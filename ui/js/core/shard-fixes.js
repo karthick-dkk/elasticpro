@@ -2,7 +2,7 @@
  * Why a shard is unassigned, in words, and what to do about it — the one mapping behind the "i"
  * on an unassigned shard row (pages/shards.js). Pure; tested in tools/unit/shard-fixes.test.mjs.
  *
- * The facts come from GET _cluster/allocation/explain for that shard: the reason code
+ * The facts come from POST _cluster/allocation/explain for that shard: the reason code
  * Elasticsearch recorded when the shard became unassigned (unassigned_info.reason), its own
  * sentence (allocate_explanation), and every node's deciders that said NO with their words.
  * This file adds only what each code means and the fix it usually takes; it never invents a
@@ -114,7 +114,7 @@ export function explainInWords(answer) {
   };
 }
 
-/** The body GET _cluster/allocation/explain takes for one shard — what the REST console is opened with. */
+/** The body POST _cluster/allocation/explain takes for one shard — what the REST console is opened with. */
 export function explainBody(index, shard, primary) {
   return { index, shard: Number(shard), primary: !!primary };
 }

@@ -123,8 +123,11 @@ function wire() {
  */
 export function infoButton({ id, head, label, title, items, empty = '', failed = 'Could not be read:' }) {
   wire();
+  // Drawn as the open one when its popover is up: a page that keeps unchanged nodes between
+  // redraws (lib/keyed.js compares markup) then keeps the open button, and the popover stays.
+  const isOpen = !!(owner && owner.isConnected && reg.has(owner) && reg.get(owner).id === String(id));
   const b = h('button.ld-ibtn', {
-    type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+    type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': isOpen ? 'true' : 'false',
     'aria-label': label || `About ${id}`, title: title || 'Recommended fix',
   }, 'i');
   reg.set(b, { id: String(id), head: head || '', label: label || `About ${id}`, empty, failed,

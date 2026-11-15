@@ -15,13 +15,13 @@ import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
          datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { freshnessText } from '../lib/freshness.js';
-import { card, table, empty, pill, edgeTile, connectionBanner, keptCard } from './common.js';
+import { card, table, empty, pill, edgeTile, connectionBanner, keptCard, usageBar } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast, rowMenu } from '../ui/menu.js';
 import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
-import { ensureWrites, writeToggle, writesAllowed, roleMayWrite } from '../core/writes.js';
+import { ensureWrites, writeToggle, writesAllowed, roleMayWrite, onWritesChange } from '../core/writes.js';
 import { splitGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortNodeId,
@@ -97,6 +97,9 @@ const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focu
  */
 let shown = null;
 const onScreen = () => !!host && host.isConnected && (shown === null || shown.isConnected);
+
+// The allocation switch and Move… follow the write lock wherever it was changed (a prompt, another page).
+onWritesChange(() => draw());
 
 export function render(el) {
   host = el;
@@ -616,7 +619,8 @@ async function setAllocation(c, v) {
     { yes: `set ${v}`, danger: v !== 'all' });
   if (!ok) return;
   try {
-    const r = await client(c.id).setAllocationEnable(v);
+    const cur = alloc.get(c.id);
+    const r = await client(c.id).setAllocationEnable(v, !!(cur && cur.setting && cur.setting.source === 'transient'));
     if (r && r.acknowledged === false) throw new Error('Elasticsearch did not acknowledge it');
     toast(`Shard allocation: ${ALLOC_LABEL[v]}`, 'ok', 5000, { meta: c.name, detail: [`cluster.routing.allocation.enable = ${v}`] });
     await loadAllocation(c, true);
@@ -834,14 +838,14 @@ function tickAll(movable, c, selectedCount) {
       movable.forEach((x) => { if (allOn) picked.delete(keyOf(x)); else picked.set(keyOf(x), { ...x, clusterId: c.id }); });
       draw();
     } });
-  box.indeterminate = selectedCount > 0 && !allOn;
+  box.indeterminate = !allOn && movable.some((x) => picked.has(keyOf(x)));
   return { label: h('span.tick-all', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', whiteSpace: 'nowrap' } }, box,
     selectedCount ? h('span.muted', { style: { fontWeight: 400, textTransform: 'none' } }, `${num(selectedCount)} selected`) : null) };
 }
 
 /**
  * The "i" at the end of an unassigned shard row: why this shard is unassigned, from
- * `GET _cluster/allocation/explain` for that very shard (asked when pressed, through the core
+ * `POST _cluster/allocation/explain` for that very shard (asked when pressed, through the core
  * like any read), in words (core/shard-fixes.js), with the recommended fix and two buttons —
  * Retry failed allocations (the gated action) and the explain request in the REST console.
  * A failed explain says so; nothing is guessed.
@@ -853,7 +857,7 @@ function explainButton(c, s) {
     label: `Why ${s.index}[${s.shard}] is unassigned`, title: 'Why this shard is unassigned, and the recommended fix',
     failed: 'The cluster could not explain it:',
     items: async () => {
-      const w = explainInWords(await client(c.id).allocationExplainFor(s.index, s.shard, s.primary));
+      const w = explainInWords(await client(c.id).explainShard(explainBody(s.index, s.shard, s.primary)));
       if (!w) throw new Error('the answer was not an explain answer');
       return [{
         title: `Reason: ${w.title}${w.reason ? ` (${w.reason})` : ''}`,
@@ -865,8 +869,8 @@ function explainButton(c, s) {
         fix: w.fix ? h('span', h('b', `${w.fix.title}. `), w.fix.fix) : 'No fix is known for this reason — read the node decisions above.',
         actions: [
           h('button.btn.sm', { title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.', onclick: () => retry(c) }, 'Retry failed allocations'),
-          h('button.btn.sm', { title: 'Open GET _cluster/allocation/explain for this shard in the REST console',
-            onclick: () => navigateTo('console', { method: 'GET', path: '/_cluster/allocation/explain', body: JSON.stringify(explainBody(s.index, s.shard, s.primary), null, 2) }) },
+          h('button.btn.sm', { title: 'Open POST _cluster/allocation/explain for this shard in the REST console',
+            onclick: () => navigateTo('console', { method: 'POST', path: '/_cluster/allocation/explain', body: JSON.stringify(explainBody(s.index, s.shard, s.primary), null, 2) }) },
             'Open the explain answer in REST'),
         ],
       }];

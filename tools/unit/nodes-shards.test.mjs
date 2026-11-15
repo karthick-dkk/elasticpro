@@ -110,14 +110,8 @@ test('coresByNode reads allocated_processors by node name and skips nodes withou
   assert.equal(coresByNode({ acknowledged: true }).size, 0, 'a fixture answering nothing useful is nobody’s core count');
 });
 
-const { shardsPerNode, unassignedByReason, allocationSetting, queueSizes, shortNodeId, ALLOCATION_VALUES, ALLOCATION_MEANING } =
+const { unassignedByReason, allocationSetting, queueSizes, shortNodeId, ALLOCATION_VALUES, ALLOCATION_MEANING } =
   await import(pathToFileURL(path.join(ROOT, 'ui/js/core/nodes-shards.js')).href);
-
-test('shardsPerNode counts the listing by node and leaves unassigned shards out', () => {
-  const m = shardsPerNode([{ node: 'n1' }, { node: 'n1' }, { node: 'n2' }, { node: '', state: 'UNASSIGNED' }, null]);
-  assert.deepEqual([...m.entries()], [['n1', 2], ['n2', 1]]);
-  assert.equal(shardsPerNode(null).size, 0);
-});
 
 test('unassignedByReason counts the unassigned shards per recorded reason, most frequent first', () => {
   assert.deepEqual(unassignedByReason([

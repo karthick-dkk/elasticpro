@@ -990,23 +990,6 @@ a.arow-cluster:hover { text-decoration: underline; }
 .use-bar > .bar-mini { flex: 1 1 56px; min-width: 40px; }
 .use-num { font-variant-numeric: tabular-nums; font-size: 11.5px; min-width: 34px; text-align: right; white-space: nowrap; flex: none; }
 
-/* One population divided, one line tall (lib/charts.js splitDonut): a 44 px ring, the total, the parts. */
-.split-donut { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 3px; }
-.split-donut > svg { display: block; flex: none; }
-.split-total { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
-.split-total > b { font-size: 13px; font-variant-numeric: tabular-nums; }
-.split-total > .muted { font-size: 11px; }
-.split-legend { display: inline-flex; gap: 10px; flex-wrap: wrap; }
-.split-legend > div { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; white-space: nowrap; }
-.split-legend .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
-.split-legend b { font-variant-numeric: tabular-nums; }
-/* The bigger ring (96 px, Shard allocation) with the total inside it. */
-.split-donut.inside { gap: 14px; }
-.split-ring { position: relative; display: inline-grid; place-items: center; flex: none; }
-.split-ring > svg { display: block; }
-.split-ring > .split-total { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 0; line-height: 1.1; }
-.split-ring > .split-total > b { font-size: 20px; font-weight: 680; }
-.split-ring > .split-total > .muted { font-size: 10px; }
 
 /* Nodes & shards: the Shard allocation / Query pressure row, and the tiles both are built from
    (pages/common.js edgeTile): one 22 px number over a small upper-case label, a 3 px colour edge. */
@@ -1051,11 +1034,6 @@ a.arow-cluster:hover { text-decoration: underline; }
    the window is narrow. */
 .glance-band { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; min-height: 22px; }
 .glance-figs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; flex: 1 1 auto; min-width: 0; }
-.fig-inline { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11.5px; white-space: nowrap; }
-.fig-inline > .k { color: var(--text-muted); }
-.fig-inline > .v { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.fig-inline > .d { color: var(--text-muted); font-size: 11px; }
-.fig-inline.alert > .v, .fig-inline.alert > .d { color: var(--critical-ink); }
 .banner {
   display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: var(--radius);
   border: 1px solid var(--border); background: var(--surface-2); margin-bottom: 14px; font-size: 12.5px;

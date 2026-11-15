@@ -363,7 +363,7 @@ function buildTable(c, rows, allRows = rows) {
       redrawTable();
     },
   });
-  selectAll.indeterminate = selected.size > 0 && !allMatchedTicked;
+  selectAll.indeterminate = !allMatchedTicked && allRows.some((r) => selected.has(r.index));
 
   const t = h('div.tbl-wrap', h('table.tbl',
     h('thead', h('tr',

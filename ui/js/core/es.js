@@ -345,6 +345,7 @@ export class EsClient {
     const want = ['name', 'indices.search.query_total', 'indices.search.query_time_in_millis',
       'indices.indexing.index_total', 'indices.indexing.delete_total',
       'thread_pool.search.rejected', 'thread_pool.search.queue', 'thread_pool.write.rejected', 'thread_pool.write.queue',
+      'thread_pool.bulk.rejected', // clusters before 6.3 (core/node-rates.js bulkRejected)
       'breakers.*.tripped'].map((f) => `nodes.*.${f}`).join(',');
     return this.json('GET', `/_nodes/stats/indices,thread_pool,breaker?filter_path=${want}`);
   }
@@ -367,33 +368,24 @@ export class EsClient {
   }
   /**
    * Switch shard allocation: `all`, `primaries`, `new_primaries` or `none`, as a persistent
-   * setting. A write — the flag alone grants nothing; the core refuses it unless the session is
+   * setting. A transient value outranks it, so `clearTransient` (the value read was transient)
+   * removes that one in the same call — otherwise the switch would be acknowledged and change
+   * nothing. A write — the flag alone grants nothing; the core refuses it unless the session is
    * unlocked (core/writes.js).
    */
-  setAllocationEnable(value) {
-    return this.json('PUT', '/_cluster/settings', { persistent: { 'cluster.routing.allocation.enable': value } },
+  setAllocationEnable(value, clearTransient = false) {
+    const KEY = 'cluster.routing.allocation.enable';
+    return this.json('PUT', '/_cluster/settings',
+      { persistent: { [KEY]: value }, ...(clearTransient ? { transient: { [KEY]: null } } : {}) },
       { allowWrites: true, timeoutMs: 30000 });
   }
   /**
-   * Why ONE shard is unassigned: the explain API with the shard named in the body. A POST,
-   * because the core sends no body with a GET; the read-only guard knows this one POST changes
-   * nothing (guard.rs is_read_post), so it goes through like any read.
+   * Why ONE shard is unassigned: the explain API with the shard named in the body
+   * (core/shard-fixes.js explainBody). A POST, because the core sends no body with a GET; the
+   * read-only guard knows this one POST changes nothing (guard.rs is_read_post).
    */
-  allocationExplainFor(index, shard, primary) {
-    return this.json('POST', '/_cluster/allocation/explain', { index, shard: Number(shard), primary: !!primary }, { timeoutMs: 30000 });
-  }
-  /**
-   * The counters behind the Query pressure card (core/node-rates.js): searches and their time,
-   * documents indexed and deleted, the search and write pools' rejections and queues, and the
-   * breaker trips — per node, filtered to those fields so the answer does not grow with what
-   * else a node reports. Two readings make the rates; one is only a baseline.
-   */
-  nodesRates() {
-    const want = ['name', 'indices.search.query_total', 'indices.search.query_time_in_millis',
-      'indices.indexing.index_total', 'indices.indexing.delete_total',
-      'thread_pool.search.rejected', 'thread_pool.search.queue', 'thread_pool.write.rejected', 'thread_pool.write.queue',
-      'breakers.*.tripped'].map((f) => `nodes.*.${f}`).join(',');
-    return this.json('GET', `/_nodes/stats/indices,thread_pool,breaker?filter_path=${want}`);
+  explainShard(body) {
+    return this.json('POST', '/_cluster/allocation/explain', body, { timeoutMs: 30000 });
   }
   indices(pattern = '*') {
     const h = 'health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date';

@@ -319,7 +319,7 @@ await go('shards');
   ok(!titles.includes('Cluster at a glance'), `shards: the glance card is still on this page (it belongs to the Clusters overview) — ${titles.join(' | ')}`);
   ok(titles.includes('Shard allocation') && titles.includes('Query pressure'), `shards: the allocation / pressure row is missing — ${titles.join(' | ')}`);
 
-  const heads = [...doc.querySelectorAll('table.tbl thead th')].map((x) => x.textContent.trim());
+  const heads = [...doc.querySelectorAll('table.tbl thead th')].map((x) => x.textContent.replace(/[▲▼↕]/g, '').trim());
   for (const col of ['Index', 'Shard', 'Type', 'State', 'Node', 'Store', 'Unassigned reason']) {
     ok(heads.includes(col), `shards: the table has no "${col}" column, saw ${heads.join(', ')}`);
   }
@@ -482,7 +482,7 @@ await go('shards');
       if (off) {
         off.click(); await settleFor(300);
         const dlg = [...doc.querySelectorAll('.modal')].pop();
-        ok(!!dlg && /no shard will be placed or moved until it is switched back/.test(dlg.textContent),
+        ok(!!dlg && /no shard will be placed or moved until it is switched back/i.test(dlg.textContent),
           `allocation: choosing off did not ask with the consequence in words (${dlg ? dlg.textContent.slice(0, 120) : 'no dialog'})`);
         ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'allocation: a PUT was sent before anybody said yes');
         const yes = dlg && [...dlg.querySelectorAll('.modal-foot button')].find((b) => /^set none$/i.test(b.textContent.trim()));
@@ -602,9 +602,10 @@ await go('shards');
     ok(!!ib, 'shards: the unassigned row has no "i"');
     ok(![...doc.querySelectorAll('table.tbl tbody tr')].some((tr) => /started/.test(tr.textContent) && tr.querySelector('button.ld-ibtn')), 'shards: a started row has an "i"');
     if (ib) {
-      ib.click(); await settleFor(50);
+      ib.click();   // read at once: the popover says "Asking" until the answer lands, which can be quick
       const pop = doc.querySelector('.ld-fixpop:not([hidden])');
       ok(!!pop && /Asking the cluster/.test(pop.textContent), 'shards: the "i" did not open with "Asking the cluster…"');
+      await settleFor(50);
       for (let i = 0; i < 40 && pop && /Asking the cluster/.test(pop.textContent); i++) await settleFor(100);
       const t = pop ? pop.textContent : '';
       ok(/Reason: Node left \(NODE_LEFT\)/.test(t), `shards: the popover does not name the reason in words (${t.slice(0, 160)})`);
@@ -618,11 +619,19 @@ await go('shards');
         'shards: the explain was not asked for this very shard');
       const toRest = pop && [...pop.querySelectorAll('.ld-fixacts button')].find((b) => /REST/.test(b.textContent));
       if (toRest) {
+        // What is handed to the console, read as the navigation starts (capture, before the console
+        // takes it): the console applies it once its stored tabs are read, and the memory IndexedDB
+        // of this harness never completes a transaction.
+        const I = await load('core/intent.js');
+        let handed = null;
+        const grab = () => { handed = I.intent.console && { ...I.intent.console }; };
+        window.addEventListener('ep:navigate', grab, true);
         toRest.click(); await settleFor(400);
-        ok(app.currentPage ? app.currentPage() === 'console' : true, 'shards: "Open the explain answer in REST" did not open the console');
-        const fields = [...doc.querySelectorAll('#view input, #view textarea')].map((f) => f.value || '').join('\n');
-        ok(/allocation\/explain/.test(fields) && /"index": "logstash-beta-2026.09.09"/.test(fields),
-          'shards: the console was not opened with the explain request and its body');
+        window.removeEventListener('ep:navigate', grab, true);
+        ok(/#\/console/.test(window.location.hash), 'shards: "Open the explain answer in REST" did not open the console');
+        let body = null; try { body = handed && JSON.parse(handed.body); } catch (_) { /* not JSON */ }
+        ok(handed && handed.method === 'POST' && handed.path === '/_cluster/allocation/explain' && body && body.index === 'logstash-beta-2026.09.09' && body.primary === false,
+          `shards: the console was not handed the explain request and its body (${JSON.stringify(handed)})`);
         await go('shards');
       }
       // A refused explain is shown as what the cluster said, never as a guess.

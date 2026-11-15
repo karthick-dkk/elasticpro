@@ -456,54 +456,6 @@ export function splitGauge(segments, opts = {}) {
         h('span.muted', part.label)))));
 }
 
-/**
- * The same split as splitGauge, small enough for a band one line tall: a donut of about
- * 44 px, the total named beside it, and every part's count to the right — the zeroes
- * included, because "0 unassigned" is what the reader came for. The slices are the parts
- * of one circumference (stroke dashes on one circle each), so a slice is hoverable and
- * titled like an arc segment.
- *
- * `size` makes it bigger (the Shard allocation card's 96 px); `inside` puts the total in the
- * ring instead of beside it; `legend: false` leaves the counts to the caller (tiles beside it).
- * One definition whatever the size.
- *
- * @param segments [{ key, label, value, color }]
- * @param opts { total, totalLabel, format, size, stroke, inside, legend }
- */
-export function splitDonut(segments, opts = {}) {
-  const { parts, total } = divide(segments, opts.total);
-  const fmt = opts.format || ((v) => String(v));
-  const size = opts.size || 44, sw = opts.stroke || (size >= 80 ? 12 : 10);
-  const r = (size - sw) / 2, c = size / 2;
-  const C = 2 * Math.PI * r;
-  const label = opts.totalLabel || 'total';
-  const ring = (stroke, more = {}) => svg('circle', { cx: c, cy: c, r, transform: `rotate(-90 ${c} ${c})`,
-    style: { fill: 'none', stroke, strokeWidth: sw, ...more } });
-  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img',
-    'aria-label': `${fmt(total)} ${label}: ${parts.map((p) => `${fmt(p.value)} ${p.label}`).join(', ')}`,
-    style: { width: `${size}px`, height: `${size}px` } });
-  // The track is the total; a part the cluster did not break down stays grey.
-  s.append(ring('var(--surface-3)'));
-  let at = 0;
-  for (const part of parts) {
-    if (!total || part.value <= 0) continue;
-    const len = Math.min(C - at, C * (part.value / total));
-    const seg = ring(part.color, { strokeDasharray: `${len.toFixed(3)} ${(C - len).toFixed(3)}`, strokeDashoffset: (-at).toFixed(3) });
-    seg.append(svg('title', {}, `${part.label}: ${fmt(part.value)}`));
-    s.append(seg);
-    at += len;
-  }
-  const totalEl = h('div.split-total', h('b', fmt(total)), h('span.muted', label));
-  return h(`div.split-donut${opts.inside ? '.inside' : ''}`,
-    opts.inside ? h('div.split-ring', s, totalEl) : s,
-    opts.inside ? null : totalEl,
-    opts.legend === false ? null
-      : h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
-          h('span.dot', { style: { background: part.color } }),
-          h('b', fmt(part.value)),
-          h('span.muted', part.label)))));
-}
-
 /* --------------------------------- honeycomb ---------------------------------- */
 
 /**
@@ -688,7 +640,7 @@ export function capacityChart(capacity, needs, opts = {}) {
 /**
  * A reading as a full ring with the figure in the middle — the Clusters › Overview gauges
  * (CPU, Disk, JVM heap, Shards). One part is a plain reading against `total` (a percentage
- * against 100); several parts are one population split, as splitDonut draws it, with the
+ * against 100); several parts are one population split, as splitGauge draws it, with the
  * centre saying whatever the caller means by it ("99%" of shards assigned). The one ring:
  * the four cards call this and nothing else draws one.
  *

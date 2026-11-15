@@ -186,15 +186,6 @@ export function unreadable(what, reasonText, actions = null) {
 }
 
 /**
- * A labelled figure on one line: a small caption, the value, and at most a short grey
- * suffix (`sub`) — anything longer goes in the tooltip (`title`, which defaults to the
- * figure spelled out). Several of these make a band one line tall; the stacked
- * caption / big number / note shape they replaced made the glance card 250 px.
- *
- * Here rather than on a page so a second row of figures elsewhere cannot drift in size,
- * weight or casing — which is exactly how a row of figures stops reading as one row.
- */
-/**
  * A tile: one big number (22 px) over a small upper-case label, with a 3 px colour edge on the
  * left — the Shard allocation and Query pressure cards of Nodes & shards are built from it.
  * `edge` is the colour (none for a plain tile); `title` carries the breakdown that is not on
@@ -204,14 +195,6 @@ export function edgeTile(value, label, { edge = null, title = null, extra = null
   return h(`div.edge-tile${alert ? '.alert' : ''}`, { title, style: edge ? { borderLeftColor: edge } : null },
     h('b.v', value),
     h('div.k', h('span', label), ...(Array.isArray(extra) ? extra : extra ? [extra] : [])));
-}
-
-export function figure(label, value, sub, { alert = false, title = null } = {}) {
-  // `alert`: a figure that needs attention is red, so it is seen before it is read.
-  return h(`div.fig-inline${alert ? '.alert' : ''}`, { title: title || `${label}: ${value}${sub ? ` · ${sub}` : ''}` },
-    h('span.k', label),
-    h('b.v', value),
-    sub ? h('span.d', sub) : null);
 }
 
 /**

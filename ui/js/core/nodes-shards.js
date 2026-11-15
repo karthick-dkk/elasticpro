@@ -34,17 +34,6 @@ export function shardSplit(rows) {
 }
 
 /**
- * How many shards each node holds, by node name, from the shard rows (the listing is the truth;
- * `_cat/allocation`'s count is the fallback when the listing was refused). Unassigned shards
- * have no node and are not counted here.
- */
-export function shardsPerNode(rows) {
-  const out = new Map();
-  for (const x of rows || []) if (x && x.node) out.set(x.node, (out.get(x.node) || 0) + 1);
-  return out;
-}
-
-/**
  * The unassigned shards by the reason Elasticsearch recorded (`unassigned.reason`), most
  * frequent first; a shard with no reason is counted under "not recorded".
  */
