@@ -150,33 +150,113 @@ for (const id of ['overview', 'indices', 'console', 'log-delay', 'snapshots', 's
   ok(!(await load('app.js')).renderSideFoot, 'app.js still exports renderSideFoot');
 }
 
-/* ------------------------ the REST console names its target ------------------------ */
+/* ------------------------ the REST console names its target, once ------------------------ */
 
+// Where a request goes is said once: the cluster by the top bar's chooser and the page title,
+// the method and the path by the inputs. The echo lines that repeated them (above the inputs,
+// and "GET /…" above the answer) went at the owner's request and must not come back. The
+// outcome — status, time, size — sits beside Run, out of the output box, in #c-status.
 await go('console');
 {
-  const target = doc.getElementById('c-target');
   const run = doc.getElementById('c-run');
-  ok(!!target, 'console: no #c-target line naming the address');
   ok(!!run, 'console: no Run button');
-  if (target && run) {
-    ok(!!(target.compareDocumentPosition(run) & window.Node.DOCUMENT_POSITION_FOLLOWING),
-      'console: the address is not above the Run button, where it is read before pressing it');
+  ok(!doc.getElementById('c-target') && !doc.getElementById('c-echo-method'), 'console: the request echo line above the inputs is back');
+  const chooser = doc.getElementById('cluster-select');
+  {
+    // The chooser shows the cluster the page is on: its option names the selected cluster.
+    const st0 = await load('core/state.js');
+    const sel = st0.clusters().find((x) => x.id === st0.state.selected);
+    const picked = chooser && chooser.options[chooser.selectedIndex];
+    ok(!!sel && !!picked && chooser.value === sel.id && picked.textContent.includes(sel.name),
+      `console: the top bar's chooser does not name the cluster (value "${chooser && chooser.value}", option "${picked && picked.textContent.trim()}", selected ${st0.state.selected})`);
   }
-  // An evidence page: the line names the path the request will take, never the host.
+  ok(doc.querySelector('#topbar h1') && doc.querySelector('#topbar h1').textContent === 'REST', 'console: the top bar does not carry the page title');
+  // An evidence page: the host is nowhere on it.
   const base = config.clusters[0].url.replace(/\/+$/, '');
-  ok(target && target.textContent === '/_cluster/health',
-    `console: the target line reads "${target && target.textContent}", expected the path alone`);
-  ok(target && !target.textContent.includes(base), 'console: the target line still names the cluster address');
+  const host = new URL(base).host;
+  ok(!doc.getElementById('view').textContent.includes(host), `console: the page prints the cluster's host ${host}`);
 
   const pathInput = doc.getElementById('c-path');
   ok(!!pathInput, 'console: no path input');
-  if (pathInput && target) {
-    for (const [typed, want] of [['/_cat/indices', '/_cat/indices'], ['_cluster/health', '/_cluster/health']]) {
-      pathInput.value = typed;
-      pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
-      await settleFor(50);
-      ok(target.textContent === want,
-        `console: typing "${typed}" gave "${target.textContent}", expected "${want}"`);
+  ok(pathInput && pathInput.value === '/_cluster/health', `console: the path box reads "${pathInput && pathInput.value}", expected the default request`);
+
+  // The status pill: right after Run, a grey dash before anything has run, role=status.
+  const status = doc.getElementById('c-status');
+  ok(!!status, 'console: no #c-status beside Run');
+  if (status && run) {
+    ok(run.nextElementSibling === status, 'console: the status is not the element right after Run');
+    ok(status.getAttribute('role') === 'status', 'console: the status pill has no role=status');
+    ok(status.textContent.trim() === '—' && !!status.querySelector('.pill.grey'), `console: before a run the status reads "${status.textContent.trim()}", expected a grey dash`);
+    ok(!/HTTP|ms|B\b/.test(status.textContent), 'console: a figure is shown before anything was run');
+  }
+  if (pathInput && run) {
+    pathInput.value = '/_cluster/health'; pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    run.click(); await settleFor(1200);
+    const st = doc.getElementById('c-status');
+    ok(st && st.isConnected && /^HTTP 200/.test(st.textContent.trim()), `console: after a run the status reads "${st && st.textContent.trim()}", expected HTTP 200 first`);
+    ok(st && !!st.querySelector('.pill.green'), 'console: a 200 is not a green pill');
+    ok(st && /\d+ ms/.test(st.textContent) && /\d+(\.\d+)? ?k?B/.test(st.textContent), `console: the status does not carry the time and size: "${st && st.textContent.trim()}"`);
+    ok(doc.getElementById('c-run').nextElementSibling === st, 'console: after a run the status moved away from Run');
+    const resultsHead = doc.querySelector('#c-response section.card > header');
+    ok(resultsHead && !/HTTP|\d+ ms/.test(resultsHead.textContent), `console: the Results header still carries the status: "${resultsHead && resultsHead.textContent.trim()}"`);
+    const resultsBody = doc.querySelector('#c-response section.card > .body');
+    ok(resultsBody && !resultsBody.querySelector('.trunc') && !/^\s*GET \/_cluster\/health/.test(resultsBody.textContent), 'console: the "GET /…" echo above the answer is back');
+    ok(!!doc.getElementById('c-out'), 'console: the run produced no answer to read');
+
+    // While the cluster is slow to answer, the pill says so and counts: a spinner, "Running… 0.4 s"
+    // ticking in place (the same element throughout), Run disabled; then the status. The stall is
+    // the request itself held 1.5 s on its way to the bridge, so no mock setting is needed.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (init && typeof init.body === 'string' && init.body.includes('c-stall-path')) await new Promise((r) => setTimeout(r, 1500));
+      return realFetch(input, init);
+    };
+    try {
+      pathInput.value = '/_cat/indices/c-stall-path'; pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      doc.getElementById('c-run').click(); await settleFor(300);
+      const running = doc.getElementById('c-status');
+      ok(running && /Running…/.test(running.textContent) && !!running.querySelector('.spin'), `console: while the request is in flight the status reads "${running && running.textContent.trim()}", expected a spinner and Running…`);
+      ok(doc.getElementById('c-run').disabled, 'console: Run is not disabled while a request is in flight');
+      const t1 = running && (running.textContent.match(/([\d.]+) s/) || [])[1];
+      const elapsedEl = doc.getElementById('c-status-elapsed');
+      await settleFor(500);
+      const t2 = running && (running.textContent.match(/([\d.]+) s/) || [])[1];
+      ok(t1 !== undefined && t2 !== undefined && Number(t2) > Number(t1), `console: the elapsed time does not tick (${t1} s → ${t2} s)`);
+      ok(doc.getElementById('c-status') === running && doc.getElementById('c-status-elapsed') === elapsedEl, 'console: the running pill is rebuilt while it ticks');
+      await settleFor(1800);
+      const after = doc.getElementById('c-status');
+      ok(after && /^HTTP \d{3}/.test(after.textContent.trim()) && !after.querySelector('.spin'), `console: after the slow answer the status reads "${after && after.textContent.trim()}", expected the HTTP code`);
+      ok(!doc.getElementById('c-run').disabled, 'console: Run stayed disabled after the answer');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // No read-only pill anywhere on the console (banned, owner 2026-11-14); the write guard is
+    // what answers Run instead. Under the fixture's read-only default a DELETE asks to allow
+    // writes by hand and sends nothing until somebody says yes; Run's tooltip says so beforehand.
+    ok(!/read-only|writes enabled|writes allowed/.test(doc.getElementById('view').textContent), 'console: a read-only / writes pill is on the page');
+    ok(!doc.querySelector('#view section.card input[type="checkbox"]'), 'console: the write-unlock checkbox is still on the request card');
+    {
+      const st = await load('core/state.js');
+      const ro = st.state.defaults.readOnly;
+      st.state.defaults.readOnly = true;
+      const { writesUnlocked } = await load('core/writes.js');
+      const sentBefore = (doc.getElementById('c-status') || { textContent: '' }).textContent;
+      doc.getElementById('c-method').value = 'DELETE'; doc.getElementById('c-method').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150);
+      const p2 = doc.getElementById('c-path'); p2.value = '/my-index'; p2.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
+      const runBtn = doc.getElementById('c-run');
+      ok(!runBtn.disabled && /locked|allow them by hand/i.test(runBtn.title), `console: Run's tooltip does not say the write is locked: "${runBtn.title}"`);
+      if (!writesUnlocked()) {
+        runBtn.click(); await settleFor(300);
+        const dlg = doc.querySelector('.modal-overlay .modal');
+        ok(!!dlg && /Allow writes to this cluster\?/.test(dlg.textContent), `console: a locked DELETE on Run did not ask to allow writes (dialog: "${dlg && dlg.textContent.trim().slice(0, 80)}")`);
+        ok(!/Running…/.test((doc.getElementById('c-status') || { textContent: '' }).textContent), 'console: a locked write was sent before the guard answered');
+        if (dlg) { [...dlg.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No').click(); await settleFor(200); }
+        ok(!doc.querySelector('.modal-overlay'), 'console: No did not close the write guard');
+        ok((doc.getElementById('c-status') || { textContent: '' }).textContent === sentBefore, 'console: declining the guard still changed the status — something was sent');
+      }
+      doc.getElementById('c-method').value = 'GET'; doc.getElementById('c-method').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150);
+      st.state.defaults.readOnly = ro;
     }
   }
 
@@ -186,7 +266,10 @@ await go('console');
     `console: the query box still carries a placeholder — "${body && body.getAttribute('placeholder')}"`);
 
   /* ---- a request typed or pasted whole is recognised: method, path, body (core/console-paste.js) ---- */
-  if (pathInput && body && target) {
+  // Fresh handles: the write-guard case above changed the method, which redraws the page, and a
+  // box held from before that is detached — typing into it proves nothing about the page.
+  if (doc.getElementById('c-path') && doc.getElementById('c-body')) {
+    const pathInput = doc.getElementById('c-path'), body = doc.getElementById('c-body');
     const method = () => doc.getElementById('c-method').value;
     const paste = (el, text) => {
       const e = new window.Event('paste', { bubbles: true, cancelable: true });
@@ -199,9 +282,7 @@ await go('console');
     pathInput.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
     ok(method() === 'POST', `console paste: typing "post _snapshot/es_9/execute" left the method ${method()}`);
     ok(pathInput.value === '/_snapshot/es_9/execute', `console paste: the path box reads "${pathInput.value}", expected the path alone`);
-    ok(target.textContent === '/_snapshot/es_9/execute', `console paste: the target line reads "${target.textContent}"`);
     ok(/Recognised POST \/_snapshot\/es_9\/execute/.test(doc.getElementById('c-response').textContent), 'console paste: nothing said what was recognised');
-    ok(doc.querySelector('#c-echo-method').textContent === 'POST', 'console paste: the echo line still shows the old method');
     ok(/POST \/_snapshot\/es_9\/execute/.test(doc.querySelector('.console-tab.on').title), `console paste: the tab tooltip reads "${doc.querySelector('.console-tab.on').title}"`);
     // Pasted into the path box with a body (Kibana Dev Tools style): the body goes to the editor, formatted.
     const e1 = paste(pathInput, 'PUT /_cluster/settings\n{"persistent":{"cluster.max_shards_per_node":2000}}');
@@ -4977,7 +5058,7 @@ consolePanels: {
     sbtn().click(); await settleFor(150);
     [...rows()[0].querySelectorAll('button')].find((b) => b.textContent === 'Run').click(); await settleFor(1200);
     ok(!pop(), 'console panels: Run left the panel open');
-    ok(/HTTP 200/.test(doc.getElementById('c-response').textContent), `console panels: Run did not run — results read "${doc.getElementById('c-response').textContent.slice(0, 80)}"`);
+    ok(/^HTTP 200/.test((doc.getElementById('c-status') || { textContent: '' }).textContent.trim()), `console panels: Run did not run — the status beside Run reads "${(doc.getElementById('c-status') || { textContent: '' }).textContent.trim()}"`);
     // Closing: Escape, the ×, a click outside.
     sbtn().click(); await settleFor(150); ok(!!pop(), 'console panels: the panel did not reopen');
     doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
@@ -5757,6 +5838,10 @@ if (viaFleet) {
       ok(hbtn && hbtn.querySelector('.c-count') && hbtn.querySelector('.c-count').textContent === '1', `evidence console: the History button counts "${hbtn && hbtn.textContent.trim()}", expected this cluster's one request`);
       doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
       ok(!doc.querySelector('.pop.console-pop'), 'evidence console: the History panel did not close');
+      // A GET, said so: the alerts playbook handed a PUT to the console earlier (its own tab, still
+      // the active one), and a write on Run now asks the guard first rather than being sent for the
+      // core to refuse — this case is about what the page shows, not about the guard.
+      { const m = doc.getElementById('c-method'); if (m && m.value !== 'GET') { m.value = 'GET'; m.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150); } }
       doc.getElementById('c-path').value = '/_cluster/health';
       doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
       doc.getElementById('c-run').click();
