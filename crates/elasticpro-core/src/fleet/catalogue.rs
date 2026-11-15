@@ -71,7 +71,8 @@ pub fn enc(s: &str) -> String {
     out
 }
 
-const NODE_COLS: &str = "name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime";
+// `id` last: the Nodes & shards table shows it (short, the whole id in the tooltip).
+const NODE_COLS: &str = "name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime,id";
 const INDEX_COLS: &str = "health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date";
 const TASK_COLS: &str = "action,task_id,parent_task_id,node,running_time,running_time_ns,type,description";
 

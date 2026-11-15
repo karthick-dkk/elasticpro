@@ -14,7 +14,7 @@ import { bytes, num, compact } from '../lib/fmt.js';
 import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
          datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
-import { freshnessBar } from '../lib/freshness.js';
+import { freshnessText } from '../lib/freshness.js';
 import { card, table, empty, pill, edgeTile, connectionBanner, keptCard } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
@@ -22,10 +22,10 @@ import { toast, rowMenu } from '../ui/menu.js';
 import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed, roleMayWrite } from '../core/writes.js';
-import { splitDonut, STATUS } from '../lib/charts.js';
+import { splitGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode, queueSizes, shortNodeId,
-         shardsPerNode, unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
+         unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
 
@@ -479,12 +479,12 @@ const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
  * coloured by `kind`'s thresholds, and the number beside it — in the level's ink from
  * amber up, so colour is never the only signal. A figure the node did not report is a dash.
  */
-function usageBar(p, kind, title, suffix = null) {
+function usageBar(p, kind, title, suffix = null, digits = 0) {
   if (!isFinite(p)) return h('span.muted', '–');
   const level = usageLevel(p, kind);
   return h('div.use-bar', { title },
     h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${Number.isInteger(p) ? p : p.toFixed(1)}%`),
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p.toFixed(digits)}%`),
     suffix ? h('span.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, suffix) : null);
 }
 
@@ -510,7 +510,7 @@ function loadCell(n, coreCount) {
 function diskBar(used, total, p, shardCount) {
   if (!total) return h('span.muted', '–');
   return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used`,
-    `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`);
+    `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`, 1);
 }
 
 /**
@@ -550,9 +550,11 @@ function shardMix(all, d) {
 const ALLOC_LABEL = { all: 'on', primaries: 'primaries only', new_primaries: 'new primaries only', none: 'off' };
 
 /**
- * Shard allocation: the 96 px ring with the total inside, three tiles (assigned · moving ·
- * unassigned — the unassigned one carries the reasons and a "show" that narrows the table),
- * the shards per node as short bars, and in the header the allocation switch.
+ * Shard allocation: a half-circle gauge (lib/charts.js splitGauge, half: assigned green from
+ * the start, moving blue, unassigned pink at the end; the assigned share and "N of M shards
+ * assigned" under the arc), the three counts stacked beside it as edge tiles (the unassigned
+ * one carries the reasons and a "show" that narrows the table), and in the header the
+ * allocation switch. Nothing else: the owner's cut.
  */
 function allocationCard(c, all, d) {
   const mix = shardMix(all, d);
@@ -564,18 +566,14 @@ function allocationCard(c, all, d) {
   ];
   const reasons = unassignedByReason(all);
   const reasonWords = reasons.map((r) => `${r.reason.replace(/_/g, ' ').toLowerCase()} ${num(r.count)}`).join(' · ');
-
-  // The listing is the truth about who holds what; `_cat/allocation` stands in when it was refused.
-  let per = [...shardsPerNode(all).entries()];
-  if (!per.length) per = ((d.disk && d.disk.nodes) || []).filter((n) => n.node && n.node !== 'UNASSIGNED').map((n) => [n.node, Number(n.shards) || 0]);
-  per.sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
-  const busiest = per.reduce((m, [, n]) => Math.max(m, n), 0);
+  // The shards each node holds are the Disk column's "· N shards" in the node table (one place).
 
   const body = !mix.total
     ? h('div.muted', { style: { fontSize: '11.5px' } }, 'No shard listing and no health count — unknown, not zero.')
     : h('div',
         h('div.ns-alloc',
-          splitDonut(segments, { total: mix.total, totalLabel: 'shards', format: (v) => num(v), size: 96, inside: true, legend: false }),
+          splitGauge(segments, { total: mix.total, format: (v) => num(v), half: true, width: 200, stroke: 20, legend: false,
+            centreLabel: 'shards', centre: { big: `${Math.round((split.started / mix.total) * 100)}%`, small: `${num(split.started)} of ${num(mix.total)} shards assigned` } }),
           h('div.ns-alloc-tiles',
             edgeTile(num(split.started), 'assigned', { edge: STATUS.good, title: `${num(split.started)} shards started` }),
             edgeTile(num(split.moving), 'moving', { edge: 'var(--chart-info)', title: split.moving ? `${num(split.moving)} relocating or initialising` : 'no shard is relocating or initialising',
@@ -583,14 +581,7 @@ function allocationCard(c, all, d) {
             edgeTile(num(split.unassigned), 'unassigned', { edge: STATUS.critical, alert: split.unassigned > 0,
               title: split.unassigned ? `unassigned, by reason: ${reasonWords}` : 'every shard is placed',
               extra: split.unassigned ? [h('span', reasonWords),
-                h('button.btn.sm.ghost', { title: 'Show only the unassigned shards in the table below', onclick: () => { showUnassigned(); draw(); } }, 'show')] : null }))),
-        per.length
-          ? h('div.ns-pernode', { title: 'Shards per node, from the shard listing' },
-              ...per.flatMap(([name, n]) => [
-                h('span', name),
-                h('div.bar-mini', h('i', { style: { width: `${busiest ? Math.max(1.5, (n / busiest) * 100) : 0}%`, background: 'var(--chart-info)' } })),
-                h('span.n', num(n))]))
-          : null);
+                h('button.btn.sm.ghost', { title: 'Show only the unassigned shards in the table below', onclick: () => { showUnassigned(); draw(); } }, 'show')] : null }))));
 
   return card('Shard allocation', `${c.name} · ${mix.sub}`, body, [allocationControl(c)]);
 }
@@ -767,17 +758,21 @@ function shardsCard(c, d, all, raw) {
           }, 'Move…')
         : s.state === 'UNASSIGNED' ? explainButton(c, s) : null))));
 
-  const controls = keptBox(`controls:${c.id}`, 'div.toolbar', null, [
-    h('label.field', 'Index',
+  // One line, every control 30 px on one centre line, each label inline to the left of its
+  // control; a spacer; then the freshness (text alone — the ↻ at the end is the one reload),
+  // Retry failed allocations and the icon. Wraps cleanly when narrow (.ns-filters).
+  const fresh = freshnessText('shards', datasetFreshness(c.id, 'shards'));
+  const controls = keptBox(`controls:${c.id}`, 'div.toolbar.ns-filters', null, [
+    h('label.field', h('span', 'Index'),
       h('input', { id: `shards-filter-${c.id}`, type: 'search', value: ui.index, placeholder: 'filter by name', style: { width: '200px' },
         'aria-label': 'Filter shards by index name', oninput: (e) => { ui.index = e.target.value; draw(); } })),
-    h('label.field', 'Node', (() => {
-      const sel = h('select', { onchange: (e) => { ui.node = e.target.value; draw(); } },
+    h('label.field', h('span', 'Node'), (() => {
+      const sel = h('select', { 'aria-label': 'Node', onchange: (e) => { ui.node = e.target.value; draw(); } },
         h('option', { value: 'all' }, 'any node'), ...nodeNames.map((n) => h('option', { value: n }, n)));
       sel.value = ui.node; return sel;
     })()),
-    h('label.field', 'State', (() => {
-      const sel = h('select', { onchange: (e) => { ui.state = e.target.value; draw(); } },
+    h('label.field', h('span', 'State'), (() => {
+      const sel = h('select', { 'aria-label': 'State', onchange: (e) => { ui.state = e.target.value; draw(); } },
         h('option', { value: 'all' }, 'any state'), ...states.map((n) => h('option', { value: n }, n)));
       sel.value = ui.state; return sel;
     })()),
@@ -785,14 +780,16 @@ function shardsCard(c, d, all, raw) {
       h('input', { id: `shards-hidden-${c.id}`, type: 'checkbox', checked: ui.showHidden,
         onchange: (e) => { ui.showHidden = e.target.checked; writeShowHidden(ui.showHidden); draw(); } }),
       'Show hidden (.) indices'),
-    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'center' } },
+    h('div.ns-filters-right',
       writeToggle(draw),
+      loading.has(c.id)
+        ? h('span.muted.ns-fresh', h('span.spin'), ' Fetching…')
+        : h('span.ns-fresh', { class: fresh.stale || fresh.unknown ? 'muted stale ns-fresh' : 'muted ns-fresh', title: fresh.title }, fresh.text),
       h('button.btn.sm', {
         title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.',
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
-      freshnessBar(datasetFreshness(c.id, 'shards'), () => load(c), { label: 'shards', busy: loading.has(c.id), dense: true }),
-      h('button.btn.sm.icon', { 'aria-label': 'Reload shards', title: 'Reload shards', onclick: () => load(c) }, '↻'))]);
+      h('button.btn.sm.icon', { 'aria-label': 'Reload shards', title: 'Reload shards', disabled: loading.has(c.id), onclick: () => load(c) }, '↻'))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length

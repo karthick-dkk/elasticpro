@@ -1018,11 +1018,23 @@ a.arow-cluster:hover { text-decoration: underline; }
 .edge-tile > .k { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
 .edge-tile > .k .link { text-transform: none; letter-spacing: 0; font-size: 11px; }
 .edge-tile.alert > .v { color: var(--critical-ink); }
-.ns-alloc { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
-.ns-alloc-tiles { display: grid; grid-template-columns: repeat(3, minmax(96px, 1fr)); gap: 8px 14px; flex: 1 1 300px; min-width: 0; }
-.ns-pernode { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: center; font-size: 11.5px; margin-top: 10px; }
-.ns-pernode .bar-mini { height: 6px; }
-.ns-pernode .n { font-variant-numeric: tabular-nums; text-align: right; }
+.ns-alloc { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; }
+.ns-alloc > .split-gauge.half { flex: none; }
+/* The three counts stacked beside the gauge, each an edge tile. */
+.ns-alloc-tiles { display: grid; grid-template-columns: 1fr; gap: 7px; flex: 1 1 220px; min-width: 0; }
+.ns-alloc-tiles .edge-tile { padding-top: 1px; padding-bottom: 1px; }
+.ns-alloc-tiles .edge-tile > .v { font-size: 20px; }
+/* The Shards filters row: one line, every control 30 px tall (border-box) on one centre line,
+   each label inline to the left of its control; a spacer; the freshness text, Retry failed
+   allocations and the ↻ icon, the same 30 px. Wraps as a whole row when narrow. */
+.toolbar.ns-filters { align-items: center; gap: 8px 12px; margin-bottom: 9px; }
+.toolbar.ns-filters > label.field { flex-direction: row; align-items: center; gap: 6px; height: 30px; font-size: 11.5px; white-space: nowrap; overflow: visible; }
+.toolbar.ns-filters > label.field > input, .toolbar.ns-filters > label.field > select { height: 30px; box-sizing: border-box; width: auto; margin: 0; }
+.toolbar.ns-filters > label.field.check > input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
+.ns-filters-right { margin-left: auto; display: flex; align-items: center; gap: 8px; height: 30px; }
+.ns-filters-right > * { height: 30px; box-sizing: border-box; display: inline-flex; align-items: center; margin: 0; }
+.ns-filters-right > .ns-fresh { font-size: 11.5px; white-space: nowrap; }
+.ns-filters-right > .btn { padding-top: 0; padding-bottom: 0; }
 .ns-pressure { display: grid; grid-template-columns: repeat(2, minmax(96px, 1fr)); gap: 10px 14px; }
 .ns-pressure .edge-tile { border-left-color: var(--border); }
 .ns-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }

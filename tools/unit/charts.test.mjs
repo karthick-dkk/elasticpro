@@ -77,6 +77,28 @@ test('with no explicit total the parts are the total', () => {
   assert.match(g.textContent, /10/);
 });
 
+test('the half-circle form (Shard allocation) is the same split: 200 wide, stroke 20, the centre text given, no legend of its own', () => {
+  const g = splitGauge([
+    { key: 'a', label: 'assigned', value: 3, color: 'green' },
+    { key: 'm', label: 'moving', value: 0, color: 'blue' },
+    { key: 'u', label: 'unassigned', value: 1, color: 'red' },
+  ], { total: 4, half: true, width: 200, stroke: 20, legend: false, centre: { big: '75%', small: '3 of 4 shards assigned' } });
+  const svg = g.querySelector('svg');
+  assert.ok(g.classList.contains('half'));
+  assert.equal(svg.getAttribute('style').includes('width: 200px'), true);
+  assert.match(svg.getAttribute('viewBox'), /^0 0 200 1\d\d$/, 'a half circle: about 116 tall');
+  assert.equal(arcs(g).length, 3, 'track + assigned + unassigned (moving is zero)');
+  assert.ok(arcs(g).every((p) => p.getAttribute('stroke-width') === '20'), 'every arc is 20 wide');
+  // Assigned starts at the left end of the arc (180°), unassigned ends at its right end (360°).
+  const d = arcs(g).map((p) => p.getAttribute('d'));
+  assert.match(d[1], /^M 10\.00 100\.00 /, 'assigned begins at the left end');
+  assert.match(d[2], / 190\.00 100\.00$/, 'unassigned ends at the right end');
+  assert.deepEqual([...g.querySelectorAll('path title')].map((t) => t.textContent), ['assigned: 3', 'unassigned: 1']);
+  assert.match(g.textContent, /75%/);
+  assert.match(g.textContent, /3 of 4 shards assigned/);
+  assert.equal(legendOf(g).length, 0, 'the counts are the caller\'s tiles, not a legend here');
+});
+
 // Regression: ISSUE-A — the Live logs chart said "No documents in this range" above a list
 // of matching documents when the cluster sent hits but no time buckets.
 // Found by /qa on 2026-10-13
