@@ -573,8 +573,16 @@ Up to ten tabs, each with its own request and its last response; the tabs are re
 this browser (IndexedDB) with secrets redacted (`ui/js/lib/redact.js`: passwords, tokens,
 keys, cloud credentials and pasted Authorization values, in the body — parsed as JSON, line by
 line for `_bulk`/`_msearch` — and in the path). Responses are never stored. The strip reads
-**Page 1, Page 2 …** by position (`tabLabel`); the request a tab holds is its tooltip and the
-echo line in the request card.
+**Page 1, Page 2 …** by position (`tabLabel`); the request a tab holds is its tooltip. The
+method and path are shown once, in the inputs (no echo line above them, none above the
+answer); the cluster is the top bar's chooser. The outcome — the status pill (green 2xx,
+amber 3xx/4xx and the read-only refusal, red 5xx and no answer, a grey dash before any run),
+time and size — sits beside Run (`core/response-status.js`, the one definition the history
+rows share), not in the Results card; while a request is in flight the pill is a spinner and
+"Running… 1.2 s" counting (the text node updated, the pill not rebuilt), with Run disabled.
+There is no read-only pill on the console: a write on Run goes through `ensureWrites()` (a
+read-only role refused with the reason; a locked session asked to allow writes by hand) and
+then `confirmWrite` — nothing is sent before both; Run's tooltip says which applies.
 
 **A request pasted or typed whole is recognised** (`ui/js/core/console-paste.js`,
 `parseRequestText`): `METHOD path` on one line (any case; a whole URL loses its scheme and
