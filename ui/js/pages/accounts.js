@@ -16,7 +16,7 @@ import { card, pill, statTile, empty, table } from './common.js';
 import { tableSort } from '../lib/table-sort.js';
 import { modal, field, text, select, val, confirmDialog } from '../ui/modal.js';
 import { clusters, activeClusters, state } from '../core/state.js';
-import { fetchClusterUsers, createDialog, removeClusterUser, editDialog } from '../ui/cluster-users.js';
+import { fetchClusterUsers, fetchClusterRoles, createDialog, removeClusterUser, editDialog } from '../ui/cluster-users.js';
 import { ICON, toast } from '../ui/menu.js';
 
 const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
@@ -30,6 +30,8 @@ const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', fre
   roleMap: null, groupMap: false, groupMapSaved: false, roleDefaults: null, zabbixRoles: [], roleMapNote: '', roleMapErr: '', roleMapSaving: false };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
+/** The selected cluster's roles (read-only), read on demand like its accounts. */
+const cr = { byCluster: {}, loading: new Set(), q: '' };
 
 /**
  * Each table's column sort (lib/table-sort.js), remembered per browser. Users, cluster users and
@@ -41,6 +43,7 @@ const SORTS = {
   logins: tableSort('accounts.logins', { onChange: () => draw() }),
   activity: tableSort('accounts.activity', { onChange: () => draw() }),
   tokens: tableSort('accounts.tokens', { onChange: () => draw() }),
+  clusterRoles: tableSort('accounts.cluster-roles', { initial: { key: 'name', dir: 1 }, onChange: () => draw() }),
   clusterUsers: tableSort('accounts.cluster-users', { onChange: () => draw() }),
   matrix: tableSort('accounts.cluster-user-matrix', { initial: { key: 'name', dir: 1 }, onChange: () => draw() }),
 };
@@ -313,6 +316,53 @@ function clusterUsersCard() {
   return clusterUserDetail(c);
 }
 
+/** The selected cluster's roles, read from `_security/role`. Read-only: nothing here writes. */
+function clusterRolesCard() {
+  const all = clusters();
+  if (!all.length || (state.selected === 'all' && all.length > 1)) return null;
+  const c = activeClusters()[0] || all[0];
+  const got = cr.byCluster[c.id];
+  if (!got && !cr.loading.has(c.id)) loadClusterRoles(c.id);
+  const refreshBtn = h('button.btn.sm.ghost', { onclick: () => loadClusterRoles(c.id), title: `Re-read the roles on ${c.name}` },
+    cr.loading.has(c.id) ? 'Loading…' : ICON.refresh);
+  const mono = (t) => h('span.mono', { style: { fontSize: '11px' } }, t);
+  let body;
+  if (!got) body = empty(cr.loading.has(c.id) ? 'Reading roles…' : 'Not read yet.');
+  else if (got.error) {
+    body = h('div',
+      h('div', { style: { fontSize: '12px', color: 'var(--warning-ink)' } }, got.error),
+      got.fix ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, got.fix) : null);
+  } else {
+    const trs = SORTS.clusterRoles.apply(got.roles, { name: { type: 'text', value: (r) => r.name } }).map((r) => {
+      const tr = h('tr', { dataset: { role: r.name.toLowerCase() } },
+        h('td', h('b', r.name), r.reserved ? h('span.muted', { style: { marginLeft: '6px', fontSize: '10.5px' } }, '(built-in)') : null),
+        h('td', mono(r.cluster.join(', ') || '–')),
+        h('td', r.indices.length ? h('div', ...r.indices.map((i) => h('div', mono(i)))) : mono('–')),
+        h('td', mono(r.runAs.join(', ') || '–')),
+        h('td.muted', { style: { fontSize: '11.5px' } }, r.note));
+      tr.hidden = !!cr.q && !r.name.toLowerCase().includes(cr.q);
+      return tr;
+    });
+    body = table([{ label: 'Role', sort: 'name' }, 'Cluster privileges', 'Indices → privileges', 'Run as', 'Note'], trs, {
+      sort: SORTS.clusterRoles, emptyText: empty('No roles are defined on this cluster.'),
+    });
+  }
+  const find = h('input', { type: 'search', placeholder: 'find a role', 'aria-label': 'Find a role', value: cr.q, style: { width: '140px' },
+    // Filtered in place: a redraw here would take the cursor out of the box.
+    oninput: (e) => {
+      cr.q = e.target.value.trim().toLowerCase();
+      for (const tr of host.querySelectorAll('tr[data-role]')) tr.hidden = !!cr.q && !tr.dataset.role.includes(cr.q);
+    } });
+  const count = got && !got.error ? `${got.roles.length} role${got.roles.length === 1 ? '' : 's'}` : c.url;
+  return h('div', { style: { marginTop: '10px' } }, card('Cluster roles', `${c.name} · ${count}`, body, [find, refreshBtn]));
+}
+
+async function loadClusterRoles(id) {
+  cr.loading.add(id); draw();
+  cr.byCluster[id] = await fetchClusterRoles(id);
+  cr.loading.delete(id); draw();
+}
+
 /** Every account on the selected cluster, with edit and remove. */
 function clusterUserDetail(c) {
   const got = cu.byCluster[c.id];
@@ -515,6 +565,7 @@ function draw() {
     // have in common is the word "user".
     sectionBreak('On the clusters', 'accounts that sign in to Elasticsearch itself'),
     h('div', { style: { marginTop: '10px' } }, clusterUsersCard()),
+    clusterRolesCard(),
   );
 }
 
