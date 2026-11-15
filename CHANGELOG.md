@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.65
 
 - **The footer is at the bottom of every page, full width** (the owner, 2026-11-15). It is the last row of the app column, after the page menu and the page: a short page has it at the bottom edge of the window, a long one reaches it by scrolling; never fixed. With the menu on the left it runs under the menu as well (the menu ends above it). Clusters › Overview keeps its one screen with the footer as the last row. The theme button now draws a white sun (Light), moon (Dark) or half-filled circle (System) as inline SVG, 28 px hit area, its title naming the current theme and the next.
 
