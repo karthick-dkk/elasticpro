@@ -2817,9 +2817,11 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-bar .ld-bar-tabs .rp-nav a { padding: 5px 10px; border-radius: 6px; border-bottom: 0; }
 .ld-bar .ld-bar-tabs .rp-nav a[aria-current="page"] { background: var(--surface-2); }
 .ld-bar .ld-bar-right { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ld-page .ld-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 10px; padding: 6px 0 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.ld-page .ld-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 0 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
 .ld-page .ld-tools:empty { display: none; }
-.ld-tool select, .ld-tool input { height: 28px; }
+.ld-tool { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.ld-tool select, .ld-tool input { height: 30px; }
+.ld-tools .seg-group, .ld-tools .ld-tz-chip, .ld-tools .btn { height: 30px; }
 .ld-tools .ld-tz-chip { align-self: center; }
 .ld-h-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* The five count tiles: buttons, each opening Devices on its level. */
@@ -2882,7 +2884,7 @@ tr.jb-focus td { background: var(--accent-soft); }
 /* ld-fetch: start */
 .ld-fetch { display: inline-flex; margin: 0; min-height: 0; gap: 0; }
 .ld-fetch-split { position: relative; display: inline-flex; }
-.ld-fetch-split .ld-fetch-main { position: relative; overflow: hidden; height: 32px; min-width: 132px; border-top-right-radius: 0; border-bottom-right-radius: 0; font-variant-numeric: tabular-nums; }
+.ld-fetch-split .ld-fetch-main { position: relative; overflow: hidden; height: 32px; min-width: 40px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; border-top-right-radius: 0; border-bottom-right-radius: 0; font-variant-numeric: tabular-nums; }
 .ld-fetch-split .ld-fetch-main.busy:disabled { opacity: 1; cursor: progress; }
 .ld-fetch-split .ld-fetch-caret { height: 32px; padding: 0 8px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid color-mix(in srgb, var(--on-accent) 35%, var(--accent)); }
 .ld-fetch-fill { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--on-accent); opacity: .55; transition: width .3s; pointer-events: none; }

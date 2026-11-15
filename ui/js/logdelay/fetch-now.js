@@ -11,12 +11,12 @@
  *
  * The control is a split button: the main part is Fetch now for the cluster's late devices (30 min
  * or more behind), the caret opens a menu with "Late devices", "Whole cluster" and a note on the
- * automatic run. Nothing sits beside it: while a run goes the button itself reads "3 of 8…" with a
- * thin fill along its bottom edge. The nodes are built once and updated in place on every poll, so
+ * automatic run. The button is an icon, no text (the owner, 2026-11-15); nothing sits beside it: while
+ * a run goes a thin fill grows along its bottom edge and "3 of 8" is in its title. The nodes are built once and updated in place on every poll, so
  * an open menu or the focus never moves; a refusal is a toast.
  */
 
-import { h } from '../lib/dom.js';
+import { h, svg } from '../lib/dom.js';
 import { toast } from '../ui/menu.js';
 import { LD_JOB, ldFetchNow, ldJobRuns, runOf, runText, fetchRefusalText, fetchNowAllowed, RUN_ENDED, FETCH_POLL_MS } from '../core/logdelay-report.js';
 
@@ -157,10 +157,10 @@ export function fetchNowPress(scope) {
 /** Paint F onto the nodes on screen. */
 function sync() {
   if (!live) return;
-  const { main, caret, label, fill, note, scope, allowed, status } = live;
+  const { main, caret, fill, note, scope, allowed, status } = live;
   const busy = fetchNowBusy();
   const run = F.run;
-  let text = 'Fetch now';
+  let text = `Fetch now — ${scope.label}`;
   let pct = 0;
   if (busy) {
     if (F.phase === 'starting') text = 'Starting…';
@@ -169,7 +169,6 @@ function sync() {
       pct = Math.min(100, Math.round((100 * run.done) / run.total));
     } else text = 'Loading…';   // the one word for a bare wait (tools/unit/wording.test.mjs)
   }
-  if (label.textContent !== text) label.textContent = text;
   fill.style.width = `${pct}%`;
   main.classList.toggle('busy', busy);
   main.disabled = busy;
@@ -177,8 +176,9 @@ function sync() {
   if (busy && !live.menu.hidden) closeMenu(false);
   main.title = !allowed
     ? 'Fetch now measures one cluster at a time: pick a cluster first. The scheduled measurement reads every cluster.'
-    : busy ? `${F.scope ? scopeWord(F.scope) : 'Fetch now'} · ${scope.label}`
-      : `Re-measure the devices ${behind()} in ${scope.label}; the arrow offers the whole cluster`;
+    : busy ? `${text} · ${F.scope ? scopeWord(F.scope) : 'Fetch now'} · ${scope.label}`
+      : `${text}: re-measure the devices ${behind()}; the arrow offers the whole cluster`;
+  main.setAttribute('aria-label', busy ? text : `Fetch now — ${scope.label}`);
   const msg = F.phase === 'done' ? `Measured ${F.scope ? F.scope.label : ''}: ${runText(F.run)}.` : '';
   if (status.textContent !== msg) status.textContent = msg;
   live.root.dataset.phase = phaseName();
@@ -218,7 +218,6 @@ export function fetchNowControl(scope, h2, info) {
   return {
     sig: `${scope.label}|${(scope.clusterIds || []).join(',')}|${scope.device || ''}|${scope.devices || ''}|${INFO.delayFrom || ''}`,
     build: () => {
-      const label = h('span.ld-fetch-label', 'Fetch now');
       const fill = h('span.ld-fetch-fill', { 'aria-hidden': 'true' });
       const status = h('span.ld-fetch-sr', { role: 'status', 'aria-live': 'polite' });
       const go = (devices) => {
@@ -226,7 +225,9 @@ export function fetchNowControl(scope, h2, info) {
         if (!allowed) { toast('Pick a cluster first: Fetch now measures one cluster.', 'warn', 6000); return; }
         press(scope.device ? scope : { ...scope, devices });
       };
-      const main = h('button.btn.primary.ld-fetch-main#ld-fetch-now', { type: 'button', onclick: () => go('late') }, label, fill);
+      const main = h('button.btn.primary.ld-fetch-main#ld-fetch-now', { type: 'button', onclick: () => go('late') },
+        svg('svg', { class: 'ld-fetch-icon', viewBox: '0 0 24 24', width: '16', height: '16', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+          svg('path', { d: 'M21 12a9 9 0 1 1-2.64-6.36' }), svg('path', { d: 'M21 4v5h-5' })), fill);
       const note = h('div.ld-fetch-note', { role: 'note' });
       const item = (key, title, sub) => h('button.ld-fetch-item', { type: 'button', role: 'menuitem', dataset: { scope: key }, onclick: () => { closeMenu(true); go(key); } },
         h('b', title), h('span', sub));
@@ -254,7 +255,7 @@ export function fetchNowControl(scope, h2, info) {
         },
       }, '▾');
       const root = h('div.ld-fetch', h('div.ld-fetch-split', main, caret, menu), status);
-      live = { root, main, caret, menu, label, fill, note, status, scope, allowed };
+      live = { root, main, caret, menu, fill, note, status, scope, allowed };
       sync();
       loadSchedule(false);
       return root;

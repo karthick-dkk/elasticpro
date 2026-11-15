@@ -156,13 +156,17 @@ export function logDelayData(clusters, now = Date.now()) {
   return { measured, per, never: clusters.length > 1 ? clusters.slice(-1) : [] };
 }
 
+/** What a test turns: how long ago the scheduled run last ran (the Log Delay window note). */
+export const knobs = { lastRunAgoMs: 4 * 60000 };
+
 export function logDelayAnswer(body, clusters, now = Date.now()) {
   const t = String((body && body.type) || '');
   if (!t.startsWith('LOGDELAY_') && !(t.startsWith('REPORT_') && body.kind === 'log_delay')) return null;
   const { per, never } = logDelayData(clusters, now);
   const only = Array.isArray(body.clusterIds) && body.clusterIds.length ? new Set(body.clusterIds) : null;
   const sel = per.filter((p) => !only || only.has(p.c.id));
-  const n = body.days || 30;
+  const span = body.from && body.to ? Math.round((Date.parse(body.to) - Date.parse(body.from)) / DAY) + 1 : 0;
+  const n = body.days || (span > 0 ? span : 30);
   const from = body.from || ymd(now - (n - 1) * DAY); const to = body.to || ymd(now);
   const common = { ok: true, from, to, now, label: `${from} – ${to}`, everyHours: 2 };
   const fields = { pattern: 'logstash-*', device: 'src_hostname.keyword', arrival: '@timestamp', eventTime: ['event_created', 'ingested_time'], extras: EXTRAS };
@@ -179,7 +183,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
         otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now),
         below: tt.devices - tt.late, belowPct: Math.round(((tt.devices - tt.late) / tt.devices) * 1000) / 10, latePct: Math.round((tt.late / tt.devices) * 1000) / 10,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),
-        worst: { device: p.rows[0].device, minutes: p.rows[0].nowMinutes, state: 'critical' }, levels: LEVELS, lastRunAt: now - 4 * 60000,
+        worst: { device: p.rows[0].device, minutes: p.rows[0].nowMinutes, state: 'critical' }, levels: LEVELS, lastRunAt: now - knobs.lastRunAgoMs,
         counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now) },
         lastRead: lastRead(p.rows, now) };
     });
@@ -194,7 +198,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       newlyLateToday: 2, solvedToday: 1, yesterday: { newlyLate: 3, solved: 4, averageLastedMs: 6600000 }, windows: windowsOf(now, 0, totalsOf(rows).late),
       days: sumDays(daysPer), byCluster, devices: rows, devicesTotal: rows.length, devicesInRange: rows.length,
       devicesInLastRun: rows.filter((r) => r.inLastRun).length, devicesTruncated: false,
-      schedule: { supported: true, enabled: true, everyHours: 2, destination: 'builtin', lastRunAt: now - 4 * 60000, state: {} } };
+      schedule: { supported: true, enabled: true, everyHours: 2, destination: 'builtin', lastRunAt: now - knobs.lastRunAgoMs, state: {} } };
   }
   if (t === 'LOGDELAY_CLUSTER') {
     const p = per.find((x) => x.c.id === body.clusterId);
@@ -204,7 +208,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       return { ...common, cluster: c.id, name: c.name, levels: LEVELS, fields, lastRunAt: null, totals: totalsOf([]), started: 0, solved: 0, medianNow: null, medianPrevious: null, windows: [], days: [], devices: [],
         timeZone: { setting: 'detect', mode: 'none', zone: null, offsetMinutes: null, offset: null, agree: null, of: null, pct: null, since: null, steadyRuns: 0, runsNeeded: 3, majorityPercent: 60, toleranceMinutes: 3 } };
     }
-    return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - 4 * 60000, lastRead: lastRead(p.rows, now), timeZone: timeZoneOf(p.ci, now),
+    return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - knobs.lastRunAgoMs, lastRead: lastRead(p.rows, now), timeZone: timeZoneOf(p.ci, now),
       counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now) },
       totals: totalsOf(p.rows), started: 7, solved: 5, fixes: FINDINGS(p.c, p.rows),
       medianNow: 5.1, medianPrevious: 4.2, windows: windowsOf(now, p.ci, totalsOf(p.rows).late), days: daysOf(n, now, p.ci, p.rows.length), devices: withFix(p) };

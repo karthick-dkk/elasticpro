@@ -12,7 +12,7 @@
  *
  * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
  * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
- * one tools row: the period (the boards) or the time range (Live Watch, Live logs), and the
+ * one tools row: the time range (one button group on every tab: 5m to 12h, or custom) and the
  * cluster's log time zone as a chip. Every time on the page is in the server's zone.
  *
  * The cluster is the app's one chooser, in the top bar (the owner, 2026-11-14: the page had a
@@ -37,12 +37,12 @@ import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { bus, clusters } from '../core/state.js';
-import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
+import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
 import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
 import {
   boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope,
-  pickId, boardsPeriod, boardsSetPeriod, boardsInfo, boardsZoneRows, boardsMajorityPercent,
+  pickId, boardsSetWindow, boardsInfo, boardsZoneRows, boardsMajorityPercent,
 } from '../logdelay/boards.js';
 import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
 import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
@@ -212,17 +212,6 @@ function bar() {
 
 /* ------------------------------------ the tools row ------------------------------------ */
 
-/** The boards' period (the store's days; Today is its measurement windows). */
-function periodPick() {
-  const cur = boardsPeriod();
-  return P.get('period', cur, () => {
-    const s = h('select#ld-period', { 'aria-label': 'Period', onchange: (e) => { boardsSetPeriod(e.target.value); draw(); } },
-      ...PERIODS.map(([v, label]) => h('option', { value: v }, label)));
-    s.value = cur;
-    return h('label.field.ld-tool', 'Period', s);
-  });
-}
-
 /* ------------------------------------ the time zone ------------------------------------ */
 
 /** Whether the Expand panel is open; Esc and a click outside close it (wired once). */
@@ -290,19 +279,24 @@ function tzTools() {
   });
 }
 
-/** Live Watch and Live logs: the range both read, and the zone every time is written in. */
-function rangePick() {
+/**
+ * The one time range of every tab (core/log-range.js RANGES): 5m · 10m · 30m · 1h · 3h · 12h ·
+ * Custom as one button group; Custom opens From and To in the server's zone and Apply. The
+ * boards read it as the days it touches (boards.js boardsSetWindow), Live Watch and Live logs as
+ * the minutes. `withZone` adds the zone every time is written in (the boards have the chip instead).
+ */
+function rangePick(withZone) {
   const tz = zone();
   const off = offsetText(zoneOffsetMinutes(tz));
-  return P.get('range', `${JSON.stringify(range)}|${tz}|${off}`, () => {
-    const sel = h('select#ld-range', { 'aria-label': 'Time range', onchange: (e) => {
-      const id = e.target.value;
+  return P.get('range', `${JSON.stringify(range)}|${tz}|${off}|${withZone}`, () => {
+    const pick = (id) => {
       if (id !== 'custom') { setRange({ id }); return; }
       // A custom range opens on the last hour, so both fields start filled.
       const now = Date.now();
       setRange({ id: 'custom', from: range.id === 'custom' && range.from ? range.from : now - 3600000, to: range.id === 'custom' && range.to ? range.to : now });
-    } }, ...RANGES.map(([id, label]) => h('option', { value: id }, label)));
-    sel.value = range.id;
+    };
+    const group = h('div.seg-group#ld-range', { role: 'group', 'aria-label': 'Time range' },
+      ...RANGES.map(([id, label]) => h('button.seg-btn', { type: 'button', dataset: { range: id }, title: label, 'aria-pressed': String(range.id === id), onclick: () => pick(id) }, id === 'custom' ? 'Custom' : id)));
     const custom = range.id === 'custom';
     const from = custom ? h('input#ld-range-from', { type: 'datetime-local', value: zonedInputValue(range.from, tz), 'aria-label': 'From' }) : null;
     const to = custom ? h('input#ld-range-to', { type: 'datetime-local', value: zonedInputValue(range.to, tz), 'aria-label': 'To' }) : null;
@@ -313,22 +307,21 @@ function rangePick() {
       setRange({ id: 'custom', from: a, to: b });
     } }, 'Apply') : null;
     // One element (display: contents), so the cache keeps one node per draw.
-    return h('div.ld-tools-range',
-      h('label.field.ld-tool', 'Time range', sel),
-      custom ? h('label.field.ld-tool', 'From', from) : null,
-      custom ? h('label.field.ld-tool', 'To', to) : null,
+    return h('div.ld-tools-range', group,
+      custom ? h('label.ld-tool', 'From', from) : null,
+      custom ? h('label.ld-tool', 'To', to) : null,
       apply,
-      h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
-        `Times in ${tz} (${off})`));
+      withZone ? h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
+        `Times in ${tz} (${off})`) : null);
   });
 }
 
-/** One tools row for every tab: the period and time zone above the boards, the range above Live Watch and Live logs. The cluster is the top bar's chooser. */
+/** One tools row for every tab: the time range, then the time-zone chip (boards) or the zone's name (Live Watch, Live logs). The cluster is the top bar's chooser. */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
-  if (tab === 'watch' || tab === 'live') mount(row, rangePick());
-  else mount(row, periodPick(), tzTools());
+  if (tab === 'watch' || tab === 'live') mount(row, rangePick(true));
+  else mount(row, rangePick(false), tzTools());
   return row;
 }
 
@@ -336,6 +329,7 @@ function body() {
   const tab = ldTab(route.view);
   if (tab === 'watch') return watchNodes();
   if (tab === 'live') return liveNodes();
+  boardsSetWindow(range, zone());
   return boardsNode(route, { repaint: draw });
 }
 
