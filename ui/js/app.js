@@ -237,14 +237,20 @@ function setTheme(value) {
  * The footer's theme cycle (the owner, 2026-11-15): Light \u2192 Dark \u2192 System, one icon each \u2014 sun,
  * moon, half-circle. A theme outside the cycle (Dark blue, Warm, from Your settings) goes to Light next.
  */
+const SVG_HEAD = '<svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">';
+const THEME_SVG = {
+  light: `${SVG_HEAD}<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>`,
+  dark: `${SVG_HEAD}<path d="M20.5 14.2A8.5 8.5 0 1 1 9.8 3.5a6.8 6.8 0 0 0 10.7 10.7z"/></svg>`,
+  system: `${SVG_HEAD}<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>`,
+};
 const THEME_CYCLE = [
-  { id: 'light', name: 'Light', icon: '\u2600' },
-  { id: 'dark', name: 'Dark', icon: '\u263E' },
-  { id: 'system', name: 'System', icon: '\u25D0' },
+  { id: 'light', name: 'Light', icon: THEME_SVG.light },
+  { id: 'dark', name: 'Dark', icon: THEME_SVG.dark },
+  { id: 'system', name: 'System', icon: THEME_SVG.system },
 ];
 function themeStep(id) {
   const i = THEME_CYCLE.findIndex((t) => t.id === id);
-  const cur = i >= 0 ? THEME_CYCLE[i] : { id, name: (THEMES.find((t) => t.id === id) || { label: id }).label.replace(/^\S+\s/, ''), icon: '\u25D0' };
+  const cur = i >= 0 ? THEME_CYCLE[i] : { id, name: (THEMES.find((t) => t.id === id) || { label: id }).label.replace(/^\S+\s/, ''), icon: THEME_SVG.system };
   const next = THEME_CYCLE[(i + 1) % THEME_CYCLE.length];
   const after = THEME_CYCLE[(i + 2) % THEME_CYCLE.length];
   return { cur, next, after };
@@ -450,9 +456,9 @@ function renderShell() {
   // Under every page (the owner, 2026-11-14): who made it, which version, where it lives. Not
   // Play's full-screen display (app.css html.play). It names nothing of the fleet, so an evidence
   // page keeps it too.
-  const main = h('main.main', h('div.page#view'), appFooter());
+  const main = h('main.main', h('div.page#view'));
 
-  mount(root, h('div.app', header, main));
+  mount(root, h('div.app', header, main, appFooter()));
   renderNav();
   renderTopbar();
 }
@@ -492,7 +498,7 @@ function paintFooter(root = document) {
   if (!btn) return;
   const { cur, next, after } = themeStep(themeNow());
   const label = `Theme: ${cur.name} (click for ${next.name}, then ${after.name})`;
-  if (btn.textContent !== cur.icon) btn.textContent = cur.icon;
+  if (btn.dataset.theme !== cur.id) btn.innerHTML = cur.icon;
   if (btn.getAttribute('aria-label') !== label) { btn.setAttribute('aria-label', label); btn.title = `Theme: ${cur.name} · click for ${next.name}, then ${after.name}`; btn.dataset.theme = cur.id; }
 }
 
@@ -1035,7 +1041,7 @@ export function go(id) {
   const view = $('#view');
   if (!view) return;
   // The footer is at the end of every page: a shell built another way (a frame, a test harness) gets it here.
-  if (!$('#app-foot') && view.parentElement) view.parentElement.append(appFooter());
+  if (!$('#app-foot') && view.parentElement) (view.closest('.app') || view.parentElement).append(appFooter());
   // Only when the page actually changed. go() is also how a page redraws itself after a
   // cluster is picked, and that must keep your position the way every other redraw now
   // does. Before the new page is drawn, while there is almost nothing to lay out: done

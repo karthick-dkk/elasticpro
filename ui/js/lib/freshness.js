@@ -15,6 +15,16 @@ import { h } from './dom.js';
 import { dur } from './fmt.js';
 import { DATASET_LABELS } from '../core/policy.js';
 
+/**
+ * The one refresh button of the app (the owner, 2026-11-15: "only the Refresh button, the icon
+ * only"): a 30 px tall, 28 px wide button drawing the arrow, named "Refresh" for a screen reader
+ * and in its tooltip. `title` may add what it asks for ("Refresh \u00b7 ask the cluster ...").
+ */
+export function refreshButton(onclick, { title = '', busy = false, id = null, extra = {} } = {}) {
+  return h(id ? `button.btn.sm.icon.refresh-btn#${id}` : 'button.btn.sm.icon.refresh-btn',
+    { type: 'button', 'aria-label': 'Refresh', title: title ? `Refresh \u00b7 ${title}` : 'Refresh', disabled: busy, onclick, ...extra }, busy ? '\u2026' : '\u21bb');
+}
+
 /** Past this, the data is old enough that it is worth saying so rather than implying it.
  *  The default only: a dataset from the core's fleet cache carries its own
  *  `staleAfterMs` (two intervals, three for policies), and that one wins. */
@@ -98,11 +108,7 @@ export function freshnessBar(ts, onRefresh, opts = {}) {
       ? h('span.muted', h('span.spin'), ' Fetching…')
       // Named and timestamped: "this list, at this moment", not "something happened".
       : h('span', { class: w.stale || (w.unknown && f.status) ? 'muted stale' : 'muted', title: w.title }, w.text),
-    h('button.btn.sm', {
-      disabled: busy,
-      title: `Ask the cluster for current ${label} now`,
-      onclick: onRefresh,
-    }, busy ? '…' : '↻ Refresh'));
+    refreshButton(onRefresh, { busy, title: `ask the cluster for current ${label} now` }));
 }
 
 /* ------------------------------ fleet coverage ------------------------------ */

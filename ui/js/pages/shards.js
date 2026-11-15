@@ -14,7 +14,7 @@ import { bytes, num, compact } from '../lib/fmt.js';
 import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
          datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
-import { freshnessText } from '../lib/freshness.js';
+import { freshnessText, refreshButton } from '../lib/freshness.js';
 import { card, table, empty, pill, edgeTile, connectionBanner, keptCard, usageBar } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
@@ -785,7 +785,7 @@ function shardsCard(c, d, all, raw) {
         title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.',
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
-      h('button.btn.sm.icon', { 'aria-label': 'Reload shards', title: 'Reload shards', disabled: loading.has(c.id), onclick: () => load(c) }, '↻'))]);
+      refreshButton(() => load(c), { busy: loading.has(c.id), title: 'read the shards again' }))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length

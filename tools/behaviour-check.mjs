@@ -79,7 +79,8 @@ const app = await load('app.js');
   header.append(mk('div', 'topbar', 'topbar'), mk('nav', 'nav', 'nav'));
   const main = doc.createElement('main');
   main.append(mk('div', 'page', 'view'));
-  doc.body.append(header, main);
+  const app = doc.createElement('div'); app.className = 'app'; app.append(header, main);
+  doc.body.append(app);
 }
 
 const panel = (title) => [...doc.querySelectorAll('section.card')]
@@ -579,11 +580,11 @@ await go('shards');
       headBox().checked = false; headBox().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250);
       ok(!/selected/.test(doc.body.textContent), 'shards: the second press did not clear the selection');
     }
-    // Reload shards is an icon: the name is for the reader, not on screen.
-    const reload = [...doc.querySelectorAll('button')].filter((b) => b.getAttribute('aria-label') === 'Reload shards');
-    ok(reload.length === shown && reload.every((b) => b.textContent.trim() === '↻' && b.title === 'Reload shards'),
-      `shards: Reload shards is not an icon-only button (${reload.map((b) => b.textContent.trim()).join(' | ')})`);
-    ok(![...doc.querySelectorAll('button')].some((b) => /Reload shards|↻ Refresh/.test(b.textContent)), 'shards: a button still spells out "Reload shards", or the freshness bar still has its own Refresh');
+    // One Refresh per page, an icon: the name is for the reader, not on screen (the owner, 2026-11-15).
+    const reload = [...doc.querySelectorAll('#view button.refresh-btn')];
+    ok(reload.length === shown && reload.every((b) => b.textContent.trim() === '↻' && b.getAttribute('aria-label') === 'Refresh' && /^Refresh/.test(b.title)),
+      `shards: Refresh is not an icon-only button (${reload.map((b) => b.textContent.trim()).join(' | ')})`);
+    ok(![...doc.querySelectorAll('#view button')].some((b) => /Reload|Refresh/.test(b.textContent)), 'shards: a button still spells out Reload or Refresh');
     // The filters row: labels inline beside their controls, every control 30 px (the real-browser
     // measurement is the screenshot's; here the structure).
     const row = doc.querySelector('.toolbar.ns-filters');
@@ -812,7 +813,7 @@ await go('indices');
   // The name search: plain text is "contains", * and ? a glob, commas any of; "Not matching" and a
   // leading ! turn it round, the head count says so, and the head tick takes exactly that set.
   {
-    const box = () => doc.getElementById('idx-search2');
+    const box = () => doc.getElementById('idx-search');
     const said = () => (([...doc.querySelectorAll('#idx-table span.muted')].find((x) => / of [\d,]+ indices/.test(x.textContent)) || {}).textContent || '');
     const shown = () => Number((said().match(/^([\d,]+) of/) || [])[1]?.replace(/,/g, ''));
     const total = Number((said().match(/ of ([\d,]+) indices/) || [])[1]?.replace(/,/g, ''));
@@ -7934,8 +7935,8 @@ await settleFor(300);
     const f = foot();
     ok(!!f, `footer: none on ${id}`);
     if (!f) continue;
-    const main = doc.getElementById('view').parentElement;
-    ok(f.parentElement === main && f === main.lastElementChild && f.previousElementSibling === doc.getElementById('view'), `footer (${id}): not the last thing in the flow after #view`);
+    const app = doc.getElementById('view').closest('.app');
+    ok(f.parentElement === app && f === app.lastElementChild && f.previousElementSibling === doc.getElementById('view').parentElement, `footer (${id}): not the last child of .app after main (${[...app.children].map((e) => e.tagName + '.' + e.className + '#' + e.id).join(' | ')}; parent ${f.parentElement && f.parentElement.className})`);
     // The version is the running core's (PING), never a number written in ui/.
     const ping = await (await fetch(`${bridgeUrl}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"type":"PING"}' })).json().catch(() => ({}));
     const want = ping && ping.version ? `ElasticPro ${ping.version}` : 'ElasticPro';
@@ -7949,7 +7950,7 @@ await settleFor(300);
   // The theme button: one icon, cycling Light → Dark → System through the app's own theme setting.
   await go('overview');
   const btn = doc.getElementById('app-foot-theme');
-  ok(!!btn && btn.textContent.trim().length === 1 && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
+  ok(!!btn && !!btn.querySelector('svg') && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
   if (btn) {
     const was = doc.documentElement.getAttribute('data-theme') || 'system';
     const seen = [];

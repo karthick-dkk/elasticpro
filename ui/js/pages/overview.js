@@ -5,6 +5,7 @@ import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
 import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
+import { refreshButton } from '../lib/freshness.js';
 import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
 import { heapOverHigh, HEAP_HIGH_PERCENT, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from '../core/alert-rules.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -13,7 +14,7 @@ import { compareNames } from '../lib/cluster-order.js';
 import { compareSortValues, ariaSort as ariaSortOf, sortArrow } from '../core/sort.js';
 import { tableSort } from '../lib/table-sort.js';
 import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy, renameColumn, resetColumns, MAX_NAME } from '../core/cluster-view.js';
-import { refreshAge, healthCounts } from '../core/cluster-detail.js';
+import { healthCounts } from '../core/cluster-detail.js';
 import { rowMenu, popover, ICON } from '../ui/menu.js';
 import { roleMayManageClusters } from '../core/writes.js';
 import { editCluster, editZabbixCluster, rawClusterOf } from '../ui/config-editor.js';
@@ -775,22 +776,17 @@ function buildCard() {
         h('button#cl-columns.btn.sm', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
           title: 'Show, hide, reorder or rename the columns', onclick: (e) => openColumns(e.currentTarget) }, 'Columns \u25be'),
         h('button.btn.sm', { type: 'button', onclick: exportSummary, title: 'The rows on screen, in the columns on screen' }, 'Export CSV'),
-        isSnapshotMode() ? null : h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }),
-          title: 'Read every cluster on screen again' }, 'Refresh', h('span.age', { 'aria-live': 'off' })))),
+        isSnapshotMode() ? null : refreshButton(() => refreshAll({ force: true, selected: true }), { title: 'read every cluster on screen again', id: 'cl-refresh' }))),
     h('div.body', h('div.cl-tbl-holder'), h('div.cl-end')));
   return shell;
 }
 
-/** The minutes badge on Refresh: whole minutes since the last refresh, the time on hover. */
+/** The refresh button names how old the data is in its tooltip and label (the icon carries no text). */
 function paintAges() {
-  const el = host && host.querySelector('.cl-tools .age');
-  if (!el) return;
-  const t = refreshAge(state.lastRefresh);
-  if (el.textContent !== t) el.textContent = t;
-  el.hidden = !t;
-  el.title = state.lastRefresh ? `Last refreshed ${dt(state.lastRefresh)}` : '';
-  const btn = el.parentElement;
-  if (btn) btn.setAttribute('aria-label', state.lastRefresh ? `Refresh \u2014 last refreshed ${ago(state.lastRefresh)}` : 'Refresh');
+  const btn = host && host.querySelector('.cl-tools .refresh-btn');
+  if (!btn) return;
+  btn.setAttribute('aria-label', state.lastRefresh ? `Refresh \u2014 last refreshed ${ago(state.lastRefresh)}` : 'Refresh');
+  btn.title = state.lastRefresh ? `Refresh \u00b7 last refreshed ${dt(state.lastRefresh)}` : 'Refresh';
 }
 
 /**

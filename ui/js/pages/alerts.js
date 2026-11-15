@@ -4,7 +4,7 @@ import { h, mount, $, tooltip, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, dur, toCsv, download, num } from '../lib/fmt.js';
 import { state, bus, mergedAlerts, invalidateAlerts, clusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage, healthState } from '../core/state.js';
-import { coverageBar } from '../lib/freshness.js';
+import { coverageBar, refreshButton } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, table, empty, act, diagnose, diagnosisPanel, connectionProblem } from './common.js';
 import { navigateTo } from '../core/intent.js';
@@ -279,7 +279,7 @@ function draw() {
               } }, allCollapsed ? 'Expand all' : 'Collapse all')
           : null,
         h('button.btn.sm', { type: 'button', onclick: () => exportAlerts(lastMine) }, 'Export CSV'),
-        h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))]),
+        refreshButton(() => refreshAll({ force: true, selected: true }), { title: 'read the clusters again', id: 'alerts-refresh' }))]),
 
     built.same('silences', silencesCard()),
 
