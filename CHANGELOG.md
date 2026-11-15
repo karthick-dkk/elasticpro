@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.64
 
 - **Indices: select all means all** (the owner, 2026-11-15). The head tick selects every index the filters and the search match, on every page, and says "N selected" beside it; the bulk actions (Open, Close, Settings, maintenance, "Delete N indices…") act on all N. Ticking or unticking one row now keeps the head's tick, half-tick and count in step without redrawing the rows, and the head reads the matching set when pressed, not when it was drawn.
 - **Indices: wildcard and not-matching search** (the owner, 2026-11-15). The search box takes `*` and `?` as wildcards (case-insensitive, over the whole name); plain text without them is still "contains"; several patterns separated by commas match any of them. A **Not matching** toggle beside the box, or a leading `!`, shows the indices the search does not match, and the count says so ("12 of 95 indices · not matching logstash-*"). One definition, `ui/js/core/index-match.js`, read by the table, the head tick and the Live + Snapshot search.
