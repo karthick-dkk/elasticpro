@@ -732,12 +732,6 @@ await go('overview');
   v = [...doc.querySelectorAll('table.tbl thead th')].find((th) => th.textContent.includes('Version'));
   ok(/▼/.test(v.textContent), `overview: second click should reverse, header reads "${v.textContent}"`);
 }
-/** From Clusters › Overview back to the List of the whole fleet, as the List tab goes. */
-async function backToList() {
-  (await load('core/state.js')).state.selected = 'all';
-  location.hash = '#/clusters'; await settleFor(400);
-  await go('overview');
-}
 // ILM / SLM are buttons (as in 0.3.2); a red dot, never a count, says a log index / policy is failing.
 {
   const btns = [...doc.querySelectorAll('table.cl-tbl button.cl-pillbtn')];
@@ -745,44 +739,11 @@ async function backToList() {
   const bad = btns.filter((b) => b.parentElement.querySelector('.cl-errdot'));
   ok(bad.length > 0, 'overview: the mock has a logstash-* index in an ILM error step, so a red dot should show');
   for (const b of bad) ok(!/\d/.test(b.parentElement.textContent), `overview: the ILM/SLM cell shows a count: "${b.parentElement.textContent}"`);
-  // The button opens that cluster's Overview, as the name's "Overview →" does.
-  const b0 = btns[0];
-  if (b0) {
-    const id = b0.closest('tr.cl-row').dataset.cluster;
-    b0.click(); await settleFor(400);
-    ok(location.hash === `#/clusters/overview/${encodeURIComponent(id)}`, `overview: the ${b0.textContent} button opened ${location.hash}, not that cluster's Overview`);
-    await backToList();
-  }
 }
 
-/* -------- Clusters › List: no expanded row; "Overview →" on the name, shown on hover or focus -------- */
+// The summary line: disk % large with the index size, a 40 px bar with used / total.
 {
   await go('overview');
-  const st = await load('core/state.js');
-  const rows = [...doc.querySelectorAll('#view table.cl-tbl > tbody > tr.cl-row')];
-  ok(rows.length > 1, 'clusters: the fixture should have more than one row');
-  ok(!doc.querySelector('#view button.cl-chev, #view tr.cl-detail-row, #view .cl-detail, #view th.cl-xth'), 'clusters: the expanded row (chevron, details) is still on the page');
-  rows[0].querySelector('td:nth-child(2)').click(); await settleFor(150);
-  ok(!doc.querySelector('#view tr.cl-detail-row') && !rows[0].classList.contains('open'), 'clusters: a click on a row still opens it');
-  const btns = rows.map((tr) => tr.querySelector('td.cl-name-td button.cl-ov'));
-  ok(btns.every((b) => b && /^Overview →$/.test(b.textContent.trim()) && b.type === 'button'), 'clusters: a row has no "Overview →" button in its name cell');
-  // Hidden until the pointer is on the name cell or the keyboard is in it, and keeping its place
-  // (opacity, not display): jsdom has no :hover, so the rule itself is read from the stylesheet.
-  const css = (await import('node:fs')).readFileSync(path.join(UI, 'css/app.css'), 'utf8');
-  const base = (css.match(/(^|\n)\.cl-ov\s*\{([^}]*)\}/) || [])[2] || '';
-  ok(/opacity:\s*0\b/.test(base) && /pointer-events:\s*none/.test(base) && !/display:\s*none/.test(base), `clusters: "Overview →" is not hidden by opacity until asked for: {${base.trim()}}`);
-  ok(/\.cl-name-td:hover\s+\.cl-ov[^{]*\.cl-name-td:focus-within\s+\.cl-ov\s*\{[^}]*opacity:\s*1[^}]*pointer-events:\s*auto/.test(css), 'clusters: "Overview →" does not show on hover and on focus of the name cell');
-  const target = rows[1];
-  const id = target.dataset.cluster;
-  const b = target.querySelector('button.cl-ov');
-  if (b) {
-    b.focus(); b.click(); await settleFor(500);
-    ok(location.hash === `#/clusters/overview/${encodeURIComponent(id)}`, `clusters: "Overview →" opened ${location.hash}, not #/clusters/overview/${id}`);
-    ok(st.state.selected === id, `clusters: the Overview chose ${st.state.selected}, not the row's cluster ${id}`);
-    ok(!!doc.querySelector('#view .ov-board') || !!doc.querySelector('#view.ov-page'), 'clusters: "Overview →" did not land on the Overview board');
-    await backToList();
-  }
-  // The summary line: disk % large with the index size, a 40 px bar with used / total.
   const sizeCell = doc.querySelector('tr.cl-row td .cl-size-pct');
   ok(!!sizeCell && /^\d+ %$/.test(sizeCell.textContent.trim()), 'summary: the Size cell does not lead with the disk used %');
   ok(!!doc.querySelector('tr.cl-row td .cl-dbar') && /\//.test((doc.querySelector('tr.cl-row td .cl-dtext') || {}).textContent || ''), 'summary: the Disk usage cell is not a bar with "used / total"');
@@ -8084,11 +8045,57 @@ await settleFor(300);
   await go('overview');
 }
 
+/** From Clusters › Overview back to the List of the whole fleet, as the List tab goes. */
+async function backToList() {
+  (await load('core/state.js')).state.selected = 'all';
+  location.hash = '#/clusters'; await settleFor(400);
+  await go('overview');
+}
+/* -------- Clusters › List: no expanded row; "Overview →" on the name, shown on hover or focus -------- */
+{
+  await go('overview');
+  const st = await load('core/state.js');
+  const rows = [...doc.querySelectorAll('#view table.cl-tbl > tbody > tr.cl-row')];
+  ok(rows.length > 1, 'clusters: the fixture should have more than one row');
+  ok(!doc.querySelector('#view button.cl-chev, #view tr.cl-detail-row, #view .cl-detail, #view th.cl-xth'), 'clusters: the expanded row (chevron, details) is still on the page');
+  rows[0].querySelector('td:nth-child(2)').click(); await settleFor(150);
+  ok(!doc.querySelector('#view tr.cl-detail-row') && !rows[0].classList.contains('open'), 'clusters: a click on a row still opens it');
+  const btns = rows.map((tr) => tr.querySelector('td.cl-name-td button.cl-ov'));
+  ok(btns.every((b) => b && /^Overview →$/.test(b.textContent.trim()) && b.type === 'button'), 'clusters: a row has no "Overview →" button in its name cell');
+  // Hidden until the pointer is on the name cell or the keyboard is in it, and keeping its place
+  // (opacity, not display): jsdom has no :hover, so the rule itself is read from the stylesheet.
+  const css = (await import('node:fs')).readFileSync(path.join(UI, 'css/app.css'), 'utf8');
+  const base = (css.match(/(^|\n)\.cl-ov\s*\{([^}]*)\}/) || [])[2] || '';
+  ok(/opacity:\s*0\b/.test(base) && /pointer-events:\s*none/.test(base) && !/display:\s*none/.test(base), `clusters: "Overview →" is not hidden by opacity until asked for: {${base.trim()}}`);
+  ok(/\.cl-name-td:hover\s+\.cl-ov[^{]*\.cl-name-td:focus-within\s+\.cl-ov\s*\{[^}]*opacity:\s*1[^}]*pointer-events:\s*auto/.test(css), 'clusters: "Overview →" does not show on hover and on focus of the name cell');
+  const target = rows[1];
+  const id = target.dataset.cluster;
+  const b = target.querySelector('button.cl-ov');
+  if (b) {
+    b.focus(); b.click(); await settleFor(500);
+    ok(location.hash === `#/clusters/overview/${encodeURIComponent(id)}`, `clusters: "Overview →" opened ${location.hash}, not #/clusters/overview/${id}`);
+    ok(st.state.selected === id, `clusters: the Overview chose ${st.state.selected}, not the row's cluster ${id}`);
+    ok(!!doc.querySelector('#view .ov-board') || !!doc.querySelector('#view.ov-page'), 'clusters: "Overview →" did not land on the Overview board');
+    await backToList();
+  }
+  // The ILM / SLM buttons open that cluster's Overview too.
+  {
+    const btns = [...doc.querySelectorAll('table.cl-tbl button.cl-pillbtn')];
+    const b0 = btns[0];
+    if (b0) {
+      const id = b0.closest('tr.cl-row').dataset.cluster;
+      b0.click(); await settleFor(400);
+      ok(location.hash === `#/clusters/overview/${encodeURIComponent(id)}`, `overview: the ${b0.textContent} button opened ${location.hash}, not that cluster's Overview`);
+      await backToList();
+    }
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);
