@@ -163,10 +163,12 @@ await go('console');
   ok(!doc.getElementById('c-target') && !doc.getElementById('c-echo-method'), 'console: the request echo line above the inputs is back');
   const chooser = doc.getElementById('cluster-select');
   {
-    const c0 = config.clusters[0];
+    // The chooser shows the cluster the page is on: its option names the selected cluster.
+    const st0 = await load('core/state.js');
+    const sel = st0.clusters().find((x) => x.id === st0.state.selected);
     const picked = chooser && chooser.options[chooser.selectedIndex];
-    ok(!!picked && (chooser.value === c0.id || chooser.value === c0.name || picked.textContent.includes(c0.name)),
-      `console: the top bar's chooser does not name the cluster (value "${chooser && chooser.value}", option "${picked && picked.textContent.trim()}")`);
+    ok(!!sel && !!picked && chooser.value === sel.id && picked.textContent.includes(sel.name),
+      `console: the top bar's chooser does not name the cluster (value "${chooser && chooser.value}", option "${picked && picked.textContent.trim()}", selected ${st0.state.selected})`);
   }
   ok(doc.querySelector('#topbar h1') && doc.querySelector('#topbar h1').textContent === 'REST', 'console: the top bar does not carry the page title');
   // An evidence page: the host is nowhere on it.
@@ -5836,6 +5838,10 @@ if (viaFleet) {
       ok(hbtn && hbtn.querySelector('.c-count') && hbtn.querySelector('.c-count').textContent === '1', `evidence console: the History button counts "${hbtn && hbtn.textContent.trim()}", expected this cluster's one request`);
       doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
       ok(!doc.querySelector('.pop.console-pop'), 'evidence console: the History panel did not close');
+      // A GET, said so: the alerts playbook handed a PUT to the console earlier (its own tab, still
+      // the active one), and a write on Run now asks the guard first rather than being sent for the
+      // core to refuse — this case is about what the page shows, not about the guard.
+      { const m = doc.getElementById('c-method'); if (m && m.value !== 'GET') { m.value = 'GET'; m.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150); } }
       doc.getElementById('c-path').value = '/_cluster/health';
       doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
       doc.getElementById('c-run').click();
