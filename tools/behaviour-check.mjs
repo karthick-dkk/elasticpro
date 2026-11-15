@@ -162,8 +162,12 @@ await go('console');
   ok(!!run, 'console: no Run button');
   ok(!doc.getElementById('c-target') && !doc.getElementById('c-echo-method'), 'console: the request echo line above the inputs is back');
   const chooser = doc.getElementById('cluster-select');
-  ok(chooser && chooser.value === config.clusters[0].id || (chooser && [...chooser.options].some((o) => o.selected && o.textContent.includes(config.clusters[0].name))),
-    `console: the top bar's chooser does not name the cluster (reads "${chooser && chooser.value}")`);
+  {
+    const c0 = config.clusters[0];
+    const picked = chooser && chooser.options[chooser.selectedIndex];
+    ok(!!picked && (chooser.value === c0.id || chooser.value === c0.name || picked.textContent.includes(c0.name)),
+      `console: the top bar's chooser does not name the cluster (value "${chooser && chooser.value}", option "${picked && picked.textContent.trim()}")`);
+  }
   ok(doc.querySelector('#topbar h1') && doc.querySelector('#topbar h1').textContent === 'REST', 'console: the top bar does not carry the page title');
   // An evidence page: the host is nowhere on it.
   const base = config.clusters[0].url.replace(/\/+$/, '');
@@ -260,7 +264,10 @@ await go('console');
     `console: the query box still carries a placeholder — "${body && body.getAttribute('placeholder')}"`);
 
   /* ---- a request typed or pasted whole is recognised: method, path, body (core/console-paste.js) ---- */
-  if (pathInput && body) {
+  // Fresh handles: the write-guard case above changed the method, which redraws the page, and a
+  // box held from before that is detached — typing into it proves nothing about the page.
+  if (doc.getElementById('c-path') && doc.getElementById('c-body')) {
+    const pathInput = doc.getElementById('c-path'), body = doc.getElementById('c-body');
     const method = () => doc.getElementById('c-method').value;
     const paste = (el, text) => {
       const e = new window.Event('paste', { bubbles: true, cancelable: true });
