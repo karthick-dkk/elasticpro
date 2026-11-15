@@ -1,7 +1,8 @@
 /**
  * How one person likes the Clusters page laid out: which summary columns they see, in
  * what order and under what names. (It used to hold a fold for the unreachable section too;
- * that section is gone, and a stored `unreachable` key is ignored and dropped on the next save.)
+ * that section is gone, and a stored `unreachable` key is ignored and dropped on the next save;
+ * so are the open row's `details` and `expand`, since the row no longer opens.)
  *
  * Pure: no DOM, no state. The storage is passed in, so the page hands it localStorage and
  * the unit tests hand it a Map. The core has no per-user preferences store (bridge.rs has
@@ -15,7 +16,7 @@
  * column cannot exist without a way to sort it (tools/unit/cluster-view.test.mjs checks).
  * `fixed`: always shown and always first — the cluster's name is what a row IS. `hidden`:
  * off until somebody turns it on; JDK, Repository and the request count are read now and
- * then, and are also in each row's Details panel, so the default table fits a laptop.
+ * then, so the default table fits a laptop.
  */
 export const SUMMARY_COLUMNS = [
   { id: 'name', label: 'Cluster', fixed: true },
@@ -33,65 +34,10 @@ export const SUMMARY_COLUMNS = [
   { id: 'reqs', label: 'Our reqs/5m', num: true, hidden: true },
 ];
 
-/**
- * What an open row shows, in the same show/hide panel as the columns: the boxes of the strip
- * and the four cards under it (the ids are the old tiles', so a stored choice still applies:
- * health/url/jump/bucket are strip boxes, shards/ilm/slm/tasks+rate the cards; tasks and rate
- * are the two halves of the Activity card), the two sections under them, and the columns of
- * each section's table. One choice for every cluster row. `fixed`: the name column of a
- * table is the row. Columns of earlier versions (tier, role legend, oldest, newest, status)
- * are not in the lists any more; a stored choice for one is ignored.
- */
-export const DETAIL_TILES = [
-  { id: 'health', label: 'Cluster health' },
-  { id: 'url', label: 'Endpoint' },
-  { id: 'jump', label: 'Jump host' },
-  { id: 'bucket', label: 'Log bucket (S3)' },
-  { id: 'shards', label: 'Shard allocation' },
-  { id: 'ilm', label: 'ILM' },
-  { id: 'slm', label: 'Backups (SLM)' },
-  { id: 'tasks', label: 'Activity: ES tasks' },
-  { id: 'rate', label: 'Activity: search / index rate' },
-];
-export const DETAIL_SECTIONS = [
-  { id: 'repo', label: 'Repository/Snapshot section' },
-  { id: 'nodes', label: 'Nodes section' },
-];
-export const REPO_COLUMNS = [
-  { id: 'name', label: 'Repository', fixed: true },
-  { id: 'type', label: 'Type' },
-  { id: 'location', label: 'Location / bucket' },
-  { id: 'policy', label: 'SLM policy' },
-  { id: 'count', label: 'Snapshots', num: true },
-  { id: 'covered', label: 'Data covered' },
-  { id: 'last', label: 'Last snapshot' },
-  { id: 'size', label: 'Size', num: true },
-  { id: 'actions', label: 'Actions' },
-];
-export const NODE_COLUMNS = [
-  { id: 'name', label: 'Node', fixed: true },
-  { id: 'version', label: 'Version' },
-  { id: 'ip', label: 'IP' },
-  { id: 'id', label: 'Node ID', hidden: true },
-  { id: 'roles', label: 'Roles' },
-  { id: 'jdk', label: 'JDK' },
-  // A figure with a bar under it reads left, like text; only the bare numbers sit right.
-  { id: 'cpu', label: 'CPU' },
-  { id: 'heap', label: 'Heap' },
-  { id: 'disk', label: 'Disk' },
-  { id: 'free', label: 'Free size', num: true },
-  { id: 'load', label: 'Load 1m', num: true },
-  { id: 'shards', label: 'Shards', num: true },
-  { id: 'uptime', label: 'Uptime', num: true },
-];
-/** The groups the panel offers, keyed the way the stored preferences are. */
-export const DETAIL_GROUPS = { tiles: DETAIL_TILES, sections: DETAIL_SECTIONS, repo: REPO_COLUMNS, nodes: NODE_COLUMNS };
-
 /** A renamed column keeps at most this many characters: it is a header, not a note. */
 export const MAX_NAME = 40;
 
-const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} },
-  details: { tiles: {}, sections: {}, repo: {}, nodes: {} }, expand: false });
+const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} } });
 
 /** What was stored, made safe to use: wrong types dropped, nothing assumed. */
 export function sanitizePrefs(raw) {
@@ -108,12 +54,6 @@ export function sanitizePrefs(raw) {
       if (n) out.columns.names[k] = n;
     }
   }
-  const d = raw.details && typeof raw.details === 'object' ? raw.details : {};
-  for (const g of Object.keys(DETAIL_GROUPS)) {
-    if (!d[g] || typeof d[g] !== 'object') continue;
-    for (const [k, v] of Object.entries(d[g])) if (typeof v === 'boolean') out.details[g][k] = v;
-  }
-  out.expand = raw.expand === true;
   return out;
 }
 
@@ -221,50 +161,7 @@ export function renameColumn(prefs, id, name, defs = SUMMARY_COLUMNS) {
   });
 }
 
-/** Back to the default columns, order and names — and the default row details. */
+/** Back to the default columns, order and names. */
 export function resetColumns(prefs) {
-  const p = withColumns(prefs, (c) => { c.order = []; c.shown = {}; c.names = {}; });
-  p.details = EMPTY().details;
-  p.expand = false;
-  return p;
-}
-
-/* ------------------------------ the open row ------------------------------ */
-
-/**
- * One group of the open row (`tiles`, `sections`, `repo` or `nodes`) as this person has
- * it: [{ id, label, visible, fixed, num }], in the definition's order.
- */
-export function detailItems(prefs, group) {
-  const defs = DETAIL_GROUPS[group] || [];
-  const shown = sanitizePrefs(prefs).details[group] || {};
-  return defs.map((d) => ({
-    id: d.id, label: d.label, fixed: !!d.fixed, num: !!d.num,
-    visible: d.fixed ? true : (typeof shown[d.id] === 'boolean' ? shown[d.id] : !d.hidden),
-  }));
-}
-
-/** Only the ones on screen. */
-export function detailShown(prefs, group) {
-  return detailItems(prefs, group).filter((x) => x.visible);
-}
-
-/** Show or hide one tile, section or column of the open row. A fixed one stays. */
-export function setDetailShown(prefs, group, id, on) {
-  const d = (DETAIL_GROUPS[group] || []).find((x) => x.id === id);
-  const p = sanitizePrefs(prefs);
-  if (!d || d.fixed) return p;
-  p.details[group][id] = !!on;
-  return p;
-}
-
-/** Whether every cluster row opens expanded when the page is drawn. */
-export function expandByDefault(prefs) {
-  return sanitizePrefs(prefs).expand;
-}
-
-export function setExpandByDefault(prefs, on) {
-  const p = sanitizePrefs(prefs);
-  p.expand = !!on;
-  return p;
+  return withColumns(prefs, (c) => { c.order = []; c.shown = {}; c.names = {}; });
 }

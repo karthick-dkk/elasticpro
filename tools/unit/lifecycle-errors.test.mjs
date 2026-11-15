@@ -152,36 +152,6 @@ test('ILM policy state: one definition of "not known" versus "none", read by the
   }
 });
 
-test('the ILM card in the open row: Not known is grey with the reason in a tooltip; No policy only when confirmed', () => {
-  const unread = mount(P.ilmCardOf(row({ ilm: RUN, ilmOfIndex: null })));
-  const pill = unread.querySelector('.cl-card-pill');
-  assert.deepEqual([pill.textContent, pill.classList.contains('grey')], ['Not known', true]);
-  assert.match(pill.title, /view_index_metadata/);
-  const big = unread.querySelector('.cl-big');
-  assert.deepEqual([big.textContent, big.classList.contains('muted')], ['Not known', true]);
-  assert.match(big.title, /view_index_metadata/);
-  assert.ok(!/No policy|could not be read/.test(unread.textContent), `the card shows "${unread.textContent}"`);
-  assert.ok(!unread.querySelector('svg.cl-donut'), 'no empty ring for an unknown');
-
-  const none = mount(P.ilmCardOf(row({ ilm: RUN, ilmOfIndex: { 'logstash-a': null, 'logstash-b': null } })));
-  const np = none.querySelector('.cl-card-pill');
-  assert.deepEqual([np.textContent, np.classList.contains('red')], ['No policy', true]);
-  const nb = none.querySelector('.cl-big');
-  assert.deepEqual([nb.textContent, nb.classList.contains('bad')], ['No policy for logstash-*', true]);
-
-  const some = mount(P.ilmCardOf(row({ ilm: RUN, ilmOfIndex: { 'logstash-a': 'p', 'logstash-b': null } })));
-  assert.ok(some.querySelector('svg.cl-donut'), 'partly covered: the donut');
-  assert.equal(some.querySelector('.cl-card-pill').textContent, 'Logs not covered');
-});
-
-test('the Backups (SLM) card: "No policy for logstash-*" and nothing else, the wildcard matching unchanged', () => {
-  const none = mount(P.backupsCard(row(slmData([pol('metrics', { policy: { schedule: 'x', config: { indices: ['metrics-*'] } } })]))));
-  assert.equal(none.querySelector('.cl-big.bad').textContent, 'No policy for logstash-*');
-  assert.ok(!/wildcard|Checked as/i.test(none.textContent), `a note is back: "${none.textContent}"`);
-  const wild = mount(P.backupsCard(row(slmData([pol('daily', { policy: { schedule: 'x', config: { indices: ['logstash-2026*'] } } })]))));
-  assert.ok(!/No policy/.test(wild.textContent) && /daily/.test(wild.textContent), `a policy on logstash-2026* still takes logstash-*: "${wild.textContent}"`);
-});
-
 test('SLM is green when a scheduled policy takes the log indices', () => {
   const v = (slm, mode = RUN) => L.lifecycleView('SLM', { slmStatus: mode, slm }, 'logstash-*');
   assert.deepEqual([v([pol('daily')]).tone, v([pol('daily')]).word], ['green', 'Running']);

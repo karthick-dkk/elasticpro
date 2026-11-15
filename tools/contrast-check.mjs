@@ -393,7 +393,7 @@ async function runTheme(theme) {
     const rows = await p.evaluate(() => {
       let n = 0;
       for (const t of document.querySelectorAll('#view table')) {
-        const tr = [...t.querySelectorAll(':scope > tbody > tr')].find((r) => r.querySelector('td') && r.getBoundingClientRect().height > 4 && !r.classList.contains('cl-detail-row'));
+        const tr = [...t.querySelectorAll(':scope > tbody > tr')].find((r) => r.querySelector('td') && r.getBoundingClientRect().height > 4);
         if (!tr) continue;
         tr.setAttribute('data-cc-hover', String(n++));
         if (n >= 4) break;
@@ -410,11 +410,7 @@ async function runTheme(theme) {
     }
     await p.mouse.move(0, 0);
 
-    // selected: open the first Overview row; then whatever the page marks as chosen
-    if (id === 'overview') {
-      await p.evaluate(() => { const tr = document.querySelector('#view tr.cl-row'); if (tr) tr.click(); });
-      await sleep(600); await quiet(400, 3000);
-    }
+    // selected: whatever the page marks as chosen
     if (id === 'reports/measure') {
       await p.evaluate(() => { const tr = document.querySelector('#view .rp-measure-tbl tbody tr:not(.on)'); if (tr) tr.click(); });
       await sleep(500); await quiet(400, 3000);
@@ -427,7 +423,7 @@ async function runTheme(theme) {
     await p.evaluate(install);
     keep(id, await p.evaluate(() => {
       const out = [];
-      for (const tr of document.querySelectorAll('#view tr.open, #view tr.on, #view tr.ld-open, #view tr.zr-pinned, #view tr[aria-selected="true"], #view tr.cl-data')) out.push(...window.__cc.texts(tr, 'selected row').out);
+      for (const tr of document.querySelectorAll('#view tr.open, #view tr.on, #view tr.ld-open, #view tr.zr-pinned, #view tr[aria-selected="true"]')) out.push(...window.__cc.texts(tr, 'selected row').out);
       return out;
     }));
 
