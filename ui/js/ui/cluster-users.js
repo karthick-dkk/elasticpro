@@ -17,8 +17,9 @@ import { client, clusters } from '../core/state.js';
 import { modal, field, text, select, val, confirmDialog } from './modal.js';
 import { toast } from './menu.js';
 import { TASKS, taskById, missingFields, preview, runTask, ROLE_PRESETS, presetValues } from '../core/tasks.js';
+import { rolesFromSecurityResponse, rolesFailure } from '../core/security-roles.js';
 import { ensureWrites } from '../core/writes.js';
-import { usersFromSecurityResponse } from '../core/security-users.js';
+import { usersFromSecurityResponse, esReason } from '../core/security-users.js';
 
 /**
  * Read the native-realm accounts from one cluster.
@@ -33,12 +34,9 @@ export async function fetchClusterUsers(clusterId) {
   try {
     return usersFromSecurityResponse(await cl.securityUsers());
   } catch (e) {
-    // Elasticsearch puts the reason in the body; the thrown message is only the status
-    // line. Reading the status line alone turned "security is switched off on this
-    // cluster" into "HTTP 500 Internal Server Error", which sends you looking for a fault
-    // in the app instead of at a setting in elasticsearch.yml.
-    const es = e.res && e.res.json && e.res.json.error;
-    const reason = (es && (es.reason || es.type)) || e.message || String(e);
+    // The reason is in the body, not the status line (security-users.js esReason): reading the
+    // status line alone turned "security is switched off" into "HTTP 500".
+    const reason = esReason(e);
 
     if (/security must be explicitly enabled|xpack\.security\.enabled/i.test(reason)) {
       return {
@@ -63,6 +61,13 @@ export async function fetchClusterUsers(clusterId) {
     }
     return { users: null, error: reason, fix: null };
   }
+}
+
+/** The roles on one cluster, read-only; a refusal is returned in words, never as an empty list. */
+export async function fetchClusterRoles(clusterId) {
+  const cl = client(clusterId);
+  if (!cl) return { roles: null, error: 'not connected', fix: null };
+  try { return rolesFromSecurityResponse(await cl.securityRoles()); } catch (e) { return rolesFailure(e); }
 }
 
 /**

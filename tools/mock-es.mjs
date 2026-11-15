@@ -846,6 +846,12 @@ routes.unshift([(u) => u.split('?')[0] === '/_security/user', () => ({
   'log-reader': { username: 'log-reader', roles: ['viewer'], full_name: 'Log reader', email: 'logs@example.test', metadata: {}, enabled: true },
 })]);
 
+routes.unshift([(u) => u.split('?')[0] === '/_security/role', () => ({
+  superuser: { cluster: ['all'], indices: [{ names: ['*'], privileges: ['all'], allow_restricted_indices: false }], run_as: ['*'], metadata: { _reserved: true }, transient_metadata: { enabled: true } },
+  viewer: { cluster: ['monitor'], indices: [{ names: ['logs-*', 'metrics-*'], privileges: ['read', 'view_index_metadata'] }], run_as: [], metadata: { description: 'Read logs and metrics' } },
+  'ingest-writer': { cluster: ['monitor', 'manage_ingest_pipelines'], indices: [{ names: ['logs-app-*'], privileges: ['create_index', 'write'] }], run_as: ['log-reader'], metadata: {} },
+})]);
+
 // Templates. Index templates are the one kind whose writes this fixture honours: a saved
 // template that does not show up when the list is read again looks exactly like a page
 // that forgot to save, and that is the confusion the snapshot deletes above already cost.

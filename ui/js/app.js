@@ -33,6 +33,8 @@ import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
 import { confirmDialog } from './ui/modal.js';
+import { isHelpKey } from './core/shortcuts.js';
+import { showShortcuts } from './ui/shortcuts.js';
 import { reports as reportJobs, onReports, jobCounts, pillText as reportJobsText } from './core/reports.js';
 import { openYourSettings, closeYourSettings, normaliseMenuPosition } from './ui/your-settings.js';
 import { loadPrefs, savePref } from './core/prefs.js';
@@ -1479,6 +1481,7 @@ document.addEventListener('keydown', (e) => {
     if (cur && cur.mod.onKey && cur.mod.onKey(e)) return;
   }
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (isHelpKey(e)) { e.preventDefault(); showShortcuts(); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   // Number keys used to jump between pages. They are gone: a stray digit moving the
   // page out from under someone is worse than the shortcut was worth.

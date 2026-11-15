@@ -3497,6 +3497,33 @@ if (config.clusters.length >= 2 && viaFleet) {
   ok(/pinned/.test(cell.textContent), `accounts: no pinned pill on a pinned account: ${cell.textContent}`);
 }
 
+/* ------------- roles are listed read-only; a refusal is worded ------------- */
+
+{
+  const cuMod = await load('ui/cluster-users.js');
+  const st = await load('core/state.js');
+  const real = st.state.clients;
+  // The mock's own answer, through the page's own reader.
+  st.state.clients = new Map([['m', { securityRoles: async () => (await fetch('http://127.0.0.1:9299/_security/role')).json() }]]);
+  const r0 = await cuMod.fetchClusterRoles('m');
+  ok(r0 && r0.roles && ['ingest-writer', 'superuser', 'viewer'].every((n) => r0.roles.some((x) => x.name === n)),
+    `roles: the mock's three roles should be listed, got ${JSON.stringify(r0)}`);
+  const viewer = r0 && r0.roles.find((x) => x.name === 'viewer');
+  ok(viewer && viewer.indices[0] === 'logs-*, metrics-* → read, view_index_metadata' && viewer.cluster[0] === 'monitor',
+    `roles: viewer privileges not shown as "indices → privileges": ${JSON.stringify(viewer)}`);
+  ok(r0 && r0.roles.find((x) => x.name === 'superuser').reserved && r0.roles.find((x) => x.name === 'ingest-writer').runAs[0] === 'log-reader',
+    'roles: reserved flag or run-as missing');
+  const refuse = (reason) => { const e = new Error('HTTP 403'); e.res = { status: 403, json: { error: { reason } } }; return e; };
+  st.state.clients = new Map([['x', { securityRoles: async () => { throw refuse('action [cluster:admin/xpack/security/role/get] is unauthorized for user [bob]'); } }]]);
+  let r = await cuMod.fetchClusterRoles('x');
+  ok(r.roles === null && /not permitted to read roles/.test(r.error) && /unauthorized for user \[bob\]/.test(r.error),
+    `roles: a permission refusal should be worded with the reason, got "${r.error}"`);
+  st.state.clients = new Map([['x', { securityRoles: async () => { throw refuse('Security must be explicitly enabled when using a [basic] license. [xpack.security.enabled]'); } }]]);
+  r = await cuMod.fetchClusterRoles('x');
+  ok(r.roles === null && /switched off/.test(r.error), `roles: security-off should be named, got "${r.error}"`);
+  st.state.clients = real;
+}
+
 /* ------- a cluster with security off says so, not "HTTP 500" ------- */
 
 {
@@ -3522,6 +3549,30 @@ if (config.clusters.length >= 2 && viaFleet) {
   st.state.clients = new Map([['x', { securityUsers: async () => { throw err('security_exception: action unauthorized'); } }]]);
   r = await cuMod.fetchClusterUsers('x');
   ok(/may not read/.test(r.error), `a privilege problem should be named, got "${r.error}"`);
+}
+
+/* ------------- "?" opens the shortcut sheet; typing a ? does not ------------- */
+
+{
+  const sc = await load('core/shortcuts.js');
+  const sheet = await load('ui/shortcuts.js');
+  const ev = (props) => ({ key: '?', metaKey: false, ctrlKey: false, altKey: false, ...props });
+  ok(sc.isHelpKey(ev({ target: doc.body })), 'shortcuts: ? on the page should be the help key');
+  for (const tag of ['input', 'textarea', 'select']) {
+    ok(!sc.isHelpKey(ev({ target: doc.createElement(tag) })), `shortcuts: ? typed in a ${tag} must do nothing`);
+  }
+  const ce = doc.createElement('div'); Object.defineProperty(ce, 'isContentEditable', { value: true });
+  ok(!sc.isHelpKey(ev({ target: ce })), 'shortcuts: ? typed in a contenteditable must do nothing');
+  ok(!sc.isHelpKey(ev({ target: doc.body, ctrlKey: true })), 'shortcuts: Ctrl+? is not the help key');
+  sheet.showShortcuts();
+  const t = doc.querySelector('#shortcut-sheet');
+  ok(t && t.querySelectorAll('tr').length === sc.SHORTCUTS.length, 'shortcuts: the sheet should list every row of the table');
+  ok(t && /Run the request/.test(t.textContent) && /Pause \/ resume/.test(t.textContent), 'shortcuts: sheet lacks REST/Play rows');
+  sheet.showShortcuts();
+  ok(doc.querySelectorAll('.modal-overlay').length === 1, 'shortcuts: a second ? must not stack another sheet');
+  window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await settleFor(50);
+  ok(!doc.querySelector('#shortcut-sheet'), 'shortcuts: Esc should close the sheet');
 }
 
 /* ------------- the create dialog asks for what the kind needs ------------- */
