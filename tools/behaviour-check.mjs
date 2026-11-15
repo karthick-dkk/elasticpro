@@ -233,7 +233,10 @@ await go('shards');
 {
   const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
   ok(titles.some((t) => t.startsWith('Shards —')), `shards: no shard table card, saw ${titles.join(' | ')}`);
-  ok(titles.includes('Nodes & cluster load'), `shards: no node pane, saw ${titles.join(' | ')}`);
+  ok(titles.includes('Nodes & resource usage'), `shards: no node pane, saw ${titles.join(' | ')}`);
+  // The page is four cards and nothing else: nodes, shard allocation, query pressure, the shards.
+  ok(!titles.includes('Cluster at a glance'), `shards: the glance card is still on this page (it belongs to the Clusters overview) — ${titles.join(' | ')}`);
+  ok(titles.includes('Shard allocation') && titles.includes('Query pressure'), `shards: the allocation / pressure row is missing — ${titles.join(' | ')}`);
 
   const heads = [...doc.querySelectorAll('table.tbl thead th')].map((x) => x.textContent.trim());
   for (const col of ['Index', 'Shard', 'Type', 'State', 'Node', 'Store', 'Unassigned reason']) {
@@ -262,12 +265,25 @@ await go('shards');
   ok(moves === 2 * shown,
     `shards: expected a Move button on each of the 2 started shards per cluster (${2 * shown}), found ${moves}`);
 
-  // The node half, which this page lost when it stopped being "Nodes & shards".
-  ok(titles.includes('Nodes & cluster load'), `shards: no Nodes pane, saw ${titles.join(' | ')}`);
-  for (const col of ['Node', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Uptime']) {
+  // The node half: one line per node, the id and the IP as columns of their own.
+  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Uptime']) {
     ok(heads.includes(col), `shards: the node table has no "${col}" column, saw ${heads.join(', ')}`);
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
+  {
+    const pane = [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & resource usage');
+    const n1 = pane && [...pane.querySelectorAll('table.tbl tbody tr')].find((tr) => tr.children[0].textContent.includes('node-1'));
+    ok(!!n1, 'nodes: node-1 is not in the table');
+    if (n1) {
+      const idCell = n1.children[1].querySelector('[title]');
+      ok(n1.children[1].textContent.trim() === 'Xk3pQ9aT' && idCell && idCell.getAttribute('title') === 'Xk3pQ9aTn1',
+        `nodes: the Node ID column is not the short id with the whole id as its tooltip (${n1.children[1].textContent.trim()})`);
+      ok(n1.children[2].textContent.trim() === '10.0.0.1', `nodes: the IP column reads ${n1.children[2].textContent.trim()}`);
+      ok(!n1.children[0].querySelector('div'), 'nodes: the name cell still stacks the IP under the name');
+      ok(/91\.0%/.test(n1.children[9].textContent) && /free · 38 shards/.test(n1.children[9].textContent),
+        `nodes: the disk cell is not one line with the free space and shard count (${n1.children[9].textContent.trim()})`);
+    }
+  }
 
   // A header press is remembered; a link to one node's shards (largest first) lasts that
   // visit only and leaves the remembered order alone.
@@ -305,44 +321,123 @@ await go('shards');
   ok(!titles.includes('Shard states'), `shards: the honeycomb card is still here — ${titles.join(' | ')}`);
   ok(doc.querySelectorAll('polygon').length === 0, 'shards: honeycomb cells are still being drawn');
 
-  // Placement and storage share one card, because their shapes do not match: the gauge
-  // half is tall and fixed, the storage half is four short figures, and side by side as
-  // separate cards whichever was shorter left a block of empty page under it.
-  ok(titles.includes('Cluster at a glance'), `shards: no single glance card — ${titles.join(' | ')}`);
   ok(!titles.includes('Shard placement') && !titles.includes('Storage accounting'),
     `shards: the old separate cards survive — ${titles.join(' | ')}`);
-  // The stat tiles said Nodes / Shards / Unassigned / Moving, which the gauge and its
-  // legend say in the same card. Two pictures of one fact; the tiles were the redundant
-  // half, and what only they carried moved into the glance card's figures.
-  ok(!doc.querySelector('.stat'), 'shards: the stat tiles are still here, duplicating the gauge');
+  ok(!doc.querySelector('.stat'), 'shards: the stat tiles are still here');
+  ok(!/Indices hold|Unaccounted/.test(doc.getElementById('view').textContent), 'shards: the storage accounting is still on this page (it belongs to the Clusters overview)');
+
+  // Shard allocation: the 96 px ring with the total inside, three edge tiles (the unassigned one
+  // with its reasons and a "show" that narrows the table), shards per node as bars, and the
+  // allocation switch in the header — read from the cluster, disabled while writes are locked.
+  const allocCard = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Shard allocation');
   {
-    const glance = [...doc.querySelectorAll('section.card')]
-      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
-    for (const label of ['Nodes', 'Indices', 'Indices hold', 'Disk used']) {
-      ok(glance && glance.textContent.includes(label),
-        `glance card: "${label}" is missing — the tiles' figures must survive their removal`);
-    }
-  }
-  {
-    const merged = [...doc.querySelectorAll('section.card')]
-      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
-    ok(merged && merged.querySelectorAll('svg').length === 1,
-      'glance card: expected exactly one chart — the split gauge');
-    ok(merged && /Indices hold/i.test(merged.textContent),
-      'glance card: the storage figures are missing from the merged card');
-    const marks = merged ? [...merged.querySelectorAll('div[title]')].map((d) => d.getAttribute('title')) : [];
-    for (const want of ['assigned', 'moving', 'unassigned']) {
-      ok(marks.some((t) => t.startsWith(`${want}:`)), `glance card: "${want}" is not marked — ${marks.join(' | ')}`);
+    const ac = allocCard();
+    ok(!!ac, 'allocation: no Shard allocation card');
+    if (ac) {
+      // A half-circle gauge, 200 wide, stroke 20: assigned first, unassigned at the end, the
+      // assigned share and "N of M shards assigned" under the arc.
+      const gauge = ac.querySelector('.split-gauge.half svg');
+      ok(!!gauge && /width: 200px/.test(gauge.getAttribute('style') || '') && gauge.getAttribute('viewBox').startsWith('0 0 200 '),
+        `allocation: the chart is not the 200 px half-circle gauge (${gauge && gauge.getAttribute('style')})`);
+      ok(!!gauge && [...gauge.querySelectorAll('path')].every((p) => p.getAttribute('stroke-width') === '20'), 'allocation: the gauge stroke is not 20');
+      ok(!!gauge && [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
+        `allocation: the gauge's segments are ${gauge ? [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') : 'absent'}`);
+      ok(/75%/.test(ac.querySelector('.split-gauge.half').textContent) && /3 of 4 shards assigned/.test(ac.querySelector('.split-gauge.half').textContent),
+        `allocation: the centre text is not the assigned share (${ac.querySelector('.split-gauge.half').textContent.trim()})`);
+      ok(!ac.querySelector('.split-donut'), 'allocation: the donut is still drawn beside the gauge');
+      const tiles = [...ac.querySelectorAll('.ns-alloc-tiles .edge-tile')];
+      const tileText = tiles.map((t) => `${t.querySelector('.v').textContent}:${t.querySelector('.k span').textContent}`);
+      ok(JSON.stringify(tileText) === JSON.stringify(['3:assigned', '0:moving', '1:unassigned']), `allocation: the tiles read ${tileText.join(' | ')}`);
+      ok(tiles.length === 3 && tiles.every((t) => /border-left-color/.test(t.getAttribute('style') || '')), 'allocation: a tile has no colour edge');
+      ok(tiles[2] && /node left 1/.test(tiles[2].textContent), `allocation: the unassigned tile does not name the reason (${tiles[2] && tiles[2].textContent})`);
+      ok(!ac.querySelector('.split-legend'), 'allocation: the small legend is drawn as well as the tiles — two pictures of one fact');
+      // The donut and the three tiles, nothing else (the per-node bars were cut by the owner).
+      ok(!ac.querySelector('.ns-pernode') && !ac.querySelector('.body .bar-mini'), 'allocation: the per-node bars are still drawn');
+      ok(!/Per node|by reason|Moving:/.test(ac.querySelector('.body').textContent), 'allocation: the card carries text beyond the tiles');
+
+      const sw = ac.querySelector('button.ns-alloc-btn');
+      ok(!!sw, 'allocation: no allocation switch in the header');
+      if (sw) {
+        for (let i = 0; i < 40 && sw.dataset.allocation === 'unknown'; i++) await settleFor(100);
+        ok(/^Allocation: on ▾$/.test(sw.textContent.trim()) && sw.dataset.allocation === 'all',
+          `allocation: the switch reads "${sw.textContent.trim()}" (${sw.dataset.allocation}); the fixture's default is all`);
+        ok(/default setting/.test(sw.title), `allocation: the tooltip does not say where the value comes from (${sw.title})`);
+        ok(sw.disabled && /Writes are locked/.test(sw.title), `allocation: with writes locked the switch should be disabled with the reason (${sw.disabled} · ${sw.title})`);
+      }
+      // "show" on the unassigned tile narrows the table to the unassigned shards.
+      const show = tiles[2] && [...tiles[2].querySelectorAll('button')].find((b) => b.textContent === 'show');
+      ok(!!show, 'allocation: the unassigned tile has no "show"');
+      if (show) {
+        show.click(); await settleFor(250);
+        const stateSel = [...doc.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.textContent === 'any state'));
+        ok(stateSel && stateSel.value === 'UNASSIGNED', `allocation: "show" did not set the State filter to unassigned (${stateSel && stateSel.value})`);
+        const rows = [...doc.querySelectorAll('section.card')].filter((sec) => ((sec.querySelector('header h2') || {}).textContent || '').startsWith('Shards —'))
+          .reduce((n, sec) => n + sec.querySelectorAll('table.tbl tbody tr').length, 0);
+        ok(rows === 1 * shown, `allocation: after "show" the table lists ${rows} row(s) for ${shown} cluster(s), expected the one unassigned shard each`);
+        if (stateSel) { stateSel.value = 'all'; stateSel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200); }
+      }
     }
   }
 
-  // Storage accounting is shown whether or not the figures disagree — the two numbers are
-  // asked for either way.
-  const acct = [...doc.querySelectorAll('section.card')]
-    .find((sec) => /Cluster at a glance/.test((sec.querySelector('header h2') || {}).textContent || ''));
-  ok(!!acct, `shards: no glance card, saw ${titles.join(' | ')}`);
-  for (const label of ['Indices hold', 'Elasticsearch holds', 'Disk used', 'Unaccounted']) {
-    ok(acct && acct.textContent.includes(label), `shards: accounting is missing "${label}"`);
+  // The allocation switch is a write through the same gate as Move…: unlocking enables it,
+  // the menu offers the four values, choosing one asks with the consequence in words, and only
+  // a yes sends PUT _cluster/settings {persistent: {cluster.routing.allocation.enable}}.
+  {
+    const wr = await load('core/writes.js');
+    const unlockedHere = !wr.writesUnlocked();
+    if (unlockedHere) await wr.setWritesUnlocked(true, { confirmFirst: false });
+    await settleFor(300);
+    const sw = allocCard() && allocCard().querySelector('button.ns-alloc-btn');
+    ok(sw && !sw.disabled, 'allocation: the switch stays disabled after writes were unlocked');
+    if (sw && !sw.disabled) {
+      const n = sent.length;
+      sw.click(); await settleFor(200);
+      const items = [...doc.querySelectorAll('.menu-pop button[role="menuitem"]')].map((b) => b.textContent.trim());
+      ok(items.length === 4 && items.every((t, i) => t.startsWith(['on', 'primaries only', 'new primaries only', 'off'][i])),
+        `allocation: the menu offers ${items.join(' | ')}`);
+      const current = [...doc.querySelectorAll('.menu-pop button[role="menuitem"]')].find((b) => /^on/.test(b.textContent.trim()));
+      ok(current && current.disabled, 'allocation: the current value (on) is still offered as a choice');
+      const off = [...doc.querySelectorAll('.menu-pop button[role="menuitem"]')].find((b) => /^off/.test(b.textContent.trim()));
+      if (off) {
+        off.click(); await settleFor(300);
+        const dlg = [...doc.querySelectorAll('.modal')].pop();
+        ok(!!dlg && /no shard will be placed or moved until it is switched back/.test(dlg.textContent),
+          `allocation: choosing off did not ask with the consequence in words (${dlg ? dlg.textContent.slice(0, 120) : 'no dialog'})`);
+        ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'allocation: a PUT was sent before anybody said yes');
+        const yes = dlg && [...dlg.querySelectorAll('.modal-foot button')].find((b) => /^set none$/i.test(b.textContent.trim()));
+        ok(!!yes, `allocation: the dialog has no "set none" button (${dlg ? [...dlg.querySelectorAll('.modal-foot button')].map((b) => b.textContent).join(' | ') : ''})`);
+        if (yes) {
+          yes.click(); await settleFor(500);
+          const puts = sent.slice(n).filter((m) => m.type === 'ES' && m.method === 'PUT' && m.path === '/_cluster/settings');
+          ok(puts.length === 1 && puts[0].allowWrites === true && JSON.parse(puts[0].body).persistent['cluster.routing.allocation.enable'] === 'none',
+            `allocation: expected one PUT _cluster/settings with persistent none, saw ${JSON.stringify(puts.map((p) => p.body))}`);
+          ok(sent.slice(n).some((m) => m.type === 'ES' && m.method === 'GET' && /^\/_cluster\/settings\?include_defaults=true/.test(m.path)),
+            'allocation: the setting was not re-read after the write');
+        }
+      }
+    }
+    if (unlockedHere) await wr.setWritesUnlocked(false, { confirmFirst: false });
+    await settleFor(200);
+  }
+
+  // Query pressure: before two readings exist it is measuring, and says so — not zero.
+  {
+    const qp = [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Query pressure');
+    ok(!!qp, 'pressure: no Query pressure card');
+    if (qp) {
+      const tiles = [...qp.querySelectorAll('.ns-pressure .edge-tile')];
+      ok(tiles.map((t) => t.querySelector('.k span').textContent).join('|') === 'rejected|breaker trips|search queue|write queue',
+        `pressure: the tiles are ${tiles.map((t) => t.querySelector('.k span').textContent).join('|')}`);
+      ok(!/req\/s|docs\/s/.test(qp.textContent), 'pressure: rates are on the card (they belong to the Clusters overview)');
+      const headPill = qp.querySelector('header .pill');
+      if (headPill && headPill.textContent.includes('measuring')) {
+        ok(/measuring · next poll/.test(qp.textContent), 'pressure: unmeasured, but the card does not say "measuring · next poll"');
+        ok(tiles[0] && tiles[0].querySelector('.v').textContent === '–' && tiles[1].querySelector('.v').textContent === '–',
+          `pressure: before two readings rejected / trips must be unknown, not 0 (${tiles[0] && tiles[0].querySelector('.v').textContent})`);
+      }
+      ok(tiles[0] && /search .* · write .* · bulk/.test(tiles[0].title) && /parent .* · request .* · fielddata/.test(tiles[1].title),
+        'pressure: the breakdowns are not in the tiles\' tooltips');
+    }
   }
 
   // Clear any name filter before counting movable shards.
@@ -373,54 +468,122 @@ await go('shards');
   }
 
   // Ticking a started shard offers a bulk move; ticking nothing offers nothing.
-  ok(!/ticked/.test(doc.body.textContent), 'shards: the bulk bar is showing with nothing ticked');
+  ok(!/selected/.test(doc.body.textContent), 'shards: the bulk bar is showing with nothing ticked');
   const tick = [...doc.querySelectorAll('input[type=checkbox]')].find((x) => x.title === 'Include this shard in a bulk move');
   ok(!!tick, 'shards: no per-row tick on a started shard');
   if (tick) {
     tick.checked = true;
     tick.dispatchEvent(new window.Event('change', { bubbles: true }));
     await settleFor(250);
-    ok(/1 shard\(s\) ticked/.test(doc.body.textContent), 'shards: ticking one did not open the bulk bar');
+    ok(/1 selected/.test(doc.body.textContent), 'shards: ticking one did not open the bulk bar');
     ok([...doc.querySelectorAll('button')].some((b) => b.textContent === 'Move them…'),
       'shards: the bulk bar has no bulk move');
+    // The head tick is half-ticked while only some are selected, and reads how many.
+    const headBox = doc.querySelector('table.tbl thead input[type=checkbox][aria-label="Select every started shard the filters match"]');
+    ok(headBox && headBox.indeterminate && /1 selected/.test(headBox.parentElement.textContent), 'shards: the head tick is not half-ticked with "1 selected" beside it');
     const clear = [...doc.querySelectorAll('button')].find((b) => b.textContent === 'Clear');
     if (clear) { clear.click(); await settleFor(200); }
   }
 
-  // The glance card is one band: the split as a small donut with its legend and six inline
-  // figures (caption, value, at most a short suffix; the rest in the tooltip) — not the stacked
-  // caption / big number / note that made the card 250 px tall.
+  // The head tick selects every started shard the filters match — on every page, not the one
+  // on screen — and says how many; a second press clears them.
   {
-    const glance = [...doc.querySelectorAll('section.card')]
-      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
-    const figs = glance ? [...glance.querySelectorAll('.glance-band .fig-inline')] : [];
-    ok(figs.length === 6, `glance band: expected 6 inline figures, found ${figs.length}`);
-    const donut = glance && glance.querySelector('.glance-band .split-donut svg');
-    ok(!!donut, 'glance band: the shard split is not the small donut');
-    // One ring per non-zero part on top of the track: the fixture has 3 assigned and 1 unassigned, 0 moving.
-    ok(!!donut && donut.querySelectorAll('circle').length === 3 && [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
-      `glance band: the donut's slices are ${donut ? [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') : 'absent'}`);
-    ok(figs.length > 0 && figs.every((f) => f.getAttribute('title')), 'glance band: a figure has no tooltip carrying what its sub-line said');
+    const headBox = () => doc.querySelector('table.tbl thead input[type=checkbox][aria-label="Select every started shard the filters match"]');
+    ok(!!headBox(), 'shards: no head tick');
+    if (headBox()) {
+      ok(/on every page/.test(headBox().title), `shards: the head tick's title does not say it works on every page (${headBox().title})`);
+      headBox().checked = true; headBox().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250);
+      ok(/2 selected/.test(headBox().parentElement.textContent), `shards: the head does not read "2 selected" (${headBox().parentElement.textContent.trim()})`);
+      ok([...doc.querySelectorAll('input[type=checkbox][title="Include this shard in a bulk move"]')].every((b) => b.checked), 'shards: a started row stayed unticked');
+      headBox().checked = false; headBox().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250);
+      ok(!/selected/.test(doc.body.textContent), 'shards: the second press did not clear the selection');
+    }
+    // Reload shards is an icon: the name is for the reader, not on screen.
+    const reload = [...doc.querySelectorAll('button')].filter((b) => b.getAttribute('aria-label') === 'Reload shards');
+    ok(reload.length === shown && reload.every((b) => b.textContent.trim() === '↻' && b.title === 'Reload shards'),
+      `shards: Reload shards is not an icon-only button (${reload.map((b) => b.textContent.trim()).join(' | ')})`);
+    ok(![...doc.querySelectorAll('button')].some((b) => /Reload shards|↻ Refresh/.test(b.textContent)), 'shards: a button still spells out "Reload shards", or the freshness bar still has its own Refresh');
+    // The filters row: labels inline beside their controls, every control 30 px (the real-browser
+    // measurement is the screenshot's; here the structure).
+    const row = doc.querySelector('.toolbar.ns-filters');
+    ok(!!row && [...row.querySelectorAll(':scope > label.field > span')].map((s) => s.textContent).join('|') === 'Index|Node|State',
+      'shards: the filters row does not carry inline Index / Node / State labels');
+    ok(!!row && /shards fetched|shards not fetched|shards never/.test((row.querySelector('.ns-fresh') || {}).textContent || ''),
+      `shards: the freshness text is missing from the filters row (${row && (row.querySelector('.ns-fresh') || {}).textContent})`);
+  }
+
+  // Every unassigned row ends in an "i": why this shard is unassigned, asked of the cluster when
+  // pressed, in words with the recommended fix (the fixture's explain: NODE_LEFT refused by the
+  // disk watermark) and the two buttons. A failing explain says so.
+  {
+    const unassignedRow = [...doc.querySelectorAll('table.tbl tbody tr')].find((tr) => /unassigned/.test(tr.textContent) && /node left/.test(tr.textContent));
+    const ib = unassignedRow && unassignedRow.querySelector('button.ld-ibtn');
+    ok(!!ib, 'shards: the unassigned row has no "i"');
+    ok(![...doc.querySelectorAll('table.tbl tbody tr')].some((tr) => /started/.test(tr.textContent) && tr.querySelector('button.ld-ibtn')), 'shards: a started row has an "i"');
+    if (ib) {
+      ib.click(); await settleFor(50);
+      const pop = doc.querySelector('.ld-fixpop:not([hidden])');
+      ok(!!pop && /Asking the cluster/.test(pop.textContent), 'shards: the "i" did not open with "Asking the cluster…"');
+      for (let i = 0; i < 40 && pop && /Asking the cluster/.test(pop.textContent); i++) await settleFor(100);
+      const t = pop ? pop.textContent : '';
+      ok(/Reason: Node left \(NODE_LEFT\)/.test(t), `shards: the popover does not name the reason in words (${t.slice(0, 160)})`);
+      ok(/left the cluster/.test(t) && /isn't allowed to allocate/.test(t), 'shards: the popover lacks the cause or the cluster\'s own sentence');
+      ok(/node-1 · disk_threshold: the node is above the high watermark/.test(t), 'shards: the deciders that said NO are not listed');
+      ok(/Fix: Disk watermark\./.test(t) && /Free disk/.test(t), `shards: the recommended fix is not the disk-watermark one (${t.slice(0, 200)})`);
+      const btns = pop ? [...pop.querySelectorAll('.ld-fixacts button')].map((b) => b.textContent) : [];
+      ok(JSON.stringify(btns) === JSON.stringify(['Retry failed allocations', 'Open the explain answer in REST']), `shards: the popover's buttons are ${btns.join(' | ')}`);
+      const asked = sent.filter((m) => m.type === 'ES' && m.method === 'POST' && m.path === '/_cluster/allocation/explain');
+      ok(asked.length >= 1 && JSON.parse(asked[asked.length - 1].body).index === 'logstash-beta-2026.09.09' && JSON.parse(asked[asked.length - 1].body).primary === false,
+        'shards: the explain was not asked for this very shard');
+      const toRest = pop && [...pop.querySelectorAll('.ld-fixacts button')].find((b) => /REST/.test(b.textContent));
+      if (toRest) {
+        toRest.click(); await settleFor(400);
+        ok(app.currentPage ? app.currentPage() === 'console' : true, 'shards: "Open the explain answer in REST" did not open the console');
+        const fields = [...doc.querySelectorAll('#view input, #view textarea')].map((f) => f.value || '').join('\n');
+        ok(/allocation\/explain/.test(fields) && /"index": "logstash-beta-2026.09.09"/.test(fields),
+          'shards: the console was not opened with the explain request and its body');
+        await go('shards');
+      }
+      // A refused explain is shown as what the cluster said, never as a guess.
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = async (input, init) => {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        if (body.type === 'ES' && body.path === '/_cluster/allocation/explain') return stubReply({ ok: false, status: 403, message: 'no permission to explain' });
+        return realFetch(input, init);
+      };
+      const row2 = [...doc.querySelectorAll('table.tbl tbody tr')].find((tr) => /unassigned/.test(tr.textContent) && tr.querySelector('button.ld-ibtn'));
+      const ib2 = row2 && row2.querySelector('button.ld-ibtn');
+      if (ib2) {
+        ib2.click(); await settleFor(400);
+        const p2 = doc.querySelector('.ld-fixpop:not([hidden])');
+        ok(!!p2 && /The cluster could not explain it: no permission to explain/.test(p2.textContent),
+          `shards: a refused explain is not shown as the cluster's words (${p2 ? p2.textContent.slice(0, 120) : 'no popover'})`);
+        ok(!p2 || !/Fix:/.test(p2.textContent), 'shards: a fix was shown for an explain that failed — a guess');
+        doc.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await settleFor(100);
+      }
+      globalThis.fetch = realFetch;
+    }
   }
   // Heap, RAM and CPU are bars with the number beside them; load is a bar over the node's cores
   // where the count is known (node-1, node-2: 4) and the figures alone where it is not (node-3).
   {
     const pane = [...doc.querySelectorAll('section.card')]
-      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & cluster load');
+      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & resource usage');
     const rows = pane ? [...pane.querySelectorAll('table.tbl tbody tr')] : [];
     const row = (name) => rows.find((tr) => tr.children[0].textContent.includes(name));
     const n1 = row('node-1'), n3 = row('node-3');
     ok(!!n1 && !!n3, `nodes: the fixture's node-1 and node-3 are not both in the table (${rows.length} rows)`);
     if (n1 && n3) {
-      for (const [i, col] of [[3, 'Heap'], [4, 'RAM'], [5, 'CPU']]) {
+      for (const [i, col] of [[5, 'Heap'], [6, 'RAM'], [7, 'CPU']]) {
         ok(!!n1.children[i].querySelector('.use-bar .bar-mini > i') && /\d+%/.test(n1.children[i].textContent),
           `nodes: the ${col} cell is not a bar with its number (${n1.children[i].textContent.trim()})`);
       }
-      const load1 = n1.children[6];
+      const load1 = n1.children[8];
       const title1 = (load1.querySelector('.use-bar') || { getAttribute: () => '' }).getAttribute('title') || '';
       ok(!!load1.querySelector('.bar-mini') && /3\.55 \/ 2\.10/.test(load1.textContent) && /load 1 m over 4 cores/.test(title1),
         `nodes: node-1's load is not a bar over its 4 cores with the raw figures (${load1.textContent.trim()} · ${title1})`);
-      const load3 = n3.children[6];
+      const load3 = n3.children[8];
       ok(!load3.querySelector('.bar-mini') && /0\.30 \/ 0\.40/.test(load3.textContent),
         `nodes: node-3 reports no processor count, so its load must be the figures alone (${load3.textContent.trim()})`);
     }
@@ -614,6 +777,24 @@ await go('indices');
   ok(btn('Live') && btn('Snapshot') && btn('Live + Snapshot'),
     'indices: the three search scopes (Live, Snapshot, Live + Snapshot) are not all present');
   ok(btn('‹ Previous') && btn('Next ›'), 'indices: the table is not paged');
+  // The head tick selects every index the filters match — on every page (the fixture has more
+  // indices than one page holds) — and says how many; a second press clears them.
+  {
+    const headBox = () => doc.querySelector('#idx-table thead input[type=checkbox][aria-label="Select every index the filters match"]');
+    const onScreen = doc.querySelectorAll('#idx-table tbody tr').length;
+    const matching = Number(((doc.getElementById('idx-meta') || {}).textContent || '').replace(/,/g, '').match(/of (\d+) matching/)?.[1]);
+    ok(!!headBox(), 'indices: no head tick');
+    ok(matching > onScreen, `indices: the fixture should have more matching indices (${matching}) than one page (${onScreen}) for this check to mean anything`);
+    if (headBox()) {
+      headBox().checked = true; headBox().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(300);
+      const said = (headBox().parentElement.textContent.match(/([\d,]+) selected/) || [])[1];
+      ok(Number(String(said).replace(/,/g, '')) === matching, `indices: the head reads "${said} selected" for ${matching} matching indices on ${onScreen}-row pages`);
+      ok(new RegExp(`${matching.toLocaleString('en-US')} selected`).test(doc.getElementById('idx-bulk').textContent) || /selected/.test(doc.getElementById('idx-bulk').textContent),
+        'indices: the bulk bar does not show the selection');
+      headBox().checked = false; headBox().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(300);
+      ok(!/selected/.test(doc.getElementById('idx-table').textContent), 'indices: the second press did not clear the selection');
+    }
+  }
   const tabs = [...doc.querySelectorAll('.ix-views .seg .btn')].map((b) => b.textContent.trim());
   ok(JSON.stringify(tabs) === JSON.stringify(['Indices', 'Templates']), `indices: the view tabs are ${tabs.join(' | ')}, want Indices | Templates`);
   ok(!btn('Summary'), 'indices: the Summary tab is still there');
@@ -1597,38 +1778,45 @@ await go('settings');
   }
 }
 
-/* ------------- the nodes page: one pane on top, one arc for the shards ------------- */
+/* ------------- the nodes page: the node pane on top, then allocation and pressure ------------- */
 
 await go('shards');
 {
   const pane = doc.getElementById('view');
   const titles = [...pane.querySelectorAll('section.card header h2')].map((x) => x.textContent);
-  ok(titles.includes('Nodes & cluster load'),
+  ok(titles.includes('Nodes & resource usage'),
     `shards: nodes and load are not one pane, saw ${titles.join(' | ')}`);
-  ok(!titles.includes('Nodes') && !titles.includes('Cluster load'),
-    `shards: the old separate cards are still there: ${titles.join(' | ')}`);
+  ok(!titles.includes('Nodes') && !titles.includes('Cluster load') && !titles.includes('Nodes & cluster load'),
+    `shards: the old cards are still there: ${titles.join(' | ')}`);
 
-  // The merged pane comes first: it is what the page is for.
+  // The node pane comes first: it is what the page is for.
   const cards = [...pane.querySelectorAll('section.card')];
-  const merged = cards.find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & cluster load');
-  ok(merged && cards.indexOf(merged) <= 1,
+  const merged = cards.find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & resource usage');
+  ok(merged && cards.indexOf(merged) === 0,
     `shards: the nodes pane is at position ${merged ? cards.indexOf(merged) : -1}, expected the top`);
   // And it holds both halves — the node table and what the cluster is busy doing.
   ok(merged && /Uptime/.test(merged.textContent), 'shards: the merged pane lost the node table');
+  ok(cards[1] && cards[1].closest('.ns-row') && (cards[1].querySelector('header h2') || {}).textContent === 'Shard allocation'
+     && cards[2] && (cards[2].querySelector('header h2') || {}).textContent === 'Query pressure',
+    `shards: the second row is not Shard allocation beside Query pressure (${titles.join(' | ')})`);
+  ok(!doc.querySelector('.pill') || ![...doc.querySelectorAll('.pill')].some((p) => /^read-only \(/.test(p.textContent)), 'shards: the read-only (role) pill is still drawn');
 
-  const mix = cards.find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
-  ok(!!mix, `shards: no glance card, saw ${titles.join(' | ')}`);
-  if (mix) {
-    // One arc split, not three gauges: a single svg carrying the track plus a segment
-    // per non-zero part.
-    const svgs = mix.querySelectorAll('svg');
-    ok(svgs.length === 1, `shard gauge: ${svgs.length} charts, expected one split arc`);
-    // Every part is marked with its own count, including the zeroes.
-    const marks = [...mix.querySelectorAll('div[title]')].map((d) => d.getAttribute('title'));
-    for (const want of ['assigned', 'moving', 'unassigned']) {
-      ok(marks.some((t) => t.startsWith(`${want}:`)), `shard gauge: "${want}" is not marked — ${marks.join(' | ')}`);
-    }
-    ok(/shards total/.test(mix.textContent), 'shard gauge: the centre should name what the total counts');
+  // Query pressure, measured: the first visit took the baseline and the second reading followed
+  // ten seconds later, so by now the card has two readings. The fixture's node-3 write queue
+  // stands at 5 on every reading — a queue above zero for two polls is pressure.
+  const qp = cards.find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Query pressure');
+  ok(!!qp, 'pressure: no Query pressure card');
+  if (qp) {
+    const pillOf = () => (qp.querySelector('header .pill') || {}).textContent || '';
+    for (let i = 0; i < 150 && /measuring/.test(pillOf()); i++) await settleFor(100);
+    ok(pillOf() === 'Under pressure', `pressure: the pill reads "${pillOf()}", expected Under pressure (node-3's write queue stands at 5)`);
+    const tiles = [...qp.querySelectorAll('.ns-pressure .edge-tile')];
+    const vals = tiles.map((t) => t.querySelector('.v').textContent);
+    ok(JSON.stringify(vals) === JSON.stringify(['0', '0', '0', '5']), `pressure: the tiles read ${vals.join(' | ')}, expected 0 rejected · 0 trips · 0 search · 5 write`);
+    ok(/a queue above zero for two polls/.test(qp.textContent) && /between the last two polls, \d+ s apart/.test(qp.textContent),
+      `pressure: the note does not say why and how far apart the polls were (${(qp.querySelector('.ns-note') || {}).textContent})`);
+    ok(/of 10,?000 per node · 3 nodes/.test(tiles[3].title), `pressure: the write queue's tooltip lacks the pool size and node count (${tiles[3].title})`);
+    ok(/search 0 · write 0 · bulk –/.test(tiles[0].title), `pressure: the rejected tooltip is ${tiles[0].title}`);
   }
 }
 
@@ -1916,23 +2104,30 @@ await go('settings');
       await saveViaBar(300);
       ok(sent.some((m) => m.type === 'DATA_ROUTING_SET'), 'backend: Save sent no DATA_ROUTING_SET');
       ok(/history store is not configured/.test((doc.getElementById('dr-refusal') || {}).textContent || ''), 'backend: the core\'s refusal is not shown');
-      ok(sel('alerts').value === 'es', 'backend: a refused save lost what was chosen');
+      // The card redraws after a save; on a loaded machine the select is back a moment later.
+      const afterRefused = await waitFor(() => sel('alerts'), 'backend: the Kept-in select after a refused save', 3000);
+      ok(afterRefused && afterRefused.value === 'es', 'backend: a refused save lost what was chosen');
       // Accepted: only the changed fields travel, the bar goes, the warning shows for es + not writing.
       routingStub.refuse = null;
       sent.length = 0;
       await saveViaBar(400);
       const setMsg = sent.find((m) => m.type === 'DATA_ROUTING_SET');
       ok(setMsg && JSON.stringify(setMsg.routing) === JSON.stringify({ reports: 'copy', alerts: 'es' }), `backend: Save sent ${JSON.stringify(setMsg)}`);
-      ok(doc.getElementById('cm-savebar').hidden, 'backend: the save bar stays up after a saved routing');
+      const savedBar = await waitFor(() => doc.getElementById('cm-savebar'), 'backend: the save bar after a saved routing', 3000);
+      ok(savedBar && savedBar.hidden, 'backend: the save bar stays up after a saved routing');
       ok(/Not writing to Elasticsearch/.test((doc.getElementById('dr-es-warning') || {}).textContent || ''), 'backend: Elasticsearch only with a closed store shows no warning');
       // Discard returns the choice.
-      sel('alerts').value = 'builtin'; sel('alerts').dispatchEvent(new window.Event('change', { bubbles: true }));
-      await settleFor(200);
-      ok(!!doc.getElementById('dr-letgo'), 'backend: setting a kind back to built-in does not say it lets go of the queue');
-      await openBar();
-      const d2 = doc.querySelector('#cm-savebar:not([hidden]) button[data-act="discard"]');
-      if (d2) { d2.click(); await settleFor(250); }
-      ok(sel('alerts').value === 'es', 'backend: Discard did not return the saved choice');
+      const afterSaved = await waitFor(() => sel('alerts'), 'backend: the Kept-in select after a saved routing', 3000);
+      if (afterSaved) {
+        afterSaved.value = 'builtin'; afterSaved.dispatchEvent(new window.Event('change', { bubbles: true }));
+        await settleFor(200);
+        ok(!!doc.getElementById('dr-letgo'), 'backend: setting a kind back to built-in does not say it lets go of the queue');
+        await openBar();
+        const d2 = doc.querySelector('#cm-savebar:not([hidden]) button[data-act="discard"]');
+        if (d2) { d2.click(); await settleFor(250); }
+        const afterDiscard = await waitFor(() => sel('alerts'), 'backend: the Kept-in select after Discard', 3000);
+        ok(afterDiscard && afterDiscard.value === 'es', 'backend: Discard did not return the saved choice');
+      }
     }
   }
 
