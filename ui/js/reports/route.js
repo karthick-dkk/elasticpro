@@ -26,8 +26,12 @@ export const REPORT_SECTIONS = Object.freeze([
 ]);
 export const DEFAULT_SECTION = 'overview';
 
-/** Old page ids that open a page under its new id. */
-export const PAGE_ALIAS = Object.freeze({ volume: 'reports', logs: 'log-delay' });
+/**
+ * Old page ids that open a page under its new id — and `clusters`, the Clusters page's path in
+ * the address since its Overview section (`#/clusters`, `#/clusters/overview`; the page's id stays
+ * `overview`, and `#/overview` still opens it).
+ */
+export const PAGE_ALIAS = Object.freeze({ volume: 'reports', logs: 'log-delay', clusters: 'overview' });
 
 /**
  * An old address that now belongs to another page, as `[page, rest]`; null for any other.

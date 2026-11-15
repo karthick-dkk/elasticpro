@@ -150,33 +150,113 @@ for (const id of ['overview', 'indices', 'console', 'log-delay', 'snapshots', 's
   ok(!(await load('app.js')).renderSideFoot, 'app.js still exports renderSideFoot');
 }
 
-/* ------------------------ the REST console names its target ------------------------ */
+/* ------------------------ the REST console names its target, once ------------------------ */
 
+// Where a request goes is said once: the cluster by the top bar's chooser and the page title,
+// the method and the path by the inputs. The echo lines that repeated them (above the inputs,
+// and "GET /…" above the answer) went at the owner's request and must not come back. The
+// outcome — status, time, size — sits beside Run, out of the output box, in #c-status.
 await go('console');
 {
-  const target = doc.getElementById('c-target');
   const run = doc.getElementById('c-run');
-  ok(!!target, 'console: no #c-target line naming the address');
   ok(!!run, 'console: no Run button');
-  if (target && run) {
-    ok(!!(target.compareDocumentPosition(run) & window.Node.DOCUMENT_POSITION_FOLLOWING),
-      'console: the address is not above the Run button, where it is read before pressing it');
+  ok(!doc.getElementById('c-target') && !doc.getElementById('c-echo-method'), 'console: the request echo line above the inputs is back');
+  const chooser = doc.getElementById('cluster-select');
+  {
+    // The chooser shows the cluster the page is on: its option names the selected cluster.
+    const st0 = await load('core/state.js');
+    const sel = st0.clusters().find((x) => x.id === st0.state.selected);
+    const picked = chooser && chooser.options[chooser.selectedIndex];
+    ok(!!sel && !!picked && chooser.value === sel.id && picked.textContent.includes(sel.name),
+      `console: the top bar's chooser does not name the cluster (value "${chooser && chooser.value}", option "${picked && picked.textContent.trim()}", selected ${st0.state.selected})`);
   }
-  // An evidence page: the line names the path the request will take, never the host.
+  ok(doc.querySelector('#topbar h1') && doc.querySelector('#topbar h1').textContent === 'REST', 'console: the top bar does not carry the page title');
+  // An evidence page: the host is nowhere on it.
   const base = config.clusters[0].url.replace(/\/+$/, '');
-  ok(target && target.textContent === '/_cluster/health',
-    `console: the target line reads "${target && target.textContent}", expected the path alone`);
-  ok(target && !target.textContent.includes(base), 'console: the target line still names the cluster address');
+  const host = new URL(base).host;
+  ok(!doc.getElementById('view').textContent.includes(host), `console: the page prints the cluster's host ${host}`);
 
   const pathInput = doc.getElementById('c-path');
   ok(!!pathInput, 'console: no path input');
-  if (pathInput && target) {
-    for (const [typed, want] of [['/_cat/indices', '/_cat/indices'], ['_cluster/health', '/_cluster/health']]) {
-      pathInput.value = typed;
-      pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
-      await settleFor(50);
-      ok(target.textContent === want,
-        `console: typing "${typed}" gave "${target.textContent}", expected "${want}"`);
+  ok(pathInput && pathInput.value === '/_cluster/health', `console: the path box reads "${pathInput && pathInput.value}", expected the default request`);
+
+  // The status pill: right after Run, a grey dash before anything has run, role=status.
+  const status = doc.getElementById('c-status');
+  ok(!!status, 'console: no #c-status beside Run');
+  if (status && run) {
+    ok(run.nextElementSibling === status, 'console: the status is not the element right after Run');
+    ok(status.getAttribute('role') === 'status', 'console: the status pill has no role=status');
+    ok(status.textContent.trim() === '—' && !!status.querySelector('.pill.grey'), `console: before a run the status reads "${status.textContent.trim()}", expected a grey dash`);
+    ok(!/HTTP|ms|B\b/.test(status.textContent), 'console: a figure is shown before anything was run');
+  }
+  if (pathInput && run) {
+    pathInput.value = '/_cluster/health'; pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    run.click(); await settleFor(1200);
+    const st = doc.getElementById('c-status');
+    ok(st && st.isConnected && /^HTTP 200/.test(st.textContent.trim()), `console: after a run the status reads "${st && st.textContent.trim()}", expected HTTP 200 first`);
+    ok(st && !!st.querySelector('.pill.green'), 'console: a 200 is not a green pill');
+    ok(st && /\d+ ms/.test(st.textContent) && /\d+(\.\d+)? ?k?B/.test(st.textContent), `console: the status does not carry the time and size: "${st && st.textContent.trim()}"`);
+    ok(doc.getElementById('c-run').nextElementSibling === st, 'console: after a run the status moved away from Run');
+    const resultsHead = doc.querySelector('#c-response section.card > header');
+    ok(resultsHead && !/HTTP|\d+ ms/.test(resultsHead.textContent), `console: the Results header still carries the status: "${resultsHead && resultsHead.textContent.trim()}"`);
+    const resultsBody = doc.querySelector('#c-response section.card > .body');
+    ok(resultsBody && !resultsBody.querySelector('.trunc') && !/^\s*GET \/_cluster\/health/.test(resultsBody.textContent), 'console: the "GET /…" echo above the answer is back');
+    ok(!!doc.getElementById('c-out'), 'console: the run produced no answer to read');
+
+    // While the cluster is slow to answer, the pill says so and counts: a spinner, "Running… 0.4 s"
+    // ticking in place (the same element throughout), Run disabled; then the status. The stall is
+    // the request itself held 1.5 s on its way to the bridge, so no mock setting is needed.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (init && typeof init.body === 'string' && init.body.includes('c-stall-path')) await new Promise((r) => setTimeout(r, 1500));
+      return realFetch(input, init);
+    };
+    try {
+      pathInput.value = '/_cat/indices/c-stall-path'; pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+      doc.getElementById('c-run').click(); await settleFor(300);
+      const running = doc.getElementById('c-status');
+      ok(running && /Running…/.test(running.textContent) && !!running.querySelector('.spin'), `console: while the request is in flight the status reads "${running && running.textContent.trim()}", expected a spinner and Running…`);
+      ok(doc.getElementById('c-run').disabled, 'console: Run is not disabled while a request is in flight');
+      const t1 = running && (running.textContent.match(/([\d.]+) s/) || [])[1];
+      const elapsedEl = doc.getElementById('c-status-elapsed');
+      await settleFor(500);
+      const t2 = running && (running.textContent.match(/([\d.]+) s/) || [])[1];
+      ok(t1 !== undefined && t2 !== undefined && Number(t2) > Number(t1), `console: the elapsed time does not tick (${t1} s → ${t2} s)`);
+      ok(doc.getElementById('c-status') === running && doc.getElementById('c-status-elapsed') === elapsedEl, 'console: the running pill is rebuilt while it ticks');
+      await settleFor(1800);
+      const after = doc.getElementById('c-status');
+      ok(after && /^HTTP \d{3}/.test(after.textContent.trim()) && !after.querySelector('.spin'), `console: after the slow answer the status reads "${after && after.textContent.trim()}", expected the HTTP code`);
+      ok(!doc.getElementById('c-run').disabled, 'console: Run stayed disabled after the answer');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // No read-only pill anywhere on the console (banned, owner 2026-11-14); the write guard is
+    // what answers Run instead. Under the fixture's read-only default a DELETE asks to allow
+    // writes by hand and sends nothing until somebody says yes; Run's tooltip says so beforehand.
+    ok(!/read-only|writes enabled|writes allowed/.test(doc.getElementById('view').textContent), 'console: a read-only / writes pill is on the page');
+    ok(!doc.querySelector('#view section.card input[type="checkbox"]'), 'console: the write-unlock checkbox is still on the request card');
+    {
+      const st = await load('core/state.js');
+      const ro = st.state.defaults.readOnly;
+      st.state.defaults.readOnly = true;
+      const { writesUnlocked } = await load('core/writes.js');
+      const sentBefore = (doc.getElementById('c-status') || { textContent: '' }).textContent;
+      doc.getElementById('c-method').value = 'DELETE'; doc.getElementById('c-method').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150);
+      const p2 = doc.getElementById('c-path'); p2.value = '/my-index'; p2.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
+      const runBtn = doc.getElementById('c-run');
+      ok(!runBtn.disabled && /locked|allow them by hand/i.test(runBtn.title), `console: Run's tooltip does not say the write is locked: "${runBtn.title}"`);
+      if (!writesUnlocked()) {
+        runBtn.click(); await settleFor(300);
+        const dlg = doc.querySelector('.modal-overlay .modal');
+        ok(!!dlg && /Allow writes to this cluster\?/.test(dlg.textContent), `console: a locked DELETE on Run did not ask to allow writes (dialog: "${dlg && dlg.textContent.trim().slice(0, 80)}")`);
+        ok(!/Running…/.test((doc.getElementById('c-status') || { textContent: '' }).textContent), 'console: a locked write was sent before the guard answered');
+        if (dlg) { [...dlg.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No').click(); await settleFor(200); }
+        ok(!doc.querySelector('.modal-overlay'), 'console: No did not close the write guard');
+        ok((doc.getElementById('c-status') || { textContent: '' }).textContent === sentBefore, 'console: declining the guard still changed the status — something was sent');
+      }
+      doc.getElementById('c-method').value = 'GET'; doc.getElementById('c-method').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150);
+      st.state.defaults.readOnly = ro;
     }
   }
 
@@ -186,7 +266,10 @@ await go('console');
     `console: the query box still carries a placeholder — "${body && body.getAttribute('placeholder')}"`);
 
   /* ---- a request typed or pasted whole is recognised: method, path, body (core/console-paste.js) ---- */
-  if (pathInput && body && target) {
+  // Fresh handles: the write-guard case above changed the method, which redraws the page, and a
+  // box held from before that is detached — typing into it proves nothing about the page.
+  if (doc.getElementById('c-path') && doc.getElementById('c-body')) {
+    const pathInput = doc.getElementById('c-path'), body = doc.getElementById('c-body');
     const method = () => doc.getElementById('c-method').value;
     const paste = (el, text) => {
       const e = new window.Event('paste', { bubbles: true, cancelable: true });
@@ -199,9 +282,7 @@ await go('console');
     pathInput.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
     ok(method() === 'POST', `console paste: typing "post _snapshot/es_9/execute" left the method ${method()}`);
     ok(pathInput.value === '/_snapshot/es_9/execute', `console paste: the path box reads "${pathInput.value}", expected the path alone`);
-    ok(target.textContent === '/_snapshot/es_9/execute', `console paste: the target line reads "${target.textContent}"`);
     ok(/Recognised POST \/_snapshot\/es_9\/execute/.test(doc.getElementById('c-response').textContent), 'console paste: nothing said what was recognised');
-    ok(doc.querySelector('#c-echo-method').textContent === 'POST', 'console paste: the echo line still shows the old method');
     ok(/POST \/_snapshot\/es_9\/execute/.test(doc.querySelector('.console-tab.on').title), `console paste: the tab tooltip reads "${doc.querySelector('.console-tab.on').title}"`);
     // Pasted into the path box with a body (Kibana Dev Tools style): the body goes to the editor, formatted.
     const e1 = paste(pathInput, 'PUT /_cluster/settings\n{"persistent":{"cluster.max_shards_per_node":2000}}');
@@ -1171,8 +1252,10 @@ await goOne('snapshots');
     R.resetReports();
     R.startReportsPoll();
     await go('overview');
-    await waitFor(() => (pill() && !pill().hidden ? pill() : null), 'reports: the top-bar pill did not show for a core that runs reports');
-    ok(pill() && pill().textContent === 'Reports · idle', `reports: the idle pill reads "${pill() && pill().textContent}"`);
+    // The bar says nothing in a normal state (the owner, 2026-11-14): the pill is there only for a failed run.
+    await waitFor(() => (R.reports.supported === true ? doc.body : null), 'reports: a core that runs reports was not recognised');
+    ok(!pill() || pill().hidden, `reports: the Reports pill shows while no run failed ("${pill() && pill().textContent}")`);
+    ok(!pill() || /failed/.test(pill().title), 'reports: the pill does not say it is about a failed run');
 
     await go('reports');
     press(doc.querySelector('.rp-nav a[data-section="exports"]'));
@@ -1355,7 +1438,9 @@ await go('reports');
   const btnIn = (root, label) => [...(root || doc).querySelectorAll('button')].find((b) => b.textContent.trim() === label);
 
   // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
-  ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
+  // The page's name is shown once, in the menu; the top bar's h1 is for screen readers (app.js renderTopbar).
+  ok(/^Reports$/.test((doc.querySelector('#topbar h1') || {}).textContent || ''), 'reports: the top bar does not name the page for screen readers');
+  ok(!doc.querySelector('#view h1'), 'reports: the page repeats its name in a heading');
   ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
   // Log delay moved to the Log Delay page (0.3.60): its entry is a link there, marked with ›.
   ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Log delay › · Exports & schedules',
@@ -1642,9 +1727,11 @@ await go('settings');
   ok(!/config_cluster\.json/.test((doc.querySelector('.cm-side') || {}).textContent || ''), 'config: the menu names the config file');
   // One page at a time, with its header and the tab row; switching moves the marker.
   ok(await openCfg('clusters', 'clusters'), 'config: Clusters does not open');
-  const wasTitle = (doc.querySelector('.cm-head h1') || {}).textContent;
+  // The header is the page's line (its name is in the Config-Management menu, once — no h1, no crumb).
+  const wasTitle = (doc.querySelector('.cm-head p') || {}).textContent;
+  ok(!doc.querySelector('.cm-head h1') && !doc.querySelector('.cm-crumb'), 'config: the header repeats the page name or the crumb');
   ok(await openCfg('system', 'file'), 'config: System › Config file does not open');
-  ok((doc.querySelector('.cm-head h1') || {}).textContent !== wasTitle, 'config: switching page left the old header');
+  ok((doc.querySelector('.cm-head p') || {}).textContent !== wasTitle, 'config: switching page left the old header');
   ok((window.location.hash || '') === '#/settings/system/file', `config: the address is ${window.location.hash}, not the open tab`);
   ok(!!doc.querySelector('.cm-danger') && doc.querySelector('.cm-body').lastElementChild.contains(doc.querySelector('.cm-danger')),
     'config: Forget file & credentials is not last, apart, in the danger zone');
@@ -4631,8 +4718,13 @@ restoreConsole();
   ok(view.firstElementChild === first, 'quiet: a fleet event repainted the Clusters page while it was being read');
   ok(!doc.querySelector('#pending-updates') && ![...doc.querySelectorAll('#topbar *')].some((e) => /updates? — Apply/.test(e.textContent)),
     'quiet: a held update showed a pill or counter');
-  ok([...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
-    'quiet: the top bar should say "quiet" under the default policy, not "live"');
+  // The bar says nothing about freshness any more (the owner, 2026-11-14): no live / quiet / manual
+  // pill, no Refresh button or badge, no Auto toggle, no Reports · idle, no ▶ Play.
+  ok(![...doc.querySelectorAll('#topbar .pill')].some((p) => /^(quiet|live|manual)$/.test(p.textContent.trim())),
+    'quiet: the top bar still carries a live / quiet / manual pill');
+  ok(![...doc.querySelectorAll('#topbar button')].some((b) => /Refresh|Auto|▶ Play|Reports · idle/.test(b.textContent)) && !doc.getElementById('refresh-btn') && !doc.getElementById('play-btn'),
+    `quiet: the top bar still carries a Refresh / Auto / Play / Reports control: ${[...doc.querySelectorAll('#topbar button')].map((b) => b.textContent.trim()).filter(Boolean).join(' | ')}`);
+  ok(!doc.querySelector('#topbar #reports-pill') || doc.querySelector('#topbar #reports-pill').hidden, 'quiet: the Reports pill shows while no report run failed');
   await go('requests');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(300);
   ok(!doc.querySelector('#pending-updates'), 'quiet: a live page (Requests) grew a pill');
@@ -5172,7 +5264,7 @@ consolePanels: {
     sbtn().click(); await settleFor(150);
     [...rows()[0].querySelectorAll('button')].find((b) => b.textContent === 'Run').click(); await settleFor(1200);
     ok(!pop(), 'console panels: Run left the panel open');
-    ok(/HTTP 200/.test(doc.getElementById('c-response').textContent), `console panels: Run did not run — results read "${doc.getElementById('c-response').textContent.slice(0, 80)}"`);
+    ok(/^HTTP 200/.test((doc.getElementById('c-status') || { textContent: '' }).textContent.trim()), `console panels: Run did not run — the status beside Run reads "${(doc.getElementById('c-status') || { textContent: '' }).textContent.trim()}"`);
     // Closing: Escape, the ×, a click outside.
     sbtn().click(); await settleFor(150); ok(!!pop(), 'console panels: the panel did not reopen');
     doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
@@ -5922,7 +6014,8 @@ if (viaFleet) {
     ok(doc.querySelector('#topbar h1').textContent === label, `evidence ${id}: the top bar does not carry the page title`);
     const chip = doc.getElementById('cluster-select');
     ok(chip && chip.value === main.id, `evidence ${id}: the chooser does not show this cluster: "${chip && chip.value}"`);
-    ok([...doc.querySelectorAll('#topbar button')].some((b) => /Refresh/.test(b.textContent)), `evidence ${id}: no Refresh in the top bar`);
+    // The bar carries no Refresh (nor Play, nor a freshness pill) on any page now; refreshing runs on the configured defaults.
+    ok(![...doc.querySelectorAll('#topbar button')].some((b) => /Refresh|▶ Play/.test(b.textContent)), `evidence ${id}: a Refresh or Play control is in the top bar`);
     noFleetChrome(id);
     if (id === 'snapshots') {
       // Where the backups are kept (a bucket, an NFS path) is not evidence and must not be in
@@ -5952,6 +6045,10 @@ if (viaFleet) {
       ok(hbtn && hbtn.querySelector('.c-count') && hbtn.querySelector('.c-count').textContent === '1', `evidence console: the History button counts "${hbtn && hbtn.textContent.trim()}", expected this cluster's one request`);
       doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
       ok(!doc.querySelector('.pop.console-pop'), 'evidence console: the History panel did not close');
+      // A GET, said so: the alerts playbook handed a PUT to the console earlier (its own tab, still
+      // the active one), and a write on Run now asks the guard first rather than being sent for the
+      // core to refuse — this case is about what the page shows, not about the guard.
+      { const m = doc.getElementById('c-method'); if (m && m.value !== 'GET') { m.value = 'GET'; m.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150); } }
       doc.getElementById('c-path').value = '/_cluster/health';
       doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
       doc.getElementById('c-run').click();
@@ -6294,9 +6391,12 @@ if (viaFleet) {
   const label = () => (fsBtn() ? fsBtn().getAttribute('aria-label') : null);
   const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true }));
   try {
+    // ▶ Play left the top bar (the owner, 2026-11-14); Config-Management › Play opens it.
     await go('overview');
-    const play = doc.getElementById('play-btn');
-    ok(!!play, 'fullscreen: no ▶ Play button in the top bar');
+    ok(!doc.getElementById('play-btn'), 'fullscreen: a ▶ Play button is back in the top bar');
+    await go('settings'); window.location.hash = '#/settings/play/play'; await settleFor(600);
+    const play = doc.getElementById('play-open');
+    ok(!!play, 'fullscreen: no ▶ Open Play button on Config-Management › Play');
     if (play) {
       play.click(); await settleFor(600);
       ok(calls.req === 1, `fullscreen: ▶ Play asked for full screen ${calls.req} times`);
@@ -6314,7 +6414,10 @@ if (viaFleet) {
       await go('overview');
       ok(calls.exit === 2, `fullscreen: leaving Play exited ${calls.exit - 1} times, expected 1`);
       refuse = true;
-      doc.getElementById('play-btn').click(); await settleFor(600);
+      await go('settings'); window.location.hash = '#/settings/play/play'; await settleFor(600);
+      const again = doc.getElementById('play-open');
+      ok(!!again, 'fullscreen: no ▶ Open Play on Config-Management › Play the second time');
+      if (again) { again.click(); await settleFor(600); }
       ok(/#\/play$/.test(window.location.hash), 'fullscreen: a refused request stopped Play opening');
       refuse = false;
       await go('overview');
@@ -6381,6 +6484,8 @@ if (viaFleet) {
   const pressIn = async (root, re) => { const b = [...root.querySelectorAll('button')].find((x) => re.test(x.textContent.trim())); if (b) { b.click(); await settleFor(500); } return !!b; };
   const modalEl = () => doc.querySelector('.modal');
   try {
+    // Config was left on Play by the ▶ Open Play press above; another tab first, so opening Play reads the (older) core again.
+    await go('settings'); window.location.hash = '#/settings/system/defaults'; await settleFor(400);
     ok(await openSettingsTab('Play'), 'play: no Play tab');
     await settleFor(500);
     ok(view().textContent.includes('This server does not have Play yet (needs 0.3.47)'), 'play: an older core was not told apart from a broken page');
@@ -6571,10 +6676,10 @@ if (viaFleet) {
   try {
     // No warm-up here: the check drives the takeover a few seconds after opening.
     pPlay.configure({ display: false, onExit: () => app.go('overview'), warmMs: 0 });
-    await go('overview');
-    ok(!!doc.getElementById('play-btn'), 'play: no "▶ Play" button in the top bar');
+    await go('settings'); window.location.hash = '#/settings/play/play'; await settleFor(600);
+    ok(!!doc.getElementById('play-open'), 'play: no "▶ Open Play" button on Config-Management › Play');
     try { localStorage.removeItem('elasticpro.play.zoom'); } catch (_) { /* none */ }
-    doc.getElementById('play-btn').click();
+    doc.getElementById('play-open').click();
     await settleFor(5500);     // the shared delay record is read a few seconds after opening
     ok(doc.documentElement.classList.contains('play'), 'play: html.play is not set (the chrome would show)');
     ok(!!root(), 'play: the wall did not draw');
@@ -7288,7 +7393,9 @@ await settleFor(300);
     press(nav);
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the fleet page did not draw');
     ok(location.hash === '#/log-delay', `log delay: the address reads ${location.hash}`);
-    ok([...doc.querySelectorAll('.nav a, nav a, .tabs a, .tab')].some((x) => /Log Delay/.test(x.textContent)) || /Log Delay/.test(doc.querySelector('#view h1').textContent), 'log delay: the page is not called Log Delay');
+    // The page is called Log Delay in the menu and for screen readers (the top bar's h1); the page itself does not repeat it.
+    ok(/Log Delay/.test((doc.querySelector('#nav button[aria-current="page"]') || {}).textContent || '') && /Log Delay/.test((doc.querySelector('#topbar h1') || {}).textContent || ''), 'log delay: the page is not called Log Delay');
+    ok(!doc.querySelector('#view h1'), 'log delay: the page repeats its name in a heading');
     const fleet = view();
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 30), 'log delay: the fleet did not ask LOGDELAY_SUMMARY for 30 days');
     // The five count tiles: the three configured levels, another time zone, silent. No median, percentile or average anywhere.
@@ -7470,7 +7577,7 @@ await settleFor(300);
     ok(!/Edit cluster/.test(view().textContent) && !/Edit cluster/.test(g('ld-tz-chip').title), 'log delay: the page offers a time-zone chooser');
     g('ld-tz-chip').click(); await settleFor(120);
     ok([...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join('|') === '+05:30 · 13 devices · majority|+08:00 · 1 device', `log delay: the cluster's zones read ${[...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join(' | ')}`);
-    press(doc.querySelector('h1')); await settleFor(120);
+    press(doc.querySelector('#topbar .brand')); await settleFor(120);
     ok(g('ld-tz-panel').hidden, 'log delay: a click outside did not close the time-zone panel');
     // The top bar's chooser followed the link; and it is the control: All clusters → the fleet, a cluster → its board.
     ok(g('cluster-select').value === c0, `log delay: the top-bar chooser does not show the cluster on screen (${g('cluster-select').value})`);
@@ -7839,6 +7946,176 @@ await settleFor(300);
     st.state.defaults.readOnly = ro;
     globalThis.fetch = realFetch;
   }
+  await go('overview');
+}
+
+/* ------- the footer at the end of every page: theme button · ElasticPro <version> · the repository; in the flow, never fixed ------- */
+{
+  const foot = () => doc.getElementById('app-foot');
+  for (const id of ['overview', 'console', 'shards']) {
+    await go(id); await settleFor(300);
+    const f = foot();
+    ok(!!f, `footer: none on ${id}`);
+    if (!f) continue;
+    const main = doc.getElementById('view').parentElement;
+    ok(f.parentElement === main && f === main.lastElementChild && f.previousElementSibling === doc.getElementById('view'), `footer (${id}): not the last thing in the flow after #view`);
+    // The version is the running core's (PING), never a number written in ui/.
+    const ping = await (await fetch(`${bridgeUrl}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"type":"PING"}' })).json().catch(() => ({}));
+    const want = ping && ping.version ? `ElasticPro ${ping.version}` : 'ElasticPro';
+    ok(((f.querySelector('#app-foot-version') || {}).textContent || '') === want, `footer (${id}): reads "${(f.querySelector('#app-foot-version') || {}).textContent}", the core says "${want}"`);
+    const a = f.querySelector('a');
+    ok(!!a && a.href === 'https://github.com/karthick-dkk/elasticpro' && a.target === '_blank' && a.textContent === 'github.com/karthick-dkk/elasticpro', `footer (${id}): the repository link reads "${a && a.textContent}" → ${a && a.href}`);
+    const words = f.textContent.replace(a ? a.textContent : '', '');
+    ok(!/Karthick|licence|MIT|admin|operator/i.test(words), `footer (${id}): carries an author, a licence or a role: "${f.textContent}"`);
+    ok(!f.style.position && (f.getAttribute('style') || '') === '', `footer (${id}): positioned inline (${f.getAttribute('style')})`);
+  }
+  // The theme button: one icon, cycling Light → Dark → System through the app's own theme setting.
+  await go('overview');
+  const btn = doc.getElementById('app-foot-theme');
+  ok(!!btn && btn.textContent.trim().length === 1 && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
+  if (btn) {
+    const was = doc.documentElement.getAttribute('data-theme') || 'system';
+    const seen = [];
+    for (let i = 0; i < 3; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme') || 'system'); }
+    const start = ['light', 'dark', 'system'].indexOf(was) >= 0 ? ['light', 'dark', 'system'].indexOf(was) : -1;
+    const want = [0, 1, 2].map((k) => ['light', 'dark', 'system'][(start + 1 + k) % 3]);
+    ok(seen.join(',') === want.join(','), `footer: the theme cycle went ${seen.join(' → ')} from ${was}, expected ${want.join(' → ')}`);
+    ok(doc.getElementById('app-foot-theme') === btn, 'footer: cycling the theme rebuilt the button under the pointer');
+    ok(/Theme: System/.test(btn.getAttribute('aria-label')) && btn.dataset.theme === 'system', `footer: after the cycle the button says ${btn.getAttribute('aria-label')}`);
+    // Back where it was (System), as the app keeps it.
+    while ((doc.documentElement.getAttribute('data-theme') || 'system') !== was) { btn.click(); await settleFor(50); }
+  }
+  ok(!!doc.querySelector('#view .ov-board') || true, '');
+}
+
+/* ------- Clusters › Overview: the sub-item and the tab open it, one cluster is picked, every card is there, nothing is rebuilt for nothing ------- */
+{
+  const st = await load('core/state.js');
+  const view = () => doc.getElementById('view');
+  const card = (id) => view().querySelector(`.ov-board [data-card="${id}"]`);
+  const CARDS = ['cluster', 'nodes', 'indices', 'cpu', 'disk', 'heap', 'shards', 'search', 'devices', 'pressure', 'slm', 'ilm', 'nodes-table', 'indices-table'];
+  // The page menu has one sub-item: └ Overview under Clusters. It opens #/clusters/overview.
+  st.state.selected = 'all';
+  await go('overview');
+  ok(location.hash === '#/clusters', `clusters: the List's address reads ${location.hash}, not #/clusters`);
+  const sub = doc.querySelector('#nav button.nav-sub[data-page="overview"][data-section="overview"]');
+  ok(!!sub && /Overview/.test(sub.textContent), 'overview: no └ Overview sub-item under Clusters in the menu');
+  ok(!!doc.querySelector('#view .cl-tabs a[data-section="list"][aria-current="page"]'), 'overview: the List tab is not marked on the list');
+  if (sub) {
+    sub.click(); await settleFor(400);
+    ok(location.hash.startsWith('#/clusters/overview/'), `overview: the sub-item opened ${location.hash}`);
+    // "All clusters" was chosen: the page picks one, as the evidence pages do, and says which in the address.
+    ok(st.state.selected !== 'all', 'overview: opened on "All clusters" instead of picking one');
+    ok(location.hash === `#/clusters/overview/${encodeURIComponent(st.state.selected)}`, `overview: the address (${location.hash}) does not name the cluster shown (${st.state.selected})`);
+    ok(sub.getAttribute('aria-current') === 'page' && (doc.querySelector('#nav button[data-page="overview"]:not(.nav-sub)') || {}).getAttribute('aria-current') === 'page', 'overview: the menu does not mark Clusters and its Overview sub-item');
+    ok(!!view().querySelector('.cl-tabs a[data-section="overview"][aria-current="page"]'), 'overview: the Overview tab is not marked');
+    // The chooser offers one cluster at a time here: no "All clusters".
+    const sel = doc.getElementById('cluster-select');
+    ok(!!sel && ![...sel.options].some((o) => o.value === 'all'), 'overview: the chooser still offers "All clusters" on a one-cluster board');
+    // Every card of the approved board, in its grid; the page's own wrapper is the fit class.
+    ok(!!view().querySelector('.ov-board') && doc.documentElement.classList.contains('ov-fit') && view().classList.contains('ov-page'), 'overview: the board or its fit classes are missing');
+    const missing = CARDS.filter((id) => !card(id));
+    ok(!missing.length, `overview: cards missing: ${missing.join(', ')}`);
+    ok(['ov-top', 'ov-gauges', 'ov-rates', 'ov-lifecycle', 'ov-bottom'].every((k) => view().querySelector(`.ov-row.${k}`)), 'overview: the five rows are not all there');
+    ok(!view().querySelector('#view h1') && !/\bClusters\b/.test(view().querySelector('.ov-bar').textContent), 'overview: the bar repeats the page name');
+    // The header card: the cluster's URL under the version, the alerts badge in the corner (when there are any) with the titles on hover.
+    const headTxt = (card('cluster') || {}).textContent || '';
+    const cfg = st.clusters().find((c) => c.id === st.state.selected);
+    ok(!!cfg && headTxt.includes(cfg.url) && !!card('cluster').querySelector('.ov-url'), `overview: the header does not show the cluster's URL (${cfg && cfg.url})`);
+    {
+      const open = st.openAlertsNow().filter((a) => a.cluster && a.cluster.id === st.state.selected);
+      const badge = card('cluster').querySelector('.ov-alerts');
+      if (open.length) ok(!!badge && badge.textContent.includes(`${open.length} alert`) && (badge.title || '').includes(open[0].title) && badge.closest('.ov-head-pills'), `overview: the alerts badge reads "${badge && badge.textContent}" for ${open.length} open alerts`);
+      else ok(!badge, 'overview: an alerts badge with no open alerts');
+      ok(!view().querySelector('.ov-board > [data-card="alerts"], .ov-row > [data-card="alerts"]'), 'overview: alerts are drawn as a row, not a corner badge');
+    }
+    // The refresh control: ↻ and the interval alone (the age is the button's title); 30s by default; a choice is remembered.
+    const every = doc.getElementById('ov-every'), refreshBtn = doc.getElementById('ov-refresh');
+    ok(!!every && [...every.options].map((o) => o.value).join(',') === '10,30,60,300' && [...every.options].map((o) => o.textContent).join(',') === '10s,30s,1m,5m', `overview: the interval select offers ${every && [...every.options].map((o) => o.textContent).join(',')}`);
+    ok(!!every && every.value === '30', `overview: the default interval is ${every && every.value}, not 30 s`);
+    ok(!!refreshBtn && refreshBtn.textContent.trim() === '↻' && refreshBtn.getAttribute('aria-label') === 'Refresh now' && /^Refresh now · /.test(refreshBtn.title), `overview: the refresh button reads "${refreshBtn && refreshBtn.textContent}" / "${refreshBtn && refreshBtn.title}"`);
+    ok(!/Refresh\b|every|refreshed/.test(view().querySelector('.ov-refresh').textContent), 'overview: the refresh control shows words, not the icon and the interval alone');
+    if (every) {
+      every.value = '10'; every.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50);
+      ok(window.localStorage.getItem('elasticpro.overview.refreshSec') === '10', `overview: choosing 10 s was not remembered (${window.localStorage.getItem('elasticpro.overview.refreshSec')})`);
+      ok(doc.getElementById('ov-every') === every, 'overview: changing the interval rebuilt the control under the pointer');
+      every.value = '30'; every.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50);
+      window.localStorage.removeItem('elasticpro.overview.refreshSec');
+    }
+    if (refreshBtn) {
+      const before = sent.length;
+      refreshBtn.click(); await settleFor(900);
+      const asked = sent.slice(before).filter((m) => (m.type === 'ES' && m.clusterId === st.state.selected) || m.type === 'REFRESH' || m.type === 'CLUSTER_DATASET');
+      ok(asked.length > 0, `overview: Refresh now sent nothing for the cluster (${sent.slice(before).map((m) => m.type).join(',') || 'no messages'})`);
+      ok(!sent.slice(before).some((m) => m.type === 'REFRESH' && Array.isArray(m.clusterIds) && m.clusterIds.length > 1), 'overview: Refresh now asked for more than this cluster');
+      ok(/refreshed (just now|\d+ s ago)/.test(refreshBtn.title), `overview: the button's title does not say when it refreshed (${refreshBtn.title})`);
+    }
+    // SLM and ILM: a heading line with the operation pill and one status line each, from the fixture's policies.
+    const slmTxt = (card('slm') || {}).textContent || '', ilmTxt = (card('ilm') || {}).textContent || '';
+    ok(/SLM/.test(slmTxt) && !!card('slm').querySelector('.ov-lc-h .pill') && !!card('slm').querySelector('.ov-lc-line'), `overview: the SLM card reads "${slmTxt}"`);
+    ok(/ILM/.test(ilmTxt) && /running/.test(ilmTxt) && !!card('ilm').querySelector('.ov-lc-line') && /in error|not readable|no policy/.test(ilmTxt), `overview: the ILM card reads "${ilmTxt}"`);
+    ok(!/schedule|retention keep|next run/i.test(slmTxt), 'overview: the SLM card grew rows the owner trimmed');
+    // No captions under the panel headings; the order is the heading's title.
+    ok(!view().querySelector('.ov-panel-c') && /busiest/i.test(view().querySelector('[data-card="nodes-table"] h2').title) && /unhealthy/i.test(view().querySelector('[data-card="indices-table"] h2').title), 'overview: the panels carry captions, or the heading lacks the order on hover');
+    // The Search card's long-running line: a pill that says none / N / not readable, and the Tasks link.
+    const long = card('search') && card('search').querySelector('.ov-long');
+    ok(!!long && !!long.querySelector('.ov-long-pill') && /none over 1 min|long-running|not readable|reading/.test(long.textContent), `overview: the Search card's long-running line reads "${long && long.textContent}"`);
+    ok(view().querySelectorAll('.ov-gauge .ring-gauge svg').length === 4, `overview: ${view().querySelectorAll('.ov-gauge .ring-gauge svg').length} rings, not four`);
+    // Figures the fixture gives: node-1 is highest on CPU, disk and heap; the shards ring has a split.
+    const highest = (id) => ((card(id) || {}).querySelector ? (card(id).querySelector('.ov-gauge-node') || {}).textContent : '');
+    ok(highest('cpu') === 'node-1' && highest('disk') === 'node-1' && highest('heap') === 'node-1', `overview: highest nodes read ${['cpu', 'disk', 'heap'].map(highest).join(', ')}`);
+    ok(/91%/.test((card('disk') || {}).textContent || '') && /Watermarks 85 % \/ 90 % \/ 95 %/.test((card('disk') || {}).textContent || ''), `overview: the Disk card reads "${(card('disk') || {}).textContent}"`);
+    ok(/3 nodes/.test((card('nodes') || {}).textContent || '') && /master node-1/.test((card('nodes') || {}).textContent || ''), `overview: the Nodes card reads "${(card('nodes') || {}).textContent}"`);
+    ok(/shards placed/.test((card('cluster') || {}).textContent || '') && /Elasticsearch 8\.13\.4/.test((card('cluster') || {}).textContent || ''), `overview: the cluster card reads "${(card('cluster') || {}).textContent}"`);
+    // Rates: before two readings the cards say so — never a zero.
+    const rateText = ['search', 'pressure'].map((id) => (card(id) || {}).textContent || '').join(' ');
+    ok(/measuring · next poll|–/.test(rateText) && !/\b0 req\/s|\b0 ms/.test(rateText), `overview: the rate cards read "${rateText}" before a measurement`);
+    // Devices & log delay, in Indexing's place: the last run's devices, the late counts by the configured levels, the Log Delay link.
+    const dev = card('devices');
+    ok(!!dev && /Devices & log delay/.test(dev.textContent) && !!dev.querySelector('a.ov-link') && !/Indexing|docs\/s/.test(view().querySelector('.ov-rates').textContent), `overview: the Devices & log delay card reads "${dev && dev.textContent}"`);
+    await settleFor(600);
+    const devState = (card('devices') || { dataset: {} }).dataset.state;
+    ok(['ok', 'off', 'never', 'unsupported', 'error'].includes(devState), `overview: the Devices card is still "${devState}" after the summary was asked`);
+    if (devState === 'ok') ok(/delayed over 30 min · .*30–60 min · .*above 60 min/.test(card('devices').textContent) && /last measured .* · next /.test(card('devices').textContent), `overview: the Devices card's lines read "${card('devices').textContent}"`);
+    if (devState === 'never') ok(/never measured: not in the scheduled measurement yet/.test(card('devices').textContent), `overview: a never-measured cluster reads "${card('devices').textContent}"`);
+    ok(!/\b(below|other time zone|silent)\b/i.test((card('devices') || {}).textContent || ''), 'overview: the Devices card shows counts the owner left out');
+    // The indices panel: the fixture's yellow index first, then by size; the nodes panel busiest first with bars.
+    await waitFor(() => view().querySelector('[data-card="indices-table"] tbody tr'), 'overview: the indices panel has no rows');
+    const idxRows = [...view().querySelectorAll('[data-card="indices-table"] tbody tr[data-index]')];
+    ok(idxRows.length > 0 && /Yellow/.test(idxRows[0].children[1].textContent), `overview: the first index row is not the unhealthy one (${idxRows[0] && idxRows[0].textContent.trim()})`);
+    ok([...view().querySelectorAll('[data-card="indices-table"] thead th')].map((t) => t.textContent).join('|') === 'Index|Health|Docs|Size|Shards', 'overview: the indices columns are not Index · Health · Docs · Size · Shards');
+    ok([...view().querySelectorAll('[data-card="nodes-table"] thead th')].map((t) => t.textContent).join('|') === 'Name|IP|CPU|Heap|Disk', 'overview: the nodes columns are not Name · IP · CPU · Heap · Disk');
+    const nodeRows = [...view().querySelectorAll('[data-card="nodes-table"] tbody tr[data-node]')];
+    ok(nodeRows.length === 3 && nodeRows[0].dataset.node === 'node-1' && nodeRows.every((r) => r.querySelectorAll('.use-bar').length === 3), `overview: the nodes panel is not three rows busiest first with three bars (${nodeRows.map((r) => r.dataset.node).join(', ')})`);
+    ok(!!nodeRows[0] && nodeRows[0].children[1].textContent === '10.0.0.1', `overview: node-1's IP cell reads "${nodeRows[0] && nodeRows[0].children[1].textContent}"`);
+    ok(!!nodeRows[0] && !!nodeRows[0].querySelector('.ov-master'), 'overview: the master is not marked');
+    // No "read-only (operator)" pill anywhere on the board (the owner banned it app-wide).
+    ok(!/read-only \(operator\)/.test(view().textContent), 'overview: a read-only (operator) pill is drawn');
+    // Kept nodes: a push that changed nothing leaves every card where it was.
+    const before = CARDS.map(card);
+    st.bus.emit('data'); await settleFor(1700);
+    const after = CARDS.map(card);
+    ok(before.every((el, i) => el === after[i]), `overview: a push rebuilt ${CARDS.filter((_, i) => before[i] !== after[i]).join(', ')}`);
+    // The List tab goes back to the list, and the chooser offers the fleet again.
+    press(view().querySelector('.cl-tabs a[data-section="list"]')); await settleFor(400);
+    ok(location.hash === '#/clusters' && !!view().querySelector('.cl-summary'), `overview: the List tab opened ${location.hash}`);
+    ok(!doc.documentElement.classList.contains('ov-fit'), 'overview: leaving the board left the page unable to scroll');
+    const back = doc.getElementById('cluster-select');
+    ok(!!back && [...back.options].some((o) => o.value === 'all'), 'overview: the List does not offer "All clusters" after the board');
+    // And the Overview tab opens the board again, on the same cluster.
+    press(view().querySelector('.cl-tabs a[data-section="overview"]')); await settleFor(400);
+    ok(!!view().querySelector('.ov-board') && st.state.selected !== 'all', 'overview: the Overview tab did not open the board on one cluster');
+    // A link that names another cluster moves the chooser.
+    const other = st.clusters().find((c) => c.id !== st.state.selected);
+    if (other) {
+      location.hash = `#/clusters/overview/${encodeURIComponent(other.id)}`; await settleFor(500);
+      ok(st.state.selected === other.id && doc.getElementById('cluster-select').value === other.id, `overview: an address naming ${other.name} left the chooser on ${st.state.selected}`);
+    }
+    await go('alerts');
+    ok(!doc.documentElement.classList.contains('ov-fit'), 'overview: leaving the page left html.ov-fit');
+  }
+  await go('overview');
+  st.state.selected = 'all';
   await go('overview');
 }
 

@@ -24,7 +24,7 @@ import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed, roleMayWrite } from '../core/writes.js';
 import { splitGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
-import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode, queueSizes, shortNodeId,
+import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortNodeId,
          unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
@@ -483,24 +483,6 @@ function nodesCard(c, d) {
         : null)), 'nodes');
 }
 
-/** The fill and the ink for a usage level (core/nodes-shards.js usageLevel). */
-const LEVEL_FILL = { ok: STATUS.good, warn: STATUS.warning, crit: STATUS.critical };
-const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
-
-/**
- * A percentage as the bar the Disk column has always drawn: a thin track, the filled part
- * coloured by `kind`'s thresholds, and the number beside it — in the level's ink from
- * amber up, so colour is never the only signal. A figure the node did not report is a dash.
- */
-function usageBar(p, kind, title, suffix = null, digits = 0) {
-  if (!isFinite(p)) return h('span.muted', '–');
-  const level = usageLevel(p, kind);
-  return h('div.use-bar', { title },
-    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p.toFixed(digits)}%`),
-    suffix ? h('span.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, suffix) : null);
-}
-
 /**
  * Load 1m / 5m. A load average is not a percentage; what makes it one is the node's
  * processor count — 3.5 is idle on 32 cores and saturated on 2 — so the bar is load 1 m over
@@ -513,17 +495,14 @@ function loadCell(n, coreCount) {
   if (p === null) {
     return h('span.muted.use-num', { title: `load 1 m / 5 m${n.load_1m ? ' — the node did not report its processor count, so there is no scale to draw it on' : ''}` }, text);
   }
-  const level = usageLevel(p, 'disk');
-  return h('div.use-bar', { title: `load 1 m over ${num(coreCount)} cores: ${p.toFixed(0)} % · 5 m ${n.load_5m || '–'}` },
-    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, text));
+  return usageBar(p, 'disk', `load 1 m over ${num(coreCount)} cores: ${p.toFixed(0)} % · 5 m ${n.load_5m || '–'}`, { text });
 }
 
 /** Disk as the same bar, the free space and the shard count beside the number — one line. */
 function diskBar(used, total, p, shardCount) {
   if (!total) return h('span.muted', '–');
   return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used`,
-    `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`, 1);
+    { suffix: `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`, digits: 1 });
 }
 
 /**

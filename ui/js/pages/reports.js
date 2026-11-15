@@ -128,9 +128,10 @@ function movedSection() {
       h('a#rp-ld-moved', { href: '#/log-delay' }, 'Log Delay ›'), ', with Live Watch and Live logs beside them.'))));
 }
 
+/** The subtitle alone: the page's name is in the menu, once (the owner, 2026-11-14). */
 function header() {
   return h('div.rp-head',
-    h('div', h('h1', 'Reports'), h('p.sub', SUBTITLE)));
+    h('div', h('p.sub', SUBTITLE)));
 }
 
 function sectionNav() {

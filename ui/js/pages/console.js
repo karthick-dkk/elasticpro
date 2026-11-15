@@ -9,6 +9,7 @@ import { idb } from '../lib/idb.js';
 import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, tabLabel, toStored, fromStored } from '../core/console-tabs.js';
 import { savedQueries, loadSavedQueries, saveQuery, deleteSavedQuery, ownQuery, filterQueries } from '../core/saved-queries.js';
 import { parseRequestText, recognisedLabel } from '../core/console-paste.js';
+import { responseStatus, responseSize } from '../core/response-status.js';
 import { modal, field, text as textField, checkbox, val, checked } from '../ui/modal.js';
 import { popover, closePopover } from '../ui/menu.js';
 
@@ -33,7 +34,7 @@ import { jsonView } from '../lib/jsonview.js';
 import { empty, pill, table } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { intent, navigateTo } from '../core/intent.js';
-import { writesUnlocked, writesAllowed, syncWrites, setWritesUnlocked, writeToggle } from '../core/writes.js';
+import { writesUnlocked, writesAllowed, syncWrites, setWritesUnlocked, ensureWrites, roleMayWrite } from '../core/writes.js';
 import { confirmDialog, inputDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 
@@ -163,7 +164,7 @@ const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
 /** The response gets the larger share — see the comment where the columns are built. */
 const DEFAULT_SPLIT = 35;
 
-const ui = { method: 'GET', path: '/_cluster/health', body: '', running: false, res: null, raw: false,
+const ui = { method: 'GET', path: '/_cluster/health', body: '', res: null, raw: false,
              filter: '', showFav: false,
              split: DEFAULT_SPLIT,   // percent of the row given to the query pane
              find: '',               // search within the response
@@ -344,7 +345,7 @@ function draw() {
     onpaste: (e) => { if (recognise(pasted(e), { fromBody: false })) e.preventDefault(); },
     oninput: (e) => {
       ui.path = e.target.value;
-      if (!recognise(ui.path, { fromBody: false })) { syncTarget(); scheduleSave(); refreshTabTitle(); }
+      if (!recognise(ui.path, { fromBody: false })) { scheduleSave(); refreshTabTitle(); refreshRunTitle(); }
     },
     onkeydown: (e) => { if (e.key === 'Enter') run(); } });
 
@@ -363,21 +364,10 @@ function draw() {
       ...SNIPPETS.map((s, i) => [s, i]).filter(([s]) => s.g === g)
         .map(([s, i]) => h('option', { value: String(i) }, `${s.w ? '✎ ' : ''}${s.m} ${s.p}`)))));
 
-  // ---- the address this will actually hit
-  //
-  // Above the method, not below it, and the whole URL rather than the cluster's base:
-  // the console is the one page where a person can send anything to anything, so what
-  // gets audited afterwards is which host received which path. Reading that off two
-  // fields — a base down here, a path up there — is how the wrong cluster gets hit.
-  // It follows the path field as it is typed, so it is never a stale answer.
-  // This is an evidence page (core/evidence.js), so it names the cluster and the path, never the
-  // host: an internal address does not belong in a screenshot handed to a client.
-  const targetUrl = () => {
-    const p = String(ui.path || '');
-    return p ? (p.startsWith('/') ? p : `/${p}`) : '/';
-  };
-  const target = h('span.mono#c-target', { style: { fontSize: '12px', wordBreak: 'break-all' } }, targetUrl());
-  const syncTarget = () => { target.textContent = targetUrl(); };
+  // ---- where this goes is said once: the cluster in the top bar's chooser, the method and
+  // the path in the inputs below. The echo line that repeated them above the inputs, and the
+  // "GET /…" line above the answer, went at the owner's request. This is an evidence page
+  // (core/evidence.js): the cluster is a name, never a host.
 
   // ---- Saved queries and History open from here (owner's wording: "choose and run from here");
   // neither has a card of its own on the page any more. The counts on the buttons are the
@@ -385,23 +375,21 @@ function draw() {
   const panelBtn = (id, label, count, open, title) => h(`button.btn.sm#${id}`, { 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title,
     onclick: (e) => open(e.currentTarget) }, label, h('span.muted.c-count', { style: { marginLeft: '5px', fontSize: '11px' } }, String(count)));
 
-  // ---- request line: target · method · path · run
+  // ---- request line: method · path · run · status · common requests · the two panels
   const requestBar = h('section.card',
     h('div.body', { style: { display: 'grid', gap: '8px', padding: '10px 14px' } },
-      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'baseline', flexWrap: 'wrap' } },
-        h('b', { style: { fontSize: '12px' } }, c.name),
-        h('span.muted#c-echo-method', { style: { fontSize: '12px' } }, ui.method),
-        target,
-        null),
       h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
         methodSel, pathInput,
-        h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' } }, 'Run ▸'),
+        h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' }, title: runTitle() }, 'Run ▸'),
+        statusLine(),
         snippetSel,
         panelBtn('c-saved-btn', 'Saved queries', savedCount(), openSavedPanel, 'Named queries kept on the server — open one, or run it from here'),
         panelBtn('c-history-btn', 'History', historyCount(), openHistoryPanel, 'What this browser has sent to this cluster — load one, or run it again')),
+      // The keyboard hint alone. The "read-only (operator)" / "🔒 read-only" pill that sat here
+      // is banned (owner, 2026-11-14): the write guard is not a thing to look at, it is what
+      // answers a write request on Run (run() → ensureWrites → confirmWrite).
       h('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', fontSize: '11px', flexWrap: 'wrap' } },
-        h('span.muted', { style: { marginLeft: 'auto' } }, 'Ctrl/⌘+Enter runs · Enter in the path runs'),
-        writeToggle(draw))));
+        h('span.muted', { style: { marginLeft: 'auto' } }, 'Ctrl/⌘+Enter runs · Enter in the path runs'))));
 
   // ---- Query | Results
   // A whole request pasted here ("POST _x\n{…}", or a curl line) is split the same way: the
@@ -472,9 +460,7 @@ function recognise(text, { fromBody }) {
   const sel = $('#c-method'); if (sel) sel.value = ui.method;
   const path = $('#c-path'); if (path) { path.value = ui.path; try { path.setSelectionRange(ui.path.length, ui.path.length); } catch (_) { /* not focused */ } }
   const body = $('#c-body'); if (body && (r.body || fromBody)) body.value = ui.body;
-  const echo = $('#c-echo-method'); if (echo) echo.textContent = ui.method;
-  const target = $('#c-target'); if (target) target.textContent = ui.path;
-  refreshTabTitle(); scheduleSave();
+  refreshTabTitle(); refreshRunTitle(); scheduleSave();
   flash(recognisedLabel(r), { kind: 'ok', ms: 4000 });
   return true;
 }
@@ -495,6 +481,19 @@ function isWrite(method, path) {
   if (method === 'POST') return !SEARCH_POST.test((path || '').split('?')[0]);
   return true;
 }
+
+/**
+ * What Run will do with the request as typed — the tooltip says it before it is pressed.
+ * There is no pill to read the lock off any more; a locked write is a refused action that
+ * says why, here and when pressed.
+ */
+function runTitle() {
+  if (!isWrite(ui.method, ui.path)) return 'Send the request (Enter in the path · Ctrl/⌘+Enter in the body)';
+  if (!roleMayWrite()) return `This request can change the cluster. Your role (${state.caller.role}) reads clusters only — Run refuses it; an ElasticPro admin makes changes.`;
+  if (writesAllowed()) return 'This request can change the cluster: Run asks you to confirm it first.';
+  return 'This request can change the cluster. Writes are locked for this session: Run asks you to allow them by hand first, then to confirm the request.';
+}
+function refreshRunTitle() { const b = $('#c-run'); if (b) b.title = runTitle(); }
 
 /** Named in full, so pressing Run is never a surprise. */
 function confirmWrite(c) {
@@ -526,30 +525,44 @@ function flash(msg, { kind = 'warn', ms = 0 } = {}) {
 async function run() {
   const c = cluster();
   if (!c) return;
-  // Confirm only when the request is a write AND something will actually let it through.
-  if (isWrite(ui.method, ui.path) && writesAllowed() && !(await confirmWrite(c))) return;
+  // A write is gated twice, here as on every page (core/writes.js): first the guard — a role
+  // that reads only is refused with the reason, a read-only session is asked to allow writes
+  // by hand — then the request is named in full and confirmed. Nothing is sent before both.
+  if (isWrite(ui.method, ui.path)) {
+    if (!(await ensureWrites())) return;
+    if (!(await confirmWrite(c))) return;
+  }
   const cl = client(c.id);
-  ui.running = true;
-  const btn = $('#c-run'); if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  // Run is disabled while the answer is awaited (there is no cancel: the core's request has
+  // its own time limit); the pill beside it says Running… and counts the seconds.
+  const btn = $('#c-run'); if (btn) btn.disabled = true;
 
   const started = Date.now();
   const sentFrom = tabs.active;   // the response belongs to the tab that sent it
+  startRunning(sentFrom);
   const sent = { method: ui.method, path: ui.path, body: ui.body };
   // allowWrites is set here and nowhere else in the app; the core still refuses it
   // unless the session has been unlocked above.
   // A person typed it: sent at once, never held by the duplicate-request gap (REQUEST_PURPOSE).
-  const res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
-                               { allowWrites: writesUnlocked(), purpose: REQUEST_PURPOSE.console });
-  ui.running = false;
+  // finally: a request that throws must not leave Run disabled and the ticker running.
+  let res;
+  try {
+    res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
+                           { allowWrites: writesUnlocked(), purpose: REQUEST_PURPOSE.console });
+  } catch (e) {
+    res = { ok: false, status: 0, kind: 'error', message: String((e && e.message) || e), tookMs: Date.now() - started };
+  } finally {
+    stopRunning();
+    const b = $('#c-run'); if (b) b.disabled = false;
+  }
   tabRes.set(sentFrom, res);
   if (tabs.active !== sentFrom) {
     // Switched tabs while it ran: the answer waits in its own tab.
-    if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
+    refreshStatus();
     toast(`${sent.method} ${clip(sent.path)} → ${res.status || res.kind || 'done'} (in its tab)`, res.ok ? 'ok' : 'err', 3000, { key: 'console-run' });
     return;
   }
   ui.res = res;
-  if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
 
   const entry = {
     id: `${started}-${Math.random().toString(36).slice(2, 8)}`,
@@ -563,6 +576,7 @@ async function run() {
   // for a request that had already come back 200. It does not reject, it simply never
   // settles, which is why no catch helped.
   mount($('#c-response'), responseCard());
+  refreshStatus();
 
   history = [entry, ...history].slice(0, 500);
   drawHistory();
@@ -722,21 +736,54 @@ function highlightFind(text) {
   }
 }
 
+/**
+ * The outcome, beside the Run button (owner's request: "show the result code near Run",
+ * out of the output box): the status pill, then the time and size. A grey dash before
+ * anything has run — unknown is not zero. One definition (core/response-status.js) with the
+ * history rows. It is a kept node: run() refreshes it in place, the page is not redrawn.
+ */
+function statusLine() {
+  // While this tab's request is in flight: a spinner and the elapsed time, ticking (owner's
+  // request: "show the running status while running"). The text node is updated in place
+  // every 100 ms; the pill itself is built once per state, never per tick.
+  if (inFlight.tab !== null && inFlight.tab === tabs.active) {
+    return h('span#c-status.c-running', { role: 'status', 'aria-live': 'polite', style: { display: 'inline-flex', gap: '7px', alignItems: 'center' }, title: 'Waiting for the cluster to answer' },
+      h('span.spin', { 'aria-hidden': 'true' }),
+      h('span.muted#c-status-elapsed', { style: { fontSize: '11.5px', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }, elapsedText()));
+  }
+  const r = ui.res;
+  const { label, tone } = responseStatus(r);
+  return h('span#c-status', { role: 'status', 'aria-live': 'polite', style: { display: 'inline-flex', gap: '8px', alignItems: 'center' },
+    title: r ? null : 'Nothing run yet in this tab' },
+    pill(label, tone),
+    r ? h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, `${dur(r.tookMs)} · ${bytes(responseSize(r))}`) : null);
+}
+function refreshStatus() { const el = $('#c-status'); if (el) el.replaceWith(statusLine()); }
+
+/** The request in flight: which tab sent it, when, and the ticker that writes the elapsed time. */
+const inFlight = { tab: null, since: 0, timer: null };
+const elapsedText = () => `Running… ${((Date.now() - inFlight.since) / 1000).toFixed(1)} s`;
+function startRunning(tab) {
+  stopRunning();
+  inFlight.tab = tab; inFlight.since = Date.now();
+  refreshStatus();
+  // Bounded: cleared the moment the answer (or the failure) lands in stopRunning().
+  inFlight.timer = setInterval(() => { const el = $('#c-status-elapsed'); if (el) el.textContent = elapsedText(); }, 100);
+}
+function stopRunning() {
+  if (inFlight.timer) clearInterval(inFlight.timer);
+  inFlight.timer = null; inFlight.tab = null;
+}
+
 function responseCard() {
   const r = ui.res;
-  const head = (meta, actions) => h('header', h('h2', 'Results'), meta || null,
+  const head = (sub, actions) => h('header', h('h2', 'Results'), sub || null,
     actions ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }, ...actions) : null);
   if (!r) {
     return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column' } }, head(h('span.sub', 'nothing run yet')),
       h('div.body', { style: { flex: '1' } }, empty('Run a request — the response appears here, next to the query.')));
   }
-  const okCls = r.ok ? 'green' : r.status ? 'red' : 'yellow';
-  const size = r.json ? JSON.stringify(r.json).length : (r.text || '').length;
   const bodyText = r.json !== null && r.json !== undefined ? JSON.stringify(r.json, null, 2) : (r.text || '');
-
-  const meta = h('span', { style: { display: 'inline-flex', gap: '8px', alignItems: 'center', marginLeft: '8px' } },
-    pill(r.status ? `HTTP ${r.status}` : (r.kind || 'error'), okCls),
-    h('span.muted', { style: { fontSize: '11.5px' } }, `${dur(r.tookMs)} · ${bytes(size)}`));
 
   const body = r.kind === 'blocked_readonly'
     ? h('div.banner.warn', { style: { margin: 0 } },
@@ -758,8 +805,10 @@ function responseCard() {
       ? editable(h('pre.json', { style: { margin: 0 } }, highlightFind(bodyText)))
       : editable(jsonView(bodyText));
 
+  // The status, time and size are beside Run (statusLine), not here; the request itself is in
+  // the inputs. The header is the title and the tools; the body is the answer alone.
   return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minWidth: 0 } },
-    head(meta, [
+    head(null, [
       findBox(bodyText),
       h('button.btn.sm', { onclick: () => { ui.raw = !ui.raw; mount($('#c-response'), responseCard()); } }, ui.raw ? 'Highlighted' : 'Raw'),
       h('button.btn.sm', { onclick: () => navigator.clipboard.writeText(currentText(bodyText)) }, 'Copy'),
@@ -776,9 +825,7 @@ function responseCard() {
       style: ui.full
         ? { padding: '10px', flex: '1', minHeight: '0', height: 'calc(100vh - 150px)', overflow: 'auto' }
         : { padding: '10px', flex: '1', minHeight: '340px', maxHeight: '64vh', overflow: 'auto' },
-    },
-      h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' } }, `${ui.method} ${String(r.url || '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '')}`),
-      body));
+    }, body));
 }
 
 /* ------------------------------- saved queries ------------------------------- */
@@ -965,7 +1012,9 @@ function historyTable() {
     h('td.mono', { style: { fontSize: '11px', fontWeight: 700, color: 'var(--accent)' } }, x.method),
     h('td.mono', { style: { fontSize: '11.5px', maxWidth: '520px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: x.path + (x.body ? '\n\n' + x.body : '') }, x.path,
       x.body ? h('span.muted', { style: { marginLeft: '6px', fontSize: '10.5px' } }, `+ body ${bytes(x.body.length)}`) : null),
-    h('td', x.status ? pill(`HTTP ${x.status}`, x.ok ? 'green' : 'red') : pill('saved', 'grey')),
+    // The same words and colour as the pill beside Run (core/response-status.js); a starred
+    // request that was never sent (saveFav) has no status and says so.
+    h('td', x.status ? pill(responseStatus(x).label, responseStatus(x).tone) : pill('saved', 'grey')),
     h('td.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, x.tookMs ? dur(x.tookMs) : '–'),
     h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
       h('button.btn.sm', { onclick: () => load(x) }, 'Load'),

@@ -9,6 +9,8 @@
  *     average becomes a bar: load over the node's processors, or no bar at all.
  */
 
+import { parseRetention } from './volume.js';
+
 /* --------------------------------- shards --------------------------------- */
 
 /** The states in which a shard is assigned but not settled. */
@@ -187,4 +189,24 @@ export function coresByNode(answer) {
     if (n && n.name && Number.isFinite(cores) && cores > 0) out.set(n.name, cores);
   }
   return out;
+}
+
+/* --------------------------------- retention --------------------------------- */
+
+/**
+ * Indices whose data is older than the retention the cluster promises (`liveRetention`,
+ * "30d" / "6M" — core/volume.js parseRetention): still on disk, still costing, past the point
+ * the policy said they would be kept. Read from the date in each index's name (`day`), so a
+ * cluster whose indices are not dated reports none rather than guessing; no retention set
+ * reports none with an empty `policy`. The one definition for the Nodes & shards glance and
+ * the Clusters › Overview ILM card.
+ * → { list: [indices, oldest first], bytes, policy: 'N days' | '' }
+ */
+export function staleIndices(liveRetention, indices, now = Date.now()) {
+  const ret = parseRetention(liveRetention);
+  if (!ret || !Array.isArray(indices)) return { list: [], bytes: 0, policy: '' };
+  const cutoff = new Date(now - ret.days * 86400000).toISOString().slice(0, 10);
+  const list = indices.filter((i) => i.day && i.day < cutoff)
+    .sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  return { list, bytes: list.reduce((n, i) => n + (i.size || 0), 0), policy: ret.label };
 }

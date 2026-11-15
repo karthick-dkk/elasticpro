@@ -177,9 +177,6 @@ export function recordReading(clusterId, answer, at = Date.now()) {
   return r;
 }
 
-/** Drop what is held for a cluster (it was removed, or its counters are known to have reset). */
-export function forgetReadings(clusterId) { readings.delete(clusterId); }
-
 /** When the latest reading of a cluster was taken (ms), or 0 when there is none. */
 export function latestReadingAt(clusterId) {
   const kept = readings.get(clusterId);

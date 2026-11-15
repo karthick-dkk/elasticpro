@@ -13,6 +13,8 @@ import { card, table } from '../pages/common.js';
 import { modal, field, text, select, checkbox, val, checked, confirmDialog } from './modal.js';
 import { toast } from './menu.js';
 import { MANAGED_NOTE } from '../core/managed.js';
+import { navigateTo } from '../core/intent.js';
+import { fullscreen } from '../core/fullscreen.js';
 import {
   NO_PLAY, SLIDES, DWELL, ZOOMS, EXPIRES, SPOTLIGHT_WHEN, playConfigGet, playConfigSet, playLinkList, playLinkCreate, playLinkRevoke,
   playLinkSet, lockedFields, linkPayload, scopeText, slidesText, displaySettings, moveSlide, settingsPayload, watchRules, watchProblems, FLEET_KEYS,
@@ -336,6 +338,18 @@ async function include(x) {
 /* --------------------------------- the section -------------------------------- */
 
 export function playSection() {
-  return h('div', { style: { display: 'grid', gap: '12px' } }, displaysCard(),
+  return h('div', { style: { display: 'grid', gap: '12px' } }, openPlayBar(), displaysCard(),
     pl.unknown ? null : watchCard(), pl.unknown ? null : excludedCard());
+}
+
+/**
+ * The way into Play from here (the ▶ Play button left the top bar — the owner, 2026-11-14): the
+ * wall display, full screen when the browser allows it (asked inside the click, as the button did),
+ * Esc leaves. A display link opens it on a TV without this.
+ */
+function openPlayBar() {
+  return h('div.pl-open-bar', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+    h('button#play-open.btn', { type: 'button', title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)',
+      onclick: () => { try { fullscreen().request().catch(() => {}); } catch (_) { /* no API: Play opens in the window */ } navigateTo('play', null, {}); } }, '▶ Open Play'),
+    h('span.muted', { style: { fontSize: '12px' } }, 'The fleet as a wall display in this window, full screen; a display link below opens it on a TV.'));
 }

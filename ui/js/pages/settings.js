@@ -608,14 +608,17 @@ function sidebar(vis) {
       h('span.cm-about-links', extLink('GitHub ↗', REPO, 'Source code and releases'), extLink('Support ↗', ISSUES, 'Report a problem or ask a question'))));
 }
 
+/**
+ * The page's one line and the tab's status pill (Zabbix connected, alerts, requests). No page
+ * name and no "Config-Management" crumb: both are in the menus already, highlighted, and a name
+ * is shown once (the owner, 2026-11-14).
+ */
 function pageHeader(page, tab, t) {
   const pillEl = t.pill ? t.pill() : null;
   const actions = t.actions ? (t.actions() || []).filter(Boolean) : [];
   return h('header.cm-head',
     h('div.cm-head-t',
-      h('div.cm-crumb', 'Config-Management'),
-      h('h1', page.label, pillEl),
-      h('p', t.line || page.line)),
+      h('p', t.line || page.line, pillEl ? h('span.cm-head-pill', pillEl) : null)),
     actions.length ? h('div.cm-actions', ...actions) : null);
 }
 

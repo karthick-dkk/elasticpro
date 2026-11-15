@@ -55,6 +55,31 @@ defaults are created and edited in the UI and saved as JSON with encrypted secre
 REST console is a request bar with **Query | Results** side by side and the history table
 below (click a row to load, *Run* to re-run).
 
+**Overview** (Clusters › Overview, `#/clusters/overview`, the *└ Overview* sub-item under Clusters
+in the page menu and the *List · Overview* tabs on the page) is one cluster on one screen: the
+cluster's name, type and tags, version, URL and uuid with — in the corner — its open-alerts badge
+(a click opens Alerts for this cluster), its health pill and "N of M shards placed"; the Nodes and
+Indices cards; four gauges (CPU, Disk, JVM heap, Shards), each naming the node that is highest;
+Search (with the searches running over a minute, from the task list) and Latency-and-pressure
+rates from two readings of `_nodes/stats` (`core/node-rates.js` — "measuring · next poll" until two
+exist), and between them Devices & log delay — the devices in the cluster's last scheduled run and
+how many are late by the configured levels, from the Log Delay Dashboard's own summary; SLM and ILM, one status line each, from what the Clusters page's
+expanded row holds; and the Nodes (busiest first, with IP) and Indices (unhealthy first, then by
+size) tables, which scroll inside themselves so the page never does at 1280×720 and above. At the
+right of the tab row, ↻ refreshes this cluster now and the select beside it sets how often the
+board refreshes itself (10s / 30s / 1m / 5m, 30s by default, remembered per browser; only while the
+board is on screen and the tab visible). The top bar's chooser is the one cluster choice; with
+*All clusters* chosen the page opens on the cluster last chosen, and an address that names a
+cluster (`#/clusters/overview/<id>`) moves the chooser. Everything is drawn from what the app
+already holds for the cluster (health, nodes, allocation, settings, policies, snapshots, the alert
+list); the page itself reads the index list, the rate counters and — when the Nodes & shards page
+has not — the task list. A figure the cluster did not report is shown as not known, never as zero.
+The page's name is shown once, in the menu: no page draws its own name as a heading (the top bar
+keeps an `h1` for screen readers only). The top bar carries the brand, the cluster chooser, the
+bell and the person's name, and speaks up only in an abnormal state (the emergency stop, a failed
+report run). Every page ends in a footer — the theme button, "ElasticPro <version>", the repository
+— in the flow after the content, never over it.
+
 ## Configuration — from the UI, or a file
 
 Everything can be created and changed **in the app** (Config page: *+ Add cluster*, *+ Add
@@ -548,8 +573,16 @@ Up to ten tabs, each with its own request and its last response; the tabs are re
 this browser (IndexedDB) with secrets redacted (`ui/js/lib/redact.js`: passwords, tokens,
 keys, cloud credentials and pasted Authorization values, in the body — parsed as JSON, line by
 line for `_bulk`/`_msearch` — and in the path). Responses are never stored. The strip reads
-**Page 1, Page 2 …** by position (`tabLabel`); the request a tab holds is its tooltip and the
-echo line in the request card.
+**Page 1, Page 2 …** by position (`tabLabel`); the request a tab holds is its tooltip. The
+method and path are shown once, in the inputs (no echo line above them, none above the
+answer); the cluster is the top bar's chooser. The outcome — the status pill (green 2xx,
+amber 3xx/4xx and the read-only refusal, red 5xx and no answer, a grey dash before any run),
+time and size — sits beside Run (`core/response-status.js`, the one definition the history
+rows share), not in the Results card; while a request is in flight the pill is a spinner and
+"Running… 1.2 s" counting (the text node updated, the pill not rebuilt), with Run disabled.
+There is no read-only pill on the console: a write on Run goes through `ensureWrites()` (a
+read-only role refused with the reason; a locked session asked to allow writes by hand) and
+then `confirmWrite` — nothing is sent before both; Run's tooltip says which applies.
 
 **A request pasted or typed whole is recognised** (`ui/js/core/console-paste.js`,
 `parseRequestText`): `METHOD path` on one line (any case; a whole URL loses its scheme and

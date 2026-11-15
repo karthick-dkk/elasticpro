@@ -3117,3 +3117,134 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-fixbox { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); padding: 7px 9px; display: grid; gap: 3px; }
 .ld-fixwhere { font-size: 11.5px; color: var(--text-muted); }
 /* ld-rows: end */
+
+/* The footer at the end of every page (app.js appFooter), in the flow after the page's content —
+   never fixed, never over anything: a long page reaches it by scrolling, a short one has it at the
+   foot of the window (.app is a min-height:100vh column, #view grows). Three columns: the theme
+   button, "ElasticPro <version>", the repository. The owner's colours, the same in every theme:
+   grey #4b5563, white at 70 %. Not on Play's display. */
+.app-foot { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; min-height: 30px; padding: 0 14px;
+  font-size: 13px; color: rgba(255, 255, 255, .7); background: #4b5563; white-space: nowrap; }
+.app-foot > :last-child { text-align: right; }
+.app-foot a { color: rgba(255, 255, 255, .7); text-decoration: underline; }
+.app-foot a:hover { color: #fff; }
+.app-foot .theme-btn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: rgba(255, 255, 255, .7); cursor: pointer; }
+.app-foot .theme-btn:hover { color: #fff; background: rgba(255, 255, 255, .12); }
+.app-foot .theme-btn:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.app-foot .theme-btn svg { display: block; }
+html.play .app-foot { display: none; }
+/* The Clusters › Overview board gives the footer its row: the page shrinks, the footer never pushes it to scroll. */
+html.ov-fit .main > .app-foot { flex: none; }
+
+/* The page menu's one sub-item: └ Overview under Clusters (app.js renderNav), smaller and quieter than a page. */
+.nav button.nav-sub { font-size: 11.5px; padding: 7px 9px 8px 4px; gap: 4px; color: var(--text-muted); }
+.nav button.nav-sub .ico { font-size: 10px; opacity: .7; }
+.nav button.nav-sub[aria-current="page"] { color: var(--accent); }
+@media (min-width: 901px) {
+  html[data-menu="left"] #nav.nav button.nav-sub { height: 26px; padding-left: 22px; font-size: 11.5px; color: #a9a8a0; }
+}
+/* Config-Management's header: the tab's status pill after the page's line (no page name — it is in the menu). */
+.cm-head-pill { margin-left: 8px; }
+.cm-head-pill .pill { font-size: 11px; }
+
+/* ------------------------------ Clusters › Overview ------------------------------ */
+/* One cluster on one screen (pages/cluster-overview.js; docs/HANDBOOK.md "Overview"). The window
+   is the board: html and body stop scrolling, the board is a grid of five rows whose last takes
+   what is left, and the two panels in it scroll inside themselves. Below 1280 px the rows stack
+   and the page scrolls as any other. Tokens only: light and dark come from :root. */
+html.ov-fit, html.ov-fit body { height: 100%; overflow: hidden; }
+html.ov-fit .app { height: 100vh; min-height: 0; }
+html.ov-fit .main { min-height: 0; }
+html.ov-fit .page.ov-page { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 6px 16px 10px; }
+.cl-tabs { flex: none; margin-bottom: 8px; }
+.cl-tabs a { padding: 5px 10px; font-size: 12.5px; }
+/* The Overview's bar: the tabs, and at the right ↻ joined to the interval (the age is the button's title). */
+.ov-bar { display: flex; align-items: center; gap: 12px; flex: none; margin-bottom: 8px; }
+.ov-bar .cl-tabs { margin-bottom: 0; flex: 1 1 auto; }
+.ov-refresh { display: inline-flex; align-items: stretch; flex: none; }
+.ov-refresh .btn { height: 28px; padding: 0 9px; border-radius: var(--radius-sm) 0 0 var(--radius-sm); font-size: 14px; line-height: 1; }
+.ov-refresh select { height: 28px; padding: 0 4px 0 6px; font-size: 11.5px; border: 1px solid var(--border-strong); border-left: 0; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--surface-1); color: var(--text-primary); }
+.ov-board { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); gap: 8px; }
+.ov-row { display: grid; gap: 8px; min-width: 0; }
+.ov-top, .ov-rates { grid-template-columns: 2fr 1fr 1fr; }
+.ov-gauges { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ov-lifecycle { grid-template-columns: 1fr 1fr; }
+.ov-bottom { grid-template-columns: 1fr 1fr; min-height: 0; }
+.ov-card { min-width: 0; box-shadow: none; }
+.dense .ov-card { padding: 10px 14px; }
+.ov-fact-t { font-size: 14px; font-weight: 700; display: block; }
+.ov-fact { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.ov-fact-s { font-size: 12px; }
+/* the cluster card: the name block at the left, the pill and the placed line at the right */
+.ov-head { display: flex; gap: 12px; align-items: flex-start; }
+.ov-head-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ov-name { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-meta { color: var(--text-muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-version { margin-top: 4px; font-size: 14px; }
+.ov-url { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-uuid { font-size: 11px; color: var(--text-muted); }
+.ov-head-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 48%; }
+/* the corner: the alerts badge (a link) left of the health pill */
+.ov-head-pills { display: flex; align-items: center; gap: 8px; }
+.dense .pill.ov-health { font-size: 13.5px; padding: 3px 12px; }
+.dense .pill.ov-alerts { font-size: 12px; padding: 2px 9px; font-weight: 600; text-decoration: none; cursor: pointer; }
+a.pill.ov-alerts:hover { filter: brightness(.95); }
+.ov-placed { font-size: 12px; text-align: right; line-height: 1.35; }
+/* the gauges: text at the left, the ring at the right */
+.ov-gauge { display: flex; align-items: center; gap: 12px; }
+.ov-gauge-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ov-gauge-k { font-size: 12px; }
+.ov-gauge-node { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-gauge-c { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: 0; }
+.ring-gauge { position: relative; flex: none; display: grid; place-items: center; }
+.ring-gauge > svg { display: block; grid-area: 1 / 1; }
+.ring-gauge > .ring-centre { grid-area: 1 / 1; font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
+.ov-spacer { flex: 1 1 auto; }
+.ov-link { font-size: 12px; white-space: nowrap; }
+/* the rates, and the Devices & log delay card in their row */
+.ov-rate { display: flex; flex-direction: column; gap: 2px; }
+.ov-ld-line { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-ld-line b { font-variant-numeric: tabular-nums; }
+.ov-rate-v > b { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* the long-running searches under Search: the pill, each query (one line, the rest on hover), its time, the Tasks link */
+.ov-long { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 12px; min-width: 0; }
+.dense .pill.ov-long-pill { font-size: 11px; padding: 0 7px; font-weight: 600; flex: none; }
+.ov-long-q { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11.5px; }
+.ov-long-t { flex: none; font-variant-numeric: tabular-nums; }
+/* SLM and ILM: a heading line and one status line */
+.ov-lc { display: flex; flex-direction: column; gap: 4px; }
+.ov-lc-h { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ov-lc-h .ov-fact-t { display: inline; }
+.ov-lc-note { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-lc-line { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-lc-line .q { font-weight: 600; }
+.ov-lc-line .q .qdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; background: currentColor; }
+/* the two panels: a head (the order on hover) and a scroll box that takes the rest */
+.ov-panel { display: flex; flex-direction: column; min-height: 0; }
+.dense .ov-card.ov-panel { padding: 0; }
+.ov-panel-h { display: flex; align-items: center; gap: 10px; padding: 8px 14px 4px; flex: none; }
+.ov-panel-h h2 { margin: 0; font-size: 14px; font-weight: 700; }
+.ov-panel-s { overflow: auto; min-height: 0; flex: 1 1 auto; padding: 0 6px 4px; }
+.ov-tbl th { position: sticky; top: 0; }
+.dense .ov-tbl th { padding: 6px 10px; font-size: 11px; }
+.dense .ov-tbl td { height: 36px; padding: 0 10px; font-size: 12.5px; }
+.ov-tbl td:first-child, .ov-tbl th:first-child { padding-left: 12px; }
+.ov-tbl th.ov-bar-th { width: 120px; }
+.ov-node-name { white-space: nowrap; }
+.ov-ip { white-space: nowrap; color: var(--text-secondary); }
+.ov-master { margin-left: 6px; background: var(--accent); color: var(--on-accent); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-weight: 600; }
+.ov-idx-name { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-tbl td.num { white-space: nowrap; }
+/* The board is one screen from 1280 px up. Narrower, it stacks and the page scrolls. */
+@media (max-width: 1279px) {
+  html.ov-fit, html.ov-fit body { height: auto; overflow: auto; }
+  html.ov-fit .app { height: auto; min-height: 100vh; }
+  .ov-board { display: flex; flex-direction: column; }
+  .ov-top, .ov-rates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-top > .ov-head, .ov-rates > :first-child { grid-column: 1 / -1; }
+  .ov-gauges { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-lifecycle, .ov-bottom { grid-template-columns: 1fr; }
+  .ov-panel-s { max-height: 50vh; }
+}

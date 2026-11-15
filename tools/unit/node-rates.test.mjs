@@ -91,7 +91,6 @@ test('a counter unknown on either side yields an unknown rate, not a rate from z
 });
 
 test('recordReading keeps the last two readings per cluster and nodeRates measures from them', () => {
-  R.forgetReadings('c1');
   assert.equal(R.readingCount('c1'), 0);
   assert.equal(R.nodeRates('c1').measured, false);
   R.recordReading('c1', answer({ q: 10 }), 1000);
@@ -110,7 +109,6 @@ test('recordReading keeps the last two readings per cluster and nodeRates measur
   assert.equal(R.latestReadingAt('c1'), 21000, 'an older answer does not replace a newer reading');
   assert.equal(R.recordReading('c1', { acknowledged: true }), null);
   assert.equal(R.nodeRates('c1').activeTasks, null, 'no shard dataset read: tasks unknown');
-  R.forgetReadings('c1');
   assert.equal(R.nodeRates('other').measured, false);
 });
 

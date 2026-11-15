@@ -203,9 +203,10 @@ function fetchControl() {
 function bar() {
   const b = busy();
   const status = P.get('busy', `${b}`, () => (b ? h('span.muted.ld-busy', { role: 'status' }, h('span.spin'), ' Loading…') : h('span.ld-busy', { role: 'status' })));
-  const top = P.get('bar', '', () => h('div.rp-head.ld-bar', h('h1', 'Log Delay'), h('div.ld-bar-tabs'), h('div.ld-bar-right')));
-  mount(top.children[1], tabs());
-  mount(top.children[2], status, fetchControl());
+  // No "Log Delay" heading: the page's name is in the menu, once (the owner, 2026-11-14).
+  const top = P.get('bar', '', () => h('div.rp-head.ld-bar', h('div.ld-bar-tabs'), h('div.ld-bar-right')));
+  mount(top.children[0], tabs());
+  mount(top.children[1], status, fetchControl());
   return top;
 }
 
