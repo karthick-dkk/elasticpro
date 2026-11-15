@@ -382,11 +382,20 @@ function divide(segments, totalOpt) {
   return { parts, total };
 }
 
+/**
+ * `half: true` draws it as a half circle (the Shard allocation card: ≈200×116, stroke 20) with
+ * `centre: {big, small}` as the text under the arc and no legend of its own (`legend: false`);
+ * `width` and `stroke` size it. One definition for the 240° arc and the half circle.
+ */
 export function splitGauge(segments, opts = {}) {
+  const half = !!opts.half;
   const size = opts.size || 150;
-  const r = size / 2 - 13;
-  const cx = size / 2, cy = size / 2 + 7;
-  const START = 150, SWEEP = 240;
+  const sw = opts.stroke || (half ? 20 : 11);
+  const W = half ? (opts.width || 200) : size;
+  const r = half ? (W - sw) / 2 : size / 2 - 13;
+  const cx = W / 2, cy = half ? r + sw / 2 : size / 2 + 7;
+  const H = half ? Math.ceil(cy + sw / 2 + 2) : size;
+  const START = half ? 180 : 150, SWEEP = half ? 180 : 240;
   const { parts, total } = divide(segments, opts.total);
   const fmt = opts.format || ((v) => String(v));
 
@@ -399,18 +408,22 @@ export function splitGauge(segments, opts = {}) {
     return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${toDeg - fromDeg > 180 ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
   };
 
-  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, style: { width: `${size}px`, height: `${size}px` } });
+  const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+    'aria-label': `${fmt(total)} ${opts.centreLabel || 'total'}: ${parts.map((p) => `${fmt(p.value)} ${p.label}`).join(', ')}`,
+    style: { width: `${W}px`, height: `${H}px` } });
   // The track is the total. When the parts do not add up to it — a count the cluster did
   // not break down — the gap stays grey rather than being shared out among the parts.
-  s.append(svg('path', { d: arc(START, START + SWEEP),
-    style: { fill: 'none', stroke: 'var(--surface-3)', strokeWidth: 11, strokeLinecap: 'round' } }));
+  // The width as an attribute too: the style is what paints, the attribute is what a test
+  // without a CSS engine can read.
+  s.append(svg('path', { d: arc(START, START + SWEEP), 'stroke-width': sw,
+    style: { fill: 'none', stroke: 'var(--surface-3)', strokeWidth: sw, strokeLinecap: half ? 'butt' : 'round' } }));
 
   let at = START;
   for (const part of parts) {
     if (!total || part.value <= 0) continue;
     const span = SWEEP * (part.value / total);
-    const seg = svg('path', { d: arc(at, Math.min(START + SWEEP, at + span)),
-      style: { fill: 'none', stroke: part.color, strokeWidth: 11 } });
+    const seg = svg('path', { d: arc(at, Math.min(START + SWEEP, at + span)), 'stroke-width': sw,
+      style: { fill: 'none', stroke: part.color, strokeWidth: sw } });
     seg.append(svg('title', {}, `${part.label}: ${fmt(part.value)}`));
     s.append(seg);
     at += span;
@@ -421,13 +434,18 @@ export function splitGauge(segments, opts = {}) {
   const legendStyle = opts.legendColumn
     ? { display: 'grid', gap: '3px', justifyItems: 'start' }
     : { display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' };
-  return h('div', { style: { display: 'grid', justifyItems: 'center', gap: '2px' } },
-    h('div', { style: { position: 'relative', lineHeight: 0 } }, s,
-      h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeContent: 'center',
+  const centre = half && opts.centre
+    ? h('div', { style: { position: 'absolute', inset: 0, display: 'grid', alignContent: 'end', justifyItems: 'center',
+                          textAlign: 'center', lineHeight: 1.1, paddingBottom: '1px' } },
+        h('div', { style: { fontSize: '26px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' } }, opts.centre.big),
+        opts.centre.small ? h('div.muted', { style: { fontSize: '11px' } }, opts.centre.small) : null)
+    : h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeContent: 'center',
                           textAlign: 'center', lineHeight: 1.15 } },
         h('div', { style: { fontSize: '22px', fontWeight: 680 } }, fmt(total)),
-        h('div.muted', { style: { fontSize: '10.5px' } }, opts.centreLabel || 'total'))),
-    h('div', { style: legendStyle },
+        h('div.muted', { style: { fontSize: '10.5px' } }, opts.centreLabel || 'total'));
+  return h(`div.split-gauge${half ? '.half' : ''}`, { style: { display: 'grid', justifyItems: 'center', gap: '2px' } },
+    h('div', { style: { position: 'relative', lineHeight: 0 } }, s, centre),
+    opts.legend === false ? null : h('div', { style: legendStyle },
       ...parts.map((part) => h('div', {
         style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '11.5px' },
         title: `${part.label}: ${fmt(part.value)}`,
@@ -436,48 +454,6 @@ export function splitGauge(segments, opts = {}) {
                              background: part.color, flex: 'none' } }),
         h('b', { style: { fontVariantNumeric: 'tabular-nums' } }, fmt(part.value)),
         h('span.muted', part.label)))));
-}
-
-/**
- * The same split as splitGauge, small enough for a band one line tall: a donut of about
- * 44 px, the total named beside it, and every part's count to the right — the zeroes
- * included, because "0 unassigned" is what the reader came for. The slices are the parts
- * of one circumference (stroke dashes on one circle each), so a slice is hoverable and
- * titled like an arc segment.
- *
- * @param segments [{ key, label, value, color }]
- * @param opts { total, totalLabel, format, size, stroke }
- */
-export function splitDonut(segments, opts = {}) {
-  const { parts, total } = divide(segments, opts.total);
-  const fmt = opts.format || ((v) => String(v));
-  const size = opts.size || 44, sw = opts.stroke || 10;
-  const r = (size - sw) / 2, c = size / 2;
-  const C = 2 * Math.PI * r;
-  const label = opts.totalLabel || 'total';
-  const ring = (stroke, more = {}) => svg('circle', { cx: c, cy: c, r, transform: `rotate(-90 ${c} ${c})`,
-    style: { fill: 'none', stroke, strokeWidth: sw, ...more } });
-  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img',
-    'aria-label': `${fmt(total)} ${label}: ${parts.map((p) => `${fmt(p.value)} ${p.label}`).join(', ')}`,
-    style: { width: `${size}px`, height: `${size}px` } });
-  // The track is the total; a part the cluster did not break down stays grey.
-  s.append(ring('var(--surface-3)'));
-  let at = 0;
-  for (const part of parts) {
-    if (!total || part.value <= 0) continue;
-    const len = Math.min(C - at, C * (part.value / total));
-    const seg = ring(part.color, { strokeDasharray: `${len.toFixed(3)} ${(C - len).toFixed(3)}`, strokeDashoffset: (-at).toFixed(3) });
-    seg.append(svg('title', {}, `${part.label}: ${fmt(part.value)}`));
-    s.append(seg);
-    at += len;
-  }
-  return h('div.split-donut',
-    s,
-    h('div.split-total', h('b', fmt(total)), h('span.muted', label)),
-    h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
-      h('span.dot', { style: { background: part.color } }),
-      h('b', fmt(part.value)),
-      h('span.muted', part.label)))));
 }
 
 /* --------------------------------- honeycomb ---------------------------------- */
@@ -664,7 +640,7 @@ export function capacityChart(capacity, needs, opts = {}) {
 /**
  * A reading as a full ring with the figure in the middle — the Clusters › Overview gauges
  * (CPU, Disk, JVM heap, Shards). One part is a plain reading against `total` (a percentage
- * against 100); several parts are one population split, as splitDonut draws it, with the
+ * against 100); several parts are one population split, as splitGauge draws it, with the
  * centre saying whatever the caller means by it ("99%" of shards assigned). The one ring:
  * the four cards call this and nothing else draws one.
  *

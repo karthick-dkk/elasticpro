@@ -186,20 +186,15 @@ export function unreadable(what, reasonText, actions = null) {
 }
 
 /**
- * A labelled figure on one line: a small caption, the value, and at most a short grey
- * suffix (`sub`) — anything longer goes in the tooltip (`title`, which defaults to the
- * figure spelled out). Several of these make a band one line tall; the stacked
- * caption / big number / note shape they replaced made the glance card 250 px.
- *
- * Here rather than on a page so a second row of figures elsewhere cannot drift in size,
- * weight or casing — which is exactly how a row of figures stops reading as one row.
+ * A tile: one big number (22 px) over a small upper-case label, with a 3 px colour edge on the
+ * left — the Shard allocation and Query pressure cards of Nodes & shards are built from it.
+ * `edge` is the colour (none for a plain tile); `title` carries the breakdown that is not on
+ * screen; `extra` nodes go on the label line (a "show" link, a note).
  */
-export function figure(label, value, sub, { alert = false, title = null } = {}) {
-  // `alert`: a figure that needs attention is red, so it is seen before it is read.
-  return h(`div.fig-inline${alert ? '.alert' : ''}`, { title: title || `${label}: ${value}${sub ? ` · ${sub}` : ''}` },
-    h('span.k', label),
+export function edgeTile(value, label, { edge = null, title = null, extra = null, alert = false } = {}) {
+  return h(`div.edge-tile${alert ? '.alert' : ''}`, { title, style: edge ? { borderLeftColor: edge } : null },
     h('b.v', value),
-    sub ? h('span.d', sub) : null);
+    h('div.k', h('span', label), ...(Array.isArray(extra) ? extra : extra ? [extra] : [])));
 }
 
 /**
@@ -539,12 +534,15 @@ const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
  * coloured by `kind`'s thresholds (heap 75/85, disk and CPU 80/90 — nodes-shards.js, the one
  * set), and the number beside it — in the level's ink from amber up, so colour is never the
  * only signal. A figure the node did not report is a dash. Drawn by the Nodes & shards page
- * and the Clusters › Overview nodes panel; here so the two cannot drift.
+ * and the Clusters › Overview nodes panel; here so the two cannot drift. `text` replaces the
+ * number (load's "3.5 / 2.1"), `suffix` follows it in grey, `digits` rounds it.
  */
-export function usageBar(p, kind, title) {
+export function usageBar(p, kind, title, { text = null, suffix = null, digits = null } = {}) {
   if (!isFinite(p)) return h('span.muted', '–');
   const level = usageLevel(p, kind);
   return h('div.use-bar', { title },
     h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p}%`));
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null },
+      text !== null ? text : `${digits === null ? p : p.toFixed(digits)}%`),
+    suffix ? h('span.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, suffix) : null);
 }

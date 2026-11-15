@@ -135,6 +135,9 @@ fn is_read_post(bare: &str) -> bool {
         ("_render", ["template", id]) | ("_explain", [id]) => !id.starts_with('_'),
         ("_index_template", ["_simulate"]) => k == 0,
         ("_index_template", ["_simulate" | "_simulate_index", name]) => k == 0 && !name.starts_with('_'),
+        // Why one shard is unassigned: the shard is named in the body, so the API is a POST,
+        // and it changes nothing (the Nodes & shards "i" on an unassigned row).
+        ("_cluster", ["allocation", "explain"]) => k == 0,
         _ => false,
     }
 }
@@ -351,8 +354,13 @@ mod tests {
                   "/idx/_explain/doc-1", "/_sql?format=txt", "/_sql/translate", "/idx/_field_caps", "/_mget", "/idx/_eql/search",
                   "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze", "/_all/_search", "/_all/_count",
                   // The pages' own multi-index search, commas encoded.
-                  "/logstash-linux-2026.10.16%2Clogstash-windows-2026.10.16/_search", "/logs%2A/_count"] {
+                  "/logstash-linux-2026.10.16%2Clogstash-windows-2026.10.16/_search", "/logs%2A/_count",
+                  // One shard's allocation explanation: the shard travels in the body, nothing changes.
+                  "/_cluster/allocation/explain", "/_cluster/allocation/explain?include_yes_decisions=true"] {
             assert!(super::is_read("POST", p), "{p} reads");
+        }
+        for p in ["/idx/_cluster/allocation/explain", "/_cluster/allocation/explain/x", "/_cluster/reroute", "/_cluster/settings"] {
+            assert!(!super::is_read("POST", p), "{p} must count as a write");
         }
         for p in ["/_search/../_bulk", "/_search/%2e%2e/_delete_by_query", "/_search/..\\_bulk", "/idx/_delete_by_query#/_search",
                   "/idx/_doc/_search", "/idx/_update/_search", "/idx/_create/_search", "/_bulk", "/idx/_doc", "/_reindex?x=/_search",
