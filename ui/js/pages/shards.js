@@ -88,15 +88,26 @@ function applyFocus() {
 function showUnassigned() { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
 const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focus = name; return el; };
 
+/**
+ * The node the last draw put in `host`. The app gives every page the same `#view` element, so
+ * `host.isConnected` alone says nothing about WHICH page is on it: a reading that landed after
+ * the person had moved on (the processor counts, a `_nodes/stats` poll, the allocation setting)
+ * used to redraw this page over whatever was on screen. On screen means our own node is still
+ * in the host — or nothing has been drawn yet (a fresh render).
+ */
+let shown = null;
+const onScreen = () => !!host && host.isConnected && (shown === null || shown.isConnected);
+
 export function render(el) {
   host = el;
+  shown = null;
   el.classList.add('dense');
   applyFocus();
   draw();
   refresh();
 }
 export function onData() {
-  if (!host || !host.isConnected) return;
+  if (!onScreen()) return;
   draw();
   refresh();
 }
@@ -194,7 +205,8 @@ function scheduleRates(c, ms) {
   if (!e || e.timer) return;
   e.timer = setTimeout(() => {
     e.timer = null;
-    if (host && host.isConnected && !fleetView && isReachable(c.id) && activeClusters().some((x) => x.id === c.id)) loadRates(c);
+    // Only while this page is the one on screen; a page left behind polls nothing.
+    if (onScreen() && !fleetView && isReachable(c.id) && activeClusters().some((x) => x.id === c.id)) loadRates(c);
   }, ms);
 }
 
@@ -265,13 +277,14 @@ function keptBox(key, tag, attrs, kids) {
 }
 
 function draw() {
-  if (!host || !host.isConnected) return;
+  if (!onScreen()) return;
   const list = activeClusters();
-  if (!list.length) return mount(host, empty('No cluster selected'));
+  if (!list.length) { mount(host, empty('No cluster selected')); shown = host.firstChild; return; }
   built.begin();
   try {
     mount(host, ...list.map((c) => keptBox(`wrap:${c.id}`, 'div', { style: { marginBottom: '14px' } }, [block(c)])));
   } finally { built.end(); }
+  shown = host.firstChild;
   if (reveal && revealFocus(host, reveal)) reveal = null;
 }
 
