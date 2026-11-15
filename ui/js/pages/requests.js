@@ -29,6 +29,7 @@ import { confirmDialog } from '../ui/modal.js';
 import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES, gapLine, DATASETS } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty, keptCard, keptTable } from './common.js';
+import { refreshButton } from '../lib/freshness.js';
 import { tableSort } from '../lib/table-sort.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
   requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT, zabbixPushLine } from '../core/request-log.js';
@@ -309,7 +310,7 @@ function pageKids() {
     h('label.field', 'Result', select('outcome', [['all', 'Any result'], ['inflight', 'In flight'], ['queued', 'Queued (waiting for a slot)'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out'], ['refused', 'Refused by the gate']])),
     h('label.field', 'Slower than', select('slowerThanMs', [[0, 'Any time'], [500, '500 ms'], [2000, '2 s'], [10000, '10 s'], [30000, '30 s']])),
     h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: () => download(`elasticpro-requests-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(requestCsvRows(shownRows), CSV_HEADER), 'text/csv') }, 'Export CSV'),
-    h('button.btn.sm', { onclick: poll }, '↻ Refresh'));
+    refreshButton(poll, { title: 'read the request log again' }));
 
   // The gate's figures. From an older core that does not measure them: "—", never 0.
   const g = gateFigures(log);

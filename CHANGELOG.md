@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.65
+
+- **The footer is at the bottom of every page, full width** (the owner, 2026-11-15). It is the last row of the app column, after the page menu and the page: a short page has it at the bottom edge of the window, a long one reaches it by scrolling; never fixed. With the menu on the left it runs under the menu as well (the menu ends above it). Clusters › Overview keeps its one screen with the footer as the last row. The theme button now draws a white sun (Light), moon (Dark) or half-filled circle (System) as inline SVG, 28 px hit area, its title naming the current theme and the next.
+
+- **Indices: one search box** (the owner, 2026-11-15). The "Search index" field in the top toolbar is gone; the box above the table (wildcards, Not matching, Live / Snapshot / Live + Snapshot) is the only one. From day, To day and Status stay.
+
 ## 0.3.64
 
 - **Indices: select all means all** (the owner, 2026-11-15). The head tick selects every index the filters and the search match, on every page, and says "N selected" beside it; the bulk actions (Open, Close, Settings, maintenance, "Delete N indices…") act on all N. Ticking or unticking one row now keeps the head's tick, half-tick and count in step without redrawing the rows, and the head reads the matching set when pressed, not when it was drawn.

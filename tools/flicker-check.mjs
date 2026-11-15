@@ -84,7 +84,7 @@ const PAGES = [
   { id: 'alerts', search: '#alerts-search', hover: ['#view .al-row, #view tbody tr', '#view .seg-group button', '#view .pill'] },
   { id: 'overview', search: '#clusters-search', setup: async (F) => { await F.evaluate(() => document.querySelector('#view .cl-searchbox button')?.click()); },
     hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
-  { id: 'indices', search: '#idx-search, #idx-search2', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
+  { id: 'indices', search: '#idx-search', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   { id: 'shards', search: '#view input[type=search]', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   // The Log Delay page (was Logs & Delay, 0.3.60): every view. @c / @d are the fixture's first
   // cluster and its worst device. The pointer goes on a device row once one is drawn, else on a tab.

@@ -20,6 +20,7 @@
 import { h } from '../lib/dom.js';
 import { state, client, clusters } from '../core/state.js';
 import { card, table, pill, empty } from '../pages/common.js';
+import { refreshButton } from '../lib/freshness.js';
 import { modal, field, text, confirmDialog, inputDialog, nameList } from './modal.js';
 import { rowMenu, ICON, toast } from './menu.js';
 import { ensureWrites } from '../core/writes.js';
@@ -136,7 +137,7 @@ export function templatesView(c, { draw }) {
         h('button.btn.sm.primary', { onclick: () => editTemplate(c, tv.kind, null, draw) }, 'New template'),
         h('button.btn.sm', { 'data-act': 'tpl-compare', title: 'Read this kind of template from the clusters you pick and compare them',
           onclick: () => pickCompare(c, draw) }, 'Compare across clusters…'),
-        h('button.btn.sm', { disabled: !!lists.loading, onclick: () => loadCluster(c, draw) }, lists.loading ? 'Loading…' : '↻ Reload'),
+        refreshButton(() => loadCluster(c, draw), { busy: !!lists.loading, title: 'read the templates again' }),
       ]),
     tv.compare ? comparePanel(c, draw) : null);
 }

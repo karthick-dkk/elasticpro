@@ -13,6 +13,7 @@
 import { h, mount } from '../lib/dom.js';
 import { bridge } from '../core/transport.js';
 import { card, pill, statTile, empty, table } from './common.js';
+import { refreshButton } from '../lib/freshness.js';
 import { tableSort } from '../lib/table-sort.js';
 import { modal, field, text, select, val, confirmDialog } from '../ui/modal.js';
 import { clusters, activeClusters, state } from '../core/state.js';
@@ -509,7 +510,7 @@ function draw() {
 
     h('div.toolbar',
       h('button.btn.sm.primary', { onclick: () => editUser(null) }, '+ New ElasticPro user'),
-      h('button.btn.sm', { onclick: load }, '↻ Reload'),
+      refreshButton(load, { title: 'read the users again' }),
       h('div', { style: { marginLeft: 'auto' } },
         h('span.muted', { style: { fontSize: '11px' } },
           ui.caller ? `signed in as ${ui.caller.name}` : ''))),
@@ -647,7 +648,7 @@ function activityCard() {
      h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
        h('input', { type: 'checkbox', checked: ui.activityFailed, onchange: (e) => { ui.activityFailed = e.target.checked; loadActivity(); } }),
        'Failures only'),
-     h('button.btn.sm.ghost', { onclick: () => loadActivity() }, 'Refresh')]);
+     refreshButton(() => loadActivity(), { title: 'read the activity again' })]);
 }
 
 const LOGIN_KIND = {

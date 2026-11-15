@@ -213,9 +213,6 @@ function openReportsDaily() {
 
 function sourceBar(c, sourceList, total) {
   return h('div.toolbar',
-    h('label.field', 'Search index', h('input#idx-search', { type: 'search', placeholder: 'name, logs-*, !tmp-*…', value: ui.text,
-      title: 'Part of a name, or a pattern with * and ?; several separated by commas; ! in front for the ones that do not match', style: { minWidth: '200px' },
-      oninput: (e) => { ui.text = e.target.value; ui.page = 0; syncSearchBoxes(e.target); redrawTable(); } })),
     h('label.field', 'From day', h('input', { type: 'date', value: ui.from, onchange: (e) => { ui.from = e.target.value; draw(); } })),
     h('label.field', 'To day', h('input', { type: 'date', value: ui.to, onchange: (e) => { ui.to = e.target.value; draw(); } })),
     h('label.field', 'Status', (() => {
@@ -230,8 +227,7 @@ function sourceBar(c, sourceList, total) {
       // already fetched, so how old that is decides whether it is still true.
       freshnessBar(scrubFresh(datasetFreshness(c.id, 'indices'), c), () => load(true), { label: 'Indices', busy: ui.loading }),
       writeToggle(draw),
-      h('button.btn.sm', { onclick: () => { resetFilters(); draw(); } }, 'Clear'),
-      h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));
+      h('button.btn.sm', { onclick: () => { resetFilters(); draw(); } }, 'Clear')));
 }
 
 /** A column head that sorts (lib/table-sort.js): its id keeps keyboard focus across the redraw a sort causes. */
@@ -378,13 +374,12 @@ function buildTable(c, rows, allRows = rows) {
     h('tbody', ...(trs.length ? trs : [h('tr', h('td', { colspan: 13 }, empty('No indices match the filter')))]))));
 
   return h('div',
-    // The toolbar search sits above the charts; with them folded away it is still a
-    // scroll from the table, so the filter is repeated where the rows actually are.
+    // The one search box, where the rows are (the owner, 2026-11-15: one search only).
     h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '0 0 8px', flexWrap: 'wrap' } },
-      h('input#idx-search2', { type: 'search', value: ui.text, placeholder: 'name, logs-*, !tmp-* — or search live + snapshots…',
+      h('input#idx-search', { type: 'search', value: ui.text, placeholder: 'name, logs-*, !tmp-* — or search live + snapshots…',
         title: 'Part of a name, or a pattern with * and ?; several separated by commas; ! in front for the ones that do not match',
         style: { flex: '1', minWidth: '220px' },
-        oninput: (e) => { ui.text = e.target.value; ui.page = 0; syncSearchBoxes(e.target); redrawTable(); },
+        oninput: (e) => { ui.text = e.target.value; ui.page = 0; redrawTable(); },
         onkeydown: (e) => { if (e.key === 'Enter' && ev.scope !== 'live' && ui.text.trim()) searchEverywhere(c); } }),
       // The same as a leading "!": the indices the search does NOT match.
       h('button#idx-not.btn.sm', { type: 'button', 'aria-pressed': ui.not ? 'true' : 'false',
@@ -433,13 +428,6 @@ function paintSelection(c) {
   const box = $('#idx-all'), count = $('#idx-selcount'), bulk = $('#idx-bulk');
   if (box && count) paintHead(box, count, rows);
   if (bulk) mount(bulk, bulkBar(c, rows));
-}
-
-/** The toolbar and the over-table search are the same filter; keep them in step. */
-function syncSearchBoxes(source) {
-  for (const el of [$('#idx-search'), $('#idx-search2')]) {
-    if (el && el !== source && el.value !== ui.text) el.value = ui.text;
-  }
 }
 
 function tableCard(c, rows, all) {
