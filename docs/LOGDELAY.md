@@ -605,8 +605,14 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   the tab open — and an address that names a cluster (a By cluster link, an alert, a bookmark, Back)
   moves the chooser (`pages/log-delay.js reconcile`, the shell's `select-cluster`). The tabs link
   to the chosen cluster's views. Live Watch and Live logs read the chooser as they always did.
-* **One tools row** under the bar: the period (*Today* = the measurement windows,
-  then Last 7 / 30 days, This / Last month) and the **time zone** — plain text, never a chooser
+* **One tools row** under the bar, every control on one line at 30 px: the **time range** — one
+  button group on every tab, `5m · 10m · 30m · 1h · 3h · 12h · Custom` (`core/log-range.js RANGES`,
+  default 1h, remembered per browser; Custom opens From / To in the server's zone and Apply). Live
+  Watch and Live logs read it as minutes; the Dashboard and Devices ask the store for the local
+  days it touches (`from`/`to` `YYYY-MM-DD`, so a window inside one day is Today's measurement
+  windows) and, where the window is after the last scheduled run, say so in words ("No scheduled
+  measurement in the last 30 minutes — last run 11:40"), never zeros; *Report covers › Period
+  shown* is those days. Beside it the **time zone** — plain text, never a chooser
   (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
   counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
   (`timeZoneChipText`), "Time zone not detected" when no zone has a majority. **The chip is the

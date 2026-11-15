@@ -12,14 +12,14 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const R = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/log-range.js')).href);
 
 test('the ranges the selector offers, in order', () => {
-  assert.deepEqual(R.RANGES.map(([id]) => id), ['1m', '5m', '30m', '1h', '2h', '3h', '6h', '8h', '12h', 'custom']);
+  assert.deepEqual(R.RANGES.map(([id]) => id), ['5m', '10m', '30m', '1h', '3h', '12h', 'custom']);
 });
 
 test('a "Last …" range ends now; a custom one is its own two ends, or nothing', () => {
   const now = Date.UTC(2026, 10, 13, 3, 0, 0);
   assert.deepEqual(R.rangeBounds({ id: '5m' }, now), { from: now - 5 * 60000, to: now });
   assert.deepEqual(R.rangeBounds({ id: '12h' }, now), { from: now - 12 * 3600000, to: now });
-  assert.equal(R.rangeMinutes({ id: '8h' }, now), 480);
+  assert.equal(R.rangeMinutes({ id: '3h' }, now), 180);
   assert.deepEqual(R.rangeBounds({ id: 'custom', from: 1000, to: 5000 }), { from: 1000, to: 5000 });
   assert.equal(R.rangeBounds({ id: 'custom', from: 5000, to: 1000 }), null, 'from after to');
   assert.equal(R.rangeBounds({ id: 'custom', from: 5000 }), null, 'one end missing');

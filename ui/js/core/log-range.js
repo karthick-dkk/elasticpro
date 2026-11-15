@@ -7,9 +7,8 @@
 
 /** `[id, label, minutes]`, in the order the selector lists them; custom has no minutes. */
 export const RANGES = Object.freeze([
-  ['1m', 'Last 1 minute', 1], ['5m', 'Last 5 minutes', 5], ['30m', 'Last 30 minutes', 30],
-  ['1h', 'Last 1 hour', 60], ['2h', 'Last 2 hours', 120], ['3h', 'Last 3 hours', 180],
-  ['6h', 'Last 6 hours', 360], ['8h', 'Last 8 hours', 480], ['12h', 'Last 12 hours', 720],
+  ['5m', 'Last 5 minutes', 5], ['10m', 'Last 10 minutes', 10], ['30m', 'Last 30 minutes', 30],
+  ['1h', 'Last 1 hour', 60], ['3h', 'Last 3 hours', 180], ['12h', 'Last 12 hours', 720],
   ['custom', 'Custom', null],
 ]);
 export const DEFAULT_RANGE = '1h';
@@ -32,6 +31,12 @@ export function rangeBounds(r, now = Date.now()) {
   if (n.id === 'custom') return finite(n.from) && finite(n.to) && n.from <= n.to ? { from: n.from, to: n.to } : null;
   const minutes = RANGES.find(([k]) => k === n.id)[2];
   return { from: now - minutes * 60000, to: now };
+}
+
+/** "the last 30 minutes", or "the range" for a custom one: a range in a sentence. */
+export function rangeWords(r) {
+  const n = normaliseRange(r);
+  return n.id === 'custom' ? 'the range' : `the ${RANGES.find(([k]) => k === n.id)[1].toLowerCase()}`;
 }
 
 /** How long a range covers, in minutes; null for an incomplete custom range. */

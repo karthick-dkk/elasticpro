@@ -5,6 +5,10 @@
 - **The footer is at the bottom of every page, full width** (the owner, 2026-11-15). It is the last row of the app column, after the page menu and the page: a short page has it at the bottom edge of the window, a long one reaches it by scrolling; never fixed. With the menu on the left it runs under the menu as well (the menu ends above it). Clusters › Overview keeps its one screen with the footer as the last row. The theme button now draws a white sun (Light), moon (Dark) or half-filled circle (System) as inline SVG, 28 px hit area, its title naming the current theme and the next.
 
 - **Indices: one search box** (the owner, 2026-11-15). The "Search index" field in the top toolbar is gone; the box above the table (wildcards, Not matching, Live / Snapshot / Live + Snapshot) is the only one. From day, To day and Status stay.
+- **Log Delay: one time-range button group on every tab** (the owner, 2026-11-15). Dashboard, Devices, Live Watch and Live logs share `5m · 10m · 30m · 1h · 3h · 12h · Custom` (`core/log-range.js RANGES`; default 1h, remembered per browser; Custom opens From, To and Apply). The Dashboard and Devices ask the store for the local days the window touches, and where the window is after the last scheduled run they say so ("No scheduled measurement in the last 30 minutes — last run 11:40"); *Report covers › Period shown* follows the window. The Period list is gone.
+- **Log Delay: the tools row is one aligned line** — the range group and the Time zone chip are both 30 px, centred, no labels above.
+- **Log Delay: Fetch now is an icon** (refresh arrow, name and progress in its title and aria-label); the ▾ menu is unchanged.
+- **Log Delay: fewer descriptions** — the Dashboard subtitle, the counts line under the state bar, the By cluster and "How the last run read each cluster" subtitles are removed.
 
 ## 0.3.64
 

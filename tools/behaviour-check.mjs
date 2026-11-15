@@ -2827,7 +2827,8 @@ await go('log-delay');
     ok(location.hash === '#/log-delay/live', `live logs: the address reads ${location.hash}`);
     ok(tabOf('live').getAttribute('aria-current') === 'page', 'live logs: the Live logs tab is not marked');
     const range = doc.getElementById('ld-range');
-    ok(range && [...range.options].map((o) => o.value).join(',') === '1m,5m,30m,1h,2h,3h,6h,8h,12h,custom', `live logs: the time range offers ${range && [...range.options].map((o) => o.value).join(',')}`);
+    const rangeIds = () => [...doc.getElementById('ld-range').querySelectorAll('button')].map((b) => b.dataset.range).join(',');
+    ok(range && rangeIds() === '5m,10m,30m,1h,3h,12h,custom', `live logs: the time range offers ${range && rangeIds()}`);
     const heads = [...pane.querySelectorAll('#ld-live-logs thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
     ok(/^@timestamp \(UTC [+−]\d\d:\d\d\)$/.test(heads[0] || ''), `live logs: the time column does not name its offset: "${heads[0]}"`);
     // The event time beside it, written in the same zone (docs/LOGDELAY.md "Time zones"), its head saying so.
@@ -2850,11 +2851,11 @@ await go('log-delay');
       ok(now === other, `live logs did not follow the picked cluster: shows "${now}", picked "${other}"`);
     }
     // A newer range asks again, over that range.
-    range.value = '5m'; range.dispatchEvent(new window.Event('change', { bubbles: true }));
+    doc.querySelector('#ld-range [data-range="5m"]').click();
     await settleFor(500);
-    ok(doc.getElementById('ld-range').value === '5m', 'live logs: the range did not stay on Last 5 minutes');
+    ok(doc.querySelector('#ld-range [aria-pressed="true"]').dataset.range === '5m', 'live logs: the range did not stay on Last 5 minutes');
     ok(/Last 5 minutes/.test(pane.textContent), 'live logs: the chart does not say the range it covers');
-    range.value = '1h'; doc.getElementById('ld-range').value = '1h'; doc.getElementById('ld-range').dispatchEvent(new window.Event('change', { bubbles: true }));
+    doc.querySelector('#ld-range [data-range="1h"]').click();
     await settleFor(300);
 
     // Live Watch: coverage is per cluster, and every configured cluster is accounted for.
@@ -7326,7 +7327,7 @@ await settleFor(300);
 {
   // A fresh data directory has an empty store (only the hosted timer fills it), so the filled
   // pages are answered from tools/lib/logdelay-fixture.mjs, shaped as docs/LOGDELAY.md says.
-  const { logDelayAnswer } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/logdelay-fixture.mjs')).href);
+  const { logDelayAnswer, knobs: ldKnobs } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/logdelay-fixture.mjs')).href);
   const S = await load('core/state.js');
   const list = S.clusters().map((c) => ({ id: c.id, name: c.name }));
   const realFetch = globalThis.fetch;
@@ -7368,6 +7369,7 @@ await settleFor(300);
     await go('reports');
     const nav = [...doc.querySelectorAll('.rp-nav a')].find((a) => a.dataset.section === 'log-delay');
     ok(!!nav && nav.getAttribute('href') === '#/log-delay', `log delay: the Reports entry is not a link to the Log Delay page (${nav && nav.getAttribute('href')})`);
+    ldKnobs.lastRunAgoMs = 3 * 3600000;   // the last scheduled run is older than the default 1 h window
     press(nav);
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the fleet page did not draw');
     ok(location.hash === '#/log-delay', `log delay: the address reads ${location.hash}`);
@@ -7375,13 +7377,28 @@ await settleFor(300);
     ok(/Log Delay/.test((doc.querySelector('#nav button[aria-current="page"]') || {}).textContent || '') && /Log Delay/.test((doc.querySelector('#topbar h1') || {}).textContent || ''), 'log delay: the page is not called Log Delay');
     ok(!doc.querySelector('#view h1'), 'log delay: the page repeats its name in a heading');
     const fleet = view();
-    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 30), 'log delay: the fleet did not ask LOGDELAY_SUMMARY for 30 days');
+    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.from === m.to), 'log delay: the default 1 h window did not ask LOGDELAY_SUMMARY for one local day');
+    // One time range on every tab: 5m 10m 30m 1h 3h 12h Custom, 1h pressed; no Period select, no description lines.
+    ok([...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',') === '5m,10m,30m,1h,3h,12h,Custom' && !g('ld-period'), 'log delay: the Dashboard time range is not the one button group');
+    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '1h', 'log delay: the default range is not 1h');
+    // The window holds no scheduled run: said in words, never zeros.
+    ok(g('ld-window-note') && /No scheduled measurement in the last 1 hour — last run \d\d:\d\d/.test(g('ld-window-note').textContent), `log delay: no note for a window without a run (${(g('ld-window-note') || {}).textContent})`);
+    ldKnobs.lastRunAgoMs = 4 * 60000;
+    for (const gone of [/Every device that sends logs/, /last run = /, /in range = /, /most delayed first \(/, /pages asked, whether the list is complete/]) ok(!gone.test(fleet.textContent), `log delay: the description ${gone} is still on the Dashboard`);
+    ok(!g('ld-fleet-counts'), 'log delay: the counts line under the state bar is still drawn');
+    // The tools row is one line: every control the same height class, none a labelled field.
+    ok(!doc.querySelector('.ld-tools label.field') && doc.querySelector('.ld-tools .seg-group') && doc.querySelector('.ld-tools .ld-tz-chip'), 'log delay: the tools row is not the range group beside the time-zone chip');
     // The five count tiles: the three configured levels, another time zone, silent. No median, percentile or average anywhere.
     for (const k of ['below', 'delay', 'critical', 'tz', 'silent']) ok(!!fleet.querySelector(`[data-kpi="${k}"]`), `log delay: no ${k} tile`);
     ok(fleet.querySelectorAll('.ld-kpi').length === 5, `log delay: ${fleet.querySelectorAll('.ld-kpi').length} tiles, not five`);
     ok(!/median|p95|percentile|average/i.test(fleet.textContent), 'log delay: the Dashboard shows a median, percentile or average');
     const tileLabels = [...fleet.querySelectorAll('.ld-kpi .ld-kpi-l')].map((x) => x.textContent.trim());
     ok(tileLabels.join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent', `log delay: the tiles read ${tileLabels.join(' · ')} (levels from the config)`);
+    // A 30-day custom range: the charts are by day (the default 1 h window is Today's measurement windows).
+    g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);
+    g('ld-range-from').value = new Date(Date.parse(`${g('ld-range-to').value}:00Z`) - 29 * 86400000).toISOString().slice(0, 16);
+    g('ld-range-apply').click(); await settleFor(200);
+    await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 30, 'log delay: the charts did not follow a 30-day custom range');
     // Three panels on one y scale: the delay band, above the critical line, resolved delays — one bar per day, a day without totals a gap.
     const panels = [...view().querySelectorAll('#ld-charts .ld-chart-card h2')].map((x) => x.textContent.trim());
     ok(panels.join('|') === '30–60 min behind|Above 60 min behind|Resolved log delays', `log delay: the chart panels read ${panels.join(' · ')}`);
@@ -7427,7 +7444,7 @@ await settleFor(300);
     doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(80);
     ok(cPop.hidden, 'log delay: Escape did not close the cluster popover');
     // The tools row: period and time zone chip; the cluster is the top bar's one chooser, never a second select on the page.
-    ok(!g('ld-clusters') && g('ld-period') && g('cluster-select'), 'log delay: the tools row is not period + time zone with the top bar as the one cluster chooser');
+    ok(!g('ld-clusters') && g('ld-range') && g('cluster-select'), 'log delay: the tools row is not range + time zone with the top bar as the one cluster chooser');
     // The time zone: the chip is the majority zone of the devices in view, no counts; Expand lists every zone with its devices.
     const tzChipText = () => (g('ld-tz-chip') ? g('ld-tz-chip').textContent.replace(/\s*▾\s*$/, '').trim() : '');
     // Only measured devices are in view (two of the fixture's clusters were never measured), so the majority is the IST cluster's.
@@ -7468,11 +7485,16 @@ await settleFor(300);
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster') && location.hash === '#/log-delay', 'log delay: the Dashboard did not draw again after the zone filter');
     ok(/\+05:30 · \d+ of \d+ devices/.test(g('ld-by-cluster').textContent), `log delay: the By cluster Time zone column does not carry the device counts (${(g('ld-by-cluster').textContent.match(/Time zone[\s\S]{0,80}/) || [''])[0].replace(/\s+/g, ' ')})`);
     ok(!/· set\b/.test(g('ld-by-cluster').textContent) && (!/not detected/.test(g('ld-by-cluster').textContent) || /not detected · \d+ % agree/.test(g('ld-by-cluster').textContent)), 'log delay: a not-detected cluster does not name its agreement');
-    const per = g('ld-period'); per.value = 'last7'; per.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
-    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 7), 'log delay: Last 7 days did not ask for 7 days');
-    await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow the period to 7 days');
-    g('ld-period').value = 'today'; g('ld-period').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
-    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 1), 'log delay: Today did not ask for 1 day');
+    // Custom: 7 local days ending now → the summary is asked for those days and the charts are by day.
+    const rbtn = (id) => g('ld-range').querySelector(`[data-range="${id}"]`);
+    rbtn('custom').click(); await settleFor(150);
+    ok(g('ld-range-from') && g('ld-range-to') && g('ld-range-apply'), 'log delay: Custom did not open From, To and Apply');
+    g('ld-range-from').value = new Date(Date.parse(`${g('ld-range-to').value}:00Z`) - 6 * 86400000).toISOString().slice(0, 16);
+    g('ld-range-apply').click(); await settleFor(200);
+    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.to && m.from !== m.to), 'log delay: a 7-day custom range did not ask for its days');
+    await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow the range to 7 days');
+    rbtn('12h').click(); await settleFor(200);
+    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '12h', 'log delay: 12h did not stay pressed');
     await waitFor(() => g('ld-chart-critical') && g('ld-chart-critical').querySelectorAll('g.ld-bar').length >= 1 && g('ld-chart-critical').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
     ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === 0, 'log delay: Today has no delay/critical split (the core sends one per window)');
     // A bar opens Devices on its level.
@@ -7481,7 +7503,7 @@ await settleFor(300);
     press(doc.querySelector('.ld-tabs a[data-tab="fleet"]'));
     await waitFor(() => ldView() === 'fleet' && g('ld-charts'), 'log delay: the Dashboard did not draw again after the chart click');
     ok(/by measurement window/.test(view().textContent), 'log delay: Today does not say it is by window');
-    g('ld-period').value = 'last30'; g('ld-period').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+    rbtn('1h').click(); await settleFor(200);
     await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');
     // Export .xlsx is the log_delay report job.
     g('ld-export').click(); await settleFor(150);
@@ -7491,6 +7513,7 @@ await settleFor(300);
     ok(fetchWrap() && fetchWrap().dataset.phase === 'idle', `log delay: Fetch now starts in phase ${fetchWrap() && fetchWrap().dataset.phase}`);
     ok(fetchWrap() && fetchWrap().closest('.ld-bar'), 'log delay: Fetch now is not in the title bar');
     ok(g('ld-fetch-menu') && g('ld-fetch-menu').hidden, 'log delay: the Fetch now menu does not start hidden');
+    ok(g('ld-fetch-now').querySelector('svg') && g('ld-fetch-now').textContent.trim() === '' && /^Fetch now/.test(g('ld-fetch-now').getAttribute('aria-label') || ''), 'log delay: Fetch now is not an icon-only button with its name in aria-label');
     // With All clusters: no run, a toast says to pick one.
     const jobRunsBefore = lsent.filter((m) => m.type === 'JOB_RUN').length;
     g('ld-fetch-now').click(); await settleFor(100);
@@ -7587,6 +7610,7 @@ await settleFor(300);
       `log delay: Whole cluster sent ${JSON.stringify(clRun)}`);
     ok(fetchWrap().dataset.phase === 'running' && g('ld-fetch-now').disabled && caret.disabled, `log delay: a running Fetch now reads phase ${fetchWrap().dataset.phase}, buttons ${g('ld-fetch-now').disabled}/${caret.disabled}`);
     ok(!view().querySelector('.ld-fetch-status'), 'log delay: something is drawn beside the Fetch now button');
+    ok(g('ld-fetch-now').textContent.trim() === '' && /Starting|of \d+|Loading/.test(g('ld-fetch-now').title), `log delay: a running Fetch now says its progress in the title ("${g('ld-fetch-now').title}")`);
     await waitFor(() => fetchWrap().dataset.phase === 'done', 'log delay: Fetch now did not follow its run to the end', 9000);
     ok(lsent.some((m) => m.type === 'JOBS_LIST' && m.jobId === 'logdelay.measure'), 'log delay: Fetch now did not poll JOBS_LIST for the measurement');
     ok(/Measured .*4 of 4 devices/.test((doc.querySelector('.toast-wrap') || {}).textContent || ''), `log delay: the finished run is not said in a toast: "${(doc.querySelector('.toast-wrap') || {}).textContent}"`);
