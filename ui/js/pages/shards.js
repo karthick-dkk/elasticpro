@@ -16,16 +16,16 @@ import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetc
          datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { card, table, empty, pill, figure, connectionBanner, keptCard } from './common.js';
+import { card, table, empty, pill, figure, connectionBanner, keptCard, usageBar } from './common.js';
+import { PERPETUAL } from '../core/node-rates.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed } from '../core/writes.js';
 import { splitDonut, STATUS } from '../lib/charts.js';
-import { parseRetention } from '../core/volume.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
-import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode } from '../core/nodes-shards.js';
+import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode, staleIndices } from '../core/nodes-shards.js';
 
 let host = null;
 /**
@@ -265,7 +265,7 @@ const SLOW_TASK_MS = 30000;
  * tasks run for the life of the node; showing them as "slow queries" would bury the one
  * search that actually is.
  */
-const PERPETUAL = /geoip-downloader|cluster:monitor\/tasks\/lists|health-node|persistent/i;
+// PERPETUAL is core/node-rates.js's: the one list of tasks that never finish.
 
 /**
  * What the cluster is busy doing, as a body rather than a card — it shares a pane with
@@ -502,19 +502,6 @@ const LEVEL_FILL = { ok: STATUS.good, warn: STATUS.warning, crit: STATUS.critica
 const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
 
 /**
- * A percentage as the bar the Disk column has always drawn: a thin track, the filled part
- * coloured by `kind`'s thresholds, and the number beside it — in the level's ink from
- * amber up, so colour is never the only signal. A figure the node did not report is a dash.
- */
-function usageBar(p, kind, title) {
-  if (!isFinite(p)) return h('span.muted', '–');
-  const level = usageLevel(p, kind);
-  return h('div.use-bar', { title },
-    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p}%`));
-}
-
-/**
  * Load 1m / 5m. A load average is not a percentage; what makes it one is the node's
  * processor count — 3.5 is idle on 32 cores and saturated on 2 — so the bar is load 1 m over
  * the cores `_nodes/os` reported, capped at 100 %. Without that count there is no bar, only
@@ -566,7 +553,7 @@ function roleTitle(letters) {
 function accountingBody(c, d) {
   const acct = diskAccounting(d, state.indices.get(c.id));
   const dang = danglingFor(c.id);
-  const stale = staleIndices(c, state.indices.get(c.id));
+  const stale = staleIndices(c.liveRetention, state.indices.get(c.id));
 
   // The two figures are always worth showing — "how much do the indices hold against how
   // much is on disk" is asked whether or not they disagree. The explanation below only
@@ -637,22 +624,6 @@ function accountingBody(c, d) {
 }
 
 
-
-/**
- * Indices whose data is older than the retention this cluster promises.
- *
- * "Stale" in the sense that matters when disk is short: still on disk, still costing,
- * and past the point the policy said they would be kept. Read from the date in the index
- * name, so a cluster whose indices are not dated reports none rather than guessing.
- */
-function staleIndices(c, indices) {
-  const ret = parseRetention(c.liveRetention);
-  if (!ret || !Array.isArray(indices)) return { list: [], bytes: 0, policy: '' };
-  const cutoff = new Date(Date.now() - ret.days * 86400000).toISOString().slice(0, 10);
-  const list = indices.filter((i) => i.day && i.day < cutoff)
-    .sort((a, b) => String(a.day).localeCompare(String(b.day)));
-  return { list, bytes: list.reduce((n, i) => n + (i.size || 0), 0), policy: ret.label };
-}
 
 /** _cat gives strings; everything downstream wants the numbers as numbers. */
 function normalise(r) {

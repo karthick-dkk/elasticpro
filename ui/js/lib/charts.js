@@ -658,3 +658,42 @@ export function capacityChart(capacity, needs, opts = {}) {
   }
   return el;
 }
+
+/* ----------------------------------- ring gauge ----------------------------------- */
+
+/**
+ * A reading as a full ring with the figure in the middle — the Clusters › Overview gauges
+ * (CPU, Disk, JVM heap, Shards). One part is a plain reading against `total` (a percentage
+ * against 100); several parts are one population split, as splitDonut draws it, with the
+ * centre saying whatever the caller means by it ("99%" of shards assigned). The one ring:
+ * the four cards call this and nothing else draws one.
+ *
+ * No parts, or a zero total, is an empty track with the centre text as given ('–'): a ring
+ * drawn from a figure nobody reported would be a measurement nobody took.
+ *
+ * @param parts [{ value, color, label }]
+ * @param opts  { total, size (px, 82), stroke (px, 10), centre (text), label (aria-label), title }
+ */
+export function ringGauge(parts, opts = {}) {
+  const { parts: ps, total } = divide(parts, opts.total);
+  const size = opts.size || 82, sw = opts.stroke || 10;
+  const r = (size - sw) / 2, c = size / 2;
+  const C = 2 * Math.PI * r;
+  const ring = (stroke, more = {}) => svg('circle', { cx: c, cy: c, r, transform: `rotate(-90 ${c} ${c})`,
+    style: { fill: 'none', stroke, strokeWidth: sw, ...more } });
+  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, 'aria-hidden': 'true', style: { width: `${size}px`, height: `${size}px` } });
+  s.append(ring('var(--surface-3)'));
+  let at = 0;
+  for (const part of ps) {
+    if (!total || part.value <= 0) continue;
+    const len = Math.min(C - at, C * (part.value / total));
+    if (len <= 0) break;
+    const seg = ring(part.color, { strokeDasharray: `${len.toFixed(3)} ${(C - len).toFixed(3)}`, strokeDashoffset: (-at).toFixed(3) });
+    if (part.label) seg.append(svg('title', {}, `${part.label}: ${part.value}`));
+    s.append(seg);
+    at += len;
+  }
+  return h('div.ring-gauge', { role: 'img', 'aria-label': opts.label || String(opts.centre || ''), title: opts.title || null,
+    style: { width: `${size}px`, height: `${size}px` } },
+    s, h('span.ring-centre', opts.centre === undefined || opts.centre === null ? '' : String(opts.centre)));
+}

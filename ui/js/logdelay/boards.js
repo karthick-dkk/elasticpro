@@ -40,7 +40,8 @@ import {
   PERIODS, periodQuery, minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts,
+  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands,
+  LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
@@ -248,22 +249,8 @@ function problem(ent, what) {
   return h('div.banner.err', `${what} could not be read: ${r.message || r.kind || 'no answer'}`);
 }
 
-/**
- * The band names on the cluster's levels: "Below 30 min", "30–60 min", "Above 60 min" — the
- * three configured levels, and nothing else. Levels the core has not said read as words.
- */
-function bands(levels) {
-  const l = levels || {};
-  const a = finite(l.delayFrom) ? l.delayFrom : null; const b = finite(l.criticalOver) ? l.criticalOver : null;
-  return {
-    below: a === null ? 'Below the delay line' : `Below ${a} min`,
-    mid: a === null || b === null ? 'Delay' : `${a}–${b} min`,
-    high: b === null ? 'Critical' : `Above ${b} min`,
-    late: a === null ? 'at the delay level or more' : `${a} min or more`,
-    lateShort: a === null ? 'late' : `${a}+ min`,
-    backShort: a === null ? 'Back below the line' : `Back below ${a}`,
-  };
-}
+// The band names ("Below 30 min", "30–60 min", "Above 60 min") are core/logdelay-report.js bands(): the
+// Clusters › Overview card reads the same names.
 
 /** The levels every cluster in a summary shares, or null when they differ (then each cluster's own). */
 function sharedLevels(byCluster) {
@@ -453,7 +440,7 @@ function heatMap(res, period, b, id) {
     lab.append(svg('title', {}, r.name));
     kids.push(lab);
     if (r.never) {
-      kids.push(svg('text', { x: hL + 6, y: yy + ch / 2 + 3.5, class: 'ld-heat-never' }, 'never measured: not in the scheduled measurement yet'));
+      kids.push(svg('text', { x: hL + 6, y: yy + ch / 2 + 3.5, class: 'ld-heat-never' }, LD_NEVER_MEASURED));
       return;
     }
     for (let i = 0; i < n; i++) {
@@ -529,9 +516,9 @@ function fleetView() {
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
 
   const notice = B.get('fleet:notice', rid, () => (!res.schedule || res.schedule.supported === false
-    ? h('div.banner.warn', 'This server does not run the scheduled measurement (hosted edition only): nothing new is measured.')
+    ? h('div.banner.warn', LD_NO_SCHEDULER)
     : res.schedule.enabled === false
-      ? h('div.banner.warn', 'The scheduled measurement is switched off; the figures stop at its last run. ',
+      ? h('div.banner.warn', `${LD_SCHEDULE_OFF} `,
         h('button.linkish', { type: 'button', onclick: () => navigateTo('settings', { section: 'schedule' }) }, 'Config-Management › Data › Scheduled log delay'))
       : null));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
@@ -594,7 +581,7 @@ function fleetView() {
           : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
-        neverRun ? h('td', { colspan: 9 }, h('span.muted', 'never measured: not in the scheduled measurement yet'))
+        neverRun ? h('td', { colspan: 9 }, h('span.muted', LD_NEVER_MEASURED))
           : [h('td', stateBar(c, cb)),
             h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now` }, countText(c.lateNow)),
             h('td.num', { title: `share of the cluster's devices ${cb.late} now` }, pctText(c.latePct)),

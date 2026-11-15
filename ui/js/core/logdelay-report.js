@@ -33,6 +33,33 @@ export const LD_SECTION = 'log-delay';
  */
 export const LD_COLOURS = Object.freeze({ ok: 'var(--ld-ok)', delay: 'var(--ld-delay)', crit: 'var(--ld-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)' });
 
+/**
+ * What the boards and the Clusters › Overview card say about the scheduled measurement — one
+ * wording each, so the two pages cannot drift.
+ */
+export const LD_NEVER_MEASURED = 'never measured: not in the scheduled measurement yet';
+export const LD_SCHEDULE_OFF = 'The scheduled measurement is switched off; the figures stop at its last run.';
+export const LD_NO_SCHEDULER = 'This server does not run the scheduled measurement (hosted edition only): nothing new is measured.';
+
+/**
+ * The band names on a cluster's levels: "Below 30 min", "30–60 min", "Above 60 min" — the three
+ * configured levels, and nothing else. Levels the core has not said read as words. The boards'
+ * tiles and the Clusters › Overview card read the same names.
+ */
+export function bands(levels) {
+  const l = levels || {};
+  const fin = (v) => typeof v === 'number' && Number.isFinite(v);
+  const a = fin(l.delayFrom) ? l.delayFrom : null; const b = fin(l.criticalOver) ? l.criticalOver : null;
+  return {
+    below: a === null ? 'Below the delay line' : `Below ${a} min`,
+    mid: a === null || b === null ? 'Delay' : `${a}–${b} min`,
+    high: b === null ? 'Critical' : `Above ${b} min`,
+    late: a === null ? 'at the delay level or more' : `${a} min or more`,
+    lateShort: a === null ? 'late' : `${a}+ min`,
+    backShort: a === null ? 'Back below the line' : `Back below ${a}`,
+  };
+}
+
 /* --------------------------------- the messages --------------------------------- */
 
 /** A LOGDELAY_* reply that says the core does not know the message: an older core. */
