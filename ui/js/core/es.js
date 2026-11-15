@@ -336,6 +336,19 @@ export class EsClient {
     return this.json('GET', `/_cat/nodes?format=json&bytes=b&h=${encodeURIComponent(h)}`);
   }
   /**
+   * The counters behind the Query pressure card (core/node-rates.js): searches and their time,
+   * documents indexed and deleted, the search and write pools' rejections and queues, and the
+   * breaker trips — per node, filtered to those fields so the answer does not grow with what
+   * else a node reports. Two readings make the rates; one is only a baseline.
+   */
+  nodesRates() {
+    const want = ['name', 'indices.search.query_total', 'indices.search.query_time_in_millis',
+      'indices.indexing.index_total', 'indices.indexing.delete_total',
+      'thread_pool.search.rejected', 'thread_pool.search.queue', 'thread_pool.write.rejected', 'thread_pool.write.queue',
+      'breakers.*.tripped'].map((f) => `nodes.*.${f}`).join(',');
+    return this.json('GET', `/_nodes/stats/indices,thread_pool,breaker?filter_path=${want}`);
+  }
+  /**
    * Each node's processor count (`os.allocated_processors`, what Elasticsearch sizes its
    * thread pools by): the scale a load average is read against. _cat/nodes has no such
    * column, so it is one more call, made by the page that draws the load.

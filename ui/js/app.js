@@ -1,15 +1,14 @@
 /** ElasticPro - shell, router, setup flow. */
 
 import { h, $, mount, clear } from './lib/dom.js';
-import { ago, dur } from './lib/fmt.js';
 import { idb } from './lib/idb.js';
 import { coalesce } from './lib/coalesce.js';
 import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
-import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
+import { state, bus, setConfig, refreshAll, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, mergedAlerts, openAlertCounts, syncFleet } from './core/state.js';
-import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
+import { toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
 import { EXAMPLE_YAML } from './core/example.js';
@@ -20,7 +19,7 @@ import { tryVaultCredential } from './ui/credential-dialog.js';
 import { createNewConfig, editCluster, unlockSealed } from './ui/config-editor.js';
 import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
-import { aboutMini } from './ui/about.js';
+import { aboutMini, REPO } from './ui/about.js';
 import { createReporter, createLease, sessionStore } from './core/alert-events.js';
 import { alertEventsPut, isSupported as routingSupported } from './core/data-routing.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
@@ -28,6 +27,8 @@ import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './cor
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } from './core/evidence.js';
+// Clusters › Overview: the one sub-item of the page menu, and the section a hash of the Clusters page names.
+import { clustersSection, overviewHash, OVERVIEW } from './core/cluster-overview.js';
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
@@ -82,7 +83,6 @@ import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
 import { setPageGate } from './core/intent.js';
 import { registerPages } from './core/page-labels.js';
-import { refreshAge } from './core/cluster-detail.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -98,7 +98,9 @@ const PAGES = [
   // The page menu (board of 2026-11-05): Alerts · Clusters · Indices · Nodes & shards · Log
   // Delay · REST · Snapshots · Reports · Jobs (Jobs plan, 2026-11) · Config-Management.
   { id: 'alerts',    label: 'Alerts',         icon: '⚠', mod: pAlerts,    multi: true,  minRole: 'user' },
-  { id: 'overview',  label: 'Clusters',       icon: '▦', mod: pOverview,  multi: true,  minRole: 'guest' },
+  // `path`: its address is #/clusters (and #/clusters/overview for its Overview section — pages/cluster-overview.js);
+  // the id stays `overview`, so every navigateTo('overview'), focus and #/overview still land here.
+  { id: 'overview',  label: 'Clusters',       icon: '▦', mod: pOverview,  multi: true,  minRole: 'guest', path: 'clusters' },
   { id: 'indices',   label: 'Indices',        icon: '≡', mod: pIndices,   multi: false, minRole: 'user' },
   { id: 'shards',    label: 'Nodes & shards', icon: '☷', mod: pShards,    multi: true,  minRole: 'user', defaultSingle: true },
   // Log Delay (was "Logs & Delay", id `logs`, until 0.3.60; #/logs still opens it — reports/route.js):
@@ -216,6 +218,35 @@ const THEMES = [
   { id: 'dark-blue', label: '\u25D5 Dark blue' },
   { id: 'warm',      label: '\u25D0 Warm' },
 ];
+/** The theme on screen: the root's data-theme, 'system' when none. */
+const themeNow = () => document.documentElement.getAttribute('data-theme') || 'system';
+/**
+ * Choose a theme \u2014 Your settings and the footer's button both come here, so there is one way a
+ * theme is painted and kept: applied at once, saved with the account when the core keeps
+ * settings and in this browser always (core/prefs.js savePref).
+ */
+function setTheme(value) {
+  applyTheme(value);
+  topbarKey = ''; renderTopbar();
+  paintFooter();
+  savePref('theme', value || null).then((p) => { prefs = p; }).catch((e) => toast(`Not kept: ${e.message}`, 'warn', 5000));
+}
+/**
+ * The footer's theme cycle (the owner, 2026-11-15): Light \u2192 Dark \u2192 System, one icon each \u2014 sun,
+ * moon, half-circle. A theme outside the cycle (Dark blue, Warm, from Your settings) goes to Light next.
+ */
+const THEME_CYCLE = [
+  { id: 'light', name: 'Light', icon: '\u2600' },
+  { id: 'dark', name: 'Dark', icon: '\u263E' },
+  { id: 'system', name: 'System', icon: '\u25D0' },
+];
+function themeStep(id) {
+  const i = THEME_CYCLE.findIndex((t) => t.id === id);
+  const cur = i >= 0 ? THEME_CYCLE[i] : { id, name: (THEMES.find((t) => t.id === id) || { label: id }).label.replace(/^\S+\s/, ''), icon: '\u25D0' };
+  const next = THEME_CYCLE[(i + 1) % THEME_CYCLE.length];
+  const after = THEME_CYCLE[(i + 2) % THEME_CYCLE.length];
+  return { cur, next, after };
+}
 
 
 /**
@@ -232,7 +263,7 @@ function yourSettings(anchor) {
     themes: embedded ? null : THEMES,
     who: me ? { name: me.name, role: me.role } : null,
     onChange: (key, value) => {
-      if (key === 'theme') { applyTheme(value); topbarKey = ''; renderTopbar(); }
+      if (key === 'theme') { setTheme(value); return; }
       if (key === 'menu') { applyMenuPosition(value); navBuiltFor = ''; topbarKey = ''; closeYourSettings(); renderNav(); renderTopbar(); }
       // Applied at once; kept with the account when the core keeps them, and in this browser always.
       savePref(key, value || null).then((p) => { prefs = p; }).catch((e) => toast(`Not kept: ${e.message}`, 'warn', 5000));
@@ -414,11 +445,53 @@ function renderShell() {
       h('div.topbar#topbar'),
       h('nav.nav#nav')));
 
-  const main = h('main.main', h('div.page#view'));
+  // Under every page (the owner, 2026-11-14): who made it, which version, where it lives. Not
+  // Play's full-screen display (app.css html.play). It names nothing of the fleet, so an evidence
+  // page keeps it too.
+  const main = h('main.main', h('div.page#view'), appFooter());
 
   mount(root, h('div.app', header, main));
   renderNav();
   renderTopbar();
+}
+
+/**
+ * The footer (the owner, 2026-11-15), three columns: the theme button (one icon, cycling Light →
+ * Dark → System — the same setting Your settings keeps), "ElasticPro <version>" (the core's
+ * version from PING, the figure the About dialog and Config-Management's About card show), and
+ * the repository (ui/about.js REPO, the one place it is written; a new tab). In the flow after the
+ * page's content — never fixed. Inside Zabbix the theme follows the Zabbix user's, so the button
+ * is not offered there.
+ */
+function appFooter() {
+  const theme = embedded ? null : h('button.theme-btn#app-foot-theme', { type: 'button', onclick: () => setTheme(themeStep(themeNow()).next.id) });
+  const foot = h('footer.app-foot#app-foot', { role: 'contentinfo' },
+    h('span.app-foot-l', theme),
+    h('span#app-foot-version', footerVersion()),
+    h('span.app-foot-r', h('a', { href: REPO, target: '_blank', rel: 'noopener noreferrer', title: 'ElasticPro on GitHub' }, REPO.replace(/^https?:\/\//, ''))));
+  paintFooter(foot);
+  return foot;
+}
+/**
+ * "ElasticPro <version>" from the running core alone (PING's `version`, the About dialog's source):
+ * no version is written in ui/, and before PING answers it is "ElasticPro", never a guessed number
+ * (the owner, 2026-11-15).
+ */
+function footerVersion() {
+  const v = coreInfo && typeof coreInfo.version === 'string' && coreInfo.version && coreInfo.version !== '?' ? coreInfo.version : '';
+  return v ? `ElasticPro ${v}` : 'ElasticPro';
+}
+/** The version lands with PING, after the shell is built; the theme button names the theme on screen. Text and titles alone are touched. */
+function paintFooter(root = document) {
+  const el = root.querySelector('#app-foot-version');
+  const t = footerVersion();
+  if (el && el.textContent !== t) el.textContent = t;
+  const btn = root.querySelector('#app-foot-theme');
+  if (!btn) return;
+  const { cur, next, after } = themeStep(themeNow());
+  const label = `Theme: ${cur.name} (click for ${next.name}, then ${after.name})`;
+  if (btn.textContent !== cur.icon) btn.textContent = cur.icon;
+  if (btn.getAttribute('aria-label') !== label) { btn.setAttribute('aria-label', label); btn.title = `Theme: ${cur.name} · click for ${next.name}, then ${after.name}`; btn.dataset.theme = cur.id; }
 }
 
 /**
@@ -487,6 +560,13 @@ function renderNav() {
     shown.forEach((p) => {
       nav.append(h('button', { dataset: { page: p.id }, onclick: () => go(p.id) },
         h('span.ico', p.icon), h('span', p.label)));
+      // Clusters › Overview, the menu's one sub-item (the owner, 2026-11-14: "cluster └ overview"):
+      // one cluster on one screen. The address names the section; go() draws it.
+      if (p.id === 'overview') {
+        nav.append(h('button.nav-sub', { dataset: { page: p.id, section: OVERVIEW }, title: 'One cluster on one screen',
+          onclick: () => { location.hash = overviewHash(); go(p.id); } },
+        h('span.ico', '└'), h('span', 'Overview')));
+      }
     });
     if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
@@ -515,7 +595,9 @@ function renderNav() {
   const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
-    if (here === id) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
+    // A sub-item is current only when its section is the one on screen; its page's own button is current for both.
+    const cur = here === id && (!b.dataset.section || clustersSection(location.hash) === b.dataset.section);
+    if (cur) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
     else if (b.hasAttribute('aria-current')) b.removeAttribute('aria-current');
     // The alert count belongs on the tab: it is the reason to go there. Nothing else
     // gets a badge — the tabs used to show a shortcut number that no longer exists.
@@ -652,6 +734,9 @@ function renderTopbar() {
   // Refresh — nothing that counts, names or colours the rest of the fleet.
   const L = layout();
   const ev = L.evidence;
+  // One cluster at a time, no "All clusters": an evidence page, or a page section that shows one
+  // cluster (Clusters › Overview says so through `singleCluster`).
+  const single = ev || !!(page.mod.singleCluster && page.mod.singleCluster());
   const mine = (list) => (ev ? list.filter((c) => c.id === state.selected) : list);
   // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
   const a = ev ? [] : openAlertsNow();
@@ -662,7 +747,7 @@ function renderTopbar() {
   const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
     a.length, crit, needCreds.length, badCreds.length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
-    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster, pausedKey(state.selected), menuPosition]);
+    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, single, L.needsCluster, pausedKey(state.selected), menuPosition]);
   if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
@@ -681,14 +766,14 @@ function renderTopbar() {
   // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
   // that cannot be reached says so in the list itself, so nobody picks it expecting data.
   // (An evidence page offers one cluster at a time: its shell shows nothing of the fleet.)
-  if (page.multi && !ev) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
+  if (page.multi && !single) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
   clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
   markUnreachable(sel);
   // As wide as the longest name, not the longest option: the "— unreachable" mark comes and
   // goes, and a <select> sized by it resized the top bar, wrapped it onto a second line and
   // moved the page under the reader. Capped, so a fleet of long names keeps the bar on one
   // line; the list it opens shows every name whole.
-  const longest = Math.max(ev ? 0 : `All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
+  const longest = Math.max(single ? 0 : `All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
   sel.style.width = `${Math.min(26, Math.max(12, longest + 1))}ch`;
   resolveSelection(page);
   sel.value = state.selected;
@@ -701,7 +786,9 @@ function renderTopbar() {
     // The product name, and nothing else: the config filename is an implementation detail.
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
-    h('h1', page.home ? (PAGES.find((p) => p.id === page.home) || page).label : page.label),
+    // The page's name is shown once, in the menu (the owner, 2026-11-14); this one is for screen
+    // readers only — one h1 per page, read, not drawn.
+    h('h1.sr-only', page.home ? (PAGES.find((p) => p.id === page.home) || page).label : page.label),
     // Evidence: the same chooser, one cluster at a time — no "All clusters", no finder (its
     // placeholder counts the fleet) and the dot is that cluster's, not the fleet's.
     ev && !evCluster ? null
@@ -727,8 +814,9 @@ function renderTopbar() {
     // clusters may not, since it holds them all.
     pausedPill({ selected: state.selected, mayEnd: mayStop(me), refusal: stopRefusal(me),
       onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
-    // Report jobs running in the background (ui/reports-pill.js): one element that keeps
-    // its own text, so job progress never rebuilds the bar. Hidden on a core without reports.
+    // A report run that failed (ui/reports-pill.js): one element that keeps its own text, so job
+    // progress never rebuilds the bar. Absent while reports run or sit idle — the owner
+    // (2026-11-14): the bar shows nothing in a normal state.
     reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest'), evidence: ev }),
     // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
     ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
@@ -741,72 +829,24 @@ function renderTopbar() {
       ? h('span.pill.grey', { title: `Rendered from a snapshot file collected elsewhere${state.snapshot && state.snapshot.host ? ' on ' + state.snapshot.host : ''}. The browser is making no network requests.` },
           h('i.dot'), 'snapshot')
       : null,
-    // When the fleet was last refreshed is the badge on the Refresh button (tickStatus): whole
-    // minutes, the time on hover.
-    // With the server's fleet cache there is nothing for a page to poll: the core goes to the
-    // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
-    // would only be a switch for load that no longer exists, so this says how what lands
-    // reaches the page instead: live (repainted as it arrives) or quiet (held until you pause).
-    fleetMode() && !isSnapshotMode() && !ev
-      ? (redrawPolicy() === 'live'
-        ? h('span.pill.green', { title: `${serverLead()}; `
-            + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
-            + 'Config-Management › System › Defaults › Live redraw changes this.' }, h('i.dot'), 'live')
-        : h('span.pill.grey', { title: `${serverLead()}. `
-            + (redrawPolicy() === 'pending'
-              ? 'The page does not move while you are using it; what has landed is drawn a few seconds after you pause'
-              : 'The page keeps what it shows until you press Refresh or open another page')
-            + '. Refresh asks it to fetch the clusters on screen now. Config-Management › System › Defaults › Live redraw changes this.' },
-          h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
-      : null,
-    h('button.btn.sm', {
-      hidden: isSnapshotMode() || fleetMode() || ev,
-      onclick: () => {
-        state.autoRefresh = !state.autoRefresh;
-        state.nextRefreshAt = Date.now() + state.defaults.refreshIntervalSec * 1000;
-        idb.setKV('autoRefresh', state.autoRefresh);
-        renderTopbar();
-      },
-      class: state.autoRefresh ? '' : 'ghost',
-      title: state.autoRefresh
-        ? `Auto-refresh is on (every ${state.defaults.refreshIntervalSec}s). Click to turn it off.`
-        : 'Auto-refresh is off. Data only updates when you press Refresh. Click to turn it on.',
-    }, state.autoRefresh ? `\u23F8 Auto ${state.defaults.refreshIntervalSec}s` : '\u25B6 Auto off'),
-    ev && L.needsCluster ? null
-    : isSnapshotMode()
+    // The Refresh button with its minutes badge and its ▾ menu, the Auto toggle, the live / quiet /
+    // manual pill, the Reports · idle pill and the ▶ Play button are gone from the bar (the owner,
+    // 2026-11-14: "remove this completely; make it default settings as configured"). Refreshing
+    // runs on the configured defaults (System › Defaults: Auto-refresh, Refresh every; the fleet
+    // cache's own schedule) with no control here; `r` still refreshes the selection; Play opens
+    // from Config-Management › Play (and a display link). The bar says something only in an
+    // abnormal state: the emergency stop (pausedPill) or a failed report run (reportsPill).
+    // A snapshot file keeps its way to a newer one.
+    isSnapshotMode() && !(ev && L.needsCluster)
       ? h('label.btn.sm', { style: { position: 'relative', overflow: 'hidden' }, title: 'Open a newer snapshot file' }, '↻ Load newer',
           h('input', { type: 'file', accept: '.json,application/json',
             style: { position: 'absolute', inset: '0', opacity: '0', cursor: 'pointer' },
             onchange: (e) => openSnapshot(e.target.files[0]) }))
-      : h('span', { style: { display: 'inline-flex', gap: '2px' } },
-          h('button.btn.sm#refresh-btn', {
-            onclick: () => refreshAll({ force: true, selected: true }),
-            title: 'Refresh the selected cluster now, or all of them on "All clusters" (r)',
-          }, '↻ Refresh', ev ? null : h('span.age#refresh-status', { 'aria-live': 'off' })),
-          // A full refresh is thirteen calls per cluster. When what you are watching is
-          // one of them — a snapshot you just started, an index you just deleted —
-          // waiting for the other twelve is the difference between a control that feels
-          // instant and one you press twice.
-          rowMenu(REFRESH_MODULES.filter((m) => m.id !== 'all').map((m) => ({
-            label: m.label,
-            title: m.hint,
-            onClick: async () => {
-              const n = await refreshModule(m.id, { selected: true });
-              // Through the core the fetch is queued and the answers arrive as they land;
-              // "refreshed" would claim more than is known at this moment.
-              toast(fleetMode()
-                ? `${m.label.replace(' only', '')} requested on ${n} cluster${n === 1 ? '' : 's'} — updates as the server fetches them`
-                : `${m.label.replace(' only', '')} refreshed on ${n} cluster${n === 1 ? '' : 's'}`, 'ok', 3000);
-            },
-          })), { label: '▾', title: 'Refresh one part only' })),
+      : null,
     // Inside Zabbix the theme follows the Zabbix user's; a second switch here would be one
     // that the next page load undoes.
     // The bell lists every cluster's notices; it stays off an evidence page and comes back
     // with everything in it when the person leaves.
-    // The wall display: full screen, the same figures. Not on an evidence page (it shows the fleet).
-    ev || !visiblePages().some((p) => p.id === 'play') ? null
-      : h('button.btn.sm#play-btn', { type: 'button', onclick: () => { try { fullscreen().request().catch(() => {}); } catch (_) { /* no API: Play opens in the window */ } go('play'); },
-          title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)' }, '\u25B6 Play'),
     ev ? null : notificationBell(),
     // Your settings (page menu, theme, opens on, sign out), from the person's name. With the
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
@@ -816,25 +856,11 @@ function renderTopbar() {
 }
 
 /**
- * The badge on Refresh: whole minutes since the last refresh ("0m", "19m", "1h 5m"), the
- * same rule every Refresh button in ElasticPro follows (core/cluster-detail.js refreshAge).
- * The exact time, and on the portable build when the next automatic refresh is due, are
- * on hover; a spinner while a refresh is running.
+ * The bar used to carry a Refresh button whose badge counted the minutes since the last refresh;
+ * the button is gone (the owner, 2026-11-14) and the bar has nothing that moves with the clock.
+ * Kept as the hook the refresh and tick events call, so a control that comes back has its place.
  */
-function tickStatus() {
-  const el = $('#refresh-status');
-  if (!el) return;
-  const btn = el.parentElement;
-  if (state.refreshing) { mount(el, h('span.spin')); el.hidden = false; el.title = 'refreshing…'; return; }
-  const left = Math.max(0, state.nextRefreshAt - Date.now());
-  const t = refreshAge(state.lastRefresh);
-  if (el.textContent !== t) el.textContent = t;
-  el.hidden = !t;
-  el.title = state.lastRefresh
-    ? `Last refreshed ${new Date(state.lastRefresh).toLocaleString()}${fleetMode() ? '' : state.autoRefresh ? ` · next in ${dur(left)}` : ' · manual'}`
-    : '';
-  if (btn) btn.setAttribute('aria-label', state.lastRefresh ? `Refresh — last refreshed ${ago(state.lastRefresh)}` : 'Refresh');
-}
+function tickStatus() {}
 
 /* ------------------------------ evidence layout ------------------------------ */
 
@@ -915,7 +941,8 @@ let lastCluster = '';
 function resolveSelection(page) {
   // An evidence page shows one cluster: the one it was left on, else the one last chosen,
   // else the first. fleetView is not touched, so a fleet page after it is "All clusters" again.
-  if (EVIDENCE_PAGES.has(page.id)) {
+  // So does a page section that shows one cluster (Clusters › Overview, `singleCluster`).
+  if (EVIDENCE_PAGES.has(page.id) || (page.mod.singleCluster && page.mod.singleCluster())) {
     const pick = evidenceSelection(state.selected, lastCluster, clusters().map((c) => c.id));
     if (pick) state.selected = pick;
     return;
@@ -955,6 +982,9 @@ let playReturn = '';
 
 /** Set while go() runs after the person said yes to leaving with unsaved changes. */
 let leavingConfirmed = false;
+
+/** The address go() last drew, so the hashchange it causes is not drawn a second time. */
+let routedHash = '';
 
 export function go(id) {
   id = pageAlias(id);
@@ -1005,15 +1035,20 @@ export function go(id) {
   // Drawn afresh from state below: whatever the gate was holding for the old drawing is in it.
   redrawGate.reset();
   // A section of the same page (#/reports/capacity) stays in the address; anything else is the page.
+  // A page with a `path` (Clusters: #/clusters) is addressed by it, whatever id opened it.
   const here = parseHash(location.hash);
-  const hash = here.page === page.id && here.rest ? `#/${page.id}/${here.rest}` : `#/${page.id}`;
+  const base = page.path || page.id;
+  const hash = here.page === page.id && here.rest ? `#/${base}/${here.rest}` : `#/${base}`;
   if (location.hash !== hash) location.hash = hash;
+  routedHash = location.hash;
   resolveSelection(page);
   syncEvidence();
   renderNav();
   renderTopbar();
   const view = $('#view');
   if (!view) return;
+  // The footer is at the end of every page: a shell built another way (a frame, a test harness) gets it here.
+  if (!$('#app-foot') && view.parentElement) view.parentElement.append(appFooter());
   // Only when the page actually changed. go() is also how a page redraws itself after a
   // cluster is picked, and that must keep your position the way every other redraw now
   // does. Before the new page is drawn, while there is almost nothing to lay out: done
@@ -1222,6 +1257,7 @@ async function boot() {
   state.caller = me ? { name: me.name, role: me.role, scoped: !!me.scoped, playOnly: isDisplay() } : null;
   pPlay.configure({ display: isDisplay(), onExit: () => go(playReturn && playReturn !== 'play' ? playReturn : 'overview') });
   try { coreInfo = (await workerStatus()) || coreInfo; } catch (_) { /* dev bridge missing */ }
+  paintFooter();
   await readSnapshotRunning();
   // A display link reads only what Play needs: the bell's server copy is not among it.
   if (isDisplay()) setNotificationSink(null); else connectNotificationStore(coreInfo);
@@ -1267,7 +1303,7 @@ function connectNotificationStore(info) {
 // keep coreInfo (version, tunnels, snapshot-running) current
 setInterval(async () => {
   if (!state.config || isSnapshotMode()) return;
-  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderNav(); } } catch (_) { /* ignore */ }
+  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderNav(); paintFooter(); } } catch (_) { /* ignore */ }
 }, 10000);
 
 // An expired or revoked session: back to the gate rather than a screen of stale numbers
@@ -1445,6 +1481,9 @@ window.addEventListener('hashchange', () => {
   if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) { go(wanted); return; }
   // Another section of the page on screen (#/reports/daily → #/reports/capacity).
   const p = PAGES.find((x) => x.id === currentPage);
+  // A page whose sections differ in what the chooser offers (Clusters: the List shows the fleet, the
+  // Overview one cluster) is drawn again as the shell draws a page — selection, top bar, menu and all.
+  if (wanted === currentPage && p && p.mod.singleCluster) { if (location.hash !== routedHash) go(wanted); return; }
   if (wanted === currentPage && p && p.mod.onRoute) { try { p.mod.onRoute(); } catch (err) { console.error(err); } }
 });
 

@@ -33,8 +33,19 @@ import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, 
 import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
 import { repoOverview } from '../core/snapshot-evidence.js';
+// Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
+import * as board from './cluster-overview.js';
+import { clustersSection, OVERVIEW, LIST } from '../core/cluster-overview.js';
 
 let host = null;
+/** The section on screen: the List (this file) or the Overview (pages/cluster-overview.js). */
+let section = LIST;
+/**
+ * Whether the page is showing one cluster: the Overview section. The shell reads it (app.js
+ * resolveSelection, renderTopbar, the hashchange listener) to pick a cluster as the evidence pages
+ * do, to offer no "All clusters", and to draw the page again when the address moves between sections.
+ */
+export const singleCluster = () => clustersSection(location.hash) === OVERVIEW;
 /** Rows the operator opened or closed by hand; what the rest show is the preference. */
 const openedByHand = new Set();
 const closedByHand = new Set();
@@ -218,6 +229,9 @@ function askOnOpen() {
 }
 
 export function render(el) {
+  section = clustersSection(location.hash);
+  if (section === OVERVIEW) { listLeave(); board.render(el); return; }
+  board.onLeave();
   host = el; el.classList.add('dense'); trackHeadHeight();
   // "Go to" from an unreachable alert (core/alert-goto.js): that cluster's row, in view.
   const f = takeFocus('overview');
@@ -227,9 +241,16 @@ export function render(el) {
   // The Refresh badge counts minutes; nothing else on the page moves on its own.
   if (!ageTimer) ageTimer = setInterval(() => { if (host && host.isConnected) paintAges(); else onLeave(); }, 30000);
 }
-export function onData() { if (host && host.isConnected) { askOnOpen(); draw(); } }
-/** The page's own timers stop with it: the badge tick and every open row's live readings. */
+export function onData() {
+  if (section === OVERVIEW) { board.onData(); return; }
+  if (host && host.isConnected) { askOnOpen(); draw(); }
+}
+/** The page's own timers stop with it: the badge tick and every open row's live readings — and the Overview's poll. */
 export function onLeave() {
+  board.onLeave();
+  listLeave();
+}
+function listLeave() {
   if (ageTimer) { clearInterval(ageTimer); ageTimer = null; }
   for (const L of live.values()) if (L.timer) { clearTimeout(L.timer); L.timer = null; }
 }
@@ -424,6 +445,8 @@ function draw() {
   built.begin();
 
   mount(host,
+    // List · Overview, under the page's title: the same row the Overview draws (one definition of where the other is).
+    built.get('cl-tabs', LIST, () => board.clustersTabs(LIST)),
     downNote(unreachableRows(rows).length),
     summaryCard(rows, all),
   );

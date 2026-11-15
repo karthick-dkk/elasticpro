@@ -11,6 +11,8 @@ import { diagnoseCluster } from '../core/diagnose.js';
 import { configErrorText } from '../core/volume-daily.js';
 import { slmExempt, ulmLabel, ULM_WHY } from '../core/cluster-kind.js';
 import { trustCert, untrustCert, trustHostKey, untrustHostKey, tunnelSecret, tunnelReconnect } from '../core/es.js';
+import { STATUS } from '../lib/charts.js';
+import { usageLevel } from '../core/nodes-shards.js';
 
 export function card(title, sub, body, actions) {
   return h('section.card',
@@ -526,4 +528,23 @@ export function snapshotCellFor(c, d, staleHours) {
 /** The amber banner for a volume reply's `configError`; null when there is none. */
 export function configErrorBanner(err) {
   return err ? h('div.banner.warn.vol-config-error', { role: 'status' }, configErrorText(err)) : null;
+}
+
+/** The fill and the ink for a usage level (core/nodes-shards.js usageLevel). */
+const LEVEL_FILL = { ok: STATUS.good, warn: STATUS.warning, crit: STATUS.critical };
+const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
+
+/**
+ * A percentage as the bar the Disk column has always drawn: a thin track, the filled part
+ * coloured by `kind`'s thresholds (heap 75/85, disk and CPU 80/90 — nodes-shards.js, the one
+ * set), and the number beside it — in the level's ink from amber up, so colour is never the
+ * only signal. A figure the node did not report is a dash. Drawn by the Nodes & shards page
+ * and the Clusters › Overview nodes panel; here so the two cannot drift.
+ */
+export function usageBar(p, kind, title) {
+  if (!isFinite(p)) return h('span.muted', '–');
+  const level = usageLevel(p, kind);
+  return h('div.use-bar', { title },
+    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p}%`));
 }

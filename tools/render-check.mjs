@@ -94,7 +94,9 @@ const LD_MOVED = [['reports/log-delay', 'fleet'], ['reports/log-delay/fixes', 'd
 const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'zabbix/zabbix', 'alerts/triggers',
   'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
-const PAGES = ['alerts', 'overview', 'indices', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
+// `overview/overview`: Clusters › Overview, one cluster on one screen (the page reads the section from
+// the address and canonicalises it to #/clusters/overview/<cluster>).
+const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
   // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST.
   'jobs', 'jobs/history', 'jobs/settings',

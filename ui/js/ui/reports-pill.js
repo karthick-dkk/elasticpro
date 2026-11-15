@@ -13,19 +13,29 @@
  */
 
 import { h } from '../lib/dom.js';
-import { reports, onReports, startReportsPoll, pillText, jobCounts, openReportJobs } from '../core/reports.js';
+import { reports, onReports, startReportsPoll, openReportJobs } from '../core/reports.js';
 
 let el = null;
 
+/** The report jobs that failed, as the poller lists them (core/reports.js, status 'failed'). */
+export function failedJobs(snap) {
+  return ((snap && snap.jobs) || []).filter((j) => j && j.status === 'failed');
+}
+
+/**
+ * The owner (2026-11-14): the bar shows nothing in a normal state. So the pill is drawn only
+ * when a report run FAILED — "Reports · 1 failed", red — and is absent while jobs run, wait or
+ * sit idle (the Reports page and its tab's dot say those). Unknown until the first answer, and
+ * gone for good on an older core or a refusal.
+ */
 function sync() {
   if (!el) return;
-  const c = jobCounts(reports);
-  const busy = c.running + c.queued > 0;
-  // Unknown until the first answer, and gone for good on an older core or a refusal.
-  el.hidden = reports.supported !== true;
-  el.textContent = pillText(reports);
-  el.classList.toggle('rp-busy', busy);
-  el.classList.toggle('grey', !busy);
+  const failed = failedJobs(reports);
+  el.hidden = reports.supported !== true || !failed.length;
+  el.textContent = `Reports · ${failed.length} failed`;
+  el.title = `${failed.length} report job${failed.length === 1 ? '' : 's'} failed: ${failed.slice(0, 3).map((j) => j.name || j.type || j.id).join(', ')}${failed.length > 3 ? '…' : ''}. Opens Reports › Exports & schedules with the report jobs.`;
+  el.classList.toggle('red', failed.length > 0);
+  el.classList.toggle('grey', !failed.length);
 }
 
 /**
@@ -38,7 +48,7 @@ export function reportsPill({ snapshot = false, guest = false, evidence = false 
   if (!el) {
     el = h('button#reports-pill.pill.rp-pill.grey', {
       type: 'button', hidden: true,
-      title: 'Report jobs running in the background. Opens Reports › Exports & schedules with the report jobs.',
+      title: 'A report job failed. Opens Reports › Exports & schedules with the report jobs.',
       onclick: () => openReportJobs(),
     });
     onReports(sync);

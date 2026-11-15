@@ -15,9 +15,13 @@
 
 import { parseHash } from '../reports/route.js';
 import { shardAllocation, nodeRoles } from './cluster-detail.js';
-import { isDataNode } from './cluster-boxes.js';
-import { usageLevel } from './nodes-shards.js';
+import { isDataNode, slmCard, ilmCard } from './cluster-boxes.js';
+import { usageLevel, staleIndices } from './nodes-shards.js';
 import { byLevel, worstOf } from './alert-levels.js';
+import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js';
+import { clusterKind } from './cluster-kind.js';
+import { durationMs } from './snapshot-list.js';
+import { bands, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
 
 /* ------------------------------------ the route ------------------------------------ */
 
@@ -196,3 +200,121 @@ export function rateText(v) {
 
 /** Whether a nodeRates() answer has a rate yet (two polls exist). */
 export const measured = (r) => !!(r && r.measured);
+
+/* ------------------------------- devices and log delay ------------------------------- */
+
+/**
+ * The Devices & log delay card from one cluster's LOGDELAY_SUMMARY (`ldSummary({clusterIds: [id],
+ * days: 1})` — the Log Delay Dashboard's own answer, read once per refresh): the devices in the
+ * last scheduled run (the Dashboard's `devicesInLastRun`), how many of them are late by the
+ * CONFIGURED levels (`totals.delay` in the delay band, `totals.critical` over the critical line —
+ * the tiles' quantities), when the cluster was last measured and when the next run is due, and
+ * the words for a measurement that is not there (the boards' own, one wording each).
+ * → { state: 'ok'|'never'|'off'|'unsupported'|'error'|'none', message, inLastRun, delay, critical,
+ *     late, bands, lastRunAt, nextDueAt }
+ */
+export function devicesDelay(res, clusterId) {
+  const out = { state: 'none', message: null, inLastRun: null, delay: null, critical: null, late: null, bands: bands(null), lastRunAt: null, nextDueAt: null };
+  if (!res) return out;
+  if (res.unsupported) return { ...out, state: 'unsupported', message: res.message || 'This server has no log delay report yet.' };
+  if (res.ok === false) return { ...out, state: 'error', message: res.message || 'the log delay summary could not be read' };
+  const sch = res.schedule || null;
+  const mine = (res.byCluster || []).find((c) => c && c.id === clusterId) || null;
+  const lv = (mine && mine.levels) || null;
+  out.bands = bands(lv);
+  out.lastRunAt = mine && Number.isFinite(mine.lastRunAt) ? mine.lastRunAt : null;
+  out.nextDueAt = sch && sch.state && Number.isFinite(sch.state.nextDueAt) ? sch.state.nextDueAt : null;
+  if (!sch || sch.supported === false) return { ...out, state: 'unsupported', message: LD_NO_SCHEDULER };
+  if (out.lastRunAt === null) return { ...out, state: 'never', message: LD_NEVER_MEASURED };
+  const t = res.totals || {};
+  const n = (v) => (Number.isFinite(Number(v)) && v !== null && v !== undefined ? Number(v) : null);
+  out.inLastRun = n(res.devicesInLastRun);
+  out.delay = n(t.delay);
+  out.critical = n(t.critical);
+  out.late = out.delay === null && out.critical === null ? null : (out.delay || 0) + (out.critical || 0);
+  out.state = sch.enabled === false ? 'off' : 'ok';
+  out.message = sch.enabled === false ? LD_SCHEDULE_OFF : null;
+  return out;
+}
+
+/* ------------------------------- long-running searches ------------------------------- */
+
+/** A search is long-running from here (the owner: "more than 1 min"). */
+export const LONG_SEARCH_MS = 60000;
+
+/**
+ * The searches running longer than `minMs`, longest first, from the `_cat/tasks?detailed` rows
+ * the Tasks panel reads (core/es.js tasks(): action, node, running_time_ns, description):
+ * [{ description, node, ms }]. null when the rows are not a list — not read, or refused — so
+ * the card says "not readable" rather than "none".
+ */
+export function longRunningSearches(rows, { minMs = LONG_SEARCH_MS } = {}) {
+  if (!Array.isArray(rows)) return null;
+  const out = [];
+  for (const t of rows) {
+    if (!t || !/search/i.test(String(t.action || ''))) continue;
+    const ns = fig(t.running_time_ns);
+    const ms = Number.isFinite(ns) ? ns / 1e6 : durationMs(t.running_time);
+    if (ms === null || !(ms > minMs)) continue;
+    out.push({ description: String(t.description || '').replace(/\s+/g, ' ').trim(), node: String(t.node || ''), ms });
+  }
+  return out.sort((a, b) => b.ms - a.ms);
+}
+
+/* ------------------------------------ SLM and ILM ------------------------------------ */
+
+/** The operation pill of SLM or ILM: { tone, word } — 'running' green, anything else red, not read grey. */
+export function operationPill(mode) {
+  if (!mode) return { tone: 'grey', word: 'not read' };
+  const m = String(mode).toLowerCase();
+  return { tone: m === 'running' ? 'green' : 'red', word: m };
+}
+
+/**
+ * The SLM card's one line, from what the Clusters page's expanded row already has (cluster-boxes.js
+ * slmCard — the one definition of "no policy" / "not used" / "not known"): the operation pill, the
+ * policy that takes the log indices, and its last run — result, when, how long, how many indices
+ * (the snapshot's own figures from the listing the app holds; null where it has none).
+ * → { pill, kind, policy, status: 'Success'|'Failed'|null, at, durationMs, indices, why, note }
+ */
+export function slmSummary(d, c, defaults) {
+  const pattern = logPatternOf(c, defaults);
+  const view = lifecycleView('SLM', d, pattern, c);
+  const card = slmCard(d, view, pattern, clusterKind(c).ulm);
+  const out = { pill: operationPill(d && d.slmStatus && d.slmStatus.operation_mode), kind: card.kind, policy: card.policy || null,
+    status: card.status || null, at: card.at || null, durationMs: null, indices: null, why: card.why || null, note: card.note || null };
+  if (card.kind === 'unused') out.pill = { tone: 'grey', word: 'not used' };
+  if (card.kind !== 'ok' || !out.policy) return out;
+  const p = (d.slm || []).find((x) => x.id === out.policy);
+  const run = p && (out.status === 'Failed' ? p.last_failure : p.last_success);
+  const name = run && run.snapshot_name;
+  if (name) {
+    for (const list of Object.values((d && d.snapshots) || {})) {
+      const s = (list || []).find((x) => x.id === name);
+      if (s) { out.durationMs = durationMs(s.duration); out.indices = Number.isFinite(Number(s.indices)) ? Number(s.indices) : null; break; }
+    }
+  }
+  return out;
+}
+
+/**
+ * The ILM card's one line (cluster-boxes.js ilmCard and lifecycle-errors.js ilmErrorsOf are the
+ * definitions; nodes-shards.js staleIndices the past-retention figure): the operation pill, how
+ * many log indices are managed, how many are past the cluster's retention and their size, how
+ * many are in an ILM error step.
+ * → { pill, known, state, managed, total, stale: { count, bytes, policy }, errors, errorsKnown, why }
+ */
+export function ilmSummary(d, c, defaults, indices, now = Date.now()) {
+  const pattern = logPatternOf(c, defaults);
+  const card = ilmCard(d, pattern);
+  const errs = ilmErrorsOf(d, pattern);
+  const st = staleIndices(c && c.liveRetention, indices, now);
+  return {
+    pill: operationPill(d && d.ilm && d.ilm.operation_mode),
+    known: card.known, state: card.state,
+    managed: card.known ? card.managed : null, total: card.known ? card.total : null,
+    stale: { count: st.list.length, bytes: st.bytes, policy: st.policy, known: Array.isArray(indices) && !!st.policy },
+    errors: errs.known ? errs.count : null, errorsKnown: errs.known,
+    why: card.why || null,
+  };
+}

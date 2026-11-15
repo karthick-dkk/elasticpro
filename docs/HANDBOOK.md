@@ -55,6 +55,31 @@ defaults are created and edited in the UI and saved as JSON with encrypted secre
 REST console is a request bar with **Query | Results** side by side and the history table
 below (click a row to load, *Run* to re-run).
 
+**Overview** (Clusters › Overview, `#/clusters/overview`, the *└ Overview* sub-item under Clusters
+in the page menu and the *List · Overview* tabs on the page) is one cluster on one screen: the
+cluster's name, type and tags, version, URL and uuid with — in the corner — its open-alerts badge
+(a click opens Alerts for this cluster), its health pill and "N of M shards placed"; the Nodes and
+Indices cards; four gauges (CPU, Disk, JVM heap, Shards), each naming the node that is highest;
+Search (with the searches running over a minute, from the task list) and Latency-and-pressure
+rates from two readings of `_nodes/stats` (`core/node-rates.js` — "measuring · next poll" until two
+exist), and between them Devices & log delay — the devices in the cluster's last scheduled run and
+how many are late by the configured levels, from the Log Delay Dashboard's own summary; SLM and ILM, one status line each, from what the Clusters page's
+expanded row holds; and the Nodes (busiest first, with IP) and Indices (unhealthy first, then by
+size) tables, which scroll inside themselves so the page never does at 1280×720 and above. At the
+right of the tab row, ↻ refreshes this cluster now and the select beside it sets how often the
+board refreshes itself (10s / 30s / 1m / 5m, 30s by default, remembered per browser; only while the
+board is on screen and the tab visible). The top bar's chooser is the one cluster choice; with
+*All clusters* chosen the page opens on the cluster last chosen, and an address that names a
+cluster (`#/clusters/overview/<id>`) moves the chooser. Everything is drawn from what the app
+already holds for the cluster (health, nodes, allocation, settings, policies, snapshots, the alert
+list); the page itself reads the index list, the rate counters and — when the Nodes & shards page
+has not — the task list. A figure the cluster did not report is shown as not known, never as zero.
+The page's name is shown once, in the menu: no page draws its own name as a heading (the top bar
+keeps an `h1` for screen readers only). The top bar carries the brand, the cluster chooser, the
+bell and the person's name, and speaks up only in an abnormal state (the emergency stop, a failed
+report run). Every page ends in a footer — the theme button, "ElasticPro <version>", the repository
+— in the flow after the content, never over it.
+
 ## Configuration — from the UI, or a file
 
 Everything can be created and changed **in the app** (Config page: *+ Add cluster*, *+ Add
