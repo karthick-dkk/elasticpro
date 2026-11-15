@@ -56,15 +56,16 @@ REST console is a request bar with **Query | Results** side by side and the hist
 below (click a row to load, *Run* to re-run).
 
 **Overview** (Clusters › Overview, `#/clusters/overview`, the *└ Overview* sub-item under Clusters
-in the page menu and the *List · Overview* tabs on the page) is one cluster on one screen: the
+in the page menu, the *List · Overview* tabs on the page, and the *Overview →* that appears on a
+cluster's name in the List while the pointer or the keyboard is on it) is one cluster on one screen: the
 cluster's name, type and tags, version, URL and uuid with — in the corner — its open-alerts badge
 (a click opens Alerts for this cluster), its health pill and "N of M shards placed"; the Nodes and
 Indices cards; four gauges (CPU, Disk, JVM heap, Shards), each naming the node that is highest;
 Search (with the searches running over a minute, from the task list) and Latency-and-pressure
 rates from two readings of `_nodes/stats` (`core/node-rates.js` — "measuring · next poll" until two
 exist), and between them Devices & log delay — the devices in the cluster's last scheduled run and
-how many are late by the configured levels, from the Log Delay Dashboard's own summary; SLM and ILM, one status line each, from what the Clusters page's
-expanded row holds; and the Nodes (busiest first, with IP) and Indices (unhealthy first, then by
+how many are late by the configured levels, from the Log Delay Dashboard's own summary; SLM and ILM, one status line each, from the same
+readings as the Clusters list's ILM and SLM cells; and the Nodes (busiest first, with IP) and Indices (unhealthy first, then by
 size) tables, which scroll inside themselves so the page never does at 1280×720 and above. At the
 right of the tab row, ↻ refreshes this cluster now and the select beside it sets how often the
 board refreshes itself (10s / 30s / 1m / 5m, 30s by default, remembered per browser; only while the

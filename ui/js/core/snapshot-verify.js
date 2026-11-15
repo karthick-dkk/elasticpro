@@ -19,6 +19,7 @@
  */
 
 import { client, state, ensureFullSnapshots } from './state.js';
+import { indexQuery } from './index-match.js';
 
 const SNAPSHOT_LIST_SIZE = 1000;
 
@@ -131,14 +132,16 @@ export function coverageLabel(v) {
 
 /**
  * Find an index by name across what is live and what is held in snapshots — the search
- * that answers "does this still exist anywhere" without opening two pages.
+ * that answers "does this still exist anywhere" without opening two pages. `term` is read as
+ * the Indices search box reads it (core/index-match.js: contains, globs, commas, `!`), and
+ * `not` is that page's "Not matching" toggle.
  */
-export async function findIndexEverywhere(cluster, term, { max = 200 } = {}) {
-  const needle = String(term || '').trim().toLowerCase();
-  if (!needle) return { live: [], snapshotted: [], unverified: [] };
+export async function findIndexEverywhere(cluster, term, { max = 200, not = false } = {}) {
+  const q = indexQuery(term, { not });
+  if (!q.active) return { live: [], snapshotted: [], unverified: [] };
 
   const live = (state.indices.get(cluster.id) || [])
-    .filter((r) => r.index.toLowerCase().includes(needle))
+    .filter((r) => q.test(r.index))
     .map((r) => ({ index: r.index, size: r.size, docs: r.docs, day: r.day, status: r.status, health: r.health }));
 
   const cl = client(cluster.id);
@@ -152,7 +155,7 @@ export async function findIndexEverywhere(cluster, term, { max = 200 } = {}) {
     catch (e) { unverified.push(`${repo}: ${e.message || e}`); continue; }
     for (const s of list) {
       for (const idx of s.indices || []) {
-        if (!idx.toLowerCase().includes(needle)) continue;
+        if (!q.test(idx)) continue;
         if (!found.has(idx)) found.set(idx, { index: idx, snapshots: [] });
         found.get(idx).snapshots.push({
           repo, snapshot: s.snapshot, state: String(s.state || '').toUpperCase(),

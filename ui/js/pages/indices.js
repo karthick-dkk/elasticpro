@@ -27,9 +27,10 @@ import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
+import { indexQuery } from '../core/index-match.js';
 
 let host = null;
-const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', not: false, status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
 /**
  * The index table's column sort (lib/table-sort.js): largest first until a header says
  * otherwise, and a new column starts high-to-low, as it always has here. Remembered per
@@ -61,8 +62,11 @@ const ev = { scope: 'live', term: '', running: false, result: null, error: null,
 
 /** Back to an unfiltered list (what the toolbar's Clear does, and a hint from another page starts from). */
 function resetFilters() {
-  ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0;
+  ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.not = false; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0;
 }
+
+/** The name search as typed, with the Not matching toggle (core/index-match.js — the one reading of it). */
+const nameQuery = () => indexQuery(ui.text, { not: ui.not });
 
 export function render(el) {
   host = el;
@@ -112,10 +116,8 @@ function rowsFor(c) {
   if (ui.status !== 'all') rows = rows.filter((r) => (ui.status === 'open' || ui.status === 'close') ? r.status === ui.status : r.health === ui.status);
   if (ui.from) rows = rows.filter((r) => !r.day || r.day >= ui.from);
   if (ui.to) rows = rows.filter((r) => !r.day || r.day <= ui.to);
-  if (ui.text.trim()) {
-    const t = ui.text.trim().toLowerCase();
-    rows = rows.filter((r) => r.index.toLowerCase().includes(t));
-  }
+  const q = nameQuery();
+  if (q.active) rows = rows.filter((r) => q.test(r.index));
   return IDX_SORT.apply(rows, IDX_COLS);
 }
 
@@ -211,7 +213,8 @@ function openReportsDaily() {
 
 function sourceBar(c, sourceList, total) {
   return h('div.toolbar',
-    h('label.field', 'Search index', h('input#idx-search', { type: 'search', placeholder: 'substring…', value: ui.text, style: { minWidth: '200px' },
+    h('label.field', 'Search index', h('input#idx-search', { type: 'search', placeholder: 'name, logs-*, !tmp-*…', value: ui.text,
+      title: 'Part of a name, or a pattern with * and ?; several separated by commas; ! in front for the ones that do not match', style: { minWidth: '200px' },
       oninput: (e) => { ui.text = e.target.value; ui.page = 0; syncSearchBoxes(e.target); redrawTable(); } })),
     h('label.field', 'From day', h('input', { type: 'date', value: ui.from, onchange: (e) => { ui.from = e.target.value; draw(); } })),
     h('label.field', 'To day', h('input', { type: 'date', value: ui.to, onchange: (e) => { ui.to = e.target.value; draw(); } })),
@@ -227,7 +230,7 @@ function sourceBar(c, sourceList, total) {
       // already fetched, so how old that is decides whether it is still true.
       freshnessBar(scrubFresh(datasetFreshness(c.id, 'indices'), c), () => load(true), { label: 'Indices', busy: ui.loading }),
       writeToggle(draw),
-      h('button.btn.sm', { onclick: () => { ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
+      h('button.btn.sm', { onclick: () => { resetFilters(); draw(); } }, 'Clear'),
       h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));
 }
 
@@ -309,11 +312,12 @@ function buildTable(c, rows, allRows = rows) {
   // the bulk bar speak about the filtered set, the tbody only about the page.
   const shown = rows;
   const refresh = { onChanged: () => afterChange(c) };
+  const q = nameQuery();
 
   const tick = (r) => h('input', {
     type: 'checkbox', checked: selected.has(r.index), style: { cursor: 'pointer' },
     onclick: (e) => e.stopPropagation(),
-    onchange: (e) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); redrawBulk(c); },
+    onchange: (e) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); paintSelection(c); },
   });
 
   const trs = shown.map((r) => h('tr',
@@ -352,23 +356,22 @@ function buildTable(c, rows, allRows = rows) {
       ], { title: `Actions for ${r.index}` })))));
 
   // The head tick works on every index the filters match — on every page, not only the rows
-  // on screen — and says how many are ticked; half-ticked while only some are.
-  const allMatchedTicked = allRows.length > 0 && allRows.every((r) => selected.has(r.index));
-  const selectAll = h('input', {
-    type: 'checkbox', checked: allMatchedTicked, style: { cursor: 'pointer' },
+  // on screen — and says how many are ticked; half-ticked while only some are (paintSelection).
+  const selectAll = h('input#idx-all', {
+    type: 'checkbox', style: { cursor: 'pointer' },
     'aria-label': 'Select every index the filters match',
-    title: allMatchedTicked ? 'Clear the selection' : `Select every index the filters match (${num(allRows.length)}, on every page)`,
+    // Read the matching set at the click, not at the draw: a kept table may be older than the data.
     onchange: (e) => {
-      allRows.forEach((r) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); });
+      rowsFor(c).forEach((r) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); });
       redrawTable();
     },
   });
-  selectAll.indeterminate = !allMatchedTicked && allRows.some((r) => selected.has(r.index));
+  const selCount = h('span#idx-selcount.muted', { style: { fontWeight: 400, textTransform: 'none' } });
+  paintHead(selectAll, selCount, allRows);
 
   const t = h('div.tbl-wrap', h('table.tbl',
     h('thead', h('tr',
-      h('th', { style: { whiteSpace: 'nowrap' } }, h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } }, selectAll,
-        selected.size ? h('span.muted', { style: { fontWeight: 400, textTransform: 'none' } }, `${num(selected.size)} selected`) : null)),
+      h('th', { style: { whiteSpace: 'nowrap' } }, h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } }, selectAll, selCount)),
       th('H', 'health'), th('Index', 'index'), th('Source', 'source'), th('Day', 'day'), th('State', 'status'),
       th('P/R', 'pri', true), th('Docs', 'docs', true), th('Deleted', 'deleted', true),
       th('Size', 'size', true), th('Primary', 'priSize', true), th('Created', 'created'), h('th', ''))),
@@ -378,10 +381,15 @@ function buildTable(c, rows, allRows = rows) {
     // The toolbar search sits above the charts; with them folded away it is still a
     // scroll from the table, so the filter is repeated where the rows actually are.
     h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '0 0 8px', flexWrap: 'wrap' } },
-      h('input#idx-search2', { type: 'search', value: ui.text, placeholder: 'filter the table, or search live + snapshots…',
+      h('input#idx-search2', { type: 'search', value: ui.text, placeholder: 'name, logs-*, !tmp-* — or search live + snapshots…',
+        title: 'Part of a name, or a pattern with * and ?; several separated by commas; ! in front for the ones that do not match',
         style: { flex: '1', minWidth: '220px' },
         oninput: (e) => { ui.text = e.target.value; ui.page = 0; syncSearchBoxes(e.target); redrawTable(); },
         onkeydown: (e) => { if (e.key === 'Enter' && ev.scope !== 'live' && ui.text.trim()) searchEverywhere(c); } }),
+      // The same as a leading "!": the indices the search does NOT match.
+      h('button#idx-not.btn.sm', { type: 'button', 'aria-pressed': ui.not ? 'true' : 'false',
+        title: 'Show the indices the search does not match (the same as starting it with !)',
+        onclick: () => { ui.not = !ui.not; ui.page = 0; draw(); const b = $('#idx-not'); if (b) b.focus(); } }, 'Not matching'),
       // One result set, three ways of reading it. findIndexEverywhere always answers
       // "live, in a snapshot, or both"; the scope decides which part of that answer is
       // shown, rather than which question gets asked — asking a narrower question would
@@ -399,10 +407,10 @@ function buildTable(c, rows, allRows = rows) {
         onclick: () => searchEverywhere(c),
       }, ev.running ? 'Searching…' : 'Search'),
       h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } },
-        `${num(allRows.length)} of ${num((state.indices.get(c.id) || []).length)} indices`),
-      ui.text || ui.sourceFilter !== 'all' || ui.status !== 'all' || ui.from || ui.to
+        `${num(allRows.length)} of ${num((state.indices.get(c.id) || []).length)} indices${q.active ? ` · ${q.label}` : ''}`),
+      ui.text || ui.not || ui.sourceFilter !== 'all' || ui.status !== 'all' || ui.from || ui.to
         ? h('button.btn.sm.ghost', { onclick: () => {
-            ui.text = ''; ui.sourceFilter = 'all'; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw();
+            ui.text = ''; ui.not = false; ui.sourceFilter = 'all'; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw();
           } }, 'Clear filters')
         : null),
     (ev.result || ev.error) ? h('div', { style: { padding: '0 0 9px' } }, everywherePanel(c)) : null,
@@ -410,16 +418,28 @@ function buildTable(c, rows, allRows = rows) {
     t);
 }
 
+/** The head tick and its "N selected" for the matching `rows`: all ticked, some (half-ticked), or none. */
+function paintHead(box, count, rows) {
+  const all = rows.length > 0 && rows.every((r) => selected.has(r.index));
+  box.checked = all;
+  box.indeterminate = !all && rows.some((r) => selected.has(r.index));
+  box.title = all ? 'Clear the selection' : `Select every index the filters match (${num(rows.length)}, on every page)`;
+  count.textContent = selected.size ? `${num(selected.size)} selected` : '';
+}
+
+/** A row ticked by hand: the head and the bulk bar follow, the rows stay where they are (and the keyboard on the box). */
+function paintSelection(c) {
+  const rows = rowsFor(c);
+  const box = $('#idx-all'), count = $('#idx-selcount'), bulk = $('#idx-bulk');
+  if (box && count) paintHead(box, count, rows);
+  if (bulk) mount(bulk, bulkBar(c, rows));
+}
+
 /** The toolbar and the over-table search are the same filter; keep them in step. */
 function syncSearchBoxes(source) {
   for (const el of [$('#idx-search'), $('#idx-search2')]) {
     if (el && el !== source && el.value !== ui.text) el.value = ui.text;
   }
-}
-
-function redrawBulk(c) {
-  const el = $('#idx-bulk');
-  if (el) mount(el, bulkBar(c, rowsFor(c)));
 }
 
 function tableCard(c, rows, all) {
@@ -440,8 +460,8 @@ function tableCard(c, rows, all) {
 async function searchEverywhere(c) {
   const term = ui.text.trim();
   if (!term) return;
-  ev.running = true; ev.error = null; ev.term = term; ev.picked.clear(); draw();
-  try { ev.result = await findIndexEverywhere(c, term); }
+  ev.running = true; ev.error = null; ev.term = ui.not ? `not ${term}` : term; ev.picked.clear(); draw();
+  try { ev.result = await findIndexEverywhere(c, term, { not: ui.not }); }
   catch (e) { ev.error = e.message || String(e); ev.result = null; }
   ev.running = false;
   draw();

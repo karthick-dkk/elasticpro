@@ -3,39 +3,30 @@
 import { h, svg, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
-import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage, fleetMode, datasetFreshness } from '../core/state.js';
+import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
 import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
 import { heapOverHigh, HEAP_HIGH_PERCENT, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from '../core/alert-rules.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
-import { repoSizeCache } from '../lib/idb.js';
 import { compareNames } from '../lib/cluster-order.js';
 import { compareSortValues, ariaSort as ariaSortOf, sortArrow } from '../core/sort.js';
 import { tableSort } from '../lib/table-sort.js';
-import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy,
-         renameColumn, resetColumns, MAX_NAME, DETAIL_GROUPS, detailItems, detailShown, setDetailShown,
-         expandByDefault, setExpandByDefault } from '../core/cluster-view.js';
-import { nodeRoles, roleKind, taskSummary, statsCounters, rateBetween, slmForRepo,
-         repoSizeFromCache, refreshAge, healthCounts } from '../core/cluster-detail.js';
-import { privilegeHint } from '../core/es-tasks.js';
-import { restoreSnapshotDialog } from '../ui/snapshot-dialogs.js';
-import { rowMenu, popover, ICON, toast } from '../ui/menu.js';
-import { roleMayWrite, roleMayManageClusters } from '../core/writes.js';
-import { editCluster, editClusterKind, editZabbixCluster, rawClusterOf } from '../ui/config-editor.js';
+import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy, renameColumn, resetColumns, MAX_NAME } from '../core/cluster-view.js';
+import { refreshAge, healthCounts } from '../core/cluster-detail.js';
+import { rowMenu, popover, ICON } from '../ui/menu.js';
+import { roleMayManageClusters } from '../core/writes.js';
+import { editCluster, editZabbixCluster, rawClusterOf } from '../ui/config-editor.js';
 import { credentialsKeptOnServer } from '../core/server-credentials.js';
-import { takeFocus, revealFocus, setFocus } from '../core/focus.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
 import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf, NOT_KNOWN } from '../core/lifecycle-errors.js';
-import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
-         unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
-import { repoOverview } from '../core/snapshot-evidence.js';
 // Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
 import * as board from './cluster-overview.js';
-import { clustersSection, OVERVIEW, LIST } from '../core/cluster-overview.js';
+import { clustersSection, overviewHash, OVERVIEW, LIST } from '../core/cluster-overview.js';
 
 let host = null;
 /** The section on screen: the List (this file) or the Overview (pages/cluster-overview.js). */
@@ -46,14 +37,6 @@ let section = LIST;
  * do, to offer no "All clusters", and to draw the page again when the address moves between sections.
  */
 export const singleCluster = () => clustersSection(location.hash) === OVERVIEW;
-/** Rows the operator opened or closed by hand; what the rest show is the preference. */
-const openedByHand = new Set();
-const closedByHand = new Set();
-const isOpen = (id) => (expandByDefault(prefs) ? !closedByHand.has(id) : openedByHand.has(id));
-function toggleRow(id) {
-  if (expandByDefault(prefs)) { closedByHand.has(id) ? closedByHand.delete(id) : closedByHand.add(id); }
-  else { openedByHand.has(id) ? openedByHand.delete(id) : openedByHand.add(id); }
-}
 
 /**
  * Sort keys, each pulling one comparable value out of a {c, d, cl} row. `null` is "not
@@ -245,14 +228,13 @@ export function onData() {
   if (section === OVERVIEW) { board.onData(); return; }
   if (host && host.isConnected) { askOnOpen(); draw(); }
 }
-/** The page's own timers stop with it: the badge tick and every open row's live readings — and the Overview's poll. */
+/** The page's own timers stop with it: the badge tick — and the Overview's poll. */
 export function onLeave() {
   board.onLeave();
   listLeave();
 }
 function listLeave() {
   if (ageTimer) { clearInterval(ageTimer); ageTimer = null; }
-  for (const L of live.values()) if (L.timer) { clearTimeout(L.timer); L.timer = null; }
 }
 let ageTimer = null;
 
@@ -388,9 +370,7 @@ let lastRows = [];
 /** Everything a cluster's row is drawn from. */
 function rowSig(r) {
   const q = requestsFor(r.c.id);
-  const L = live.get(r.c.id);
-  return [clusterRev(r.c.id), objId(r.d), objId(r.cl), r.cl && r.cl.state, objId(r.c), isOpen(r.c.id), L ? L.at : 0,
-    objId(prefs && prefs.details), (sizeCaches.get(r.c.id) || {}).size || 0,
+  return [clusterRev(r.c.id), objId(r.d), objId(r.cl), r.cl && r.cl.state, objId(r.c),
     (alertCounts && alertCounts.get(r.c.id)) || 0, q.last5m, q.perMinute.toFixed(1), minute(), objId(state.defaults),
     objId(state.indices.get(r.c.id)), clusterKindRev()].join('|');
 }
@@ -439,9 +419,6 @@ function draw() {
   const rows = visibleRows(all);
   lastRows = rows;
   for (const r of all) r.sig = rowSig(r);
-  // A row is rebuilt when its live readings land; the keyboard on its chevron stays there.
-  const act = document.activeElement;
-  const keepChevron = act && host.contains(act) && act.matches('button.cl-chev') ? act.closest('tr').dataset.cluster : null;
   built.begin();
 
   mount(host,
@@ -451,13 +428,8 @@ function draw() {
     summaryCard(rows, all),
   );
   built.end();
-  stopLiveForClosed();
   scheduleHeadSync();
   revealFocused();
-  if (keepChevron && !act.isConnected) {
-    const again = host.querySelector(`tr[data-cluster="${cssId(keepChevron)}"] button.cl-chev`);
-    if (again) again.focus({ preventScroll: true });
-  }
   if (focusSearch) {
     focusSearch = false;
     const i = document.getElementById('clusters-search');
@@ -530,6 +502,19 @@ function nameMenu(c) {
   });
 }
 
+/** Clusters › Overview, on this cluster: the address names it, and the page and its chooser follow. */
+function openOverview(id) { location.hash = overviewHash(id); }
+
+/**
+ * The way into a cluster's detail: "Overview →" beside its name, shown only while the pointer is
+ * on the name cell or the keyboard is inside it (app.css .cl-ov), so a hundred rows do not carry a
+ * hundred buttons. It keeps its place when hidden: nothing moves as the pointer passes.
+ */
+function overviewButton(c) {
+  return h('button.btn.sm.ghost.cl-ov', { type: 'button', title: `Open the Overview of ${c.name}`,
+    'aria-label': `Overview of ${c.name}`, onclick: () => openOverview(c.id) }, 'Overview \u2192');
+}
+
 /**
  * CI / DI / On-Prem beside the name (core/cluster-kind.js — the one definition the alert
  * rules read too): what the cluster is, and so whether "no snapshot" means anything.
@@ -582,7 +567,7 @@ function healthFlag(r) {
  * missing from the file, or the other way round.
  */
 const CELLS = {
-  name: (r) => h('td.cl-name-td', nameMenu(r.c), typeBadge(r.c)),
+  name: (r) => h('td.cl-name-td', nameMenu(r.c), typeBadge(r.c), overviewButton(r.c)),
   version: (r) => h('td.mono', versionOf(r.d) || '–'),
   // The JVM the nodes run on. A cluster mid-upgrade has more than one, and saying "mixed"
   // with the breakdown on hover beats picking whichever node answered first.
@@ -618,7 +603,7 @@ const CELLS = {
     : h('span.cl-clip', diskCell(r.d.disk, r.d.clusterSettings, { dataNodes: true, compact: true }))),
   // A button, as in 0.3.2: Running in green only when it looks after the log indices, red
   // otherwise (0.3.44), a red dot beside it when a log index is in an ILM error step
-  // (lifecycle-errors.js — the one definition). Click opens the row.
+  // (lifecycle-errors.js — the one definition). Click opens the cluster's Overview.
   ilm: (r) => {
     const { d } = r;
     return h('td', d.ilm
@@ -662,10 +647,10 @@ const CELLS = {
  * Running ? grey), why in its tooltip; a red dot (never a count) when `errs` has any.
  */
 export function lifecycleButton(r, label, view, errs, titleOf) {
-  const title = [view.why, errs.count ? titleOf(errs) : '', 'Click for the cluster\u2019s details.'].filter(Boolean).join('\n\n');
+  const title = [view.why, errs.count ? titleOf(errs) : '', 'Click for the cluster\u2019s Overview.'].filter(Boolean).join('\n\n');
   return h('span.cl-lc', h(`button.pill.cl-pillbtn.${view.tone}`, {
-    type: 'button', title, 'aria-label': `${label} ${view.word}${view.covered === false ? ', not looking after the log indices' : ''}${errs.count ? ', has errors' : ''} \u2014 open details for ${r.c.name}`,
-    onclick: () => { if (!isOpen(r.c.id)) { toggleRow(r.c.id); draw(); } },
+    type: 'button', title, 'aria-label': `${label} ${view.word}${view.covered === false ? ', not looking after the log indices' : ''}${errs.count ? ', has errors' : ''} \u2014 open the Overview of ${r.c.name}`,
+    onclick: () => openOverview(r.c.id),
   }, view.word), errs.count ? h('i.cl-errdot', { title: titleOf(errs), role: 'img', 'aria-label': 'errors' }) : null);
 }
 
@@ -733,7 +718,7 @@ function summaryCard(rows, all) {
   const byCluster = alertCounts || alertsByCluster();
   const trs = [];
   rows.forEach((r) => {
-    trs.push(...built.get(`row:${r.c.id}`, `${r.sig || rowSig(r)}|${colSig}|${mayEdit()}`, () => rowNodes(r, byCluster, cols)));
+    trs.push(built.get(`row:${r.c.id}`, `${r.sig || rowSig(r)}|${colSig}|${mayEdit()}`, () => rowNodes(r, byCluster, cols)));
   });
 
   const total = all.length;
@@ -788,7 +773,7 @@ function buildCard() {
         mayEdit() ? h('button#cl-add.btn.sm', { type: 'button', title: 'Add a cluster to the config',
           onclick: async () => { if (await editCluster(null)) draw(); } }, '+ Add cluster') : null,
         h('button#cl-columns.btn.sm', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
-          title: 'Show or hide the columns, the tiles and the sections of an open row', onclick: (e) => openColumns(e.currentTarget) }, 'Columns \u25be'),
+          title: 'Show, hide, reorder or rename the columns', onclick: (e) => openColumns(e.currentTarget) }, 'Columns \u25be'),
         h('button.btn.sm', { type: 'button', onclick: exportSummary, title: 'The rows on screen, in the columns on screen' }, 'Export CSV'),
         isSnapshotMode() ? null : h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }),
           title: 'Read every cluster on screen again' }, 'Refresh', h('span.age', { 'aria-live': 'off' })))),
@@ -829,9 +814,7 @@ function buildTable(cols, trs, { sort, dir, onSort, emptyText }) {
   const st = { key: sort, dir };
   const arrow = (col) => (sortArrow(st, col.id) ? ` ${sortArrow(st, col.id)}` : null);
   const ariaSort = (col) => ariaSortOf(st, col.id);
-  // The first column is the expand chevron: no name, nothing to sort by.
   const thead = h('thead.cl-thead', h('tr',
-    h('th.cl-xth', { 'aria-label': 'Expand' }, h('span.cl-th-in', '')),
     ...cols.map((col) => h(`th.sortable${col.num ? '.num' : ''}`, {
       scope: 'col', 'data-col': col.id, 'aria-sort': ariaSort(col),
       // No tab stop — the strip above is what the keyboard uses — but a screen reader's
@@ -839,14 +822,13 @@ function buildTable(cols, trs, { sort, dir, onSort, emptyText }) {
       onclick: () => onSort(col.id),
     }, h('span.cl-th-in', col.name, arrow(col))))));
   const tbody = h('tbody');
-  if (!trs.length) tbody.append(h('tr', h('td', { colspan: cols.length + 1 }, empty(emptyText))));
+  if (!trs.length) tbody.append(h('tr', h('td', { colspan: cols.length }, empty(emptyText))));
   trs.forEach((r) => tbody.append(r));
   const tbl = h('table.tbl.cl-tbl', thead, tbody);
   const scroller = h('div.tbl-wrap.cl-scroll', tbl);
 
   const strip = h('div.cl-head', { role: 'group', 'aria-label': 'Sort the cluster summary' },
     h('div.cl-head-row',
-      h('span.cl-hcell.cl-hcell-x', { 'aria-hidden': 'true' }),
       ...cols.map((col) => h(`button.cl-hcell${col.num ? '.num' : ''}`, {
         type: 'button', 'data-col': col.id, 'aria-sort': ariaSort(col),
         'aria-label': `Sort by ${col.name}${sort === col.id ? `, sorted ${ariaSort(col)}` : ''}`,
@@ -883,9 +865,6 @@ function syncHeads(shell) {
   row.style.width = `${tw}px`;
   [...row.children].forEach((cell, i) => { if (ws[i] !== undefined) cell.style.width = `${ws[i]}px`; });
   const scroller = shell.querySelector('.cl-scroll');
-  // How much of the table is in view: an open details row is held to it (app.css .cl-detail),
-  // so a table wider than the window scrolls its columns and never the details.
-  if (scroller && scroller.clientWidth) shell.style.setProperty('--cl-view-w', `${scroller.clientWidth}px`);
   followScroll(strip, scroller);
 }
 
@@ -927,45 +906,16 @@ function trackHeadHeight() {
 /* ---------------------------------- the rows ---------------------------------- */
 
 /**
- * One cluster's row, and its details row when it is expanded. The chevron at the start of the
- * row opens the details; a cluster that is not answering has none to open (what is wrong, and
- * Retry and Diagnose, are on the Alerts page), and its figures are dashes.
+ * One cluster's row. A cluster that is not answering keeps its name, health and alerts; its
+ * other figures are dashes (what is wrong, and Retry and Diagnose, are on the Alerts page).
+ * One row per cluster: what a cluster holds in detail is its Overview (the button on the name).
  */
 function rowNodes(r, byCluster, cols) {
-  const out = [];
-  const { c, d } = r;
   const down = isDown(r);
-  const open = !down && isOpen(c.id);
   const cell = (col) => (!down || col.id === 'name' || DOWN_KEEPS.has(col.id) || col.id === 'disk'
     ? CELLS[col.id](r, byCluster)
     : h(`td${col.num ? '.num' : ''}`, h('span.muted', { 'aria-label': 'not known' }, '\u2014')));
-  const flip = () => {
-    toggleRow(c.id);
-    draw();
-    // The row was rebuilt, so the keyboard would be left on nothing: put it back.
-    const again = host && host.querySelector(`tr[data-cluster="${cssId(c.id)}"] button.cl-chev`);
-    if (again) again.focus({ preventScroll: true });
-  };
-  const chevron = down ? h('td.cl-xtd')
-    : h('td.cl-xtd', h('button.cl-chev', {
-      type: 'button',
-      'aria-expanded': open ? 'true' : 'false',
-      'aria-label': `${open ? 'Hide' : 'Show'} details for ${c.name}`,
-      title: open ? `Collapse ${c.name}` : `Expand ${c.name} \u2014 nodes, disk, repositories`,
-      onclick: flip,
-    }, h('span', { 'aria-hidden': 'true' }, open ? '\u25be' : '\u25b8')));
-  // The whole row is the handle: a click on any plain cell opens or closes it. Its own
-  // controls — the name menu, the alerts link, the chevron — keep their meaning.
-  out.push(h(`tr${down ? '.cl-row-down' : '.cl-row'}${open ? '.open' : ''}`, { 'data-cluster': c.id,
-    title: down ? null : (open ? 'Click to collapse' : 'Click to expand'),
-    onclick: (e) => {
-      if (down) return;
-      const t = e.target instanceof Element ? e.target : null;
-      if (t && t.closest('button, a, input, select, label, .menu-pop')) return;
-      toggleRow(c.id); draw();
-    } }, chevron, ...cols.map(cell)));
-  if (open) out.push(h('tr.cl-detail-row', h('td', { colspan: cols.length + 1 }, detail(r))));
-  return out;
+  return h(`tr${down ? '.cl-row-down' : '.cl-row'}`, { 'data-cluster': r.c.id }, ...cols.map(cell));
 }
 
 /* ------------------------------- the Columns panel ------------------------------- */
@@ -1067,494 +1017,16 @@ function columnsPanel(ctx) {
     return li;
   };
 
-  // The three other groups are plain show/hide: what an open row carries across the top,
-  // which sections it has, and the columns of each section's table.
-  const group = (g, title) => h('fieldset.cl-cols-group',
-    h('legend', title),
-    ...detailItems(prefs, g).map((it) => h(`label.cl-col-ck${it.fixed ? '.fixed' : ''}`,
-      h(`input#cl-dvis-${g}-${it.id}`, { type: 'checkbox', checked: it.visible, disabled: it.fixed,
-        'aria-label': it.fixed ? `${it.label} is always shown` : `Show ${it.label}`,
-        onchange: (e) => apply(setDetailShown(prefs, g, it.id, e.currentTarget.checked), `cl-dvis-${g}-${it.id}`) }),
-      it.label, it.fixed ? h('span.cl-col-note', 'always') : null)));
-  const sections = detailItems(prefs, 'sections');
   return h('div.cl-cols-panel',
-    h('label.cl-col-ck.cl-expand', h('input#cl-expand-default', { type: 'checkbox', checked: expandByDefault(prefs),
-      onchange: (e) => apply(setExpandByDefault(prefs, e.currentTarget.checked), 'cl-expand-default') }),
-      'Expand details by default'),
-    h('div.cl-cols-grid',
-      h('fieldset.cl-cols-group', h('legend', 'Cluster table'),
-        h('ul.cl-cols-list', { 'aria-label': 'Columns, in order' }, ...cols.map(rowFor)),
-        h('div.muted.cl-cols-hint', 'drag to reorder \u00b7 click a name to rename')),
-      h('fieldset.cl-cols-group', h('legend', 'Cluster details'),
-        ...detailItems(prefs, 'tiles').map((it) => h('label.cl-col-ck',
-          h(`input#cl-dvis-tiles-${it.id}`, { type: 'checkbox', checked: it.visible, 'aria-label': `Show ${it.label}`,
-            onchange: (e) => apply(setDetailShown(prefs, 'tiles', it.id, e.currentTarget.checked), `cl-dvis-tiles-${it.id}`) }), it.label)),
-        h('div.cl-cols-rule'),
-        ...sections.map((it) => h('label.cl-col-ck.strong',
-          h(`input#cl-dvis-sections-${it.id}`, { type: 'checkbox', checked: it.visible, 'aria-label': `Show the ${it.label}`,
-            onchange: (e) => apply(setDetailShown(prefs, 'sections', it.id, e.currentTarget.checked), `cl-dvis-sections-${it.id}`) }), it.label))),
-      group('repo', 'Repository / Snapshot'),
-      group('nodes', 'Nodes')),
+    h('fieldset.cl-cols-group', h('legend', 'Cluster table'),
+      h('ul.cl-cols-list', { 'aria-label': 'Columns, in order' }, ...cols.map(rowFor)),
+      h('div.muted.cl-cols-hint', 'drag to reorder \u00b7 click a name to rename')),
     h('div.cl-cols-foot',
       h('span.muted', { style: { fontSize: '11.5px' } }, 'Changes apply to every cluster row.'),
       h('span.cl-sp'),
       h('button#cl-cols-reset.btn.sm', { type: 'button', onclick: () => apply(resetColumns(prefs), 'cl-cols-reset') }, 'Reset to default'),
       h('span.muted', { style: { fontSize: '11.5px' } }, prefsSaved ? 'saved for you' : 'not saved \u2014 this browser keeps no storage')));
 }
-
-/* ---------------------------------- details ---------------------------------- */
-
-/**
- * The live readings an open row makes for itself: how many tasks the cluster is running
- * and its search/index rate. Not part of the refresh — a row is opened by hand, and these
- * two calls are made for that row only, again every 30 s while it stays open (the rate
- * needs a second reading, 10 s after the first). Closed rows and a left page stop them.
- */
-const live = new Map();
-const LIVE_EVERY = 30000, LIVE_SECOND = 10000;
-function ensureLive(c) {
-  let L = live.get(c.id);
-  if (!L) { L = { tasks: null, tasksError: null, counters: null, rate: null, rateError: null, at: 0, due: 0, busy: false, timer: null }; live.set(c.id, L); }
-  if (L.busy || Date.now() < L.due) return L;
-  L.busy = true;
-  const cl = client(c.id);
-  Promise.allSettled([cl.taskCounts(), cl.rateCounters()]).then(([t, s]) => {
-    L.busy = false; L.at = Date.now();
-    if (t.status === 'fulfilled') { L.tasks = taskSummary(t.value); L.tasksError = null; }
-    else L.tasksError = privilegeHint(t.reason && t.reason.res && t.reason.res.status, 'list') || (t.reason && t.reason.message) || 'not readable';
-    if (s.status === 'fulfilled') {
-      const now = statsCounters(s.value, L.at);
-      L.rate = rateBetween(L.counters, now) || (L.counters ? L.rate : null);
-      L.counters = now; L.rateError = null;
-    } else L.rateError = (s.reason && s.reason.message) || 'not readable';
-    L.due = L.at + (L.counters && !L.rate ? LIVE_SECOND : LIVE_EVERY);
-    if (L.timer) clearTimeout(L.timer);
-    L.timer = setTimeout(() => { L.timer = null; if (host && host.isConnected && isOpen(c.id)) draw(); }, L.due - L.at);
-    if (host && host.isConnected) draw();
-  });
-  return L;
-}
-/** A row that closed stops reading; the next open starts afresh after LIVE_EVERY. */
-function stopLiveForClosed() {
-  for (const [id, L] of live) if (!isOpen(id) && L.timer) { clearTimeout(L.timer); L.timer = null; }
-}
-
-/**
- * The per-snapshot size cache (lib/idb.js) the Volume report and the Snapshots page fill:
- * an open row reads a repository's size from it and never measures on its own.
- */
-const sizeCaches = new Map();
-function sizeCacheFor(c) {
-  let cache = sizeCaches.get(c.id);
-  if (!cache) {
-    cache = repoSizeCache(c.id);
-    cache.size = 0;
-    sizeCaches.set(c.id, cache);
-    cache.ready.then(() => { cache.size = cache.map.size; if (host && host.isConnected && cache.size) draw(); });
-  }
-  return cache;
-}
-
-/** Where a jump-host cluster's tunnel goes: the host as the config file names it. */
-function jumpTitle(c) {
-  const raw = state.config && state.config.raw;
-  const jh = raw && raw.jump_hosts;
-  const j = !jh ? null : Array.isArray(jh) ? jh.find((x) => (x.id || x.name) === c.via) : jh[c.via];
-  if (!j) return `SSH tunnel via ${c.via}`;
-  return `SSH ${j.host || '?'}:${j.port || 22}${j.user ? ` · user ${j.user}` : ''} → ${c.url}`;
-}
-
-/** http or https, parsed — never a scheme that would run something when followed. */
-function isWebUrl(u) {
-  try { const p = new URL(String(u)).protocol; return p === 'http:' || p === 'https:'; } catch (_) { return false; }
-}
-
-/* ------------------------------ the expanded row ------------------------------ */
-
-/**
- * Whether this cluster's repositories and SLM policies have been read (the Snapshots page asks the
- * same way). Under the fleet cache an unread list is empty: that is "not read yet", never "none".
- */
-const policiesRead = (id) => !fleetMode() || datasetFreshness(id, 'policies').ts > 0;
-
-/** A short clock for a run: the time today, the date otherwise; the full stamp is in the tooltip. */
-function clock(ts) {
-  const d = new Date(Number(ts));
-  if (!isFinite(d.getTime())) return '–';
-  const sameDay = d.toDateString() === new Date().toDateString();
-  return sameDay ? d.toTimeString().slice(0, 5) : d.toLocaleDateString(undefined, { month: 'short', day: '2-digit' });
-}
-
-const ELASTIC_DOCS = 'https://www.elastic.co/docs';
-export const DOCS = {
-  repos: `${ELASTIC_DOCS}/deploy-manage/tools/snapshot-and-restore/manage-snapshot-repositories`,
-  cpu: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/high-cpu-usage`,
-  heap: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/high-jvm-memory-pressure`,
-  watermark: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/fix-watermark-errors`,
-};
-
-/** An elastic.co link: new tab, never hands the page to the target. */
-const docLink = (href, text, title) => h('a.cl-doc', { href, target: '_blank', rel: 'noopener noreferrer', title: title || null }, `${text} ↗`);
-
-/** A link to an ElasticPro page: same tab, the cluster already chosen (core/intent.js navigateTo). */
-function pageLink(text, page, payload, c, opts = {}) {
-  if (!canOpenPage(page)) return null;
-  return h('a.cl-lnk', { href: `#/${page}`, title: opts.title || null,
-    onclick: (e) => { e.preventDefault(); if (opts.focus) setFocus(page, opts.focus); navigateTo(page, payload || null, { cluster: c.id }); } }, `${text} ›`);
-}
-
-/** One box of the strip: its label and its value side by side, on one line. */
-const box = (id, label, ...body) => h('div.cl-box', { 'data-tile': id }, h('span.cl-box-k', label), h('span.cl-box-v', ...body));
-
-/* -- Cluster health: the pill, and the list of what is not green, on hover only -- */
-
-/**
- * The list behind the health button is asked for when it is opened, never on the poll:
- * `_cat/indices?health=…`, then the shards of those indices and one allocation explanation.
- * Kept per cluster and health, a minute at a time, so moving the pointer over and off again
- * does not ask again.
- */
-const problems = new Map();
-/** The popover of each cluster:health currently built, so a late answer paints the one on the page. */
-const livePops = new Map();
-const PROBLEM_TTL = 60000, PROBLEM_MAX = 25;
-function loadProblems(c, health, repaint) {
-  const key = `${c.id}:${health}`;
-  let P = problems.get(key);
-  if (P && (P.busy || Date.now() - P.at < PROBLEM_TTL)) return P;
-  P = { rows: null, unassigned: null, explained: null, error: null, shardsError: null, busy: true, at: 0 };
-  problems.set(key, P);
-  const cl = client(c.id);
-  (async () => {
-    try {
-      const pi = problemIndices(health, await cl.indicesOfHealth(health));
-      P.rows = pi ? pi.rows : [];
-      repaint();
-      const names = P.rows.slice(0, PROBLEM_MAX).map((x) => x.index);
-      if (names.length) {
-        const [sh, ex] = await Promise.allSettled([cl.shardStates(), cl.allocationExplain()]);
-        if (sh.status === 'fulfilled') P.unassigned = unassignedByIndex(sh.value, names);
-        else P.shardsError = (sh.reason && sh.reason.message) || 'not readable';
-        // No unassigned shard to explain is a 400, not a fault: the reason column falls back to the code.
-        if (ex.status === 'fulfilled') P.explained = explainLine(ex.value);
-      }
-    } catch (e) {
-      P.error = (e && e.message) || 'not readable';
-    }
-    P.busy = false; P.at = Date.now();
-    repaint();
-  })();
-  return P;
-}
-
-function paintProblems(pop, c, health) {
-  const P = problems.get(`${c.id}:${health}`);
-  const Word = health[0].toUpperCase() + health.slice(1);
-  const pill = h(`span.pill.${health}`, Word);
-  const body = [];
-  if (!P || (P.rows === null && !P.error)) body.push(h('div.cl-hp-note', 'Loading the indices…'));
-  else if (P.error && P.rows === null) body.push(h('div.cl-hp-note', `Could not read the indices: ${P.error}`));
-  else if (!P.rows.length) body.push(h('div.cl-hp-note', `No ${health} index listed — the cluster may have changed since the last refresh.`));
-  else {
-    const shown = P.rows.slice(0, PROBLEM_MAX);
-    const trs = shown.map((x) => {
-      const u = P.unassigned ? P.unassigned.get(x.index) : null;
-      const why = P.unassigned || P.shardsError ? reasonFor(x.index, P.unassigned, P.explained) : null;
-      return h('tr',
-        h('td.mono', x.index), h('td', pill.cloneNode(true)),
-        h('td.num.mono', isFinite(x.pri) ? String(x.pri) : '–'), h('td.num.mono', isFinite(x.rep) ? String(x.rep) : '–'),
-        h('td', P.unassigned ? (unassignedText(u) || h('span.muted', 'none')) : h('span.muted', { title: P.shardsError || 'Loading…' }, P.shardsError ? 'not readable' : '…')),
-        h('td.cl-hp-why', why ? h('span', { title: `From ${why.source}${why.source === 'unassigned.reason' ? ' (allocation explain names one shard at a time)' : ''}` }, why.text)
-          : P.unassigned || P.shardsError ? h('span.muted', { title: 'Elasticsearch gave no reason for this index' }, 'not reported') : h('span.muted', '…')));
-    });
-    body.push(h('table.cl-hp-tbl', h('thead', h('tr', h('th', 'Index'), h('th', 'Health'), h('th.num', 'Primaries'), h('th.num', 'Replicas'), h('th', 'Unassigned'), h('th', 'Reason'))),
-      h('tbody', trs)));
-    if (P.rows.length > shown.length) body.push(h('div.cl-hp-note', `+${P.rows.length - shown.length} more — open Indices for the rest`));
-  }
-  pop.replaceChildren(
-    h('div.cl-hp-head', h('b', `${Word} indices`),
-      h('span.muted', P && P.rows ? `${P.rows.length} · ${health === 'red' ? 'a primary shard is unassigned' : 'every primary assigned, some replicas not'}` : ''),
-      pageLink(`Open in Indices, health: ${health}`, 'indices', null, c, { focus: { health } })),
-    ...body);
-}
-
-function healthBox(r) {
-  const { c, d } = r;
-  const st = healthState(d);
-  const word = st === 'loading' ? 'loading' : st[0].toUpperCase() + st.slice(1);
-  const pill = h(`span.pill.${HEALTH_PILL[st]}.cl-health-pill`, h('i.dot'), word);
-  if (st !== 'yellow' && st !== 'red') {
-    return box('health', 'Cluster health', pill, st === 'green' ? h('span.muted', 'All indices green') : null);
-  }
-  const pop = h('div.cl-hp-pop', { role: 'tooltip' });
-  const known = problems.get(`${c.id}:${st}`);
-  const label = known && known.rows ? problemButtonText(st, known.rows.length) : `${st[0].toUpperCase()}${st.slice(1)} indices`;
-  const btn = h(`button.cl-hp-btn.${st}`, { type: 'button', 'aria-label': `${label}: list them`, 'aria-haspopup': 'true' }, label);
-  // The page redraws on every push, so the list may land after the node that asked was replaced:
-  // repaint whichever popover for this cluster and health is on the page now.
-  const key = `${c.id}:${st}`;
-  livePops.set(key, { pop, btn });
-  const repaint = () => {
-    const L = livePops.get(key);
-    if (!L || !L.pop.isConnected) return;
-    paintProblems(L.pop, c, st);
-    const P = problems.get(key);
-    if (P && P.rows) L.btn.textContent = problemButtonText(st, P.rows.length);
-  };
-  const open = () => { loadProblems(c, st, repaint); paintProblems(pop, c, st); };
-  if (known) paintProblems(pop, c, st);
-  // Hover and keyboard focus only: nothing is asked until the pointer or the keyboard gets here.
-  const wrap = h('span.cl-hp', { onmouseenter: open, onfocusin: open }, btn, pop);
-  return box('health', 'Cluster health', pill, wrap);
-}
-
-/* -- Endpoint, Jump host, Log bucket -- */
-
-function endpointBox(c, d) {
-  // A link only for a web scheme: the address is operator-written config, and a cluster that
-  // reached the list through Zabbix is still text somebody typed somewhere.
-  const uuid = `Cluster UUID: ${(d.info && d.info.cluster_uuid) || 'unknown'}`;
-  return box('url', 'Endpoint',
-    isWebUrl(c.url) ? h('a.mono.cl-url-a', { href: c.url, target: '_blank', rel: 'noopener', title: uuid }, c.url) : h('span.mono', { title: uuid }, c.url),
-    h('button.btn.sm.ghost.cl-copy', { type: 'button', 'aria-label': 'Copy endpoint', title: 'Copy the address',
-      onclick: async () => {
-        try { await navigator.clipboard.writeText(c.url); toast('URL copied', 'ok', 1800, { key: 'cl-copy' }); }
-        catch (_) { toast('The browser would not copy — select the URL and copy it', 'warn', 3000, { key: 'cl-copy' }); }
-      } }, 'Copy'));
-}
-
-function bucketBox(c) {
-  const k = clusterKind(c);
-  const zabbixKind = c.source === 'zabbix' && mayEdit() && roleMayWrite() && credentialsKeptOnServer();
-  const edit = !k.ulm.bucket && (mayEditCluster(c) || zabbixKind)
-    ? h('button.cl-lnk.cl-lnkbtn', { type: 'button', title: 'Set the bucket on the cluster (admins)',
-        onclick: async () => { if (zabbixKind ? await editClusterKind(c) : await openEditor(c)) draw(); } }, 'Set in Config ›')
-    : null;
-  return box('bucket', 'Log bucket (S3)',
-    k.ulm.bucket ? h('span.mono', { title: `${k.ulm.bucket}: enriched and raw logs share this bucket.` }, k.ulm.bucket)
-      : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, 'not set'),
-    k.ulm.enabled ? h('span.pill.green.cl-ulm', 'ULM on') : null, edit);
-}
-
-/* -- the four cards -- */
-
-// Chart colours (owner rule: never red with yellow): light green, orange, pink, blue.
-const SEG_COLOR = { active: 'var(--chart-good)', init: 'var(--chart-warn)', unas: 'var(--chart-bad)', reloc: 'var(--chart-info)', ok: 'var(--chart-good)', err: 'var(--chart-bad)', none: 'var(--surface-3)' };
-
-/** A 64 px donut: the share of each part, an empty ring when there is nothing to share. */
-function donut(parts, label) {
-  const R = 15.915;
-  return svg('svg', { class: 'cl-donut', width: 64, height: 64, viewBox: '0 0 42 42', role: 'img', 'aria-label': label },
-    svg('circle', { cx: 21, cy: 21, r: R, fill: 'none', stroke: 'var(--surface-3)', 'stroke-width': 6 }),
-    ...donutSegments(parts).map((s) => svg('circle', { cx: 21, cy: 21, r: R, fill: 'none', stroke: SEG_COLOR[s.key], 'stroke-width': 6,
-      'stroke-dasharray': s.dash, 'stroke-dashoffset': s.offset.toFixed(2) })));
-}
-
-/** Ring on the left; the headline figure and the legend beside it (never inside the ring). */
-function donutBody(parts, figure, word, label) {
-  return h('div.cl-dwrap', donut(parts, label),
-    h('div.cl-dleg', h('div.cl-dhead', h('b', figure), h('span.muted', word)),
-      ...parts.map((p) => h(`div.cl-dl${p.n === 0 && p.key !== 'active' && p.key !== 'ok' ? '.zero' : ''}`,
-        h('i.cl-dot', { style: { background: SEG_COLOR[p.key] } }), h('span.cl-dn', p.label), h('span.mono.cl-dc', num(p.n))))));
-}
-
-const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, { title: pill.title || null }, pill.text) : null);
-const card4 = (id, cls, ...kids) => h(`div.cl-card${cls ? `.${cls}` : ''}`, { 'data-tile': id }, ...kids);
-
-function shardsCard(d) {
-  const s = shardCard(d.health);
-  if (!s) return card4('shards', '', cardHead('Shard allocation', { tone: 'grey', text: 'Unknown' }), h('div.cl-card-note', 'Cluster health has not been read.'));
-  const n = (k) => (s.parts.find((p) => p.key === k) || { n: 0 }).n;
-  return card4('shards', '', cardHead('Shard allocation', s.pill),
-    donutBody(s.parts, s.figure === null ? '–' : s.figure, 'active',
-      `${num(n('active'))} active, ${num(n('init'))} initializing, ${num(n('unas'))} unassigned of ${num(s.total)} shards`));
-}
-
-/**
- * The ILM card. Not known (grey, the permission sentence in its tooltip) and No policy (red,
- * Elasticsearch confirmed it) are told apart by ONE definition, lifecycle-errors.js
- * ilmPolicyState, which the summary's ILM cell reads too. Exported for tools/unit.
- */
-export function ilmCardOf(r) {
-  const { c, d } = r;
-  const v = ilmCard(d, logPattern(r));
-  if (!v.known) {
-    return card4('ilm', '', cardHead('ILM', v.pill),
-      h('div.cl-big.muted', { title: v.why }, v.headline));
-  }
-  const e = ilmErrorsOf(d, logPattern(r));
-  const link = v.link ? pageLink('Indices without a policy', 'indices', null, c, { focus: { noPolicy: v.noPolicy }, title: v.noPolicy.slice(0, 8).join('\n') }) : null;
-  if (v.state === 'none') {
-    return card4('ilm', '', cardHead('ILM', v.pill),
-      h('div.cl-big.bad', { title: `${v.total} open ${v.logs} ${v.total === 1 ? 'index has' : 'indices have'} no ILM policy` }, 'No policy for ', h('span.mono', v.logs)),
-      link ? h('div.cl-card-links', link) : null);
-  }
-  return card4('ilm', '', cardHead('ILM', v.pill),
-    donutBody(v.parts, `${v.managed}/${v.total}`, 'managed', `${v.parts[0].n} managed without error, ${v.errors} in ILM error, ${v.noPolicy.length} without a policy, of ${v.total} log indices`),
-    // Errors name themselves in the tooltip of the pill; no link then (owner, 2026-11-05).
-    e.count ? null : link ? h('div.cl-card-links', link) : null);
-}
-
-/** The Backups (SLM) card. Exported for tools/unit. */
-export function backupsCard(r) {
-  const { c, d } = r;
-  const view = lifecycleView('SLM', d, logPattern(r), c);
-  const v = slmCard(d, view, logPattern(r), clusterKind(c).ulm);
-  const title = canOpenPage('snapshots')
-    ? h('a.cl-card-t', { href: '#/snapshots', title: 'Snapshots › SLM policies',
-        onclick: (e) => { e.preventDefault(); setFocus('snapshots', { section: 'policies' }); navigateTo('snapshots', { view: 'summary' }, { cluster: c.id }); } }, 'Backups (SLM) ›')
-    : 'Backups (SLM)';
-  const head = h('div.cl-card-h', title, h(`span.pill.${v.pill.tone}.cl-card-pill`, v.pill.text));
-  const noRepo = policiesRead(c.id) && Array.isArray(d.repos) && !d.repos.length;
-  if (v.kind === 'unused') {
-    const off = card4('slm', 'off', head,
-      h('div.cl-big.muted', 'Not used'),
-      h('div.cl-card-note', 'Logs archived by ULM', v.bucket ? [' to ', h('span.mono', v.bucket)] : null));
-    off.title = 'ULM is on for this cluster, so SLM snapshots are not used';
-    return off;
-  }
-  if (v.kind === 'ok') {
-    const tone = v.status === 'Success' ? 'good' : v.status === 'Failed' ? 'bad' : 'none';
-    return card4('slm', '', head,
-      h('div.cl-big-row',
-        h(`span.cl-big.${tone}`, v.status || 'Not run yet'),
-        v.at ? h('span.muted.cl-when', { title: dt(v.at) }, clock(v.at)) : null),
-      h('div.cl-card-note.mono', { title: v.others > 0 ? `+${v.others} more policy take the log indices` : null }, v.policy));
-  }
-  if (v.kind === 'none') {
-    return card4('slm', '', head,
-      // Only the headline (owner, 2026-11-07); a policy on any overlapping wildcard still counts (lifecycle-errors.js slmCoversPattern).
-      h('div.cl-big.bad', 'No policy for ', h('span.mono', v.logs)),
-      noRepo ? h('div.cl-card-links', docLink(DOCS.repos, 'Register a repository')) : null);
-  }
-  return card4('slm', '', head,
-    h('div.cl-big.muted', v.kind === 'stopped' ? 'SLM is stopped' : '–'),
-    h('div.cl-card-note', v.kind === 'unread' ? 'Its policies could not be read (needs manage_slm or read_slm).' : v.why || 'Nothing is snapshotted until SLM is started again.'));
-}
-
-const rateText = (rt) => `${rt.qps >= 100 ? Math.round(rt.qps) : rt.qps.toFixed(1)} q/s · ${rt.dps >= 1000 ? `${(rt.dps / 1000).toFixed(1)}k` : rt.dps >= 100 ? Math.round(rt.dps) : rt.dps.toFixed(1)} docs/s`;
-
-function activityCard(c, L, shown) {
-  const t = shown.has('tasks') ? L && L.tasks : null, rt = shown.has('rate') ? L && L.rate : null;
-  let pill;
-  if (shown.has('tasks') && t) pill = t.slow ? { tone: 'yellow', text: `${t.slow} slow` } : { tone: 'green', text: 'Normal' };
-  else if (shown.has('tasks') && L && L.tasksError) pill = { tone: 'grey', text: 'Not readable' };
-  else pill = { tone: 'grey', text: 'Loading…' };
-  const main = [];
-  if (shown.has('tasks')) {
-    main.push(t ? h('span.cl-big', `${t.running} task${t.running === 1 ? '' : 's'}`)
-      : L && L.tasksError ? h('span.cl-big.muted', { title: L.tasksError }, '–') : h('span.cl-big.muted', '…'));
-    if (t && t.slow) main.push(h('span.cl-warnink', `${t.slow} over 60 s`));
-  }
-  if (shown.has('rate')) {
-    main.push(rt ? h('span.muted.cl-when', { title: 'Shard-level: query_total counts once per shard' }, rateText(rt))
-      : L && L.rateError ? h('span.muted.cl-when', { title: L.rateError }, 'rate not readable')
-      : h('span.muted.cl-when', { title: 'Two readings of _nodes/stats, ten seconds apart, make a rate' }, 'measuring…'));
-  }
-  const link = pageLink('GET _tasks', 'console', { method: 'GET', path: '/_tasks?detailed=true&group_by=parents' }, c, { title: 'REST console with the request typed in, not sent' });
-  return card4('activity', '', cardHead('Activity', pill), h('div.cl-big-row', ...main), link ? h('div.cl-card-links', link) : null);
-}
-
-function detail(r) {
-  const { c, d } = r;
-  const root = h('div.cl-detail');
-  const shown = new Set(detailShown(prefs, 'tiles').map((x) => x.id));
-  const sections = new Set(detailShown(prefs, 'sections').map((x) => x.id));
-  const L = shown.has('tasks') || shown.has('rate') ? ensureLive(c) : null;
-
-  const boxes = [];
-  if (shown.has('health')) boxes.push(healthBox(r));
-  if (shown.has('url')) boxes.push(endpointBox(c, d));
-  if (shown.has('jump')) {
-    boxes.push(box('jump', 'Jump host', c.via ? h('span.mono', { title: jumpTitle(c) }, c.via)
-      : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'None (direct)')));
-  }
-  if (shown.has('bucket')) boxes.push(bucketBox(c));
-  // One thin row of boxes, label beside value; no Report button at its end any more (owner, 2026-11-07).
-  if (boxes.length) root.append(h('div.cl-strip', ...boxes));
-
-  const cards = [];
-  if (shown.has('shards')) cards.push(shardsCard(d));
-  if (shown.has('ilm')) cards.push(ilmCardOf(r));
-  if (shown.has('slm')) cards.push(backupsCard(r));
-  if (shown.has('tasks') || shown.has('rate')) cards.push(activityCard(c, L, shown));
-  if (cards.length) root.append(h('div.cl-cards', ...cards));
-
-  if (sections.has('repo')) root.append(repoSection(c, d));
-  if (sections.has('nodes')) root.append(nodesSection(c, d));
-  return root;
-}
-
-
-/** Last snapshot status as a pill: Success, Partial, Failed, In progress. */
-function statusPill(s) {
-  if (!s) return h('span.muted', 'none');
-  const st = String(s.status || '').toUpperCase();
-  const cls = st === 'SUCCESS' ? 'green' : st === 'PARTIAL' ? 'yellow' : st === 'FAILED' ? 'red' : 'grey';
-  const word = st === 'IN_PROGRESS' ? 'In progress' : st ? st[0] + st.slice(1).toLowerCase() : 'unknown';
-  return h(`span.pill.${cls}`, { title: `Latest snapshot ${s.id} · ${st || 'state unknown'}` }, h('i.dot'), word);
-}
-
-/** A section header: bold title, a count or summary, and its links at the right end. */
-const secHead = (title, sub, ...rest) => h('div.cl-sec-h', h('b', title), sub ? h('span.muted.cl-sec-sub', sub) : null, ...rest);
-
-function repoSection(c, d) {
-  const repos = d.repos || [];
-  const snapshotsLink = pageLink('Snapshots', 'snapshots', { view: 'summary' }, c);
-  // Nothing registered: one line, no table, no empty band (and not a fault: an unread list is not "none").
-  if (policiesRead(c.id) && Array.isArray(d.repos) && !repos.length) {
-    return h('div.cl-sec.cl-sec-bar', { 'data-section': 'repo' },
-      h('span.cl-sec-chev', { 'aria-hidden': 'true' }, '▸'), h('b', 'Snapshot repositories'), h('span.muted.cl-sec-sub', 'None registered'),
-      h('span.cl-sec-links', snapshotsLink, docLink(DOCS.repos, 'Register a repository')));
-  }
-  if (!repos.length) return h('div.cl-sec', { 'data-section': 'repo' }, secHead('Snapshot repositories', 'not read yet'));
-  const cols = detailShown(prefs, 'repo');
-  const cache = sizeCacheFor(c);
-  const mayRestore = roleMayWrite() && !isSnapshotMode();
-  const trs = repos.map((rp) => {
-    const snaps = (d.snapshots && d.snapshots[rp.name]) || [];
-    const newest = snaps[0];
-    const policies = slmForRepo(d.slm, rp.name);
-    const size = repoSizeFromCache(rp.name, snaps, cache.map);
-    const span = repoOverview(rp, d.snapshots ? snaps : null, d.slm || []).span;
-    const cell = {
-      name: () => h('td', h('span.mono', rp.name)),
-      type: () => h('td', h(`span.pill.${rp.type === 's3' ? 'orange' : 'grey'}`, { title: `Repository type ${rp.type || 'unknown'}` }, rp.type || '?')),
-      location: () => h('td.mono.cl-detail-loc', { title: rp.location }, rp.location || '–'),
-      policy: () => h('td', policies.length
-        ? h('div.cl-pols', ...policies.slice(0, 2).map((p) => h('span.mono', { title: `${p.pattern || ''}${p.lastSnapshot ? ` → ${p.lastSnapshot}` : ''}${p.lastAt ? `\nlast run ${dt(p.lastAt)}` : '\nnever run'}` }, p.id)),
-            policies.length > 2 ? h('span.muted.cl-sub', `+${policies.length - 2} more`) : null)
-        : h('span.muted', { title: 'No SLM policy writes to this repository' }, 'none')),
-      count: () => h('td.num', { title: snaps.slice(0, 12).map((x) => x.id).join('\n') + (snaps.length > 12 ? `\n+${snaps.length - 12} more` : '') }, num(snaps.length)),
-      // The days of log data inside the snapshots, read from the dates in their index names (not when they ran).
-      // A listing that names no indices (_cat) cannot say: unknown, never "none".
-      covered: () => h('td', span.from
-        ? h('span', { title: `${span.days} day(s) of dated indices${span.unknown ? ' — some snapshots not yet read in full' : ''}` }, `${span.from} → ${span.to}`)
-        : span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices. The Snapshots page reads them in full.' }, 'unknown')
-        : h('span.muted', { title: 'No index in these snapshots carries a date in its name' }, '–')),
-      last: () => h('td', newest
-        ? [statusPill(newest), ' ', h('span.muted', { title: `Snapshot ${newest.id} started ${dt(newest.start)}` }, `${clock(newest.start)} · ${ago(newest.start)}`)]
-        : h('span.muted', 'none')),
-      // Unknown is not a figure: a size is shown only once every snapshot has been measured.
-      size: () => h('td.num', size !== null ? h('span.mono', { title: `Sum of the incremental bytes of ${snaps.length} snapshot(s), measured on the Reports page` }, bytes(size))
-        : h('span.muted', { title: 'Sizing a repository is an expensive call: the Reports page measures it on demand (Measure size), and this reads that measurement' }, 'not measured')),
-      actions: () => h('td.num', h('div.cl-acts',
-        canOpenPage('snapshots')
-          ? h('a.cl-lnk', { href: '#/snapshots', title: 'Open Snapshots: list, take, restore, delete, SLM policies',
-              onclick: (e) => { e.preventDefault(); navigateTo('snapshots', { view: 'snapshots' }, { cluster: c.id }); } }, 'Manage ›')
-          : null,
-        mayRestore && newest
-          ? h('button.cl-lnk.cl-lnkbtn', { type: 'button', title: `Restore indices from ${newest.id}`,
-              onclick: () => restoreSnapshotDialog(c, rp.name, newest.id, { onChanged: () => refreshAll({ force: true, selected: true }) }) }, 'Restore…')
-          : null)),
-    };
-    return h('tr', ...cols.map((col) => cell[col.id]()));
-  });
-  return h('div.cl-sec', { 'data-section': 'repo' },
-    secHead('Snapshot repositories', String(repos.length), h('span.cl-sec-links', snapshotsLink)),
-    table(cols.map((col) => ({ label: col.label, num: col.num })), trs));
-}
-
 
 /**
  * Where a node's CPU, heap and disk turn amber ('low') and red ('high'). One definition: the node
@@ -1576,64 +1048,3 @@ export function heapLevel(p) {
 }
 /** The heap column's tooltip: the line it is coloured by. */
 export const HEAP_TITLE = `JVM heap used. Amber from ${NODE_LOAD_LEVELS.heap.warn} %; orange over ${HEAP_HIGH_PERCENT} %, where a High alert is raised (after ${HEAP_RAISE_READINGS} readings in a row; it clears below ${HEAP_CLEAR_PERCENT} %).`;
-
-/** The chip a node role takes: Elasticsearch's own name, coloured by what it does. */
-const roleChip = (role) => h(`span.cl-role.${roleKind(role)}`, role);
-
-function nodesSection(c, d) {
-  const nodes = d.nodes || [];
-  if (!nodes.length) return h('div.cl-sec', { 'data-section': 'nodes' }, secHead('Nodes', null), empty('No node list yet'));
-  const cols = detailShown(prefs, 'nodes');
-  const shardsOf = new Map(((d.disk && d.disk.nodes) || []).map((x) => [x.node, Number(x.shards)]));
-  // A node's disk level is the cluster's own watermarks, as the Disk usage cell reads them (none while they are unread).
-  const diskLvl = (p) => diskAgainstWatermarks({ percent: isFinite(p) ? p : null }, d.clusterSettings).level;
-  const bar = (p, cls) => h('div.cl-mini', { role: 'img', 'aria-label': `${Math.round(p)} percent` },
-    h(`i.${cls}`, { style: { width: `${Math.max(1.5, Math.min(100, p))}%` } }));
-  // A reading over its line (red CPU / disk, heap past the High alert) carries the troubleshooting page, in its cell.
-  const pctCell = (p, sub, which, doc) => {
-    if (!isFinite(p)) return h('span.muted', '–');
-    const cls = which === 'heap' ? heapLevel(p) : which === 'disk' ? diskLvl(p) : nodeLoadLevel(p, which);
-    const over = which === 'heap' ? cls === 'over' || cls === 'high' : cls === 'high';
-    return h('span.cl-pc', h('span.cl-pcn' + (over ? '.bad' : cls === 'low' || cls === 'over' ? '.warn' : ''), `${Math.round(p)} %`),
-      bar(p, cls === 'unknown' ? 'unk' : cls), sub ? h('span.muted.cl-sub', sub) : null, over ? docLink(doc.href, doc.text) : null);
-  };
-  const lists = nodes.map((n) => nodeRoles(n['node.role']));
-  const over = (n) => nodeLoadLevel(Number(n.cpu), 'cpu') === 'high' || ['over', 'high'].includes(heapLevel(Number(n['heap.percent'])))
-    || diskLvl(Number(n['disk.used_percent'])) === 'high';
-  const trs = nodes.map((n, i) => {
-    const roles = lists[i];
-    const isMaster = String(n.master || '').trim() === '*';
-    const data = isDataNode(roles);
-    const free = nodeFreeBytes(n);
-    const lvl = diskLvl(Number(n['disk.used_percent']));
-    const cell = {
-      name: () => h('td.cl-nm', h('span.mono', n.name), isMaster ? h('span.cl-star', { title: 'Elected master', 'aria-label': 'elected master' }, ' ★') : null),
-      version: () => h('td.mono', n.version || '–'),
-      ip: () => h('td.mono', n.ip || '–'),
-      id: () => h('td.mono', { title: n.id || '' }, n.id ? String(n.id).slice(0, 8) : '–'),
-      roles: () => {
-        const rc = roleChips(roles);
-        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (!k.roles.length ? h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label)
-          : k.kind ? h(`span.cl-role.${k.kind}`, { title: k.title }, k.label) : roleChip(k.label))),
-        rc.more.length ? h('span.cl-role.other', { title: rc.more.join(', ') }, `+${rc.more.length}`) : null));
-      },
-      jdk: () => h('td.mono', n.jdk || '–'),
-      cpu: () => h('td', pctCell(Number(n.cpu), '', 'cpu', { href: DOCS.cpu, text: 'High CPU' })),
-      heap: () => h('td', pctCell(Number(n['heap.percent']), n['heap.current'] && n['heap.max'] ? `${bytes(Number(n['heap.current']))} of ${bytes(Number(n['heap.max']))}` : '', 'heap', { href: DOCS.heap, text: 'Why high?' })),
-      disk: () => h('td', pctCell(Number(n['disk.used_percent']), n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))}` : '', 'disk', { href: DOCS.watermark, text: 'Watermark' })),
-      // disk.total − disk.used (else disk.avail), coloured with the disk level; not reported is a dash, never 0 B.
-      free: () => h('td.num.mono' + (lvl === 'high' ? '.bad' : lvl === 'low' ? '.warn' : ''),
-        free === null ? h('span.muted', { title: 'This node did not report its disk' }, '–')
-          : h('span', { title: n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))} used` : null }, bytes(free))),
-      load: () => h('td.num.mono', n.load_1m ?? '–'),
-      shards: () => h('td.num', shardsOf.has(n.name) ? num(shardsOf.get(n.name)) : h('span.muted', { title: 'Not in _cat/allocation: no shards here' }, '–')),
-      uptime: () => h('td.num.mono', n.uptime || '–'),
-    };
-    return h(`tr${data ? '.cl-data' : ''}${data && over(n) ? '.over' : ''}`, ...cols.map((col) => cell[col.id]()));
-  });
-  const summary = nodesSummary(lists, nodes.some((n) => String(n.master || '').trim() === '*'));
-  return h('div.cl-sec', { 'data-section': 'nodes' },
-    secHead('Nodes', summary,
-      h('span.cl-sec-links', pageLink('Nodes & shards', 'shards', null, c))),
-    table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs));
-}
