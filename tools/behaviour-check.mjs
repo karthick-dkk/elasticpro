@@ -79,7 +79,8 @@ const app = await load('app.js');
   header.append(mk('div', 'topbar', 'topbar'), mk('nav', 'nav', 'nav'));
   const main = doc.createElement('main');
   main.append(mk('div', 'page', 'view'));
-  doc.body.append(header, main);
+  const app = doc.createElement('div'); app.className = 'app'; app.append(header, main);
+  doc.body.append(app);
 }
 
 const panel = (title) => [...doc.querySelectorAll('section.card')]
