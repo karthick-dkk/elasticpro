@@ -21,3 +21,9 @@ export function usersFromSecurityResponse(res) {
   })).sort((a, b) => a.name.localeCompare(b.name));
   return { users, error: null, fix: null };
 }
+
+/** Elasticsearch puts the reason in the body; the thrown message is only the status line. */
+export function esReason(e) {
+  const es = e && e.res && e.res.json && e.res.json.error;
+  return (es && (es.reason || es.type)) || (e && e.message) || String(e);
+}
