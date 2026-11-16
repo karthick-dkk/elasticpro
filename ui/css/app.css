@@ -284,9 +284,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   height: 36px; max-width: 70%;
   display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; padding: 0 12px; background: var(--surface-0);
 }
-/* The top bar has no band of its own (the owner, 2026-11-16): it floats over the right end of the
-   first row: the end of the menu row (a flex item beside it), or with the menu on the left it floats
-   over the page's own first row, which the .page::before float below leaves room for. */
+/* The top bar has no band of its own with the menu on top (the owner, 2026-11-16): it is the end of
+   the menu row, a flex item beside it. With the menu on the left it is the content's first row, the
+   chooser at its left end (the owner, 2026-11-16) and the pills and the bell at its right. It used to
+   float over the page's first row with a 330px float reserving room for it, and every flex or grid
+   box beside a float is narrowed by it from top to bottom: the REST page lost 330px of its width. */
 .embedded .nav-brand { display: none; }
 .nav-brand { align-items: center; gap: 8px; padding: 0 10px 0 4px; font-size: 13.5px; }
 .nav-brand img { width: 20px; height: 20px; border-radius: 6px; }
@@ -2462,9 +2464,9 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
 /* --- the page menu on the left (Your settings › Page menu: Left), wide windows only --- */
 @media (min-width: 901px) {
   html[data-menu="left"] .app > .head-fix, html[data-menu="left"] .app > .main { margin-left: 200px; }
-  html[data-menu="left"] .head-fix { height: 0; border-bottom: 0; }
-  html[data-menu="left"] .topbar { position: absolute; z-index: 21; right: 4px; top: 6px; height: 32px; background: var(--surface-0); }
-  html[data-menu="left"] .page::before { content: ''; float: right; width: 330px; height: 32px; }
+  html[data-menu="left"] .head-fix { margin-left: 200px; border-bottom: 0; }
+  html[data-menu="left"] .head-fix > .topbar { flex: 1 1 auto; min-width: 0; max-width: none; height: 32px; padding: 8px 16px 0; background: transparent; }
+  html[data-menu="left"] .main .page { padding-top: 8px; }
   html[data-menu="left"] #nav.nav { position: fixed; left: 0; top: 0; bottom: 0; width: 200px; z-index: 30; flex-direction: column;
     align-items: stretch; gap: 2px; padding: 14px 10px 44px; overflow-x: hidden; overflow-y: auto; flex-wrap: nowrap;
     background: #1a1a19; color: #e7e6e2; border-right: 1px solid #000; }
