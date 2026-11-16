@@ -421,7 +421,9 @@ function loadBody(c) {
 /**
  * Everything _cat/nodes knows, which is what "is this node healthy" is answered from: one
  * 32 px line per node — name, the short node id (the whole id is its tooltip), IP, roles,
- * version, then the usage bars, the disk and the uptime. Nothing stacked.
+ * version, then the usage bars, the disk, the shards the node holds and the uptime. Nothing
+ * stacked, and the whole table fits the page without a sideways scroll (app.css .ns-nodes:
+ * tight cells, narrow bars; the disk cell is "91% · 8.38 GB free", its sizes in the tooltip).
  */
 function nodesBody(c, d) {
   const nodes = d.nodes || [];
@@ -439,8 +441,8 @@ function nodesBody(c, d) {
     const heapCur = Number(n['heap.current']), heapMax = Number(n['heap.max']);
     const isMaster = String(n.master || '').trim() === '*';
     return h('tr',
-      h('td', h('span', { style: { fontWeight: 620 } }, n.name),
-        isMaster ? h('span', { style: { marginLeft: '6px' } }, pill('master', 'blue')) : null),
+      h('td', h('span.ns-name', { title: n.name }, n.name),
+        isMaster ? h('span.ns-master', { title: 'The elected master' }, pill('master', 'blue')) : null),
       h('td', n.id ? h('span.mono.muted.id', { title: n.id }, shortNodeId(n.id)) : h('span.muted', '–')),
       h('td.mono', { style: { fontSize: '11px' } }, n.ip || h('span.muted', '–')),
       h('td', h('span.mono', { style: { fontSize: '11px' }, title: roleTitle(n['node.role']) },
@@ -451,12 +453,13 @@ function nodesBody(c, d) {
       h('td.num', usageBar(pctOf(n['ram.percent']), 'disk', `RAM ${n['ram.percent']}% in use on the host`)),
       h('td.num', usageBar(pctOf(n.cpu), 'disk', `CPU ${n.cpu}% (the process, over the last sample)`)),
       h('td.num', loadCell(n, coreMap ? coreMap.get(n.name) : undefined)),
-      h('td', diskBar(used, total, p, Number(a.shards) || null)),
-      h('td.muted', { style: { fontSize: '11.5px' } }, n.uptime || ''));
+      h('td', diskBar(used, total, p)),
+      h('td.num', a.shards === undefined || a.shards === '' ? h('span.muted', { title: 'Not in _cat/allocation' }, '–') : num(Number(a.shards))),
+      h('td.muted', n.uptime || ''));
   });
 
   return h('div.ns-nodes', table(['Node', 'Node ID', 'IP', 'Roles', 'Version', { label: 'Heap', num: true }, { label: 'RAM', num: true },
-                { label: 'CPU', num: true }, { label: 'Load 1m/5m', num: true }, 'Disk', 'Uptime'],
+                { label: 'CPU', num: true }, { label: 'Load 1m/5m', num: true }, 'Disk', { label: 'Shards', num: true, title: 'Shards on the node (_cat/allocation)' }, 'Uptime'],
     trs, {
       // A cluster with no nodes is not a thing. An empty list here means the call did
       // not come back with one, so it says that rather than implying an empty cluster.
@@ -501,11 +504,11 @@ function loadCell(n, coreCount) {
   return usageBar(p, 'disk', `load 1 m over ${num(coreCount)} cores: ${p.toFixed(0)} % · 5 m ${n.load_5m || '–'}`, { text });
 }
 
-/** Disk as the same bar, the free space and the shard count beside the number — one line. */
-function diskBar(used, total, p, shardCount) {
+/** Disk as the same bar and the free space beside the number — one short line; the sizes in its tooltip. */
+function diskBar(used, total, p) {
   if (!total) return h('span.muted', '–');
-  return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used`,
-    { suffix: `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`, digits: 1 });
+  return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`,
+    { suffix: `· ${bytes(total - used)} free`, digits: 0 });
 }
 
 /**
@@ -541,15 +544,18 @@ function shardMix(all, d) {
   return { split, total, sub };
 }
 
+/** The Shard allocation and Query pressure cards are the compact kind (app.css .ns-compact): tighter, smaller figures. */
+function snug(el) { el.classList.add('ns-compact'); return el; }
+
 /** How the allocation switch's values read on the control. */
 const ALLOC_LABEL = { all: 'on', primaries: 'primaries only', new_primaries: 'new primaries only', none: 'off' };
 
 /**
  * Shard allocation: a half-circle gauge (lib/charts.js splitGauge, half: assigned green from
- * the start, moving blue, unassigned pink at the end; the assigned share and "N of M shards
- * assigned" under the arc), the three counts stacked beside it as edge tiles (the unassigned
- * one carries the reasons and a "show" that narrows the table), and in the header the
- * allocation switch. Nothing else: the owner's cut.
+ * the start, moving blue, unassigned pink at the end; the assigned share inside the arc and
+ * "N of M shards assigned" under it), the three counts side by side beside it as edge tiles (the
+ * unassigned one carries the reasons and a "show" that narrows the table), and in the header the
+ * allocation switch. Nothing else: the owner's cut. Compact (0.3.71, app.css .ns-compact).
  */
 function allocationCard(c, all, d) {
   const mix = shardMix(all, d);
@@ -561,14 +567,17 @@ function allocationCard(c, all, d) {
   ];
   const reasons = unassignedByReason(all);
   const reasonWords = reasons.map((r) => `${r.reason.replace(/_/g, ' ').toLowerCase()} ${num(r.count)}`).join(' · ');
-  // The shards each node holds are the Disk column's "· N shards" in the node table (one place).
+  // The shards each node holds are the node table's Shards column (one place).
 
   const body = !mix.total
     ? h('div.muted', { style: { fontSize: '11.5px' } }, 'No shard listing and no health count — unknown, not zero.')
     : h('div',
         h('div.ns-alloc',
-          splitGauge(segments, { total: mix.total, format: (v) => num(v), half: true, width: 200, stroke: 20, legend: false,
-            centreLabel: 'shards', centre: { big: `${Math.round((split.started / mix.total) * 100)}%`, small: `${num(split.started)} of ${num(mix.total)} shards assigned` } }),
+          // Compact (0.3.71): 120 wide (60 % of the 200 it was), stroke 12, a 20 px figure; the
+          // "N of M shards assigned" line under the gauge, which is too narrow to hold it.
+          splitGauge(segments, { total: mix.total, format: (v) => num(v), half: true, width: 120, stroke: 12, legend: false,
+            centreLabel: 'shards', centre: { big: `${Math.round((split.started / mix.total) * 100)}%`, bigPx: 20, smallBelow: true,
+              small: `${num(split.started)} of ${num(mix.total)} shards assigned` } }),
           h('div.ns-alloc-tiles',
             edgeTile(num(split.started), 'assigned', { edge: STATUS.good, title: `${num(split.started)} shards started` }),
             edgeTile(num(split.moving), 'moving', { edge: 'var(--chart-info)', title: split.moving ? `${num(split.moving)} relocating or initialising` : 'no shard is relocating or initialising',
@@ -578,7 +587,7 @@ function allocationCard(c, all, d) {
               extra: split.unassigned ? [h('span', reasonWords),
                 h('button.btn.sm.ghost', { title: 'Show only the unassigned shards in the table below', onclick: () => { showUnassigned(); draw(); } }, 'show')] : null }))));
 
-  return card('Shard allocation', `${c.name} · ${mix.sub}`, body, [allocationControl(c)]);
+  return snug(card('Shard allocation', `${c.name} · ${mix.sub}`, body, [allocationControl(c)]));
 }
 
 /**
@@ -660,7 +669,7 @@ function pressureCard(c) {
     : io && io.error ? `could not read _nodes/stats: ${io.error}`
     : 'measuring · next poll';
   const by = r.rejectedBy || {}, tb = r.tripsBy || {};
-  return card('Query pressure', `${c.name} · between the last two polls`,
+  return snug(card('Query pressure', `${c.name} · between the last two polls`,
     h('div',
       h('div.ns-pressure',
         edgeTile(fmt(r.rejected), 'rejected', { alert: r.rejected > 0,
@@ -672,7 +681,7 @@ function pressureCard(c) {
         edgeTile(fmt(r.writeQueue), 'write queue', { alert: r.queueSustained && r.writeQueue > 0,
           title: `write requests queued now across the nodes · ${poolText('write')}` })),
       h('div.ns-note', note)),
-    [headPill]);
+    [headPill]));
 }
 
 /* ---------------------------------- the table ---------------------------------- */

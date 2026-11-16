@@ -348,7 +348,7 @@ await go('shards');
     `shards: expected a Move button on each of the 2 started shards per cluster (${2 * shown}), found ${moves}`);
 
   // The node half: one line per node, the id and the IP as columns of their own.
-  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Uptime']) {
+  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Shards', 'Uptime']) {
     ok(heads.includes(col), `shards: the node table has no "${col}" column, saw ${heads.join(', ')}`);
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
@@ -362,8 +362,11 @@ await go('shards');
         `nodes: the Node ID column is not the short id with the whole id as its tooltip (${n1.children[1].textContent.trim()})`);
       ok(n1.children[2].textContent.trim() === '10.0.0.1', `nodes: the IP column reads ${n1.children[2].textContent.trim()}`);
       ok(!n1.children[0].querySelector('div'), 'nodes: the name cell still stacks the IP under the name');
-      ok(/91\.0%/.test(n1.children[9].textContent) && /free · 38 shards/.test(n1.children[9].textContent),
-        `nodes: the disk cell is not one line with the free space and shard count (${n1.children[9].textContent.trim()})`);
+      // Compact (0.3.71): "91% · N GB free" in the cell, the sizes in its tooltip; the shard count its own column.
+      ok(/^91%\s*\S.* free$/.test(n1.children[9].textContent.trim()) && !/shards/.test(n1.children[9].textContent)
+        && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
+        `nodes: the disk cell is not "91% · free" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
+      ok(n1.children[10].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[10].textContent.trim()}", not node-1's 38`);
     }
   }
 
@@ -417,12 +420,13 @@ await go('shards');
     const ac = allocCard();
     ok(!!ac, 'allocation: no Shard allocation card');
     if (ac) {
-      // A half-circle gauge, 200 wide, stroke 20: assigned first, unassigned at the end, the
-      // assigned share and "N of M shards assigned" under the arc.
+      // A half-circle gauge, compact (0.3.71): 120 wide, stroke 12, assigned first, unassigned at
+      // the end, the assigned share in the arc and "N of M shards assigned" under it.
       const gauge = ac.querySelector('.split-gauge.half svg');
-      ok(!!gauge && /width: 200px/.test(gauge.getAttribute('style') || '') && gauge.getAttribute('viewBox').startsWith('0 0 200 '),
-        `allocation: the chart is not the 200 px half-circle gauge (${gauge && gauge.getAttribute('style')})`);
-      ok(!!gauge && [...gauge.querySelectorAll('path')].every((p) => p.getAttribute('stroke-width') === '20'), 'allocation: the gauge stroke is not 20');
+      ok(!!gauge && /width: 120px/.test(gauge.getAttribute('style') || '') && gauge.getAttribute('viewBox').startsWith('0 0 120 '),
+        `allocation: the chart is not the 120 px half-circle gauge (${gauge && gauge.getAttribute('style')})`);
+      ok(!!gauge && [...gauge.querySelectorAll('path')].every((p) => p.getAttribute('stroke-width') === '12'), 'allocation: the gauge stroke is not 12');
+      ok(ac.classList.contains('ns-compact') && !!ac.querySelector('.split-gauge-small'), 'allocation: the card is not the compact kind, or the assigned line is not under the gauge');
       ok(!!gauge && [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
         `allocation: the gauge's segments are ${gauge ? [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') : 'absent'}`);
       ok(/75%/.test(ac.querySelector('.split-gauge.half').textContent) && /3 of 4 shards assigned/.test(ac.querySelector('.split-gauge.half').textContent),

@@ -383,9 +383,11 @@ function divide(segments, totalOpt) {
 }
 
 /**
- * `half: true` draws it as a half circle (the Shard allocation card: ≈200×116, stroke 20) with
- * `centre: {big, small}` as the text under the arc and no legend of its own (`legend: false`);
- * `width` and `stroke` size it. One definition for the 240° arc and the half circle.
+ * `half: true` draws it as a half circle with `centre: {big, small}` as the text under the arc
+ * and no legend of its own (`legend: false`); `width` and `stroke` size it, `centre.bigPx` the
+ * big figure (26 px unless given), and `centre.smallBelow` puts the small line under the gauge
+ * instead of inside the arc — for a gauge too narrow to hold it (the Shard allocation card:
+ * 120 wide, stroke 12, a 20 px figure). One definition for the 240° arc and the half circle.
  */
 export function splitGauge(segments, opts = {}) {
   const half = !!opts.half;
@@ -437,14 +439,16 @@ export function splitGauge(segments, opts = {}) {
   const centre = half && opts.centre
     ? h('div', { style: { position: 'absolute', inset: 0, display: 'grid', alignContent: 'end', justifyItems: 'center',
                           textAlign: 'center', lineHeight: 1.1, paddingBottom: '1px' } },
-        h('div', { style: { fontSize: '26px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' } }, opts.centre.big),
-        opts.centre.small ? h('div.muted', { style: { fontSize: '11px' } }, opts.centre.small) : null)
+        h('div', { style: { fontSize: `${opts.centre.bigPx || 26}px`, fontWeight: 700, fontVariantNumeric: 'tabular-nums' } }, opts.centre.big),
+        opts.centre.small && !opts.centre.smallBelow ? h('div.muted', { style: { fontSize: '11px' } }, opts.centre.small) : null)
     : h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeContent: 'center',
                           textAlign: 'center', lineHeight: 1.15 } },
         h('div', { style: { fontSize: '22px', fontWeight: 680 } }, fmt(total)),
         h('div.muted', { style: { fontSize: '10.5px' } }, opts.centreLabel || 'total'));
   return h(`div.split-gauge${half ? '.half' : ''}`, { style: { display: 'grid', justifyItems: 'center', gap: '2px' } },
     h('div', { style: { position: 'relative', lineHeight: 0 } }, s, centre),
+    half && opts.centre && opts.centre.small && opts.centre.smallBelow
+      ? h('div.muted.split-gauge-small', { style: { fontSize: '11px', lineHeight: 1.2, whiteSpace: 'nowrap' } }, opts.centre.small) : null,
     opts.legend === false ? null : h('div', { style: legendStyle },
       ...parts.map((part) => h('div', {
         style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '11.5px' },

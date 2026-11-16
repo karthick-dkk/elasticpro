@@ -1006,10 +1006,32 @@ a.arow-cluster:hover { text-decoration: underline; }
 .ns-pressure { display: grid; grid-template-columns: repeat(2, minmax(96px, 1fr)); gap: 10px 14px; }
 .ns-pressure .edge-tile { border-left-color: var(--border); }
 .ns-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
-/* The node table: one 32 px line per node, no stacked cells. */
-.ns-nodes table.tbl td { padding: 0 10px; height: 32px; white-space: nowrap; }
-.ns-nodes table.tbl th { padding: 4px 10px; }
+/* Shard allocation and Query pressure, compact (0.3.71, pages/shards.js snug): about half their old
+   height — the gauge 120 px, the figures 18–20 px, the tiles side by side, tight padding. Every
+   figure and label is still there. */
+.dense .ns-compact > header { padding: 4px 10px; }
+.dense .ns-compact > .body { padding: 6px 10px 7px; }
+.ns-compact .edge-tile { padding: 0 0 0 8px; }
+.ns-compact .edge-tile > .v, .ns-compact .ns-alloc-tiles .edge-tile > .v { font-size: 18px; line-height: 1.15; }
+.ns-compact .edge-tile > .k { letter-spacing: 0.03em; }
+.ns-compact .ns-alloc { gap: 14px; flex-wrap: nowrap; }
+.ns-compact .ns-alloc-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 12px; flex: 1 1 auto; }
+.ns-compact .ns-pressure { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 12px; }
+.ns-compact .ns-note { margin-top: 4px; font-size: 11px; }
+/* The node table: one 32 px line per node, no stacked cells, and no sideways scroll at the owner's
+   1440 px window with the menu on the left (1208 px of page) nor at 1280 (1048): tight cells,
+   narrow bars that give way first, a long node name ends in … with the whole name its tooltip. */
+.ns-nodes table.tbl td { padding: 0 6px; height: 32px; white-space: nowrap; font-size: 12px; }
+.ns-nodes table.tbl th { padding: 4px 6px; letter-spacing: 0; }
+.ns-nodes table.tbl td:first-child, .ns-nodes table.tbl th:first-child { padding-left: 8px; }
 .ns-nodes .mono.id { font-size: 11px; }
+.ns-nodes .ns-name { font-weight: 620; display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.ns-nodes .ns-master { margin-left: 5px; }
+.ns-nodes .ns-master .pill { padding: 0 6px; font-size: 10.5px; }
+.ns-nodes .use-bar { min-width: 0; gap: 4px; }
+.ns-nodes .use-bar > .bar-mini { flex: 1 1 44px; min-width: 22px; max-width: 72px; }
+.ns-nodes .use-num { min-width: 28px; font-size: 11.5px; }
+.ns-nodes .use-bar > .muted { font-size: 11px; }
 /* The icon-only buttons of the Shards toolbar. */
 .btn.icon { padding: 3px 7px; font-size: 13px; line-height: 1.1; min-width: 28px; }
 /* The one Refresh button (lib/freshness.js refreshButton): the arrow alone, as tall as the other toolbar buttons. */
