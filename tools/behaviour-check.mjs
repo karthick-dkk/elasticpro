@@ -8116,6 +8116,20 @@ await settleFor(300);
       location.hash = `#/clusters/overview/${encodeURIComponent(other.id)}`; await settleFor(500);
       ok(st.state.selected === other.id && doc.getElementById('cluster-select').value === other.id, `overview: an address naming ${other.name} left the chooser on ${st.state.selected}`);
     }
+    // And the chooser moves the board: picking another cluster shows it and the address follows
+    // (it used to snap back to the cluster the address still named).
+    {
+      const from = st.state.selected;
+      const to = st.clusters().find((c) => c.id !== from);
+      const pickEl = doc.getElementById('cluster-select');
+      if (to && pickEl) {
+        pickEl.value = to.id; pickEl.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500);
+        const shown = (card('cluster') || {}).textContent || '';
+        ok(st.state.selected === to.id && doc.getElementById('cluster-select').value === to.id, `overview: choosing ${to.name} in the top bar left the chooser on ${st.state.selected}`);
+        ok(shown.includes(to.name), `overview: choosing ${to.name} in the top bar still shows "${shown.slice(0, 80)}"`);
+        ok(location.hash === `#/clusters/overview/${encodeURIComponent(to.id)}`, `overview: choosing ${to.name} left the address at ${location.hash}`);
+      }
+    }
     await go('alerts');
     ok(!doc.documentElement.classList.contains('ov-fit'), 'overview: leaving the page left html.ov-fit');
   }

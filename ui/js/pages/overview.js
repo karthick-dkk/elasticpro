@@ -38,6 +38,8 @@ let section = LIST;
  * do, to offer no "All clusters", and to draw the page again when the address moves between sections.
  */
 export const singleCluster = () => clustersSection(location.hash) === OVERVIEW;
+/** The address for a cluster picked in the top bar: the Overview names it (app.js, the chooser); the List names none. */
+export const addressFor = (id) => (singleCluster() && id && id !== 'all' ? overviewHash(id) : null);
 
 /**
  * Sort keys, each pulling one comparable value out of a {c, d, cl} row. `null` is "not

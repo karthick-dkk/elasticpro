@@ -762,6 +762,12 @@ function renderTopbar() {
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
     // for; picking one cluster withdraws it.
     fleetChosen = e.target.value === 'all';
+    // A page whose address names the cluster (Clusters › Overview: #/clusters/overview/<id>) moves
+    // its address first: drawn again under the old one, the page read the old cluster out of it
+    // and put the chooser straight back.
+    const cur = PAGES.find((p) => p.id === currentPage);
+    const addr = cur && cur.mod.addressFor ? cur.mod.addressFor(e.target.value) : null;
+    if (addr && location.hash !== addr) { try { history.replaceState(null, '', addr); } catch (_) { location.hash = addr; } }
     go(currentPage);
   } });
   // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
