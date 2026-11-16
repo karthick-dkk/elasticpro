@@ -766,9 +766,8 @@ await go('overview');
 }
 
 await go('indices');
-// The Indices page is for managing indices. Its Summary tab moved to Reports › Daily &
-// monthly in 0.3.53 (docs/REPORTS.md, board 7); what must be on THIS page is the table, the
-// controls that act on it, and one line saying where the summary went.
+// The Indices page is for managing indices: the table and the controls that act on it. Its
+// Summary tab (0.3.71) is the index size per day, driven in its own block further down.
 {
   const txt = doc.body.textContent;
   const btn = (label) => [...doc.querySelectorAll('button')].some((b) => b.textContent.trim() === label);
@@ -840,20 +839,10 @@ await go('indices');
     await type('');
   }
   const tabs = [...doc.querySelectorAll('.ix-views .seg .btn')].map((b) => b.textContent.trim());
-  ok(JSON.stringify(tabs) === JSON.stringify(['Indices', 'Templates']), `indices: the view tabs are ${tabs.join(' | ')}, want Indices | Templates`);
-  ok(!btn('Summary'), 'indices: the Summary tab is still there');
-  ok(!doc.querySelector('.vs'), 'indices: the daily record is still drawn on the Indices page');
-  ok(/Daily and monthly summary is now in Reports › Daily & monthly ›/.test(txt), 'indices: no line saying where the summary went');
-  const link = doc.getElementById('ix-to-reports');
-  ok(!!link, 'indices: the line has no link to Reports › Daily & monthly');
-  if (link) {
-    press(link);
-    await settleFor(400);
-    ok(app.currentPage ? app.currentPage() === 'reports' : true, 'indices: the link did not open Reports');
-    ok((doc.location.hash || '') === '#/reports/daily', `indices: the link went to ${doc.location.hash}`);
-    const on = doc.querySelector('.rp-nav a[aria-current="page"]');
-    ok(on && on.dataset.section === 'daily', 'indices: the link did not open the Daily & monthly section');
-  }
+  ok(JSON.stringify(tabs) === JSON.stringify(['Indices', 'Templates', 'Summary']), `indices: the view tabs are ${tabs.join(' | ')}, want Indices | Templates | Summary`);
+  ok(!doc.querySelector('.vs') && !doc.querySelector('.isum'), 'indices: a daily record is drawn on the Indices tab');
+  ok(!/summary is now in/.test(txt), 'indices: the old line pointing to Reports is still there');
+  ok(!btn('15d'), 'indices: the Summary\'s day buttons are on the Indices tab');
 }
 
 /* --------------------- Reports › Daily & monthly against the real core --------------------- */
@@ -8458,11 +8447,180 @@ async function backToList() {
   try { for (const k of ['elasticpro.indices.perPage', 'elasticpro.docs.perPage', 'elasticpro.docs.range']) window.localStorage.removeItem(k); } catch (_) { /* no storage */ }
 }
 
+/* ---------- Indices › Summary (0.3.71): day buttons, Columns / Rows, tag1 chips, the "i", the CSV, an empty record ---------- */
+{
+  // A fresh data directory has no daily record: VOLUME_* are answered from tools/lib/volume-fixture.mjs
+  // (100 days, nine tag1 values, one day missing 41 days ago), shaped as docs/VOLUME.md says.
+  const { volumeAnswer } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/volume-fixture.mjs')).href);
+  const realFetch = globalThis.fetch;
+  let mode = 'full';
+  const vsent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('VOLUME_')) {
+      vsent.push(body);
+      const a = volumeAnswer(body, { mode });
+      if (a) return stubReply(a);
+    }
+    return realFetch(input, init);
+  };
+  const view = () => doc.getElementById('view');
+  const today = new Date().toISOString().slice(0, 10);
+  const bars = () => view().querySelectorAll('svg.isum-cols rect.isum-bar').length;
+  const tileText = (id) => ((doc.getElementById(`isum-${id}`) || {}).textContent || '');
+  const heads = () => [...view().querySelectorAll('#isum-tag-table thead th')].map((th) => th.textContent.trim());
+  const dayBtn = (n) => view().querySelector(`.isum-toolbar .seg button[data-days="${n}"]`);
+  const chip = (v) => [...view().querySelectorAll('.isum-chip')].find((b) => b.textContent.trim() === v);
+  const tipText = () => ((doc.querySelector('.tip') || {}).textContent || '');
+  try { window.localStorage.removeItem('elasticpro.indices.summary.chart'); } catch (_) { /* no storage */ }
+  try {
+    await go('indices');
+    const tab = [...doc.querySelectorAll('.ix-views .seg .btn')].find((b) => b.textContent.trim() === 'Summary');
+    ok(!!tab, 'summary: no Summary tab on the Indices page');
+    if (tab) tab.click();
+    await settleFor(300);
+    const drawn = await waitFor(() => [...view().querySelectorAll('#isum-tag-table tbody tr td:nth-child(3)')].find((td) => /\d (KB|MB|GB|TB)$/.test(td.textContent)), 'summary: the tag1 table did not fill in', 8000);
+    if (drawn) {
+      await settleFor(300);
+      ok((doc.location.hash || '') === '#/indices/summary', `summary: the address is ${doc.location.hash}, want #/indices/summary`);
+      const pressed = [...view().querySelectorAll('.isum-toolbar .seg button[aria-pressed="true"]')].map((b) => b.textContent.trim());
+      ok(pressed.includes('Summary') && pressed.includes('15d'), `summary: pressed ${pressed.join(' | ')}, want Summary and 15d`);
+      ok(!!view().querySelector('#isum-csv') && !!view().querySelector('#isum-refresh[aria-label="Refresh"]'), 'summary: no Export CSV or icon-only refresh');
+      ok(!/Older|Newer/.test(view().querySelector('.isum-toolbar').textContent), 'summary: the toolbar pages Older / Newer');
+
+      // The tiles: Yesterday with indices and docs, three averages per day, today as of HH:MM.
+      ok(/^Yesterday/.test(tileText('yesterday')) && /\d+ indices · [\d,]+ docs/.test(tileText('yesterday')), `summary: the Yesterday tile reads "${tileText('yesterday')}"`);
+      ok(/per day$/.test(tileText('avg7')) && /per day$/.test(tileText('avg30')), `summary: Avg 7 / 30 do not read "per day": "${tileText('avg7')}" "${tileText('avg30')}"`);
+      ok(/per day · 59 of 60 days recorded/.test(tileText('avg60')), `summary: the 60-day tile does not count the missing day: "${tileText('avg60')}"`);
+      ok(/as of \d\d:\d\d · not final/.test(tileText('today')), `summary: the Today tile reads "${tileText('today')}"`);
+
+      // The chart: a bar per day, the average line, dates "03 Nov", the month once.
+      ok(bars() === 15, `summary: ${bars()} bars for 15d`);
+      ok(!!view().querySelector('svg.isum-cols polyline.isum-avg'), 'summary: no 7-day average line');
+      ok(!!view().querySelector(`svg.isum-cols rect.isum-bar.today[data-day="${today}"]`), 'summary: today\'s bar is not the lighter one');
+      const xs = [...view().querySelectorAll('svg.isum-cols text.isum-x')].map((t) => t.textContent);
+      ok(xs.length === 15 && xs.every((t) => /^\d\d [A-Z][a-z]{2}$/.test(t)), `summary: the dates under 15 bars read ${xs.slice(0, 3).join(', ')}… (${xs.length})`);
+      ok(view().querySelectorAll('svg.isum-cols text.isum-month').length >= 1 && /^[A-Z][a-z]+ \d{4}$/.test(view().querySelector('svg.isum-cols text.isum-month').textContent), 'summary: no month under the axis');
+      ok(!view().querySelector('.isum .card > header .sub'), 'summary: a card has a subtitle line');
+      // Hover a bar: date, final / today so far, size, indices, the 7-day average.
+      const hit = view().querySelector(`svg.isum-cols rect.isum-hit[data-day="${today}"]`);
+      if (hit) hit.dispatchEvent(new window.MouseEvent('mousemove', { bubbles: true, clientX: 300, clientY: 200 }));
+      ok(/today so far/.test(tipText()) && /Size/.test(tipText()) && /Indices/.test(tipText()) && /7-day avg/.test(tipText()), `summary: the bar's tooltip reads "${tipText()}"`);
+      if (hit) hit.dispatchEvent(new window.MouseEvent('mouseleave', { bubbles: true }));
+
+      // The day buttons change the bar count; 60 and 90 days thin the dates and keep the missing day empty.
+      for (const n of [30, 60, 90]) {
+        const b = dayBtn(n);
+        if (b) b.click();
+        await settleFor(250);
+        const want = n > 41 ? n - 1 : n;
+        ok(bars() === want, `summary: ${bars()} bars for ${n}d, want ${want} (one day is not in the record)`);
+        ok(view().querySelectorAll('#isum-tag-table tbody tr').length === n, `summary: the tag1 table has ${view().querySelectorAll('#isum-tag-table tbody tr').length} rows for ${n}d`);
+        if (n > 41) ok(view().querySelectorAll('svg.isum-cols .isum-nobar').length === 1, `summary: the day missing from the record is not marked at ${n}d`);
+        const labels = view().querySelectorAll('svg.isum-cols text.isum-x');
+        if (n >= 60) ok(labels.length < n / 2 && labels[labels.length - 1].textContent === `${today.slice(8, 10)} ${new Date(`${today}T00:00:00Z`).toUTCString().slice(8, 11)}`, `summary: ${labels.length} dates at ${n}d (not thinned, or today has none)`);
+      }
+      ok(vsent.filter((m) => m.type === 'VOLUME_DAILY').length === 1, `summary: the day buttons asked the record again (${vsent.filter((m) => m.type === 'VOLUME_DAILY').length} VOLUME_DAILY)`);
+      dayBtn(15) && dayBtn(15).click();
+      await settleFor(250);
+
+      // Columns / Rows: icon-only, named in title and aria-label, remembered in this browser.
+      const rowsBtn = view().querySelector('#isum-dir-rows');
+      ok(!!rowsBtn && rowsBtn.getAttribute('aria-label') === 'Rows' && /Rows/.test(rowsBtn.title) && !rowsBtn.textContent.trim(), 'summary: the Rows button is not an icon with its name in title and aria-label');
+      if (rowsBtn) rowsBtn.click();
+      await settleFor(200);
+      const rows = [...view().querySelectorAll('.isum-rows .isum-row')];
+      ok(rows.length === 15 && !view().querySelector('svg.isum-cols'), `summary: Rows drew ${rows.length} rows${view().querySelector('svg.isum-cols') ? ' and the columns' : ''}`);
+      ok(rows.length && rows[rows.length - 1].dataset.day === today, 'summary: Rows does not put the newest day at the bottom');
+      ok(rows.every((r) => /\d (B|KB|MB|GB|TB)$/.test(r.querySelector('.isum-row-v').textContent)), 'summary: a row has no size at its right end');
+      let kept = null;
+      try { kept = window.localStorage.getItem('elasticpro.indices.summary.chart'); } catch (_) { /* no storage */ }
+      ok(kept === 'rows', `summary: the Rows choice was not remembered (${kept})`);
+      view().querySelector('#isum-dir-columns').click();
+      await settleFor(200);
+      ok(bars() === 15, 'summary: Columns did not come back');
+
+      // The tag1 chips: All + the top six + "+ 3 more"; a chip filters the chart and the table.
+      const chipNames = [...view().querySelectorAll('.isum-chip')].map((b) => b.textContent.trim());
+      ok(chipNames[0] === 'All' && chipNames.length === 8 && chipNames[7] === '+ 3 more', `summary: the chips are ${chipNames.join(' | ')}`);
+      ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'All indices', ...chipNames.slice(1, 7), 'other', 'Status']), `summary: the tag1 table columns are ${heads().join(' | ')}`);
+      const axisTop = () => [...view().querySelectorAll('svg.isum-cols text.isum-ax')].map((t) => t.textContent).pop();
+      const allTop = axisTop();
+      const vpn = chip('vpn');
+      if (vpn) vpn.click();
+      await settleFor(400);
+      ok(chip('vpn') && chip('vpn').getAttribute('aria-pressed') === 'true' && chip('All').getAttribute('aria-pressed') === 'false', 'summary: the vpn chip is not the pressed one');
+      ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'All indices', 'vpn', 'Status']), `summary: with vpn chosen the table columns are ${heads().join(' | ')}`);
+      ok(axisTop() !== allTop, `summary: the chart's scale did not follow the vpn filter (${allTop})`);
+      // The chart and the table say the same for a day.
+      const yday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      const yHit = view().querySelector(`svg.isum-cols rect.isum-hit[data-day="${yday}"]`);
+      if (yHit) yHit.dispatchEvent(new window.MouseEvent('mousemove', { bubbles: true, clientX: 300, clientY: 200 }));
+      const tipSize = (/Size\s*([\d.]+ [KMGT]?B)/.exec(tipText()) || [])[1];
+      const cellSize = ((view().querySelector(`#isum-tag-table tr[data-day="${yday}"] td:nth-child(3)`) || {}).textContent || '').trim();
+      ok(tipSize && tipSize === cellSize, `summary: the chart says ${tipSize} for vpn on ${yday}, the table ${cellSize}`);
+      if (yHit) yHit.dispatchEvent(new window.MouseEvent('mouseleave', { bubbles: true }));
+      // "+ 3 more" opens the rest.
+      view().querySelector('#isum-more').click();
+      await settleFor(200);
+      ok(!!chip('printer') && !!chip('fewer'), 'summary: "+ 3 more" did not open the other values');
+      chip('All').click();
+      await settleFor(300);
+      ok(chip('All').getAttribute('aria-pressed') === 'true' && heads().includes('other'), 'summary: All did not bring every index back');
+
+      // The "i": its tooltip says how a value's size is worked out; nothing on the page says "est.".
+      const i = view().querySelector('#isum-tag-i');
+      ok(!!i && /Elasticsearch does not store size per tag1 value: a value's size is its share of the day's documents × the day's index size\. Top 6 values shown\./.test(i.title || ''), `summary: the "i" says "${i && i.title}"`);
+      if (i) { i.click(); await settleFor(50); }
+      ok(/share of the day's documents/.test(tipText()), 'summary: pressing the "i" shows nothing');
+      const titles = [...view().querySelectorAll('[title]')].map((e) => e.getAttribute('title')).join(' ');
+      ok(!/\best\.|\(est\)/i.test(view().textContent) && !/\best\./i.test(titles), 'summary: "est." is on the page');
+      ok(!/estimate/i.test(view().textContent), 'summary: a visible line explains the estimate (the owner chose the "i" only)');
+
+      // Export CSV: a row per day shown, the size and its 7-day average, the tag1 values.
+      const before = files.length;
+      view().querySelector('#isum-csv').click();
+      await settleFor(100);
+      const f = files.length > before ? files.at(-1) : null;
+      const lines = f ? f.text.split('\n') : [];
+      ok(lines[0] && lines[0].startsWith('cluster,day,status,indices,docs,size_basis,size_bytes,avg_7d_bytes,tag1=') && lines[0].endsWith(',tag1=other_bytes'), `summary: the CSV header is "${lines[0]}"`);
+      ok(lines.length === 16, `summary: the CSV has ${lines.length - 1} rows for 15 days`);
+
+      // A cluster with no tag1 field says so and names the setting; no chips.
+      mode = 'notag';
+      view().querySelector('#isum-refresh').click();
+      await waitFor(() => (/These indices have no tag1 field/.test(view().textContent) ? true : null), 'summary: a cluster with no tag1 field does not say so', 5000);
+      ok(/Indices & volume fields/.test(view().textContent) && !view().querySelector('.isum-chip'), 'summary: no tag field: the setting is not named, or chips are drawn');
+
+      // A record never collected says why and offers Collect now; no zeros drawn.
+      mode = 'empty';
+      view().querySelector('#isum-refresh').click();
+      await waitFor(() => view().querySelector('#isum-collect'), 'summary: an empty record does not offer Collect now', 5000);
+      ok(/never been collected/.test(view().textContent) && !view().querySelector('svg.isum-cols') && !view().querySelector('.isum-tiles'), 'summary: an empty record is not explained, or a chart is drawn');
+      vsent.length = 0;
+      view().querySelector('#isum-collect').click();
+      await settleFor(200);
+      ok(vsent.some((m) => m.type === 'VOLUME_RUN'), 'summary: Collect now sent no VOLUME_RUN');
+
+      // Back to the list: the address follows.
+      mode = 'full';
+      const ixTab = [...view().querySelectorAll('.isum-toolbar .seg .btn')].find((b) => b.textContent.trim() === 'Indices');
+      if (ixTab) ixTab.click();
+      await settleFor(300);
+      ok((doc.location.hash || '') === '#/indices' && !!view().querySelector('#idx-table'), `summary: the Indices tab went to ${doc.location.hash}`);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    try { window.localStorage.removeItem('elasticpro.indices.summary.chart'); } catch (_) { /* no storage */ }
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices › Summary (day buttons, Columns / Rows, tag1 chips, the "i", CSV, empty record), hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

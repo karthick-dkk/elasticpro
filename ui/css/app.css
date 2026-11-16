@@ -2142,7 +2142,7 @@ button.pn-link:hover { text-decoration: underline; }
 .vs-dn { color: var(--good-ink); white-space: nowrap; }
 .rp-short { color: var(--critical-ink); }
 .rp-none { color: var(--good-ink); }
-.rp-page .linkish, .ix-moved .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.rp-page .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .rp-page .linkish:disabled { color: var(--text-muted); cursor: default; text-decoration: none; }
 .rp-tbl td, .rp-tbl th { white-space: nowrap; }
 .rp-tbl tr.rp-band th { text-align: center; background: var(--surface-2); color: var(--text-primary); letter-spacing: .05em; font-size: 11px; height: 24px; }
@@ -2211,9 +2211,51 @@ button.pn-link:hover { text-decoration: underline; }
 .colmenu-status { font-size: 11.5px; color: var(--text-secondary); min-height: 0; }
 .colmenu-status:empty { display: none; }
 .colmenu-foot { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-/* Indices: where the summary went */
+/* Indices: the Indices | Templates | Summary tabs */
 .ix-views { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
-.ix-moved { color: var(--text-secondary); font-size: 12.5px; }
+/* Indices › Summary (0.3.71): index size per day. Light blue bars, an orange average (never red
+   with yellow in a chart), 32 px table rows, no subtitle lines. */
+.isum { display: grid; gap: 10px; }
+.isum-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.isum-gap { flex: 1; }
+.isum-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: 10px; }
+.isum-tiles .stat { min-width: 0; }
+.isum .card { margin: 0; }
+.isum .card > header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.isum-dirs .btn { width: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.isum-dirs .btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.isum-chips-k { font-size: 12px; color: var(--text-secondary); }
+.isum-chip { height: 26px; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--text-secondary); border-radius: 13px; padding: 0 10px; font: inherit; font-size: 12px; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.isum-chip:hover { background: var(--surface-2); }
+.isum-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.isum-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.isum-cols { width: 100%; height: auto; display: block; }
+.isum-cols .grid-line { stroke: var(--grid); stroke-width: 1; }
+.isum-cols text { fill: var(--text-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.isum-cols .isum-x { fill: var(--text-secondary); }
+.isum-cols .isum-month { fill: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.isum-bar, .isum-sw-bar { fill: var(--series-7); background: var(--series-7); }
+.isum-bar.today, .isum-sw-bar.today { fill-opacity: .45; opacity: .55; }
+.isum-cols .isum-bar.today { opacity: 1; }
+.isum-avg { fill: none; stroke: var(--series-2); stroke-width: 2; stroke-linejoin: round; }
+.isum-sw-avg { height: 0 !important; width: 14px; border-radius: 0 !important; border-top: 2px solid var(--series-2); vertical-align: middle; }
+.isum-nobar { stroke: var(--border-strong); stroke-dasharray: 2 2; }
+.isum-hit { fill: transparent; cursor: crosshair; }
+.isum-hit:hover { fill: color-mix(in srgb, var(--accent) 7%, transparent); }
+.isum-rows { display: grid; gap: 3px; }
+.isum-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 84px; align-items: center; gap: 10px; min-height: 18px; font-size: 11.5px; }
+.isum-row:hover { background: var(--surface-2); }
+.isum-row-d { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.isum-track { display: block; height: 13px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
+.isum-track i { display: block; height: 100%; background: var(--series-7); border-radius: 3px; }
+.isum-row.today .isum-track i { opacity: .55; }
+.isum-row-v { text-align: right; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
+.isum-i { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--accent); font: italic 700 12px/1 Georgia, 'Times New Roman', serif; padding: 0; cursor: help; display: inline-grid; place-items: center; }
+.isum-i:hover { border-color: var(--accent); background: var(--surface-2); }
+.isum-i:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.isum-tbl tbody tr { height: 32px; }
+.isum-tbl td.isum-all { font-weight: 600; }
+.isum-tbl th.num { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #rp-cap-msg:empty { display: none; }
 /* Reports: report types (schedule + Run now) and Volume by host (0.3.54) */
 .rt { display: grid; gap: 8px; }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Indices › Summary** (the owner's design, approved 2026-11-17): a third tab, Indices | Templates | Summary, at `#/indices/summary`, on the cluster in the top bar. Day buttons **15d** (default) · 30d · 60d · 90d, always ending today; Export CSV; icon-only refresh.
+- Five tiles: **Yesterday** (size, indices, docs), **Avg 7 / 30 / 60 days** per day, **Today so far** ("as of HH:MM · not final"). A day missing from the record is never counted as 0: the tile says "59 of 60 days recorded".
+- **Index size per day** as **Columns** (a bar per day, the 7-day average as an orange line, today lighter, dates "03 Nov" thinned at 60/90 days, the month once under the axis, a tooltip per bar) or **Rows** (newest at the bottom, sizes in one right-aligned column). Two icon buttons switch it; the choice is remembered per browser.
+- **Per day by tag1**: a table with the top 6 tag1 values and "other", and a day's status (final / today so far / not measured). The **tag1 chips** (All, the top values, "+ N more") filter both the chart and the table. A value's size is its share of the day's documents × the day's size; the "i" beside the title says so, and no "est." label is shown.
+- Nothing new is searched. Everything comes from the daily volume record the core already keeps (VOLUME_DAILY, and VOLUME_BREAKDOWN for the tag1 values), on the configured size basis (primary by default). The core is unchanged. A record that was never collected says why and offers Collect now. A cluster with no tag field says so and names the setting.
+- The Indices tab no longer has the line "Daily and monthly summary is now in Reports › Daily & monthly ›".
+- One average (`avgPerDay` in `ui/js/core/indices-summary.js`) feeds the tiles, the line, the tooltip and the CSV. Unit tests are in `tools/unit/indices-summary.test.mjs`. `tools/lib/volume-fixture.mjs` gives render-check and behaviour-check a 100-day record with nine tag1 values.
+
 ## 0.3.70
 
 From a full UI review: every page, tab and section, signed in on the test VM and locally, with the menu on the left (light and dark) and on top.
