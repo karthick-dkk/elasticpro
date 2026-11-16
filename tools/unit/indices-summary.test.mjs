@@ -152,6 +152,18 @@ test('date labels are thinned for 60 and 90 days so they never collide; today al
   assert.deepEqual(X.labelledBars(5, 2), [0, 2, 4]);
 });
 
+test('the y axis climbs in four round steps of the unit the top reads in', () => {
+  const TB = 1024 ** 4, GB = 1024 ** 3;
+  assert.deepEqual(X.niceScale(3.53 * TB), { max: 4 * TB, step: TB });
+  assert.deepEqual(X.niceScale(838 * GB), { max: 1000 * GB, step: 250 * GB });
+  assert.deepEqual(X.niceScale(1.2 * TB), { max: 2 * TB, step: 0.5 * TB });
+  for (const top of [1, 999, 5e6, 7.7e11, 3.1e15]) {
+    const s = X.niceScale(top);
+    assert.ok(s.max >= top && s.max === s.step * 4 && s.max < top * 3, `${top}: ${JSON.stringify(s)}`);
+  }
+  assert.equal(X.niceScale(null).max >= 1, true);
+});
+
 test('a day\'s status: final, today so far, not measured, or what went wrong', () => {
   const ok = { day: '2026-11-15', final: true, priBytes: 5, basis: 5 };
   assert.equal(X.sizeDayStatus(ok, 'primary', { today: TODAY }).text, 'final');

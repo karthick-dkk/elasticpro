@@ -30,7 +30,7 @@ import {
 import {
   DAY_CHOICES, DEFAULT_DAYS, AVG_TILES, LINE_AVG_DAYS, TOP_VALUES, RECORD_DAYS, SUMMARY_CSV,
   dayWindow, avgPerDay, basisPoints, tagShareBytes, valueDocsOn, restDocsOn, rankedValues,
-  sizeDayStatus, dayMonth, monthSpans, labelStep, labelledBars,
+  sizeDayStatus, dayMonth, monthSpans, labelStep, labelledBars, niceScale,
 } from '../core/indices-summary.js';
 import { collectNow, collecting, reportStatus, FOLLOW_LIMIT_MS } from '../reports/collect.js';
 
@@ -372,16 +372,16 @@ function columnsChart(shown, today, avgOf) {
   const iw = W - padL - padR, ih = H - padT - padB;
   const n = shown.length;
   const avgs = shown.map((p) => avgOf(p.day));
-  const max = Math.max(1, ...shown.map((p) => p.value || 0), ...avgs.map((v) => v || 0));
+  const { max, step: yStep } = niceScale(Math.max(1, ...shown.map((p) => p.value || 0), ...avgs.map((v) => v || 0)));
   const slot = iw / n;
   const bw = Math.max(2, slot * 0.66);
   const xc = (i) => padL + slot * i + slot / 2;
   const y = (v) => padT + ih - (v / max) * ih;
   const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'isum-cols', role: 'img', 'aria-label': `Index size per day, last ${n} days` });
-  for (const f of [0, 0.25, 0.5, 0.75, 1]) {
-    const yy = y(max * f);
+  for (let k = 0; k <= 4; k++) {
+    const yy = y(yStep * k);
     s.append(svg('line', { x1: padL, x2: W - padR, y1: yy, y2: yy, class: 'grid-line' }),
-      svg('text', { x: padL - 6, y: yy + 3.5, 'text-anchor': 'end', class: 'isum-ax' }, bytes(max * f)));
+      svg('text', { x: padL - 6, y: yy + 3.5, 'text-anchor': 'end', class: 'isum-ax' }, bytes(yStep * k)));
   }
   shown.forEach((p, i) => {
     if (p.value === null) {
@@ -398,7 +398,12 @@ function columnsChart(shown, today, avgOf) {
   flush();
   // A date under the bars, thinned so they never collide; the month once under its days.
   const step = labelStep(n, iw, 46);
-  for (const i of labelledBars(n, step)) s.append(svg('text', { x: xc(i), y: H - padB + 16, 'text-anchor': 'middle', class: 'isum-x' }, dayMonth(shown[i].day)));
+  // A date near either end is anchored to it, so it is never cut off by the edge.
+  for (const i of labelledBars(n, step)) {
+    const x = xc(i);
+    const anchor = x > W - padR - 22 ? 'end' : x < padL + 22 ? 'start' : 'middle';
+    s.append(svg('text', { x: anchor === 'end' ? W - padR : anchor === 'start' ? padL : x, y: H - padB + 16, 'text-anchor': anchor, class: 'isum-x' }, dayMonth(shown[i].day)));
+  }
   for (const m of monthSpans(shown.map((p) => p.day))) {
     const mid = (xc(m.first) + xc(m.last)) / 2;
     s.append(svg('text', { x: Math.min(W - padR - 50, Math.max(padL + 50, mid)), y: H - 8, 'text-anchor': 'middle', class: 'isum-month' }, m.label));
@@ -435,7 +440,7 @@ function infoButton(field) {
   const show = (e) => { const r = e.currentTarget.getBoundingClientRect(); tooltip.show(h('div', text), r.left, r.bottom); };
   // Its own class: `button.ld-ibtn` is claimed by a document-wide handler (ui/fix-popover.js).
   return h('button#isum-tag-i.isum-i', { type: 'button', 'aria-label': `How ${field} sizes are worked out`, title: text,
-    onclick: show, onfocus: show, onblur: () => tooltip.hide(), onmouseleave: () => tooltip.hide() }, 'i');
+    onclick: show, onfocus: show, onmouseenter: show, onblur: () => tooltip.hide(), onmouseleave: () => tooltip.hide() }, 'i');
 }
 
 /** The table's value columns: the chosen values, else the top ones and the rest as "other". */

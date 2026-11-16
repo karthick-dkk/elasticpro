@@ -181,5 +181,19 @@ export function labelledBars(n, step) {
   return out;
 }
 
+/**
+ * The y axis for byte sizes: four even steps of a round size in the unit the top reads in
+ * (1024-based, as lib/fmt.js bytes() writes them): `{max, step}` with max = 4 × step ≥ `top`.
+ * 3.53 TB → steps of 1 TB up to 4 TB, not 902 GB, 1.76 TB …
+ */
+export function niceScale(top) {
+  const t = typeof top === 'number' && Number.isFinite(top) && top > 0 ? top : 1;
+  const unit = 1024 ** Math.max(0, Math.floor(Math.log(t) / Math.log(1024)));
+  const v = t / unit;
+  const mag = 10 ** Math.floor(Math.log10(v / 4));
+  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s * 4 >= v) * unit;
+  return { max: step * 4, step };
+}
+
 /** The CSV's columns before the tag1 ones. */
 export const SUMMARY_CSV = ['cluster', 'day', 'status', 'indices', 'docs', 'size_basis', 'size_bytes', 'avg_7d_bytes'];
