@@ -321,7 +321,7 @@ function docsSearch(url, body) {
   }
   const from = Math.max(0, Number(body.from) || 0), size = Math.max(0, Number(body.size) || 10);
   return { took: 3, timed_out: false, _shards: { total: names.length, successful: names.length, failed: 0 },
-    hits: { total: { value: all.length, relation: body.track_total_hits === true || all.length <= 10000 ? 'eq' : 'gte' }, max_score: null,
+    hits: { total: (() => { const cap = body.track_total_hits === true ? Infinity : Number.isFinite(body.track_total_hits) ? body.track_total_hits : 10000; return all.length > cap ? { value: cap, relation: 'gte' } : { value: all.length, relation: 'eq' }; })(), max_score: null,
       hits: all.slice(from, from + size).map((d) => ({ _index: d._index, _id: d._id, _seq_no: d._seq_no, _primary_term: d._primary_term, _source: d._source })) } };
 }
 /** GET / PUT / DELETE `<index>/_doc/<id>` as `{status, body}`, or null when the path is not one. */

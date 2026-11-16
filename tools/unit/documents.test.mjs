@@ -61,7 +61,7 @@ test('search body: query_string or match_all, the window on the time field, newe
   assert.deepEqual(b.query.bool.filter[1], { range: { '@timestamp': { format: 'epoch_millis', gte: 1000, lte: 2000 } } });
   assert.deepEqual(b.sort, [{ '@timestamp': 'desc' }]);
   assert.equal(b.from, 10); assert.equal(b.size, 5);
-  assert.equal(b.track_total_hits, true);
+  assert.equal(b.track_total_hits, D.MAX_RESULT_WINDOW);
   assert.equal(b.seq_no_primary_term, true);
   const plain = D.searchBody({ query: '  ', timeField: null, window: { from: 1, to: 2 } });
   assert.deepEqual(plain.query.bool.filter, [{ match_all: {} }], 'no time field: no range, whatever the window');

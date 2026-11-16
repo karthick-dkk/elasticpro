@@ -110,8 +110,10 @@ function filterClauses({ query = '', timeField = null, window = null } = {}) {
 
 /**
  * The body for one page of hits: newest first by the time field when there is one, else by
- * `_doc`; the exact total (`track_total_hits`), and each hit's `_seq_no` / `_primary_term`
- * so an edit or a delete can name the version it read.
+ * `_doc`; the total counted up to MAX_RESULT_WINDOW only (past it nothing can be paged, and
+ * counting every match of a large log pattern is work the cluster need not do — the label
+ * says "10,000+"), and each hit's `_seq_no` / `_primary_term` so an edit or a delete can name
+ * the version it read.
  */
 export function searchBody({ query = '', timeField = null, window = null, from = 0, size = 5 } = {}) {
   return {
@@ -119,7 +121,7 @@ export function searchBody({ query = '', timeField = null, window = null, from =
     sort: timeField ? [{ [timeField]: 'desc' }] : ['_doc'],
     from: Math.max(0, Math.floor(from) || 0),
     size: Math.max(1, Math.floor(size) || 1),
-    track_total_hits: true,
+    track_total_hits: MAX_RESULT_WINDOW,
     seq_no_primary_term: true,
   };
 }

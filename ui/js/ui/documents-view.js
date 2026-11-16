@@ -197,8 +197,9 @@ export function documentsView(cluster, target, { onBack } = {}) {
           vals.loading ? h('span.muted', 'Counting…') : null,
           vals.error ? h('span', { style: { color: 'var(--critical-ink)' } }, vals.error) : null,
           !vals.loading && !vals.error && !vals.list.length ? h('span.muted', 'No values in this range') : null,
-          ...vals.list.map((v) => h('button.docs-val', { type: 'button', title: `Add ${f.name}:"${v.value}" to the search`,
-            onclick: () => { st.query = D.addTerm(st.query, f.name, v.value); drawTop(); run(); } },
+          ...vals.list.map((v) => h('button.docs-val', { type: 'button', title: `Add ${f.aggField}:"${v.value}" to the search`,
+            // The field the count came from: a text field's value narrows by its .keyword, exactly.
+            onclick: () => { st.query = D.addTerm(st.query, f.aggField, v.value); drawTop(); run(); } },
             h('span.vv', String(v.value)), h('span.vc', num(v.count)))),
           vals.other ? h('span.muted', { style: { fontSize: '11px' } }, `+${num(vals.other)} in other values`) : null));
       }
