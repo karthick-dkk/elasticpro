@@ -37,7 +37,7 @@
   /* Status in a chart or a bar (a meter, a coverage strip, a donut): light green, blue, pink
      and orange — the owner's chart colours — never the red and yellow of the status fills.
      A shade deeper here than in the dark themes so a bar still stands off its track. */
-  --chart-good: #6cc070; --chart-info: #5b9be6; --chart-bad: #e57ba8; --chart-warn: #f0943f;
+  --chart-good: #6cc070; --chart-info: #5b9be6; --level-crit: #d93a3a; --chart-bad: var(--level-crit); --chart-warn: #f0943f;
 
   /* sequential blue ramp */
   --seq-100: #cde2fb; --seq-250: #86b6ef; --seq-400: #3987e5; --seq-550: #1c5cab; --seq-700: #0d366b;
@@ -93,7 +93,7 @@
     --on-accent: #0b0b0b;
     --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
     --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-    --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
+    --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
     --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
     --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
     --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
@@ -125,7 +125,7 @@
   --on-accent: #0b0b0b;
   --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
   --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
   --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
   --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
@@ -168,7 +168,7 @@
   --on-accent: #0a111f;
   --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
   --seq-100: #17325c; --seq-250: #24518f; --seq-400: #3d7fd4; --seq-550: #79aaea; --seq-700: #c6ddf8;
   --good-bg: #10281f; --warning-bg: #322a12; --critical-bg: #331a20; --serious-bg: #33241a;
   --good-ink: #52c78a; --warning-ink: #e8bf5f; --serious-ink: #ef9a72; --critical-ink: #f07b83;
@@ -211,7 +211,7 @@
      is kept, at the soft step, because a chart's series must stay apart by hue. */
   --series-1: #a9c8f0; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #c9b6e8; --series-6: #8fcfc0; --series-7: #e3c59a; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
   /* The sequential ramp is amber here rather than blue — it is a ramp, not a brand. */
   --seq-100: #3d2e14; --seq-250: #6b5220; --seq-400: #a67c2e; --seq-550: #d1a552; --seq-700: #f0d49a;
   --good-bg: #14240f; --warning-bg: #2e2410; --critical-bg: #2e1813; --serious-bg: #2e2014;
@@ -269,9 +269,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
    `.header`'s translucent blur: a table's rows scrolling past behind a see-through header
    read as the header being broken, not as depth. */
 .head-fix {
-  position: sticky; top: 0; z-index: 20;
+  position: sticky; top: 0; z-index: 20; display: flex; align-items: flex-start;
   background: var(--surface-0); border-bottom: 1px solid var(--border);
 }
+.head-fix > .nav { flex: 1; min-width: 0; }
+.head-fix > .topbar { order: 2; flex: none; }
 
 /* Wraps whenever the row runs out of width, rather than at a chosen breakpoint. It used
    to wrap only below 900px, and every control added to this row moved the real limit:
@@ -279,9 +281,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
    right edge at 1024px, giving the whole page a horizontal scrollbar. Wrapping costs
    nothing while everything fits. */
 .topbar {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 8px 16px; min-height: 46px;
+  height: 36px; max-width: 70%;
+  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; padding: 0 12px; background: var(--surface-0);
 }
+/* The top bar has no band of its own (the owner, 2026-11-16): it floats over the right end of the
+   first row: the end of the menu row (a flex item beside it), or with the menu on the left it floats
+   over the page's own first row, which the .page::before float below leaves room for. */
+.embedded .nav-brand { display: none; }
+.nav-brand { align-items: center; gap: 8px; padding: 0 10px 0 4px; font-size: 13.5px; }
+.nav-brand img { width: 20px; height: 20px; border-radius: 6px; }
 .topbar h1 { font-size: 14px; margin: 0; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
 .topbar .spacer { flex: 1; }
 
@@ -1309,7 +1317,7 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 /* Bottom right, clear of the header and of whatever the page is showing at the top: the
    column grows upward from the corner, oldest on top and newest nearest the corner, and
    the DOM stays oldest-first so capping still drops the oldest. */
-.toast-wrap { position: fixed; z-index: 1000; right: 16px; bottom: 16px;
+.toast-wrap { position: fixed; z-index: 1000; right: 16px; bottom: 40px; /* footer 32 px + 8 */
               display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-end; gap: 8px;
               pointer-events: none; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
               overflow: hidden; }
@@ -1392,7 +1400,6 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 /* Zabbix shows who is signed in and its menu opens the main pages, so the logo and the page
    title would say something twice. The tab row stays: Alerts, Nodes & shards, Live logs,
    Volume report, Automation and Accounts are reached from it, as when the app runs alone. */
-.embedded .topbar .brand,
 .embedded .topbar > h1 { display: none; }
 
 .sheet.fit th.fit-cluster { text-align: right; position: static; }
@@ -2449,11 +2456,15 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
 .ys-foot { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-top: 1px solid var(--grid); background: var(--surface-0);
   font-size: 11.5px; color: var(--text-secondary); }
 .ys-foot .btn { margin-left: auto; }
-.nav-brand, .nav-me { display: none; }
+.nav-me { display: none; }
+.nav-brand { display: flex; }
 
 /* --- the page menu on the left (Your settings › Page menu: Left), wide windows only --- */
 @media (min-width: 901px) {
   html[data-menu="left"] .app > .head-fix, html[data-menu="left"] .app > .main { margin-left: 200px; }
+  html[data-menu="left"] .head-fix { height: 0; border-bottom: 0; }
+  html[data-menu="left"] .topbar { position: absolute; z-index: 21; right: 4px; top: 6px; height: 32px; background: var(--surface-0); }
+  html[data-menu="left"] .page::before { content: ''; float: right; width: 330px; height: 32px; }
   html[data-menu="left"] #nav.nav { position: fixed; left: 0; top: 0; bottom: 0; width: 200px; z-index: 30; flex-direction: column;
     align-items: stretch; gap: 2px; padding: 14px 10px 44px; overflow-x: hidden; overflow-y: auto; flex-wrap: nowrap;
     background: #1a1a19; color: #e7e6e2; border-right: 1px solid #000; }

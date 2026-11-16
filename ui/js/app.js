@@ -564,7 +564,7 @@ function renderNav() {
     // One row of the pages of a shift, Config-Management last (the ☰ that held Automation,
     // Requests, Accounts and Config is gone: those live in Config-Management now). With the
     // menu on the left the brand heads it and the person's name sits at its foot.
-    if (menuPosition === 'left') nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
+    nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
     shown.forEach((p) => {
       nav.append(h('button', { dataset: { page: p.id }, onclick: () => go(p.id) },
         h('span.ico', p.icon), h('span', p.label)));
@@ -784,9 +784,6 @@ function renderTopbar() {
   const evCluster = ev && !L.needsCluster ? clusters().find((c) => c.id === state.selected) : null;
 
   mount(bar,
-    // The product name, and nothing else: the config filename is an implementation detail.
-    h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
-      h('div', h('b', 'ElasticPro'))),
     // The page's name is shown once, in the menu (the owner, 2026-11-14); this one is for screen
     // readers only — one h1 per page, read, not drawn.
     h('h1.sr-only', page.home ? (PAGES.find((p) => p.id === page.home) || page).label : page.label),
