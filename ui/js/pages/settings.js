@@ -589,7 +589,8 @@ function findBox(vis) {
 function sidebar(vis) {
   const role = roleNow();
   return h('aside.cm-side', { 'aria-label': 'Config-Management' },
-    h('div.cm-side-head', h('span.cm-side-t', 'Config-Management'), role ? h('span.muted', role) : null),
+    // The page's name is in the menu, highlighted; shown once (the owner, 2026-11-14). The role stays.
+    role ? h('div.cm-side-head', h('span.muted', role)) : null,
     findBox(vis),
     h('nav.cm-nav', { 'aria-label': 'Config sections' },
       ...vis.map((p) => {
