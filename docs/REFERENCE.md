@@ -231,7 +231,7 @@ you turn it on at the default 30 s that is about 28 requests a minute per cluste
 the meter after adding a fetch to any page, so the number stays true.
 
 ElasticPro's **own** health is the Request Centre's second tab, **Requests › ElasticPro health**
-(`#/requests/health`, administrators): memory and CPU of the core and the report worker against
+(`#/jobs/requests/health`, administrators; Jobs › Requests since 0.3.71): memory and CPU of the core and the report worker against
 their container limits, OOM kills and CPU throttling, the core's response time per message, the
 request gate, the fleet poller, report jobs with their concurrency, the data volume and 24 h
 trends, with amber/red checks that each name the setting that fixes them. It reads

@@ -348,7 +348,7 @@ await go('shards');
     `shards: expected a Move button on each of the 2 started shards per cluster (${2 * shown}), found ${moves}`);
 
   // The node half: one line per node, the id and the IP as columns of their own.
-  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Uptime']) {
+  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Shards', 'Uptime']) {
     ok(heads.includes(col), `shards: the node table has no "${col}" column, saw ${heads.join(', ')}`);
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
@@ -362,8 +362,11 @@ await go('shards');
         `nodes: the Node ID column is not the short id with the whole id as its tooltip (${n1.children[1].textContent.trim()})`);
       ok(n1.children[2].textContent.trim() === '10.0.0.1', `nodes: the IP column reads ${n1.children[2].textContent.trim()}`);
       ok(!n1.children[0].querySelector('div'), 'nodes: the name cell still stacks the IP under the name');
-      ok(/91\.0%/.test(n1.children[9].textContent) && /free · 38 shards/.test(n1.children[9].textContent),
-        `nodes: the disk cell is not one line with the free space and shard count (${n1.children[9].textContent.trim()})`);
+      // Compact (0.3.71): "91% · N GB free" in the cell, the sizes in its tooltip; the shard count its own column.
+      ok(/^91%\s*\S.* free$/.test(n1.children[9].textContent.trim()) && !/shards/.test(n1.children[9].textContent)
+        && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
+        `nodes: the disk cell is not "91% · free" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
+      ok(n1.children[10].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[10].textContent.trim()}", not node-1's 38`);
     }
   }
 
@@ -410,18 +413,20 @@ await go('shards');
 
   // Shard allocation: the 96 px ring with the total inside, three edge tiles (the unassigned one
   // with its reasons and a "show" that narrows the table), shards per node as bars, and the
-  // allocation switch in the header — read from the cluster, disabled while writes are locked.
+  // allocation switch in the header — read from the cluster; for an admin it is live while writes
+  // are locked (choosing a value asks to allow writes first — there is no toggle to tick any more).
   const allocCard = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Shard allocation');
   {
     const ac = allocCard();
     ok(!!ac, 'allocation: no Shard allocation card');
     if (ac) {
-      // A half-circle gauge, 200 wide, stroke 20: assigned first, unassigned at the end, the
-      // assigned share and "N of M shards assigned" under the arc.
+      // A half-circle gauge, compact (0.3.71): 120 wide, stroke 12, assigned first, unassigned at
+      // the end, the assigned share in the arc and "N of M shards assigned" under it.
       const gauge = ac.querySelector('.split-gauge.half svg');
-      ok(!!gauge && /width: 200px/.test(gauge.getAttribute('style') || '') && gauge.getAttribute('viewBox').startsWith('0 0 200 '),
-        `allocation: the chart is not the 200 px half-circle gauge (${gauge && gauge.getAttribute('style')})`);
-      ok(!!gauge && [...gauge.querySelectorAll('path')].every((p) => p.getAttribute('stroke-width') === '20'), 'allocation: the gauge stroke is not 20');
+      ok(!!gauge && /width: 120px/.test(gauge.getAttribute('style') || '') && gauge.getAttribute('viewBox').startsWith('0 0 120 '),
+        `allocation: the chart is not the 120 px half-circle gauge (${gauge && gauge.getAttribute('style')})`);
+      ok(!!gauge && [...gauge.querySelectorAll('path')].every((p) => p.getAttribute('stroke-width') === '12'), 'allocation: the gauge stroke is not 12');
+      ok(ac.classList.contains('ns-compact') && !!ac.querySelector('.split-gauge-small'), 'allocation: the card is not the compact kind, or the assigned line is not under the gauge');
       ok(!!gauge && [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
         `allocation: the gauge's segments are ${gauge ? [...gauge.querySelectorAll('path title')].map((t) => t.textContent).join('|') : 'absent'}`);
       ok(/75%/.test(ac.querySelector('.split-gauge.half').textContent) && /3 of 4 shards assigned/.test(ac.querySelector('.split-gauge.half').textContent),
@@ -444,7 +449,7 @@ await go('shards');
         ok(/^Allocation: on ▾$/.test(sw.textContent.trim()) && sw.dataset.allocation === 'all',
           `allocation: the switch reads "${sw.textContent.trim()}" (${sw.dataset.allocation}); the fixture's default is all`);
         ok(/default setting/.test(sw.title), `allocation: the tooltip does not say where the value comes from (${sw.title})`);
-        ok(sw.disabled && /Writes are locked/.test(sw.title), `allocation: with writes locked the switch should be disabled with the reason (${sw.disabled} · ${sw.title})`);
+        ok(!sw.disabled && !/Writes are locked/.test(sw.title), `allocation: with writes locked the switch is disabled for an admin, who has no toggle to unlock it (${sw.disabled} · ${sw.title})`);
       }
       // "show" on the unassigned tile narrows the table to the unassigned shards.
       const show = tiles[2] && [...tiles[2].querySelectorAll('button')].find((b) => b.textContent === 'show');
@@ -461,16 +466,17 @@ await go('shards');
     }
   }
 
-  // The allocation switch is a write through the same gate as Move…: unlocking enables it,
-  // the menu offers the four values, choosing one asks with the consequence in words, and only
-  // a yes sends PUT _cluster/settings {persistent: {cluster.routing.allocation.enable}}.
+  // The allocation switch is a write through the same gate as Move…: with writes locked it is
+  // still live, the menu offers the four values, choosing one asks to allow writes (the unlock
+  // dialog — no page toggle), then with the consequence in words, and only a yes to both sends
+  // PUT _cluster/settings {persistent: {cluster.routing.allocation.enable}}.
   {
     const wr = await load('core/writes.js');
-    const unlockedHere = !wr.writesUnlocked();
-    if (unlockedHere) await wr.setWritesUnlocked(true, { confirmFirst: false });
+    if (wr.writesUnlocked()) await wr.setWritesUnlocked(false, { confirmFirst: false });
+    const unlockedHere = true;
     await settleFor(300);
     const sw = allocCard() && allocCard().querySelector('button.ns-alloc-btn');
-    ok(sw && !sw.disabled, 'allocation: the switch stays disabled after writes were unlocked');
+    ok(sw && !sw.disabled, 'allocation: the switch is disabled while writes are locked');
     if (sw && !sw.disabled) {
       const n = sent.length;
       sw.click(); await settleFor(200);
@@ -482,6 +488,13 @@ await go('shards');
       const off = [...doc.querySelectorAll('.menu-pop button[role="menuitem"]')].find((b) => /^off/.test(b.textContent.trim()));
       if (off) {
         off.click(); await settleFor(300);
+        const ask = [...doc.querySelectorAll('.modal')].pop();
+        ok(!!ask && /Allow writes to this cluster\?/.test(ask.textContent), `allocation: a locked choice did not ask to allow writes first (${ask ? ask.textContent.slice(0, 120) : 'no dialog'})`);
+        ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'allocation: a PUT was sent before writes were allowed');
+        const allow = ask && [...ask.querySelectorAll('.modal-foot button')].find((b) => /^allow writes$/i.test(b.textContent.trim()));
+        ok(!!allow, 'allocation: the unlock dialog has no "allow writes" button');
+        if (allow) { allow.click(); await settleFor(400); }
+        ok(wr.writesUnlocked(), 'allocation: "allow writes" did not unlock the session');
         const dlg = [...doc.querySelectorAll('.modal')].pop();
         ok(!!dlg && /no shard will be placed or moved until it is switched back/i.test(dlg.textContent),
           `allocation: choosing off did not ask with the consequence in words (${dlg ? dlg.textContent.slice(0, 120) : 'no dialog'})`);
@@ -1635,7 +1648,9 @@ const CFG_HOME = {
 function cfgOpen() {
   const page = doc.querySelector('.cm-nav .cm-item[aria-current="page"]');
   const tab = doc.querySelector('nav.cm-tabs button[aria-current="page"]');
-  return { page: page ? page.dataset.cmPage : '', tab: tab ? tab.dataset.cmTab : '' };
+  // A page of one tab (Requests: its Policy, since the Request Centre went to Jobs) draws no tab row: the address names it.
+  const fromHash = () => { const m = /^#\/settings\/[^/]+\/([^/?]+)/.exec(window.location.hash || ''); return m ? m[1] : ''; };
+  return { page: page ? page.dataset.cmPage : '', tab: tab ? tab.dataset.cmTab : doc.querySelector('nav.cm-tabs') ? '' : fromHash() };
 }
 /** Open a page and tab of Config-Management through its menu and tab row; true when it is open. */
 async function openCfg(page, tab) {
@@ -1702,7 +1717,7 @@ await go('settings');
   const find = doc.getElementById('cm-find');
   find.value = 'watch window'; find.dispatchEvent(new window.Event('input', { bubbles: true }));
   const hit = doc.querySelector('.cm-find-hit');
-  ok(hit && /Watch window/.test(hit.textContent) && /Requests › Policy/.test(hit.textContent), `config: Find a setting offered ${hit && hit.textContent}`);
+  ok(hit && /Watch window/.test(hit.textContent) && /Requests$/.test(hit.textContent.trim()), `config: Find a setting offered ${hit && hit.textContent}`);
   if (hit) { hit.click(); await settleFor(900); }
   ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `config: the search result opened ${JSON.stringify(cfgOpen())}`);
 
@@ -1751,13 +1766,46 @@ await go('settings');
   const trig = doc.querySelector('nav.cm-tabs button[data-cm-tab="triggers"]');
   if (trig) { trig.click(); await settleFor(600); }
   ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'triggers', `hosted: Triggers from Automation opened ${JSON.stringify(cfgOpen())}`);
-  await go('requests'); await settleFor(400);
+  await go('automation'); await settleFor(400);
   const find2 = doc.getElementById('cm-find');
   if (find2) { find2.value = 'watch window'; find2.dispatchEvent(new window.Event('input', { bubbles: true })); }
   const hit2 = doc.querySelector('.cm-find-hit');
   if (hit2) { hit2.click(); await settleFor(1200); }
-  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from the Request Centre opened ${JSON.stringify(cfgOpen())}`);
-  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from the Request Centre did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from Automation opened ${JSON.stringify(cfgOpen())}`);
+  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from Automation did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+
+  // The Request Centre is Jobs › Requests (0.3.71): Config-Management › Requests is its Policy
+  // alone; the page opens under the Jobs tab row at #/jobs/requests; the old addresses open it.
+  ok(!doc.querySelector('nav.cm-tabs button[data-cm-tab="centre"]') && !/Request Centre/.test((doc.querySelector('.cm-nav') || {}).textContent || ''),
+    'request centre: still a Config-Management tab');
+  await go('requests'); await settleFor(500);
+  ok(window.location.hash === '#/jobs/requests', `request centre: go('requests') is at ${window.location.hash}, not #/jobs/requests`);
+  {
+    const cur = doc.querySelector('#view nav.jb-tabs button[aria-current="page"]');
+    ok(!!cur && cur.dataset.tab === 'requests' && !!doc.querySelector('#view .jb-host .rq-tabs, #view .jb-host .rq-tbl, #view .jb-host .rq-tiles'),
+      `request centre: not drawn under the Jobs tab row with Requests marked (${cur && cur.dataset.tab})`);
+    ok(!doc.querySelector('#view .cm-side'), 'request centre: still drawn inside Config-Management');
+    const navJobs = doc.querySelector('#nav button[data-page="jobs"]');
+    ok(!!navJobs && navJobs.getAttribute('aria-current') === 'page', 'request centre: the menu does not mark Jobs');
+  }
+  // From another page, and typed while the Request Centre is already on screen.
+  for (const [old, from] of [['#/requests', 'alerts'], ['#/settings/requests/centre', 'alerts'], ['#/settings/requests/centre', null], ['#/requests/health', null]]) {
+    if (from) await go(from);
+    window.location.hash = old; await settleFor(700);
+    if (old === '#/requests/health') { ok(window.location.hash === '#/jobs/requests/health', `request centre: ${old} went to ${window.location.hash}`); continue; }
+    ok(window.location.hash === '#/jobs/requests' && !!doc.querySelector('#view .jb-host'), `request centre: the old address ${old} went to ${window.location.hash}`);
+  }
+  // From Jobs, the Requests tab opens it; from it, the History tab goes back to Jobs.
+  await go('jobs'); await settleFor(400);
+  {
+    const rq = doc.querySelector('#view nav.jb-tabs button[data-tab="requests"]');
+    ok(!!rq, 'jobs: no Requests tab for an admin');
+    if (rq) { rq.click(); await settleFor(700); }
+    ok(window.location.hash === '#/jobs/requests' && !!doc.querySelector('#view .jb-host'), `jobs: the Requests tab opened ${window.location.hash}`);
+    const hist = doc.querySelector('#view nav.jb-tabs button[data-tab="history"]');
+    if (hist) { hist.click(); await settleFor(700); }
+    ok(window.location.hash === '#/jobs/history' && !doc.querySelector('#view .jb-host'), `jobs: History from Requests opened ${window.location.hash}`);
+  }
 
   // Leaving Config-Management by the page menu with unsaved changes asks first; No stays.
   await openSettingsTab('Defaults');
@@ -3793,7 +3841,7 @@ restoreConsole();
     ok(!!tab, 'health: no "ElasticPro health" tab on the Request Centre');
     if (tab) {
       tab.click(); await settleFor(700);
-      ok(window.location.hash === '#/requests/health', `health: the tab is not at #/requests/health (${window.location.hash})`);
+      ok(window.location.hash === '#/jobs/requests/health', `health: the tab is not at #/jobs/requests/health (${window.location.hash})`);
       ok(count('SYSTEM_HEALTH') >= 1, 'health: opening the tab did not read SYSTEM_HEALTH');
       ok(!hsent.some((m) => m.type === 'ES'), 'health: the tab sent a cluster something');
       const fix = doc.querySelector('tr[data-check="core.memory"] .hl-fix');
@@ -3822,7 +3870,7 @@ restoreConsole();
       ok(count('SYSTEM_HEALTH') > reads, 'health: the tab is not read again after 5 s');
       // Back to the log tab, then away: the health read stops.
       doc.querySelector('nav.rq-tabs button[data-tab="log"]').click(); await settleFor(500);
-      ok(window.location.hash === '#/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
+      ok(window.location.hash === '#/jobs/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
       await go('overview');
       const left = count('SYSTEM_HEALTH');
       await settleFor(5300);
@@ -7993,6 +8041,46 @@ await settleFor(300);
   ok(!!doc.querySelector('#view .ov-board') || true, '');
 }
 
+/* ------- The left menu folds to an icon rail (0.3.71): « / », remembered per browser; the top menu has none ------- */
+{
+  await go('alerts');
+  ok(!doc.querySelector('#nav .nav-rail-btn'), 'rail: the top menu offers the fold button');
+  const pickMenu = async (id) => {
+    const me = doc.querySelector('#topbar .me-btn, #nav .me-btn');
+    if (me) { me.click(); await settleFor(200); }
+    const b = doc.querySelector(`.ys-seg button[data-menu="${id}"]`);
+    if (b) { b.click(); await settleFor(300); }
+    return !!b;
+  };
+  if (await pickMenu('left')) {
+    const html = doc.documentElement;
+    let fold = doc.querySelector('#nav .nav-rail-btn');
+    ok(html.dataset.menu === 'left' && !!fold && fold.getAttribute('aria-expanded') === 'true' && fold.textContent === '«', `rail: the left menu has no « at its foot (${fold && fold.textContent})`);
+    ok(!!fold && !!fold.nextElementSibling && fold.nextElementSibling.classList.contains('nav-me') || !doc.querySelector('#nav .nav-me'), 'rail: « is not just above the account button');
+    const pages = [...doc.querySelectorAll('#nav button[data-page]:not(.nav-sub)')];
+    ok(pages.length > 3 && pages.every((b) => b.title && b.getAttribute('aria-label') && b.querySelector('.nav-label')), 'rail: a menu button has no page name as tooltip and label');
+    if (fold) { fold.click(); await settleFor(200); }
+    fold = doc.querySelector('#nav .nav-rail-btn');
+    ok(html.dataset.rail === 'on' && !!fold && fold.textContent === '»' && fold.getAttribute('aria-expanded') === 'false', `rail: « did not fold the menu (${html.dataset.rail}, ${fold && fold.textContent})`);
+    ok(window.localStorage.getItem('elasticpro.menu.rail') === '1', 'rail: the folded menu is not remembered');
+    ok(!!doc.querySelector('#nav button[data-page][aria-current="page"]'), 'rail: the page on screen is not marked in the rail');
+    const al = doc.querySelector('#nav button[data-page="alerts"]');
+    if (al && al.querySelector('.pill')) ok(/^Alerts, \d+ open/.test(al.getAttribute('aria-label')), `rail: the Alerts icon does not say its count (${al.getAttribute('aria-label')})`);
+    if (fold) { fold.click(); await settleFor(200); }
+    ok(!html.dataset.rail && window.localStorage.getItem('elasticpro.menu.rail') === '0', 'rail: » did not open the menu again');
+    await pickMenu('top');
+    ok(html.dataset.menu === 'top' && !doc.querySelector('#nav .nav-rail-btn'), 'rail: back on top, the fold button is still there');
+  } else ok(false, 'rail: Your settings has no Page menu: Left');
+  window.localStorage.removeItem('elasticpro.menu.rail');
+}
+
+/* ------- No page carries a write toggle (0.3.71): an admin's write action asks to allow writes when pressed ------- */
+for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
+  await go(id); await settleFor(300);
+  const t = doc.getElementById('view').textContent;
+  ok(!/🔒 read-only|✎ writes allowed|writes enabled \(config\)/.test(t), `${id}: the read-only / writes-allowed toggle is still drawn`);
+}
+
 /* ------- Clusters › Overview: the sub-item and the tab open it, one cluster is picked, every card is there, nothing is rebuilt for nothing ------- */
 {
   const st = await load('core/state.js');
@@ -8115,6 +8203,20 @@ await settleFor(300);
     if (other) {
       location.hash = `#/clusters/overview/${encodeURIComponent(other.id)}`; await settleFor(500);
       ok(st.state.selected === other.id && doc.getElementById('cluster-select').value === other.id, `overview: an address naming ${other.name} left the chooser on ${st.state.selected}`);
+    }
+    // And the chooser moves the board: picking another cluster shows it and the address follows
+    // (it used to snap back to the cluster the address still named).
+    {
+      const from = st.state.selected;
+      const to = st.clusters().find((c) => c.id !== from);
+      const pickEl = doc.getElementById('cluster-select');
+      if (to && pickEl) {
+        pickEl.value = to.id; pickEl.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500);
+        const shown = (card('cluster') || {}).textContent || '';
+        ok(st.state.selected === to.id && doc.getElementById('cluster-select').value === to.id, `overview: choosing ${to.name} in the top bar left the chooser on ${st.state.selected}`);
+        ok(shown.includes(to.name), `overview: choosing ${to.name} in the top bar still shows "${shown.slice(0, 80)}"`);
+        ok(location.hash === `#/clusters/overview/${encodeURIComponent(to.id)}`, `overview: choosing ${to.name} left the address at ${location.hash}`);
+      }
     }
     await go('alerts');
     ok(!doc.documentElement.classList.contains('ov-fit'), 'overview: leaving the page left html.ov-fit');

@@ -10,6 +10,8 @@
  * Two addresses moved to the Log Delay page (#/log-delay/…, core/logdelay-report.js ldRoute)
  * and still open there: #/reports/log-delay/… (Reports › Log delay until 0.3.60, and the link
  * in the log delay mail) and #/logs (the page was "Logs & Delay", opened on its live tail).
+ * The Request Centre (app page `requests`) lives at #/jobs/requests since 0.3.71; #/requests
+ * and #/settings/requests/centre still open it.
  */
 
 /** The sections, in the order the section nav shows them. */
@@ -40,6 +42,10 @@ export const PAGE_ALIAS = Object.freeze({ volume: 'reports', logs: 'log-delay', 
  */
 export function movedPath(first, more) {
   if (first === 'reports' && more[0] === 'log-delay') return ['log-delay', more.slice(1)];
+  // The Request Centre is Jobs › Requests (0.3.71): `#/jobs/requests[/health]` is its own app
+  // page, `requests`; Config-Management's old tab address opens it too.
+  if (first === 'jobs' && more[0] === 'requests') return ['requests', more.slice(1)];
+  if (first === 'settings' && more[0] === 'requests' && more[1] === 'centre') return ['requests', more.slice(2)];
   if (first === 'logs') return ['log-delay', more.length ? more : ['live']];
   return null;
 }
