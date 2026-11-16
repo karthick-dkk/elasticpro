@@ -3,7 +3,10 @@
  * what runs now, what runs next, every job, every run, and the settings the controls keep.
  *
  * Three tabs, each its own address: Jobs (#/jobs), History (#/jobs/history) and Settings
- * (#/jobs/settings). A strip above them says how busy the server is. A user reads it all;
+ * (#/jobs/settings). A strip above them says how busy the server is. A fourth, Requests
+ * (#/jobs/requests), is the Request Centre (pages/requests.js) — its own app page, `requests`,
+ * drawn under this tab row (hostedPage below); it moved here from Config-Management in 0.3.71
+ * and is an operator's and an administrator's, as it was there. A user reads it all;
  * only an administrator presses anything, and every press goes through the write unlock the
  * other admin pages use (core/writes.js ensureWrites) and says a refusal as a sentence.
  *
@@ -25,12 +28,15 @@ import { confirmDialog } from '../ui/modal.js';
 import { toast, rowMenu } from '../ui/menu.js';
 import { openCreateJob, createdToast } from '../ui/job-create.js';
 import { keptCard, keptTable } from './common.js';
+import { canOpenPage } from '../core/intent.js';
 import * as J from '../core/jobs.js';
 
 /** The tabs, in order. */
 export const JOB_TABS = Object.freeze([
   { id: 'jobs', label: 'Jobs' }, { id: 'history', label: 'History' }, { id: 'settings', label: 'Settings' },
 ]);
+/** The Request Centre's tab: an app page of its own (`requests`, #/jobs/requests), shown to whoever may open it. */
+export const REQUESTS_TAB = Object.freeze({ id: 'requests', label: 'Requests' });
 const tabHash = (id) => (id === 'jobs' ? '#/jobs' : `#/jobs/${id}`);
 const hashNow = () => (typeof location !== 'undefined' ? location.hash : '');
 /** The tab an address names; Jobs for anything else. */
@@ -180,16 +186,52 @@ function pageKids() {
   ].filter(Boolean);
 }
 
+/** The tab row: Jobs · History · Settings, and Requests for whoever may open the Request Centre. */
+function tabsNav(current) {
+  const all = canOpenPage('requests') ? [...JOB_TABS, REQUESTS_TAB] : JOB_TABS;
+  return h('nav.subnav.jb-tabs', { 'aria-label': 'Jobs' },
+    ...all.map((t) => h('button', {
+      type: 'button', dataset: { tab: t.id }, 'aria-current': current === t.id ? 'page' : null, onclick: () => openTab(t.id),
+    }, t.label)));
+}
+
 function head() {
   const admin = isAdmin();
-  const tabs = h('nav.subnav.jb-tabs', { 'aria-label': 'Jobs' },
-    ...JOB_TABS.map((t) => h('button', {
-      type: 'button', dataset: { tab: t.id }, 'aria-current': tab === t.id ? 'page' : null, onclick: () => openTab(t.id),
-    }, t.label)));
+  const tabs = tabsNav(tab);
   const right = h('div.jb-head-acts',
     admin ? null : h('span.muted.jb-ro', { title: 'Only an administrator runs, pauses or changes jobs' }, 'read-only · an administrator runs and changes jobs'),
     admin ? h('button#jb-create.btn.sm.primary', { type: 'button', onclick: createJob }, 'Create job') : null);
   return built.same('head', h('div.jb-head', tabs, right));
+}
+
+/* ---------------------------- Jobs › Requests (hosted) ---------------------------- */
+
+/**
+ * The Request Centre drawn as this page's Requests tab (#/jobs/requests, #/jobs/requests/health).
+ * app.js registers it under its own id, `requests`, with this as its module: the shell's hooks
+ * reach the page inside, and every navigateTo('requests'), alert "go to" and old address
+ * (#/requests, #/settings/requests/centre — reports/route.js movedPath) still lands on it. The
+ * Jobs tab row is drawn above it; JOBS_LIST is not read meanwhile (the Jobs tabs' own loop).
+ */
+export function hostedPage(mod) {
+  let el = null;
+  let body = null;
+  return {
+    render(view) {
+      el = view;
+      if (!body) body = h('div.jb-hosted', { dataset: { hosted: 'requests' } });
+      mount(view, h('div.jb-host', h('div.jb-head', tabsNav(REQUESTS_TAB.id)), body));
+      mod.render(body);
+    },
+    onData() { if (el && mod.onData) mod.onData(); },
+    onRoute() { if (el && mod.onRoute) mod.onRoute(); },
+    onKey(e) { return !!(mod.onKey && mod.onKey(e)); },
+    onLeave() {
+      if (mod.onLeave) { try { mod.onLeave(); } catch (_) { /* leaving must not block arriving */ } }
+      el = null; body = null;
+    },
+    hashNow,
+  };
 }
 
 /* ------------------------------------ the strip ------------------------------------ */

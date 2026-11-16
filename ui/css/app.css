@@ -2718,6 +2718,9 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 /* ------------------------------- Jobs (docs/JOBS.md "Jobs page") ------------------------------- */
 /* Dense: 32 px rows, no empty bands. Bars light blue / green / pink / orange (never red and yellow). */
 .jb-page { display: grid; gap: 10px; min-width: 0; }
+/* Jobs › Requests: the Jobs tab row over the Request Centre, which keeps its own card styles (not .jb-page's). */
+.jb-host { display: grid; gap: 10px; min-width: 0; }
+.jb-host > * { min-width: 0; }
 .jb-page > * { min-width: 0; }
 .jb-page .banner { margin: 0; padding: 7px 11px; }
 .jb-head { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }

@@ -88,21 +88,23 @@ const LD_VIEWS = ['log-delay', 'log-delay/devices', 'log-delay/fixes', 'log-dela
 const LD_MOVED = [['reports/log-delay', 'fleet'], ['reports/log-delay/fixes', 'devices'], ['logs', 'live'],
   ...(LD_FIRST ? [[`reports/log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, 'cluster']] : [])];
 // Config-Management (pages/settings.js): every tab it draws itself, each from its own route; and
-// the three app pages it hosts as tabs (Automation, Request Centre, Accounts), drawn inside its frame
-// the way the shell draws them (hostedPage). A tab the bridge does not support (Data, Backup) is
+// the two app pages it hosts as tabs (Automation, Accounts), drawn inside its frame the way the shell
+// draws them (hostedPage). The Request Centre is Jobs › Requests (0.3.71): drawn under the Jobs tab row
+// (pages/jobs.js hostedPage), at #/jobs/requests and #/jobs/requests/health. A tab the bridge does not support (Data, Backup) is
 // left out of the frame by the page itself, which draws the first tab it does have.
 const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'zabbix/zabbix', 'alerts/triggers',
   'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
-const HOSTED = new Set(['automation', 'requests', 'accounts']);
+const HOSTED = new Set(['automation', 'accounts']);
 // `overview/overview`: Clusters › Overview, one cluster on one screen (the page reads the section from
 // the address and canonicalises it to #/clusters/overview/<cluster>).
 // `indices/docs/logstash-*`: Indices › Documents, the documents of every open logstash index (0.3.68),
 // drawn in place of the list from its own address.
 const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/docs/logstash-*', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
-  // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST.
-  'jobs', 'jobs/history', 'jobs/settings',
-  'automation', 'requests', 'requests/health', 'accounts', 'settings',
+  // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST,
+  // and Requests — the Request Centre, its own app page — with its ElasticPro health tab.
+  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health',
+  'automation', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const { ldRoute, ldTab } = await load('core/logdelay-report.js');
 const view = window.document.createElement('div');
@@ -117,9 +119,12 @@ for (const name of PAGES) {
     const linkOnly = name === 'reports/log-delay-link';
     const path = moved ? 'log-delay' : linkOnly ? 'reports/log-delay' : name;
     const [page, section, tab] = path.split('/');
-    const own = await load(`pages/${page}.js`);
+    // Jobs › Requests: the Request Centre (pages/requests.js) under the Jobs tab row, as the shell draws it.
+    const jobsHosted = page === 'jobs' && section === 'requests';
+    const own = await load(`pages/${jobsHosted ? 'requests' : page}.js`);
     // A page that lives in Config-Management is drawn inside its frame, as the shell does.
-    const mod = HOSTED.has(page) ? (await load('pages/settings.js')).hostedPage(page, own) : own;
+    const mod = jobsHosted ? (await load('pages/jobs.js')).hostedPage(own)
+      : HOSTED.has(page) ? (await load('pages/settings.js')).hostedPage(page, own) : own;
     while (view.firstChild) view.removeChild(view.firstChild);
     window.history.replaceState(null, '', `#/${moved || name}`);
     if (linkOnly) (await load('core/intent.js')).intent.reports = { section: 'log-delay' };
@@ -130,11 +135,15 @@ for (const name of PAGES) {
     // The bottom status strip was removed; no page may bring it back.
     if (window.document.querySelector('#side-foot, .status-strip')) errors.push(`${name}: a bottom status strip is on the page`);
     // Requests › ElasticPro health (docs/HEALTH.md): drawn from the bridge's own SYSTEM_HEALTH.
-    if (page === 'requests' && section === 'health') {
-      const tab = view.querySelector('nav.rq-tabs button[aria-current="page"]');
-      if (!tab || tab.dataset.tab !== 'health') errors.push('requests/health: the tab bar does not mark ElasticPro health as the one shown');
-      if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push('requests/health: no status strip with the core');
-      if (!view.querySelector('tr[data-check="core.memory"]')) errors.push('requests/health: no memory check');
+    if (jobsHosted) {
+      const jt = view.querySelector('nav.jb-tabs button[aria-current="page"]');
+      if (!jt || jt.dataset.tab !== 'requests') errors.push(`${name}: the Jobs tab row does not mark Requests`);
+      const rt = view.querySelector('nav.rq-tabs button[aria-current="page"]');
+      if (tab === 'health') {
+        if (!rt || rt.dataset.tab !== 'health') errors.push(`${name}: the tab bar does not mark ElasticPro health as the one shown`);
+        if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push(`${name}: no status strip with the core`);
+        if (!view.querySelector('tr[data-check="core.memory"]')) errors.push(`${name}: no memory check`);
+      } else if (!rt || rt.dataset.tab !== 'log') errors.push(`${name}: the Request Centre's tab bar does not mark Requests`);
     } else if (page === 'jobs') {
       // Jobs: the tab bar marks the tab shown, the strip is there, and the Jobs tab lists every job.
       const cur = view.querySelector('nav.jb-tabs button[aria-current="page"]');

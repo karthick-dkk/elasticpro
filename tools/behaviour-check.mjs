@@ -1764,13 +1764,44 @@ await go('settings');
   const trig = doc.querySelector('nav.cm-tabs button[data-cm-tab="triggers"]');
   if (trig) { trig.click(); await settleFor(600); }
   ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'triggers', `hosted: Triggers from Automation opened ${JSON.stringify(cfgOpen())}`);
-  await go('requests'); await settleFor(400);
+  await go('automation'); await settleFor(400);
   const find2 = doc.getElementById('cm-find');
   if (find2) { find2.value = 'watch window'; find2.dispatchEvent(new window.Event('input', { bubbles: true })); }
   const hit2 = doc.querySelector('.cm-find-hit');
   if (hit2) { hit2.click(); await settleFor(1200); }
-  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from the Request Centre opened ${JSON.stringify(cfgOpen())}`);
-  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from the Request Centre did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from Automation opened ${JSON.stringify(cfgOpen())}`);
+  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from Automation did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+
+  // The Request Centre is Jobs › Requests (0.3.71): Config-Management › Requests is its Policy
+  // alone; the page opens under the Jobs tab row at #/jobs/requests; the old addresses open it.
+  ok(!doc.querySelector('nav.cm-tabs button[data-cm-tab="centre"]') && !/Request Centre/.test((doc.querySelector('.cm-nav') || {}).textContent || ''),
+    'request centre: still a Config-Management tab');
+  await go('requests'); await settleFor(500);
+  ok(window.location.hash === '#/jobs/requests', `request centre: go('requests') is at ${window.location.hash}, not #/jobs/requests`);
+  {
+    const cur = doc.querySelector('#view nav.jb-tabs button[aria-current="page"]');
+    ok(!!cur && cur.dataset.tab === 'requests' && !!doc.querySelector('#view .jb-host .rq-tabs, #view .jb-host .rq-tbl, #view .jb-host .rq-tiles'),
+      `request centre: not drawn under the Jobs tab row with Requests marked (${cur && cur.dataset.tab})`);
+    ok(!doc.querySelector('#view .cm-side'), 'request centre: still drawn inside Config-Management');
+    const navJobs = doc.querySelector('#nav button[data-page="jobs"]');
+    ok(!!navJobs && navJobs.getAttribute('aria-current') === 'page', 'request centre: the menu does not mark Jobs');
+  }
+  for (const old of ['#/requests', '#/settings/requests/centre']) {
+    await go('alerts');
+    window.location.hash = old; await settleFor(700);
+    ok(window.location.hash === '#/jobs/requests' && !!doc.querySelector('#view .jb-host'), `request centre: the old address ${old} went to ${window.location.hash}`);
+  }
+  // From Jobs, the Requests tab opens it; from it, the History tab goes back to Jobs.
+  await go('jobs'); await settleFor(400);
+  {
+    const rq = doc.querySelector('#view nav.jb-tabs button[data-tab="requests"]');
+    ok(!!rq, 'jobs: no Requests tab for an admin');
+    if (rq) { rq.click(); await settleFor(700); }
+    ok(window.location.hash === '#/jobs/requests' && !!doc.querySelector('#view .jb-host'), `jobs: the Requests tab opened ${window.location.hash}`);
+    const hist = doc.querySelector('#view nav.jb-tabs button[data-tab="history"]');
+    if (hist) { hist.click(); await settleFor(700); }
+    ok(window.location.hash === '#/jobs/history' && !doc.querySelector('#view .jb-host'), `jobs: History from Requests opened ${window.location.hash}`);
+  }
 
   // Leaving Config-Management by the page menu with unsaved changes asks first; No stays.
   await openSettingsTab('Defaults');
@@ -3806,7 +3837,7 @@ restoreConsole();
     ok(!!tab, 'health: no "ElasticPro health" tab on the Request Centre');
     if (tab) {
       tab.click(); await settleFor(700);
-      ok(window.location.hash === '#/requests/health', `health: the tab is not at #/requests/health (${window.location.hash})`);
+      ok(window.location.hash === '#/jobs/requests/health', `health: the tab is not at #/jobs/requests/health (${window.location.hash})`);
       ok(count('SYSTEM_HEALTH') >= 1, 'health: opening the tab did not read SYSTEM_HEALTH');
       ok(!hsent.some((m) => m.type === 'ES'), 'health: the tab sent a cluster something');
       const fix = doc.querySelector('tr[data-check="core.memory"] .hl-fix');
@@ -3835,7 +3866,7 @@ restoreConsole();
       ok(count('SYSTEM_HEALTH') > reads, 'health: the tab is not read again after 5 s');
       // Back to the log tab, then away: the health read stops.
       doc.querySelector('nav.rq-tabs button[data-tab="log"]').click(); await settleFor(500);
-      ok(window.location.hash === '#/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
+      ok(window.location.hash === '#/jobs/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
       await go('overview');
       const left = count('SYSTEM_HEALTH');
       await settleFor(5300);

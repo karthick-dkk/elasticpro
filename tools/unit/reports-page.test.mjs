@@ -254,6 +254,13 @@ test('the route: #/reports/<section>, Overview by default, #/volume is an alias'
   assert.deepEqual(R.parseHash('#/reports/log-delay/device/a/b'), { page: 'log-delay', rest: 'device/a/b' });
   assert.deepEqual(R.parseHash('#/reports/log-delay'), { page: 'log-delay', rest: '' });
   assert.deepEqual(R.parseHash('#/logs'), { page: 'log-delay', rest: 'live' }, '#/logs opened the live tail');
+  // The Request Centre (app page `requests`) is Jobs › Requests since 0.3.71; its old addresses still open it.
+  assert.deepEqual(R.parseHash('#/jobs/requests'), { page: 'requests', rest: '' });
+  assert.deepEqual(R.parseHash('#/jobs/requests/health'), { page: 'requests', rest: 'health' });
+  assert.deepEqual(R.parseHash('#/requests/health'), { page: 'requests', rest: 'health' });
+  assert.deepEqual(R.parseHash('#/settings/requests/centre'), { page: 'requests', rest: '' });
+  assert.deepEqual(R.parseHash('#/settings/requests/policy'), { page: 'settings', rest: 'requests/policy' });
+  assert.deepEqual(R.parseHash('#/jobs/history'), { page: 'jobs', rest: 'history' });
   assert.equal(R.pageAlias('logs'), 'log-delay');
   assert.equal(R.sectionOfHash('#/reports/log-delay/device/a/b'), 'overview', 'not a Reports section any more');
   assert.equal(R.sectionOfHash('#/reports'), 'overview');

@@ -5,9 +5,10 @@
  * a "Find a setting" search, one page header, one tab row, one save bar and one lock mark. The
  * pages, tabs and who sees which are core/config-nav.js; the save bar is ui/change-tracker.js.
  *
- * Three tabs are whole app pages that left the page menu (Alerts › Automation, Requests ›
- * Request Centre, Accounts). They keep their own app page id and are drawn here through
- * `hostedPage()`, so every link and deep link to them still lands on them.
+ * Two tabs are whole app pages that left the page menu (Alerts › Automation, Accounts). They
+ * keep their own app page id and are drawn here through `hostedPage()`, so every link and deep
+ * link to them still lands on them. The Request Centre was a third until 0.3.71: it is Jobs ›
+ * Requests now (pages/jobs.js hostedPage); Requests here is its Policy.
  */
 
 import { h, mount, $ } from '../lib/dom.js';
@@ -211,8 +212,7 @@ export function zabbixRolesSupported() { return rolesSupported(); }
 export function render(el) { arrive(el, 'settings', null); }
 
 /**
- * An app page drawn as a tab of this frame: Alerts › Automation, Requests › Request Centre,
- * Accounts. app.js registers each under its own id with this as its module, so the shell's
+ * An app page drawn as a tab of this frame: Alerts › Automation, Accounts. app.js registers each under its own id with this as its module, so the shell's
  * hooks (onData, onLeave, onRoute, onKey) reach the page inside.
  */
 export function hostedPage(id, mod) {
@@ -279,7 +279,7 @@ function arrive(el, appId, mod) {
     hostedMod = mod;
     hostedBody = h('div.cm-hosted', { dataset: { hosted: appId } });
   } else {
-    // Arriving from another page that named a tab (the Request Centre's mode link, a report's
+    // Arriving from another page that named a tab (Jobs › Requests' mode link, a report's
     // "Edit in Config") opens it; a legacy section id (intent.settings.section) has its new home.
     const it = intent.settings;
     intent.settings = null;
@@ -293,7 +293,7 @@ function arrive(el, appId, mod) {
     } else {
       const r = routeOfRest(parseHash(typeof location !== 'undefined' ? location.hash : '').rest);
       if (r.page) route = r;
-      // A tab left open on a hosted page (Request Centre, Automation) is that page's, not this
+      // A tab left open on a hosted page (Automation, Accounts) is that page's, not this
       // one's: arriving at #/settings itself starts on the first tab instead of going back there.
       else if (appPageOf(route.page, route.tab) !== 'settings') route = { page: 'clusters', tab: '' };
     }
@@ -416,7 +416,6 @@ const TABS = {
     actions: () => [h('button.btn', { type: 'button', onclick: () => openTab('alerts', 'automation') }, 'Write your own rule in Automation ›')] },
   'alerts/automation': { pill: () => alertsPill() },
   'requests/policy': { build: () => requestsCard(), load: () => loadPolicy(), pill: () => requestsPill(), actions: () => requestsActions() },
-  'requests/centre': { pill: () => requestsPill() },
   'reports/fields': { build: () => fieldsTab(), load: () => loadVolumeSection() },
   'reports/mail': { build: () => mailTab(), load: () => loadVolumeSection(), actions: () => reportMailHeaderActions(),
     line: 'The volume report mailed as an .xlsx, and the mail server that sends it. Columns and sheet layout are set on Reports › Daily & monthly.' },
@@ -460,7 +459,7 @@ function draw() {
   const vis = visible();
   if (!vis.length) {
     mount(host, h('div.banner', h('div', h('div.ttl', 'Nothing here for this account'),
-      h('div', 'Config-Management is an administrator’s; an operator sees Clusters, Alerts › Automation and Requests › Request Centre.'))));
+      h('div', 'Config-Management is an administrator’s; an operator sees Clusters and Alerts › Automation. The Request Centre is Jobs › Requests.'))));
     return;
   }
   settleRoute(vis);
@@ -625,7 +624,7 @@ function pageHeader(page, tab, t) {
 
 /**
  * The tab row. The same markup and `aria-current` as the window's own tabs, so it reads as
- * navigation; a hosted tab (Automation, Request Centre) is its own address.
+ * navigation; a hosted tab (Automation, Accounts) is its own address.
  */
 function tabRow(page) {
   return h('nav.subnav.cm-tabs', { 'aria-label': `Sections of ${page.label}` },
@@ -1123,7 +1122,7 @@ async function loadPolicy() {
     pol = { error: e.message || String(e) };
   }
   polDraft = null;
-  if (isOpen('requests/policy') || isOpen('requests/centre')) { tracker.reset('policy'); draw(); }
+  if (isOpen('requests/policy')) { tracker.reset('policy'); draw(); }
 }
 
 const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
@@ -1221,7 +1220,7 @@ function resetPolicyForm() {
 
 async function savePolicy() {
   const { policy, problems } = fromForm(readPolicyForm(), polDefaults(), polBounds());
-  // The emergency stop is not this form's: it has its own messages (Request Centre), and the
+  // The emergency stop is not this form's: it has its own messages (Jobs › Requests), and the
   // core ignores `paused` in POLICY_SET — so a form opened before a stop began never lifts it.
   const { paused: _stop, ...rest } = policy;
   let res;
@@ -1427,7 +1426,7 @@ function requestsCard() {
       + 'answers 429) gets one request at a time and longer intervals until it answers quickly again, and while the '
       + 'server is busy the background polling waits so people go first. Nobody waits more than 10 s for a page. '
       + 'To hold everything for a while, use the emergency stop in ',
-      h('button.btn.sm.ghost', { onclick: () => openTab('requests', 'centre') }, 'Request Centre'),
+      h('button.btn.sm.ghost', { title: 'Open Jobs › Requests', onclick: () => navigateTo('requests') }, 'Jobs › Requests'),
       ' — it ends by itself after 15, 30 or 60 minutes. ', stored,
       pol.running === false ? ' The poller is not running on this core.' : ''),
     polNote ? h(`div.${polNote.cls.split(' ').join('.')}#pol-msg`, { style: { margin: 0, fontSize: '12px' } }, polNote.text) : null);

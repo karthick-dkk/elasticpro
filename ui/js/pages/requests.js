@@ -1,5 +1,6 @@
 /**
- * Page 10 — the Request Centre: every request this core sends to a cluster, in flight and
+ * Page 10 — the Request Centre, Jobs › Requests (#/jobs/requests; Config-Management › Requests ›
+ * Request Centre until 0.3.71): every request this core sends to a cluster, in flight and
  * recent, with who asked and how it went. The log is an administrator's: it shows every
  * user's requests on the clusters they share. An operator opens the page for the emergency
  * stop alone (POLICY_PAUSE / POLICY_RESUME) and is sent nothing of the log.
@@ -8,7 +9,7 @@
  * sends a cluster anything. While it is open it re-reads the log every two seconds — a
  * core round trip, not a cluster one — and stops the moment it is left.
  *
- * A second tab, ElasticPro health (`#/requests/health`, docs/HEALTH.md), is an
+ * A second tab, ElasticPro health (`#/jobs/requests/health`, docs/HEALTH.md), is an
  * administrator's: ElasticPro's own memory, CPU, response time, gate, poller, reports and
  * disk, from SYSTEM_HEALTH every five seconds while it is open — and the log is not read
  * meanwhile. Neither tab sends a cluster anything.
@@ -108,7 +109,7 @@ function startTab() {
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
 
-/** Another tab of this page (#/requests ↔ #/requests/health). */
+/** Another tab of this page (#/jobs/requests ↔ #/jobs/requests/health). */
 export function onRoute() {
   if (!host) return;
   const want = isAdmin() ? tabOfHash(hashNow()) : 'log';

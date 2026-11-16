@@ -6,10 +6,11 @@
  * routes with it, and tools/unit/config-nav.test.mjs checks it — one definition, so the
  * sidebar, the tab row, a deep link and the search cannot disagree about where a setting is.
  *
- * Three tabs are whole pages of the app that left the page menu: Alerts › Automation
- * (`#/automation`), Requests › Request Centre (`#/requests`) and Accounts (`#/accounts`).
- * They keep their own app page id — so every link, alert "go to" and deep link to them still
- * lands — and the shell draws them inside this frame (`appPage`).
+ * Two tabs are whole pages of the app that left the page menu: Alerts › Automation
+ * (`#/automation`) and Accounts (`#/accounts`). They keep their own app page id — so every
+ * link, alert "go to" and deep link to them still lands — and the shell draws them inside this
+ * frame (`appPage`). The Request Centre was a third (Requests › Request Centre) until 0.3.71:
+ * it is Jobs › Requests now (`#/jobs/requests`); Requests here is its Policy alone.
  */
 
 /** Roles, lowest first. A portable build has no accounts: no role there means admin. */
@@ -38,10 +39,7 @@ export const CFG_PAGES = Object.freeze([
       { id: 'automation', label: 'Automation', operator: true, appPage: 'automation' },
     ] },
   { id: 'requests', label: 'Requests', line: 'When the core goes to the clusters, how many requests it sends at once, and whether it sends any at all.',
-    tabs: [
-      { id: 'policy', label: 'Policy' },
-      { id: 'centre', label: 'Request Centre', operator: true, appPage: 'requests' },
-    ] },
+    tabs: [{ id: 'policy', label: 'Policy' }] },
   { id: 'reports', label: 'Reports', line: 'Which indices count towards volume, the volume report mailed as an .xlsx with the mail server that sends it, and the plan templates.',
     tabs: [
       { id: 'fields', label: 'Indices & volume fields' },
@@ -66,7 +64,6 @@ export const CFG_PAGES = Object.freeze([
 /** The app pages drawn as a tab of this frame: app page id → [page, tab]. */
 export const HOSTED_TABS = Object.freeze({
   automation: ['alerts', 'automation'],
-  requests: ['requests', 'centre'],
   accounts: ['accounts', 'accounts'],
 });
 
@@ -93,8 +90,8 @@ export const reachesConfig = (role) => !role || (RANK[role] ?? -1) >= RANK.opera
  *   supports  { accounts, history, sink, backup }: what the core said it has. A missing or
  *             false flag hides the tab — the core decides, never a guess.
  *
- * An operator gets Clusters › Clusters, Alerts › Automation and Requests › Request Centre and
- * nothing else; a user or a guest gets nothing (they do not reach the page).
+ * An operator gets Clusters › Clusters and Alerts › Automation and nothing else (the Request
+ * Centre, theirs for the emergency stop, is Jobs › Requests); a user or a guest gets nothing.
  */
 export function visibleConfig(role, supports = {}) {
   if (!reachesConfig(role)) return [];
@@ -212,9 +209,6 @@ export const SETTING_INDEX = Object.freeze([
   ['requests', 'policy', 'Dataset intervals', 'pol-iv-health', 'every seconds fine-tune'],
   ['requests', 'policy', 'Minimum gap (duplicate requests)', 'pol-gap', 'seconds'],
   ['requests', 'policy', 'While Play runs', 'pol-play-health', 'tv display intervals'],
-  ['requests', 'centre', 'Request Centre', '', 'request log'],
-  ['requests', 'centre', 'Emergency stop', '', 'pause resume'],
-  ['requests', 'centre', 'ElasticPro health', '', 'memory cpu'],
   ['reports', 'fields', 'Index pattern', 'vf-pattern', 'which indices count volume logstash'],
   ['reports', 'fields', 'Which day a document counts on', '', 'day from index name time field'],
   ['reports', 'fields', 'Volume time field', 'vf-time', '@timestamp'],

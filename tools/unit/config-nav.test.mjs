@@ -2,8 +2,8 @@
  * Config-Management's map (core/config-nav.js): nine pages and their tabs, who sees which,
  * where yesterday's thirteen Config tabs went, the hashes, and "Find a setting".
  *
- * Role gating must not loosen: an operator gets Clusters › Clusters, Alerts › Automation and
- * Requests › Request Centre and nothing else; a user and a guest get nothing; everything else
+ * Role gating must not loosen: an operator gets Clusters › Clusters and Alerts › Automation and
+ * nothing else (the Request Centre is Jobs › Requests since 0.3.71); a user and a guest get nothing; everything else
  * stays an admin's. A tab the core has not said it supports (history store, scheduled delay,
  * backup) is not there at all.
  */
@@ -23,7 +23,8 @@ test('nine pages, in the order of the board', () => {
   const tabs = Object.fromEntries(N.CFG_PAGES.map((p) => [p.id, p.tabs.map((t) => t.label)]));
   assert.deepEqual(tabs.clusters, ['Clusters', 'Credentials', 'Jump hosts & trust']);
   assert.deepEqual(tabs.alerts, ['Triggers', 'Automation']);
-  assert.deepEqual(tabs.requests, ['Policy', 'Request Centre']);
+  // The Request Centre is Jobs › Requests since 0.3.71: Requests here is its Policy alone.
+  assert.deepEqual(tabs.requests, ['Policy']);
   assert.deepEqual(tabs.reports, ['Indices & volume fields', 'Mail delivery', 'Plan templates']);
   assert.deepEqual(tabs.data, ['Backend', 'Scheduled log delay']);
   assert.deepEqual(tabs.system, ['Defaults', 'Config file', 'Backup & restore']);
@@ -34,7 +35,7 @@ test('an admin (or a build without accounts) sees every supported tab', () => {
   // No accounts: the portable build, where nobody is signed in and everyone is the admin.
   const none = N.visibleConfig(null, { history: false, sink: false, backup: false, accounts: false });
   assert.deepEqual(ids(none), ['clusters:clusters+creds+trust', 'zabbix:zabbix', 'alerts:triggers+automation',
-    'requests:policy+centre', 'reports:fields+mail+templates', 'play:play', 'system:defaults+file']);
+    'requests:policy', 'reports:fields+mail+templates', 'play:play', 'system:defaults+file']);
 });
 
 test('a route on a tab that waits on an answer: what it needs, and whether it is shown yet', () => {
@@ -57,8 +58,8 @@ test('a route on a tab that waits on an answer: what it needs, and whether it is
   assert.deepEqual(N.resolveRoute(before, 'system', 'backup'), { page: 'system', tab: 'defaults' });
 });
 
-test('an operator sees Clusters, Automation and the Request Centre only', () => {
-  assert.deepEqual(ids(N.visibleConfig('operator', ALL)), ['clusters:clusters', 'alerts:automation', 'requests:centre']);
+test('an operator sees Clusters and Automation only (the Request Centre is Jobs › Requests)', () => {
+  assert.deepEqual(ids(N.visibleConfig('operator', ALL)), ['clusters:clusters', 'alerts:automation']);
 });
 
 test('a user and a guest do not reach Config-Management', () => {
@@ -94,10 +95,9 @@ test('every one of yesterday\'s thirteen Config tabs has a home', () => {
 
 test('the hosted tabs keep their own app page and address', () => {
   assert.equal(N.tabHash('alerts', 'automation'), '#/automation');
-  assert.equal(N.tabHash('requests', 'centre'), '#/requests');
   assert.equal(N.tabHash('accounts', 'accounts'), '#/accounts');
   assert.equal(N.tabHash('system', 'file'), '#/settings/system/file');
-  assert.equal(N.appPageOf('requests', 'centre'), 'requests');
+  assert.ok(!('requests' in N.HOSTED_TABS), 'the Request Centre is still a Config-Management tab');
   assert.equal(N.appPageOf('requests', 'policy'), 'settings');
   for (const [app, [page, tab]] of Object.entries(N.HOSTED_TABS)) assert.equal(N.appPageOf(page, tab), app);
 });
@@ -105,7 +105,7 @@ test('the hosted tabs keep their own app page and address', () => {
 test('a route falls back to what is visible', () => {
   const op = N.visibleConfig('operator', ALL);
   assert.deepEqual(N.resolveRoute(op, 'system', 'file'), { page: 'clusters', tab: 'clusters' });
-  assert.deepEqual(N.resolveRoute(op, 'requests', 'policy'), { page: 'requests', tab: 'centre' });
+  assert.deepEqual(N.resolveRoute(op, 'requests', 'policy'), { page: 'clusters', tab: 'clusters' });
   assert.deepEqual(N.resolveRoute(op, 'alerts', ''), { page: 'alerts', tab: 'automation' });
   assert.equal(N.resolveRoute([], 'clusters', 'clusters'), null);
 });
@@ -123,7 +123,7 @@ test('Find a setting: every word must match, best first, visible tabs only', () 
   assert.equal(hits[0].page, 'requests');
   assert.equal(hits[0].tab, 'policy');
   assert.equal(hits[0].field, 'pol-watch');
-  assert.equal(hits[0].where, 'Requests › Policy');
+  assert.equal(hits[0].where, 'Requests');
   assert.deepEqual(N.findSettings('', vis), []);
   assert.deepEqual(N.findSettings('zzzz-no-such-setting', vis), []);
   // A word from the extra keywords finds it too ("smtp" is not in "Mail server").

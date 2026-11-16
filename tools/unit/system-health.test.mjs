@@ -15,8 +15,12 @@ test('the tab comes from the hash', () => {
   assert.equal(S.tabOfHash('#/requests'), 'log');
   assert.equal(S.tabOfHash('#/requests/other'), 'log');
   assert.equal(S.tabOfHash('#/reports/health'), 'log');
-  assert.equal(S.tabHash('health'), '#/requests/health');
-  assert.equal(S.tabHash('log'), '#/requests');
+  // Jobs › Requests since 0.3.71; the old addresses above still name the same tabs.
+  assert.equal(S.tabOfHash('#/jobs/requests/health'), 'health');
+  assert.equal(S.tabOfHash('#/jobs/requests'), 'log');
+  assert.equal(S.tabOfHash('#/jobs/health'), 'log');
+  assert.equal(S.tabHash('health'), '#/jobs/requests/health');
+  assert.equal(S.tabHash('log'), '#/jobs/requests');
   assert.deepEqual(S.REQUEST_TABS.map((t) => t.label), ['Requests', 'ElasticPro health']);
 });
 

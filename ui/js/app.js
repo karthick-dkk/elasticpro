@@ -119,16 +119,19 @@ const PAGES = [
   // it (runs name clusters and carry their errors, so not a guest); an admin presses things. It reads
   // JOBS_LIST on its own timer and draws its own answers; the fleet's pushes only rename clusters.
   { id: 'jobs',      label: 'Jobs',           icon: '◷', mod: pJobs,      multi: true,  minRole: 'user' },
-  // Config-Management: an admin's, and an operator's for Clusters, Alerts › Automation and
-  // Requests › Request Centre only (core/config-nav.js decides which tabs inside).
+  // Config-Management: an admin's, and an operator's for Clusters and Alerts › Automation only
+  // (core/config-nav.js decides which tabs inside).
   { id: 'settings',  label: 'Config-Management', icon: '⚙', mod: pSettings, multi: true, minRole: 'operator' },
-  // Three pages that left the page menu and live in Config-Management as tabs (`home`). Each
-  // keeps its id, so #/automation, #/requests, #/accounts, an alert's "go to" and every
-  // navigateTo() still land on it — drawn inside Config-Management (pages/settings.js hostedPage).
+  // Pages that left the page menu and live as a tab of another page (`home`). Each keeps its id,
+  // so #/automation, #/accounts, an alert's "go to" and every navigateTo() still land on it —
+  // Automation and Accounts drawn inside Config-Management (pages/settings.js hostedPage).
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pSettings.hostedPage('automation', pAutomation), multi: true, minRole: 'operator', noTab: true, home: 'settings' },
+  // The Request Centre: Jobs › Requests since 0.3.71 (was Config-Management › Requests › Request
+  // Centre), drawn under the Jobs tab row (pages/jobs.js hostedPage). Its address is #/jobs/requests
+  // (`path`); #/requests and #/settings/requests/centre still open it (reports/route.js movedPath).
   // An operator gets the emergency stop here; the request log itself stays an admin's.
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pSettings.hostedPage('requests', pRequests), multi: true, minRole: 'operator', live: true, noTab: true, home: 'settings' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pJobs.hostedPage(pRequests), multi: true, minRole: 'operator', live: true, noTab: true, home: 'jobs', path: 'jobs/requests' },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pSettings.hostedPage('accounts', pAccounts), multi: true, minRole: 'admin', accountsOnly: true, noTab: true, home: 'settings' },
   // The NOC wall display (docs/PLAY.md): full screen, no tab — the "▶ Play" button in the top
   // bar opens it, and a display link opens nothing else.
@@ -579,10 +582,11 @@ function renderNav() {
     if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
   // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md), on the tab of the
-  // Request Centre's page — Config-Management. From PING, so it moves every ten seconds.
+  // Request Centre's page — Jobs (Jobs › Requests › ElasticPro health), for whoever may open it.
+  // From PING, so it moves every ten seconds.
   {
-    const dot = navDot(coreInfo);
-    const host = nav.querySelector('button[data-page="settings"]');
+    const dot = visiblePages().some((p) => p.id === 'requests') ? navDot(coreInfo) : null;
+    const host = nav.querySelector('button[data-page="jobs"]');
     const had = nav.querySelector('.nav-health-dot');
     const want = dot ? dot.tone : '';
     if (had && (had.dataset.tone !== want || had.parentNode !== host)) had.remove();

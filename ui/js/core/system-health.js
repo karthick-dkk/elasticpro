@@ -18,14 +18,18 @@ export const REQUEST_TABS = Object.freeze([
 
 const known = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
 
-/** Which tab a hash opens: `#/requests/health` → 'health', anything else → 'log'. */
+/**
+ * Which tab a hash opens: `#/jobs/requests/health` (and the old `#/requests/health`) → 'health',
+ * anything else → 'log'. The Request Centre is Jobs › Requests since 0.3.71.
+ */
 export function tabOfHash(hash) {
   const path = String(hash || '').replace(/^#\/?/, '').split('?')[0].split('/');
-  return path[0] === 'requests' && path[1] === 'health' ? 'health' : 'log';
+  const rest = path[0] === 'jobs' && path[1] === 'requests' ? path.slice(2) : path[0] === 'requests' ? path.slice(1) : null;
+  return rest && rest[0] === 'health' ? 'health' : 'log';
 }
 
 /** The hash for a tab. */
-export const tabHash = (id) => (id === 'health' ? '#/requests/health' : '#/requests');
+export const tabHash = (id) => (id === 'health' ? '#/jobs/requests/health' : '#/jobs/requests');
 
 /** The pill class for a level. */
 export function levelTone(level) {
