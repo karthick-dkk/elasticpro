@@ -28,9 +28,15 @@ import { freshnessBar } from '../lib/freshness.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 import { indexQuery } from '../core/index-match.js';
+import { INDEX_PAGE_SIZES, documentsTarget, docsHash, docsTargetOf } from '../core/documents.js';
+import { documentsView, pageSizePref } from '../ui/documents-view.js';
 
 let host = null;
-const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', not: false, status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+// `view`: indices | templates | docs — docs is an index's (or a pattern's) documents, drawn in
+// place of the list at #/indices/docs/<target> (ui/documents-view.js); `docs.target` names them.
+const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', not: false, status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices', docs: { target: null } };
+/** Rows per page on the list: 10 by default, up to 100, remembered per browser (core/documents.js INDEX_PAGE_SIZES). */
+const IDX_SIZE = pageSizePref('elasticpro.indices.perPage', INDEX_PAGE_SIZES);
 /**
  * The index table's column sort (lib/table-sort.js): largest first until a header says
  * otherwise, and a new column starts high-to-low, as it always has here. Remembered per
@@ -82,10 +88,42 @@ export function render(el) {
   if (f && (f.health === 'red' || f.health === 'yellow')) { ui.status = f.health; ui.view = 'indices'; ui.page = 0; }
   if (f && Array.isArray(f.noPolicy)) { ui.noPolicy = new Set(f.noPolicy); ui.view = 'indices'; ui.page = 0; }
   if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
+  // A hint asked for the list: an address left on someone's documents must not win over it.
+  if (f && (f.health || f.noPolicy || f.ilm) && docsTargetOf(location.hash)) {
+    try { window.history.replaceState(null, '', '#/indices'); } catch (_) { /* sandboxed frame */ }
+  }
+  syncRoute();
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
 }
+
+/**
+ * Where the address points: `#/indices/docs/<target>` opens that target's documents, anything
+ * else the list (with its search, filters and page as they were). Read on render and on every
+ * hash change inside the page (the shell calls onRoute).
+ */
+function syncRoute() {
+  const target = docsTargetOf(location.hash);
+  if (target) { ui.view = 'docs'; ui.docs.target = target; }
+  else if (ui.view === 'docs') ui.view = 'indices';
+}
+export function onRoute() { syncRoute(); draw(); }
+
+/** Open a target's documents here: drawn now, and the address says so (Back and bookmarks). */
+function openDocuments(target) {
+  ui.view = 'docs'; ui.docs.target = target;
+  closeMenus();
+  draw();
+  if (location.hash !== docsHash(target)) location.hash = docsHash(target);
+}
+/** "‹ Indices": back to the list as it was left. */
+function closeDocuments() {
+  ui.view = 'indices';
+  draw();
+  if (location.hash !== '#/indices') location.hash = '#/indices';
+}
+
 export function onData() {
   if (!host || !host.isConnected) return;
   // Resumed (here or anywhere): ask again rather than keep saying it is paused.
@@ -133,9 +171,19 @@ function draw() {
   try { drawPage(); } finally { built.end(); }
 }
 
+/** The documents view on screen, kept for as long as the cluster and the target are the same. */
+let docsShown = { key: '', el: null };
+function docsPanel(c) {
+  const key = `${c.id}|${ui.docs.target}`;
+  if (docsShown.key !== key || !docsShown.el) docsShown = { key, el: documentsView(c, ui.docs.target, { onBack: closeDocuments }) };
+  return docsShown.el;
+}
+
 function drawPage() {
   const c = cluster();
   if (!c) return mount(host, empty('No cluster selected'));
+  // Documents: the whole page is theirs; the list waits underneath with its state intact.
+  if (ui.view === 'docs' && ui.docs.target) return mount(host, docsPanel(c));
   const all = state.indices.get(c.id) || [];
   const rows = rowsFor(c);
 
@@ -238,21 +286,24 @@ function redrawTable() {
   const holder = $('#idx-table');
   if (!holder) return draw();
   const rows = rowsFor(c);
-  const slice = pageSlice(rows, ui.page, perPage(c));
+  const slice = pageSlice(rows, ui.page, perPage());
   // Write the clamped page back: a filter that shrank the list below the current page
   // would otherwise leave ui.page pointing past the end, and the next Previous click
   // would appear to do nothing while it walked back through pages that do not exist.
   ui.page = slice.page;
   const meta = $('#idx-meta');
   if (meta) meta.textContent = `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`;
-  mount(holder, buildTable(c, slice.rows, rows), pagerBar(slice, goToPage));
+  mount(holder, buildTable(c, slice.rows, rows), idxPager(slice));
 }
 
-/** Rows per page for this cluster — config, with the shared default as the floor. */
-function perPage(c) {
-  const n = Math.floor(Number(c && c.tableRowsPerPage));
-  return isFinite(n) && n > 0 ? n : 50;
-}
+/** Rows per page on the list: the viewer's choice in this browser, 10 until one is made (the owner, 2026-11-16). */
+function perPage() { return IDX_SIZE.get(); }
+
+/** The list's pager, with the rows-per-page picker; a new size starts from the first page. */
+const idxPager = (slice) => pagerBar(slice, goToPage, {
+  label: 'indices', sizes: INDEX_PAGE_SIZES, perPage: perPage(),
+  onSize: (n) => { IDX_SIZE.set(n); ui.page = 0; redrawTable(); },
+});
 
 function goToPage(p) {
   ui.page = p;
@@ -319,7 +370,12 @@ function buildTable(c, rows, allRows = rows) {
   const trs = shown.map((r) => h('tr',
     h('td', tick(r)),
     h('td', pill(r.health || '?', r.health)),
-    h('td.mono', { style: { maxWidth: '340px', overflow: 'hidden', textOverflow: 'ellipsis' }, title: r.index }, r.index),
+    // An open index's name opens its documents here; a closed one cannot be searched, so it stays text.
+    h('td.mono', { style: { maxWidth: '340px', overflow: 'hidden', textOverflow: 'ellipsis' }, title: r.status === 'open' ? r.index : `${r.index} — closed: open it first to browse its documents` },
+      r.status === 'open'
+        ? h('a.idx-doclink', { href: docsHash(r.index), title: `Browse the documents of ${r.index}`,
+            onclick: (e) => { e.preventDefault(); openDocuments(r.index); } }, r.index)
+        : r.index),
     h('td', r.source ? h('button.btn.sm.ghost', { onclick: () => { ui.sourceFilter = r.source; ui.page = 0; draw(); } }, r.source) : h('span.muted', '–')),
     h('td.mono', r.day || '–'),
     h('td', r.status === 'open' ? h('span.pill.green', h('i.dot'), 'open') : h('span.pill.grey', h('i.dot'), r.status || '?')),
@@ -385,6 +441,16 @@ function buildTable(c, rows, allRows = rows) {
       h('button#idx-not.btn.sm', { type: 'button', 'aria-pressed': ui.not ? 'true' : 'false',
         title: 'Show the indices the search does not match (the same as starting it with !)',
         onclick: () => { ui.not = !ui.not; ui.page = 0; draw(); const b = $('#idx-not'); if (b) b.focus(); } }, 'Not matching'),
+      // The documents of every index the search matches, in one view (core/documents.js
+      // documentsTarget: a plain pattern goes as typed, anything else the matched open names).
+      (() => {
+        const narrowed = ui.sourceFilter !== 'all' || ui.status !== 'all' || !!ui.from || !!ui.to || !!ui.noPolicy || ui.ilmOnly;
+        const open = allRows.filter((r) => r.status === 'open').map((r) => r.index);
+        const t = documentsTarget(ui.text, { not: ui.not, narrowed, names: open });
+        return h('button#idx-docs.btn.sm', { type: 'button', disabled: !t.target,
+          title: t.target ? `Browse the documents of ${t.asTyped ? t.target : `the ${num(open.length)} matching open ${open.length === 1 ? 'index' : 'indices'}`}` : t.reason,
+          onclick: () => { if (t.target) openDocuments(t.target); } }, 'Documents');
+      })(),
       // One result set, three ways of reading it. findIndexEverywhere always answers
       // "live, in a snapshot, or both"; the scope decides which part of that answer is
       // shown, rather than which question gets asked — asking a narrower question would
@@ -431,9 +497,9 @@ function paintSelection(c) {
 }
 
 function tableCard(c, rows, all) {
-  const slice = pageSlice(rows, ui.page, perPage(c));
+  const slice = pageSlice(rows, ui.page, perPage());
   return card(`Indices on ${c.name}`, `${num(rows.length)} matching of ${num(all.length)} on the cluster`,
-    h('div#idx-table', buildTable(c, slice.rows, rows), pagerBar(slice, goToPage)),
+    h('div#idx-table', buildTable(c, slice.rows, rows), idxPager(slice)),
     [h('span#idx-meta.muted', { style: { fontSize: '11.5px' } },
        `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`),
      h('button.btn.sm', { onclick: () => download(`indices-${c.id}-${new Date().toISOString().slice(0, 10)}.csv`,

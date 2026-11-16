@@ -80,7 +80,9 @@ const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, Config-Management's pages and tabs. */
 const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button, #view .cm-seg button';
 // Reports is one page of six sections (docs/REPORTS.md); each section is its own route and is measured as a page.
-const PAGES = ['alerts', 'overview', 'indices', 'shards',
+const PAGES = ['alerts', 'overview', 'indices',
+  // Indices › Documents: every open logstash index's documents, drawn in place of the list (0.3.68).
+  'indices/docs/logstash-*', 'shards',
   // The Log Delay page (0.3.60): its boards, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the
   // first cluster and its worst device), Live Watch (measured, then one device watched: see LD_SETUP)
   // and Live logs (one device, from a row's Open in logs).

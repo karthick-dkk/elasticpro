@@ -96,7 +96,9 @@ const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'z
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
 // `overview/overview`: Clusters › Overview, one cluster on one screen (the page reads the section from
 // the address and canonicalises it to #/clusters/overview/<cluster>).
-const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
+// `indices/docs/logstash-*`: Indices › Documents, the documents of every open logstash index (0.3.68),
+// drawn in place of the list from its own address.
+const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/docs/logstash-*', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
   // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST.
   'jobs', 'jobs/history', 'jobs/settings',
@@ -162,6 +164,20 @@ for (const name of PAGES) {
         const devices = t.id === 'ld-devices' || t.id === 'ld-cluster-devices' || t.id === 'ld-fix-devices' || t.id === 'ld-watch-devices' || t.id === 'ld-live-logs';
         if (devices && !(heads.some((x) => x.startsWith('zone')) && heads.some((x) => x.startsWith('tag1')))) errors.push(`${name}: table ${t.id} has no zone or tag1 column`);
       }
+    } else if (page === 'indices' && section === 'docs') {
+      // Documents inside Indices: the view, its fields panel (from _mapping), rows of hits with
+      // the exact total, the rows-per-page picker at its default of 5, and no list underneath.
+      const docs = view.querySelector('.docs');
+      if (!docs) errors.push(`${name}: the documents view is not drawn`);
+      if (view.querySelector('#idx-table')) errors.push(`${name}: the index list is drawn under the documents`);
+      if (configured) {
+        if (!view.querySelector('.docs-fields button.docs-field')) errors.push(`${name}: the fields panel is empty`);
+        const rows = view.querySelectorAll('#docs-table tbody tr[data-id]').length;
+        if (rows !== 5) errors.push(`${name}: ${rows} document rows drawn, expected the default page of 5`);
+        const sel = view.querySelector('.docs .pager-size select');
+        if (!sel || sel.value !== '5') errors.push(`${name}: the documents rows-per-page picker reads ${sel && sel.value}, expected 5`);
+        if (!/of [\d,]+ documents/.test((view.querySelector('#docs-meta') || {}).textContent || '')) errors.push(`${name}: no exact total in the meta line`);
+      }
     } else if (linkOnly) {
       const a = view.querySelector('.rp-nav a[data-section="log-delay"]');
       if (!a || a.getAttribute('href') !== '#/log-delay') errors.push(`${name}: the Reports entry for Log delay is not a link to #/log-delay`);
@@ -171,7 +187,7 @@ for (const name of PAGES) {
       if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);
     }
     // Indices lost its Summary tab to Reports › Daily & monthly (board 7): one line says where.
-    if (page === 'indices' && configured) {
+    if (page === 'indices' && !section && configured) {
       if ([...view.querySelectorAll('.seg button')].some((b) => b.textContent.trim() === 'Summary')) errors.push('indices: the Summary tab is still there');
       if (!/Daily and monthly summary is now in/.test(view.textContent)) errors.push('indices: no line saying the summary moved to Reports');
     }

@@ -8170,6 +8170,294 @@ async function backToList() {
   }
 }
 
+/* -------- Indices › Documents: the list's paging choice, the name link, the view, the fields, the admin-only ⋯ menu -------- */
+// Clock-independent: the fixture's documents sit within the last three hours of the mock's start,
+// so the view's default range (24h) holds them all at any hour; nothing here reads 15m.
+{
+  const st = await load('core/state.js');
+  const W = await load('core/writes.js');
+  const { closeMenus } = await load('ui/menu.js');
+  const view = () => doc.getElementById('view');
+  const change = (el, v) => { el.value = v; el.dispatchEvent(new window.Event('change', { bubbles: true })); };
+  const typeIn = (el, v) => { el.value = v; el.dispatchEvent(new window.Event('input', { bubbles: true })); };
+  const metaCount = () => { const m = /of ([\d,]+)\+? documents/.exec((view().querySelector('#docs-meta') || {}).textContent || ''); return m ? Number(m[1].replace(/,/g, '')) : null; };
+  const docRows = () => [...view().querySelectorAll('#docs-table tbody tr[data-id]')];
+  // A menu item's label, without its icon span.
+  const itemLabel = (b) => { const s = b.querySelector('span:not(.ico):not(.mi-note)'); return (s ? s.textContent : b.textContent).trim(); };
+  const menuItems = () => [...doc.querySelectorAll('.menu-pop button')].map(itemLabel);
+  const menuPress = (label) => { const b = [...doc.querySelectorAll('.menu-pop button')].find((x) => itemLabel(x) === label); if (b) b.click(); return !!b; };
+  const callerBefore = st.state.caller;
+  try { for (const k of ['elasticpro.indices.perPage', 'elasticpro.docs.perPage', 'elasticpro.docs.range']) window.localStorage.removeItem(k); } catch (_) { /* no storage */ }
+  // On the fixture's first cluster (earlier sections leave an unreachable one selected), with its list read.
+  const c = st.clusters().find((x) => x.url === config.clusters[0].url) || st.clusters()[0];
+  st.state.selected = c.id;
+  await st.fetchIndices(c.id, '*', { force: true }).catch(() => {});
+  if (!(st.state.indices.get(c.id) || []).length) {
+    // The core's copy may be gone by now (earlier sections swapped the config and the policy):
+    // the direct listing, parsed as the page parses it, so the list has its rows.
+    const rows = await st.client(c.id).indices('*');
+    st.state.indices.set(c.id, rows.map((r) => st.parseIndexName(r.index, c.indexNameRegex, r)));
+    st.stampFetch(c.id, 'indices');
+  }
+  location.hash = '#/indices';
+  await go('indices');
+  // An evidence page opens on the cluster last chosen, which may be one an earlier section added:
+  // choose this one through the chooser, as a person would, then draw again from what is held.
+  {
+    const sel = doc.getElementById('cluster-select');
+    if (sel && sel.value !== c.id && [...sel.options].some((o) => o.value === c.id)) { change(sel, c.id); await settleFor(400); }
+    const shown = st.activeClusters()[0];
+    ok(!!shown && shown.id === c.id, `indices: the page shows ${shown && shown.name}, not ${c.name}`);
+    if (view().querySelectorAll('#idx-table tbody tr').length <= 1) await go('indices');
+    // Earlier sections leave filters on the page (an ILM focus, a status): the toolbar's Clear.
+    const clear = [...view().querySelectorAll('.toolbar button')].find((b) => b.textContent.trim() === 'Clear');
+    if (clear) { clear.click(); await settleFor(250); }
+  }
+  const drawn = await waitFor(() => (view().querySelectorAll('#idx-table tbody tr').length > 1 ? true : null), 'indices: the list drawn with rows', 8000);
+  if (!drawn) problems.push(`indices: meta "${(view().querySelector('#idx-meta') || {}).textContent}", table says "${(view().querySelector('#idx-table .tbl-empty') || {}).textContent}", count line "${(view().querySelector('#idx-search') ? view().querySelector('#idx-search').parentElement.textContent : '').slice(0, 200)}"`);
+  const all = st.state.indices.get(c.id) || [];
+
+  // 1. The list: 10 rows a page by default, 10 / 25 / 50 / 100 offered, 100 works and is remembered.
+  const sizeSel = await waitFor(() => view().querySelector('#idx-table .pager-size select'), 'indices: the rows-per-page picker');
+  if (sizeSel) {
+    ok(sizeSel.value === '10', `indices: rows per page opens at ${sizeSel.value}, not 10`);
+    ok([...sizeSel.options].map((o) => o.value).join(',') === '10,25,50,100', `indices: the picker offers ${[...sizeSel.options].map((o) => o.value).join(',')}`);
+    const n10 = view().querySelectorAll('#idx-table tbody tr').length;
+    ok(n10 === Math.min(10, all.length), `indices: ${n10} rows drawn at 10 a page (${all.length} indices)`);
+    change(sizeSel, '100'); await settleFor(250);
+    const n100 = view().querySelectorAll('#idx-table tbody tr').length;
+    ok(n100 === Math.min(100, all.length) && n100 > 10, `indices: ${n100} rows drawn at 100 a page (${all.length} indices)`);
+    let kept = null; try { kept = window.localStorage.getItem('elasticpro.indices.perPage'); } catch (_) { /* no storage */ }
+    ok(kept === '100', `indices: the rows-per-page choice is not remembered (${kept})`);
+    const sel2 = view().querySelector('#idx-table .pager-size select');
+    ok(!!sel2 && sel2.value === '100', 'indices: the picker does not show the new size after the redraw');
+    if (sel2) { change(sel2, '10'); await settleFor(250); }
+    ok(view().querySelectorAll('#idx-table tbody tr').length === Math.min(10, all.length), 'indices: back to 10 a page did not redraw 10 rows');
+  }
+
+  // 2. An open index's name is a link to its documents; a closed one stays text and says why.
+  const search = view().querySelector('#idx-search');
+  if (search) { typeIn(search, 'logstash-acme-2026.09'); await settleFor(250); }
+  const nameCells = [...view().querySelectorAll('#idx-table tbody tr td:nth-child(3)')];
+  const openCell = nameCells.find((td) => td.querySelector('a.idx-doclink'));
+  const closedCell = nameCells.find((td) => td.textContent.trim() === 'logstash-acme-2026.09.07');
+  ok(!!openCell && openCell.querySelector('a.idx-doclink').getAttribute('href') === `#/indices/docs/${encodeURIComponent(openCell.textContent.trim())}`, 'indices: an open index\'s name is not a link to #/indices/docs/<name>');
+  ok(!!closedCell && !closedCell.querySelector('a') && /closed/i.test(closedCell.title) && /open it first/i.test(closedCell.title), `indices: the closed index's name is a link, or its tooltip does not say to open it first (${closedCell && closedCell.title})`);
+  // The Documents button: plain text sends the matched open names (its title counts them); a pattern goes as typed.
+  const docsBtn = view().querySelector('#idx-docs');
+  ok(!!docsBtn && !docsBtn.disabled && /2 matching open indices/.test(docsBtn.title), `indices: the Documents button for a plain search reads "${docsBtn && docsBtn.title}"`);
+  if (search) { typeIn(view().querySelector('#idx-search'), 'logstash-acme-*'); await settleFor(250); }
+  const docsBtn2 = view().querySelector('#idx-docs');
+  ok(!!docsBtn2 && /documents of logstash-acme-\*/.test(docsBtn2.title), `indices: the Documents button for a pattern reads "${docsBtn2 && docsBtn2.title}"`);
+  if (search) { typeIn(view().querySelector('#idx-search'), 'logstash-acme-2026.09'); await settleFor(250); }
+
+  // 3. The link opens the documents in the same page: 5 rows by default, 5 / 10 / 25 / 50 offered, 50 works and is remembered.
+  const link = view().querySelector('#idx-table tbody a.idx-doclink');
+  const linked = link ? link.textContent.trim() : '';
+  press(link); await settleFor(300);
+  ok(location.hash === `#/indices/docs/${encodeURIComponent(linked)}`, `documents: the link opened ${location.hash}`);
+  ok(!!view().querySelector('.docs') && !view().querySelector('#idx-table'), 'documents: the view did not replace the list');
+  const firstRows = await waitFor(() => (docRows().length === 5 ? docRows() : null), 'documents: five rows on the first page', 8000);
+  const dsel = view().querySelector('.docs .pager-size select');
+  ok(!!dsel && dsel.value === '5', `documents: rows per page opens at ${dsel && dsel.value}, not 5`);
+  ok(!!dsel && [...dsel.options].map((o) => o.value).join(',') === '5,10,25,50', `documents: the picker offers ${dsel && [...dsel.options].map((o) => o.value).join(',')}`);
+  const total0 = metaCount();
+  ok(total0 === 60, `documents: the meta line counts ${total0}, the fixture holds 60 per index (read "${(view().querySelector('#docs-meta') || {}).textContent}")`);
+  ok(/of 60 documents/.test((view().querySelector('.docs .pager-pos') || {}).textContent || ''), 'documents: the pager does not say the exact total');
+  ok(!/10,000/.test(view().textContent), 'documents: a 10,000 figure is shown for a count Elasticsearch finished');
+  const ranges = [...view().querySelectorAll('.docs-ranges button[data-range]')].map((b) => b.dataset.range);
+  ok(ranges.join(',') === '15m,1h,24h,7d,custom', `documents: the time range buttons are ${ranges.join(',')}`);
+  ok(!!view().querySelector('.docs-ranges button[data-range="24h"][aria-pressed="true"]'), 'documents: 24h is not the range opened on');
+  ok(!!view().querySelector('#docs-refresh') && view().querySelector('#docs-refresh').textContent.trim() === '↻', 'documents: the reload is not an icon');
+  ok(!!view().querySelector('#docs-table thead th') && view().querySelector('#docs-table thead th').textContent === '@timestamp', 'documents: the first column is not the time field');
+  if (firstRows) {
+    const times = firstRows.map((tr) => tr.querySelector('td').textContent);
+    ok(times.slice(1).every((t, i) => t <= times[i]), `documents: not newest first (${times.join(' > ')})`);
+  }
+  if (dsel) {
+    change(dsel, '50');
+    const rows50 = await waitFor(() => (docRows().length === 50 ? true : null), 'documents: fifty rows after choosing 50', 8000);
+    ok(!!rows50, 'documents: 50 a page did not draw 50 rows');
+    let kept = null; try { kept = window.localStorage.getItem('elasticpro.docs.perPage'); } catch (_) { /* no storage */ }
+    ok(kept === '50', `documents: the rows-per-page choice is not remembered (${kept})`);
+    const d2 = view().querySelector('.docs .pager-size select');
+    if (d2) { change(d2, '5'); await waitFor(() => (docRows().length === 5 ? true : null), 'documents: five rows again', 8000); }
+  }
+  // Page 2 is a server page: different ids, the position label moves.
+  {
+    const ids1 = docRows().map((tr) => tr.dataset.id);
+    const idsNow = () => docRows().map((tr) => tr.dataset.id);
+    const next = [...view().querySelectorAll('.docs .pager button')].find((b) => /Next/.test(b.textContent));
+    if (next) { next.click(); await waitFor(() => (idsNow().length && !idsNow().some((id) => ids1.includes(id)) ? true : null), 'documents: page 2 with other documents', 8000); }
+    const ids2 = idsNow();
+    ok(ids2.length === 5 && !ids2.some((id) => ids1.includes(id)), `documents: page 2 repeats page 1 (${ids2.join(',')})`);
+    ok(/^6–10 of/.test((view().querySelector('.docs .pager-pos') || {}).textContent || ''), `documents: on page 2 the pager reads "${(view().querySelector('.docs .pager-pos') || {}).textContent}"`);
+    const prev = [...view().querySelectorAll('.docs .pager button')].find((b) => /Previous/.test(b.textContent));
+    if (prev) { prev.click(); await waitFor(() => (idsNow().join() === ids1.join() ? true : null), 'documents: page 1 again', 8000); }
+  }
+
+  // 4. Fields: a keyword field shows its top values; a value narrows the search; text without .keyword is not clickable.
+  const level = view().querySelector('.docs-fields button.docs-field[data-field="level"]');
+  ok(!!level && !level.disabled, 'documents: no clickable "level" field in the panel');
+  const note = view().querySelector('.docs-fields button.docs-field[data-field="note"]');
+  ok(!!note && note.disabled && /not aggregatable/.test(note.title), 'documents: the text field without .keyword is clickable, or its tooltip does not say why not');
+  const msg = view().querySelector('.docs-fields button.docs-field[data-field="message"]');
+  ok(!!msg && !msg.disabled && /message\.keyword/.test(msg.title), 'documents: a text field with .keyword is not aggregatable through it');
+  if (level) {
+    level.click();
+    const vals = await waitFor(() => (view().querySelectorAll('.docs-vals .docs-val').length ? [...view().querySelectorAll('.docs-vals .docs-val')] : null), 'documents: top values under "level"', 8000);
+    if (vals) {
+      const sum = vals.reduce((s, b) => s + Number(b.querySelector('.vc').textContent.replace(/,/g, '')), 0);
+      ok(sum === 60, `documents: the value counts add up to ${sum}, not the 60 documents`);
+      const err = vals.find((b) => b.querySelector('.vv').textContent === 'error');
+      ok(!!err, `documents: no "error" among the level values (${vals.map((b) => b.querySelector('.vv').textContent).join(', ')})`);
+      if (err) {
+        const want = Number(err.querySelector('.vc').textContent.replace(/,/g, ''));
+        err.click();
+        await waitFor(() => (metaCount() === want ? true : null), `documents: the search narrowed to the ${want} "error" documents`, 8000);
+        ok(view().querySelector('#docs-q').value === 'level:"error"', `documents: the search box reads "${view().querySelector('#docs-q').value}" after a value click`);
+        ok(metaCount() === want && want < 60, `documents: after the value click the count is ${metaCount()}, expected ${want}`);
+      }
+    }
+  }
+
+  // 5. A row opens the document on the right; the ⋯ menu of a non-admin has no Edit or Delete.
+  let row = docRows()[0];
+  if (row) { row.click(); await settleFor(150); }
+  ok(!!view().querySelector('.docs-detail:not([hidden]) pre.json'), 'documents: a row click did not open the document on the right');
+  ok(!!row && view().querySelector('.docs-detail .docs-id') && view().querySelector('.docs-detail .docs-id').textContent.includes(row.dataset.id), 'documents: the detail does not name the _id');
+  st.state.caller = { name: 'op', role: 'operator' };
+  if (row) { row.querySelector('.menu-trigger').click(); await settleFor(100); }
+  {
+    const items = menuItems();
+    ok(items.includes('Copy JSON') && items.includes('Open in REST'), `documents: an operator's ⋯ menu lacks Copy JSON / Open in REST (${items.join(', ')})`);
+    ok(!items.some((t) => /Edit|Delete/.test(t)), `documents: an operator's ⋯ menu offers ${items.filter((t) => /Edit|Delete/.test(t)).join(', ')}`);
+    closeMenus();
+  }
+
+  // 6. An admin: Edit → valid-as-you-type → Review and save (diff, request line) → Save sends the conditional PUT with allowWrites.
+  st.state.caller = { name: 'admin', role: 'admin' };
+  const unlocked = await W.setWritesUnlocked(true, { confirmFirst: false });
+  ok(unlocked, 'documents: could not unlock writes for the admin case');
+  row = docRows()[0];
+  const editedId = row && row.dataset.id;
+  if (row && unlocked) {
+    row.querySelector('.menu-trigger').click(); await settleFor(100);
+    const items = menuItems();
+    ok(items.includes('Edit…') && items.includes('Delete…'), `documents: the admin's ⋯ menu lacks Edit… / Delete… (${items.join(', ')})`);
+    menuPress('Edit…'); await settleFor(300);
+    const ta = view().querySelector('#docs-editor');
+    const status = view().querySelector('#docs-edit-status');
+    const review = view().querySelector('#docs-review');
+    ok(!!ta && !!status && !!review, 'documents: Edit… did not open the editor');
+    if (ta && status && review) {
+      ok(status.textContent === '✓ Valid JSON · 0 changes' && review.disabled, `documents: a fresh editor reads "${status.textContent}" (review ${review.disabled ? 'disabled' : 'enabled'})`);
+      const text0 = ta.value;
+      typeIn(ta, '{ "a": '); await settleFor(50);
+      ok(/^✕ /.test(status.textContent) && review.disabled, `documents: broken JSON reads "${status.textContent}"`);
+      const src = JSON.parse(text0 || '{}');
+      src.message = `${src.message} (edited by behaviour-check)`;
+      typeIn(ta, JSON.stringify(src, null, 2)); await settleFor(50);
+      ok(status.textContent === '✓ Valid JSON · 2 changes' && !review.disabled, `documents: one changed line reads "${status.textContent}" (review ${review.disabled ? 'disabled' : 'enabled'})`);
+      review.click(); await settleFor(250);
+      const dlg = doc.querySelector('.modal-overlay .modal');
+      ok(!!dlg && /Review and save/.test(dlg.textContent), 'documents: Review and save… opened no dialog');
+      if (dlg) {
+        const del = dlg.querySelector('#docs-diff .diff-del'), add = dlg.querySelector('#docs-diff .diff-add');
+        ok(!!del && /"message"/.test(del.textContent) && !!add && /edited by behaviour-check/.test(add.textContent), 'documents: the diff does not show the removed and the added line');
+        ok(dlg.querySelectorAll('#docs-diff .diff-del, #docs-diff .diff-add').length === 2, 'documents: the diff marks more than the one changed line');
+        const req = (dlg.querySelector('#docs-req') || {}).textContent || '';
+        ok(new RegExp(`^PUT /${linked.replace(/\./g, '\\.')}/_doc/${editedId}\\?if_seq_no=\\d+&if_primary_term=\\d+$`).test(req), `documents: the request line reads "${req}"`);
+        const before = sent.length;
+        dlg.querySelector('#docs-save').click();
+        await waitFor(() => (!doc.querySelector('.modal-overlay') ? true : null), 'documents: the Save dialog closed', 8000);
+        const put = sent.slice(before).find((m) => m.type === 'ES' && m.method === 'PUT');
+        ok(!!put && /\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+/.test(put.path) && put.allowWrites === true, `documents: Save sent ${put ? `${put.method} ${put.path} allowWrites=${put.allowWrites}` : 'no PUT'}`);
+        ok(!!put && JSON.parse(put.body).message === src.message, 'documents: the PUT body is not the edited document');
+        await waitFor(() => ((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('edited by behaviour-check') ? true : null, 'documents: the re-read document shows the edit', 8000);
+        ok(!view().querySelector('#docs-editor'), 'documents: the editor is still open after a save');
+        ok(metaCount() !== null, 'documents: the search was not re-run after the save');
+
+        // 7. A 409: the document changed behind the editor's back (written straight to the fixture, no
+        //    if_seq_no) — Save says so, overwrites nothing, and the text stays.
+        row = docRows().find((tr) => tr.dataset.id === editedId) || docRows()[0];
+        row.querySelector('.menu-trigger').click(); await settleFor(100);
+        menuPress('Edit…'); await settleFor(300);
+        const ta2 = view().querySelector('#docs-editor');
+        if (ta2) {
+          const opened = ta2.value;
+          // A field the search does not filter on, so the document stays on this page after the reload.
+          const behind = JSON.parse(opened);
+          behind.src_hostname = 'changed-behind-your-back';
+          const r = await fetch(`${c.url.replace(/\/+$/, '')}/${encodeURIComponent(linked)}/_doc/${encodeURIComponent(row.dataset.id)}`,
+            { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(behind) });
+          ok(r.ok, `documents: the fixture refused the out-of-band write (HTTP ${r.status})`);
+          const mine = JSON.parse(opened); mine.message = `${mine.message} (second edit)`;
+          typeIn(ta2, JSON.stringify(mine, null, 2)); await settleFor(50);
+          view().querySelector('#docs-review').click(); await settleFor(250);
+          const dlg2 = doc.querySelector('.modal-overlay .modal');
+          if (dlg2) {
+            const before2 = sent.length;
+            dlg2.querySelector('#docs-save').click();
+            const said = await waitFor(() => dlg2.querySelector('.banner.err'), 'documents: the 409 message in the dialog', 8000);
+            ok(!!said && said.textContent === 'Someone changed this document since you opened it — nothing was overwritten. Reload it.', `documents: the 409 reads "${said && said.textContent}"`);
+            ok(sent.slice(before2).some((m) => m.type === 'ES' && m.method === 'PUT'), 'documents: nothing was sent for the second save');
+            ok(doc.querySelector('.modal-overlay') && !dlg2.querySelector('#docs-save').disabled, 'documents: after a 409 the dialog closed or Save stayed disabled');
+            [...dlg2.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Cancel').click(); await settleFor(150);
+            const ta3 = view().querySelector('#docs-editor');
+            ok(!!ta3 && ta3.value === JSON.stringify(mine, null, 2), 'documents: the text typed was lost after the 409');
+            // Reload shows the other writer's version, not ours.
+            [...view().querySelectorAll('.docs-edit-acts button')].find((b) => b.textContent.trim() === 'Cancel').click(); await settleFor(100);
+            view().querySelector('#docs-refresh').click();
+            await waitFor(() => ((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('changed-behind-your-back') ? true : null, 'documents: reload shows the version written behind the editor', 8000);
+            ok(!((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('second edit'), 'documents: the 409 overwrote the document anyway');
+          }
+        }
+
+        // 8. Delete: the button stays disabled until the whole id is typed; then the conditional DELETE goes with allowWrites.
+        row = docRows().find((tr) => tr.dataset.id === editedId) || docRows()[0];
+        const delId = row.dataset.id;
+        const countBefore = metaCount();
+        row.querySelector('.menu-trigger').click(); await settleFor(100);
+        menuPress('Delete…'); await settleFor(300);
+        const ddlg = doc.querySelector('.modal-overlay .modal');
+        const dbtn = ddlg && ddlg.querySelector('#docs-delete');
+        const echo = ddlg && ddlg.querySelector('#docs-del-echo');
+        ok(!!dbtn && !!echo && dbtn.disabled, 'documents: the Delete dialog did not open with Delete disabled');
+        if (dbtn && echo) {
+          typeIn(echo, delId.slice(0, -1)); await settleFor(30);
+          ok(dbtn.disabled, 'documents: Delete is enabled on a partial id');
+          typeIn(echo, delId); await settleFor(30);
+          ok(!dbtn.disabled, 'documents: Delete stays disabled with the whole id typed');
+          ok(/^DELETE \/.+\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+$/.test((ddlg.querySelector('.docs-req') || {}).textContent || ''), 'documents: the Delete dialog does not show the conditional request');
+          const before3 = sent.length;
+          dbtn.click();
+          await waitFor(() => (!doc.querySelector('.modal-overlay') ? true : null), 'documents: the Delete dialog closed', 8000);
+          const dm = sent.slice(before3).find((m) => m.type === 'ES' && m.method === 'DELETE');
+          ok(!!dm && /\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+/.test(dm.path) && dm.allowWrites === true, `documents: Delete sent ${dm ? `${dm.method} ${dm.path} allowWrites=${dm.allowWrites}` : 'no DELETE'}`);
+          await waitFor(() => (metaCount() === countBefore - 1 ? true : null), `documents: the count fell to ${countBefore - 1} after the delete`, 8000);
+          ok(!docRows().some((tr) => tr.dataset.id === delId), 'documents: the deleted document is still listed');
+        }
+      }
+    }
+  }
+  await W.setWritesUnlocked(false, { confirmFirst: false });
+  st.state.caller = callerBefore;
+
+  // 9. ‹ Indices goes back to the list with the search kept.
+  press(view().querySelector('.docs-back')); await settleFor(300);
+  ok(location.hash === '#/indices' && !!view().querySelector('#idx-table') && !view().querySelector('.docs'), `documents: ‹ Indices landed on ${location.hash} (${view().querySelector('#idx-table') ? 'list' : 'no list'})`);
+  ok((view().querySelector('#idx-search') || {}).value === 'logstash-acme-2026.09', `documents: the list's search was not kept ("${(view().querySelector('#idx-search') || {}).value}")`);
+  // And the address alone opens the documents (a bookmark, Back).
+  location.hash = `#/indices/docs/${encodeURIComponent(linked)}`; await settleFor(400);
+  ok(!!view().querySelector('.docs') && view().querySelector('.docs').dataset.target === linked, 'documents: the address alone did not open the view');
+  location.hash = '#/indices'; await settleFor(300);
+  ok(!!view().querySelector('#idx-table'), 'documents: #/indices did not bring the list back');
+  const s3 = view().querySelector('#idx-search');
+  if (s3) { typeIn(s3, ''); await settleFor(150); }
+  try { for (const k of ['elasticpro.indices.perPage', 'elasticpro.docs.perPage', 'elasticpro.docs.range']) window.localStorage.removeItem(k); } catch (_) { /* no storage */ }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
