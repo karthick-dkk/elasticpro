@@ -233,6 +233,11 @@
 }
 .split-handle:hover, .split-handle:active { background: var(--accent-soft); border-left-color: var(--accent); }
 @media (max-width: 900px) { .split-handle { display: none; } }
+/* The Results box reaches the footer (console.js fitColumns) and the answer fills it, scrolling
+   inside itself both ways (its scrollbars stay in view), rather than stopping at the 62vh every
+   other pre.json is capped at. */
+#c-response > .card > .body { display: flex; flex-direction: column; }
+#c-response > .card > .body > pre.json { flex: 1 1 auto; min-height: 0; max-height: none; }
 
 /* Search matches in the REST console. Every hit is marked; the one you are on is marked
    differently, because "which of these am I on" must be answerable without scrolling. */

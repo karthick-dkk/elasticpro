@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **REST: the Query and Results boxes reach the footer.** Their height is the window's less where they start (measured, so it holds with the menu on top or at the left and with one to ten tabs) and the footer; a long answer scrolls inside Results, and the request body fills Query.
+
 ## 0.3.71
 
 - **Clusters › Overview: the top-bar chooser switches the board.** Picking another cluster used to snap back to the one the address named; now the board shows the cluster picked and the address follows (`#/clusters/overview/<id>`).
