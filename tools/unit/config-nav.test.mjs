@@ -134,7 +134,9 @@ test('Find a setting: every word must match, best first, visible tabs only', () 
   // An operator does not find an admin's settings.
   const op = N.visibleConfig('operator', ALL);
   assert.deepEqual(N.findSettings('watch window', op), []);
-  assert.ok(N.findSettings('emergency stop', op).length === 1);
+  // The emergency stop is Jobs › Requests since 0.3.71, not a setting here.
+  assert.deepEqual(N.findSettings('emergency stop', op), []);
+  assert.ok(N.findSettings('automation', op).length >= 1, 'an operator finds Alerts › Automation');
   // Rows a page adds at run time are searched as well.
   const extra = [...N.SETTING_INDEX, ['alerts', 'triggers', 'JVM heap above 85%', 'al-on-heap', 'alert']];
   assert.equal(N.findSettings('heap', vis, { index: extra })[0].field, 'al-on-heap');

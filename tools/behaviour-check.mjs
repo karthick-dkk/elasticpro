@@ -1648,7 +1648,9 @@ const CFG_HOME = {
 function cfgOpen() {
   const page = doc.querySelector('.cm-nav .cm-item[aria-current="page"]');
   const tab = doc.querySelector('nav.cm-tabs button[aria-current="page"]');
-  return { page: page ? page.dataset.cmPage : '', tab: tab ? tab.dataset.cmTab : '' };
+  // A page of one tab (Requests: its Policy, since the Request Centre went to Jobs) draws no tab row: the address names it.
+  const fromHash = () => { const m = /^#\/settings\/[^/]+\/([^/?]+)/.exec(window.location.hash || ''); return m ? m[1] : ''; };
+  return { page: page ? page.dataset.cmPage : '', tab: tab ? tab.dataset.cmTab : doc.querySelector('nav.cm-tabs') ? '' : fromHash() };
 }
 /** Open a page and tab of Config-Management through its menu and tab row; true when it is open. */
 async function openCfg(page, tab) {
@@ -1715,7 +1717,7 @@ await go('settings');
   const find = doc.getElementById('cm-find');
   find.value = 'watch window'; find.dispatchEvent(new window.Event('input', { bubbles: true }));
   const hit = doc.querySelector('.cm-find-hit');
-  ok(hit && /Watch window/.test(hit.textContent) && /Requests › Policy/.test(hit.textContent), `config: Find a setting offered ${hit && hit.textContent}`);
+  ok(hit && /Watch window/.test(hit.textContent) && /Requests$/.test(hit.textContent.trim()), `config: Find a setting offered ${hit && hit.textContent}`);
   if (hit) { hit.click(); await settleFor(900); }
   ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `config: the search result opened ${JSON.stringify(cfgOpen())}`);
 
@@ -1786,9 +1788,11 @@ await go('settings');
     const navJobs = doc.querySelector('#nav button[data-page="jobs"]');
     ok(!!navJobs && navJobs.getAttribute('aria-current') === 'page', 'request centre: the menu does not mark Jobs');
   }
-  for (const old of ['#/requests', '#/settings/requests/centre']) {
-    await go('alerts');
+  // From another page, and typed while the Request Centre is already on screen.
+  for (const [old, from] of [['#/requests', 'alerts'], ['#/settings/requests/centre', 'alerts'], ['#/settings/requests/centre', null], ['#/requests/health', null]]) {
+    if (from) await go(from);
     window.location.hash = old; await settleFor(700);
+    if (old === '#/requests/health') { ok(window.location.hash === '#/jobs/requests/health', `request centre: ${old} went to ${window.location.hash}`); continue; }
     ok(window.location.hash === '#/jobs/requests' && !!doc.querySelector('#view .jb-host'), `request centre: the old address ${old} went to ${window.location.hash}`);
   }
   // From Jobs, the Requests tab opens it; from it, the History tab goes back to Jobs.

@@ -1513,6 +1513,9 @@ window.addEventListener('hashchange', () => {
   if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) { go(wanted); return; }
   // Another section of the page on screen (#/reports/daily → #/reports/capacity).
   const p = PAGES.find((x) => x.id === currentPage);
+  // An old address of the page on screen (#/settings/requests/centre while on Jobs › Requests):
+  // drawn again, which puts its own address back.
+  if (wanted === currentPage && p && p.path && !String(location.hash).startsWith(`#/${p.path}`)) { go(wanted); return; }
   // A page whose sections differ in what the chooser offers (Clusters: the List shows the fleet, the
   // Overview one cluster) is drawn again as the shell draws a page — selection, top bar, menu and all.
   if (wanted === currentPage && p && p.mod.singleCluster) { if (location.hash !== routedHash) go(wanted); return; }
