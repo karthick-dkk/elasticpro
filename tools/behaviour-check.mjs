@@ -410,7 +410,8 @@ await go('shards');
 
   // Shard allocation: the 96 px ring with the total inside, three edge tiles (the unassigned one
   // with its reasons and a "show" that narrows the table), shards per node as bars, and the
-  // allocation switch in the header — read from the cluster, disabled while writes are locked.
+  // allocation switch in the header — read from the cluster; for an admin it is live while writes
+  // are locked (choosing a value asks to allow writes first — there is no toggle to tick any more).
   const allocCard = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Shard allocation');
   {
     const ac = allocCard();
@@ -444,7 +445,7 @@ await go('shards');
         ok(/^Allocation: on ▾$/.test(sw.textContent.trim()) && sw.dataset.allocation === 'all',
           `allocation: the switch reads "${sw.textContent.trim()}" (${sw.dataset.allocation}); the fixture's default is all`);
         ok(/default setting/.test(sw.title), `allocation: the tooltip does not say where the value comes from (${sw.title})`);
-        ok(sw.disabled && /Writes are locked/.test(sw.title), `allocation: with writes locked the switch should be disabled with the reason (${sw.disabled} · ${sw.title})`);
+        ok(!sw.disabled && !/Writes are locked/.test(sw.title), `allocation: with writes locked the switch is disabled for an admin, who has no toggle to unlock it (${sw.disabled} · ${sw.title})`);
       }
       // "show" on the unassigned tile narrows the table to the unassigned shards.
       const show = tiles[2] && [...tiles[2].querySelectorAll('button')].find((b) => b.textContent === 'show');
@@ -461,16 +462,17 @@ await go('shards');
     }
   }
 
-  // The allocation switch is a write through the same gate as Move…: unlocking enables it,
-  // the menu offers the four values, choosing one asks with the consequence in words, and only
-  // a yes sends PUT _cluster/settings {persistent: {cluster.routing.allocation.enable}}.
+  // The allocation switch is a write through the same gate as Move…: with writes locked it is
+  // still live, the menu offers the four values, choosing one asks to allow writes (the unlock
+  // dialog — no page toggle), then with the consequence in words, and only a yes to both sends
+  // PUT _cluster/settings {persistent: {cluster.routing.allocation.enable}}.
   {
     const wr = await load('core/writes.js');
-    const unlockedHere = !wr.writesUnlocked();
-    if (unlockedHere) await wr.setWritesUnlocked(true, { confirmFirst: false });
+    if (wr.writesUnlocked()) await wr.setWritesUnlocked(false, { confirmFirst: false });
+    const unlockedHere = true;
     await settleFor(300);
     const sw = allocCard() && allocCard().querySelector('button.ns-alloc-btn');
-    ok(sw && !sw.disabled, 'allocation: the switch stays disabled after writes were unlocked');
+    ok(sw && !sw.disabled, 'allocation: the switch is disabled while writes are locked');
     if (sw && !sw.disabled) {
       const n = sent.length;
       sw.click(); await settleFor(200);
@@ -482,6 +484,13 @@ await go('shards');
       const off = [...doc.querySelectorAll('.menu-pop button[role="menuitem"]')].find((b) => /^off/.test(b.textContent.trim()));
       if (off) {
         off.click(); await settleFor(300);
+        const ask = [...doc.querySelectorAll('.modal')].pop();
+        ok(!!ask && /Allow writes to this cluster\?/.test(ask.textContent), `allocation: a locked choice did not ask to allow writes first (${ask ? ask.textContent.slice(0, 120) : 'no dialog'})`);
+        ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'allocation: a PUT was sent before writes were allowed');
+        const allow = ask && [...ask.querySelectorAll('.modal-foot button')].find((b) => /^allow writes$/i.test(b.textContent.trim()));
+        ok(!!allow, 'allocation: the unlock dialog has no "allow writes" button');
+        if (allow) { allow.click(); await settleFor(400); }
+        ok(wr.writesUnlocked(), 'allocation: "allow writes" did not unlock the session');
         const dlg = [...doc.querySelectorAll('.modal')].pop();
         ok(!!dlg && /no shard will be placed or moved until it is switched back/i.test(dlg.textContent),
           `allocation: choosing off did not ask with the consequence in words (${dlg ? dlg.textContent.slice(0, 120) : 'no dialog'})`);
@@ -7991,6 +8000,13 @@ await settleFor(300);
     while ((doc.documentElement.getAttribute('data-theme') || 'system') !== was) { btn.click(); await settleFor(50); }
   }
   ok(!!doc.querySelector('#view .ov-board') || true, '');
+}
+
+/* ------- No page carries a write toggle (0.3.71): an admin's write action asks to allow writes when pressed ------- */
+for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
+  await go(id); await settleFor(300);
+  const t = doc.getElementById('view').textContent;
+  ok(!/🔒 read-only|✎ writes allowed|writes enabled \(config\)/.test(t), `${id}: the read-only / writes-allowed toggle is still drawn`);
 }
 
 /* ------- Clusters › Overview: the sub-item and the tab open it, one cluster is picked, every card is there, nothing is rebuilt for nothing ------- */

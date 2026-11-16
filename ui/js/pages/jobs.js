@@ -19,7 +19,7 @@ import { tableSort } from '../lib/table-sort.js';
 import { dt, num as fmtNum } from '../lib/fmt.js';
 import { state, clusters, requestLoad, refreshRequestLoad } from '../core/state.js';
 import { jobsList, jobControl } from '../core/es.js';
-import { ensureWrites, writeToggle } from '../core/writes.js';
+import { ensureWrites } from '../core/writes.js';
 import { MANAGED_NOTE } from '../core/managed.js';
 import { confirmDialog } from '../ui/modal.js';
 import { toast, rowMenu } from '../ui/menu.js';
@@ -187,7 +187,7 @@ function head() {
       type: 'button', dataset: { tab: t.id }, 'aria-current': tab === t.id ? 'page' : null, onclick: () => openTab(t.id),
     }, t.label)));
   const right = h('div.jb-head-acts',
-    admin ? writeToggle(() => draw()) : h('span.muted.jb-ro', { title: 'Only an administrator runs, pauses or changes jobs' }, 'read-only · an administrator runs and changes jobs'),
+    admin ? null : h('span.muted.jb-ro', { title: 'Only an administrator runs, pauses or changes jobs' }, 'read-only · an administrator runs and changes jobs'),
     admin ? h('button#jb-create.btn.sm.primary', { type: 'button', onclick: createJob }, 'Create job') : null);
   return built.same('head', h('div.jb-head', tabs, right));
 }

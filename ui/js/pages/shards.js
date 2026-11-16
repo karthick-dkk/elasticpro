@@ -21,7 +21,7 @@ import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast, rowMenu } from '../ui/menu.js';
 import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
-import { ensureWrites, writeToggle, writesAllowed, roleMayWrite, onWritesChange } from '../core/writes.js';
+import { ensureWrites, writesAllowed, roleMayWrite, onWritesChange } from '../core/writes.js';
 import { splitGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortNodeId,
@@ -584,8 +584,9 @@ function allocationCard(c, all, d) {
 /**
  * The allocation switch: `cluster.routing.allocation.enable` as read (transient over persistent
  * over default), and a menu of the four values. Choosing one is a write through the same gate
- * as Move… and Retry failed allocations; while writes are locked the control is disabled and
- * its title says why. "Not known" when the setting could not be read — never a guess.
+ * as Move… and Retry failed allocations: choosing one asks to allow writes when they are locked
+ * (core/writes.js ensureWrites). Disabled, with the reason in its title, only for a role that
+ * cannot write. "Not known" when the setting could not be read — never a guess.
  */
 function allocationControl(c) {
   const e = alloc.get(c.id);
@@ -597,7 +598,7 @@ function allocationControl(c) {
     : e && e.error ? `cluster.routing.allocation.enable could not be read: ${e.error}`
     : fleetView ? 'cluster.routing.allocation.enable is not read with All clusters — pick one cluster' : 'cluster.routing.allocation.enable — not read yet';
   const locked = !roleMayWrite() ? `Your role (${state.caller.role}) reads clusters only — an ElasticPro admin changes allocation (EP-110)`
-    : !writesAllowed() ? 'Writes are locked: tick ✎ writes in the Shards card first' : null;
+    : null;
   const btn = rowMenu(() => [
     { hint: 'cluster.routing.allocation.enable — which shards Elasticsearch may place or move. Written as a persistent setting.' },
     ...ALLOCATION_VALUES.map((v) => ({
@@ -749,7 +750,7 @@ function shardsCard(c, d, all, raw) {
     h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end', alignItems: 'center' } },
       s.state === 'STARTED'
         ? h('button.btn.sm', {
-            title: writesAllowed() ? 'Move this shard to another node' : 'Allow writes first',
+            title: writesAllowed() ? 'Move this shard to another node' : 'Move this shard to another node (asks to allow writes first)',
             onclick: () => moveOne(c, d, s),
           }, 'Move…')
         : s.state === 'UNASSIGNED' ? explainButton(c, s) : null))));
@@ -777,7 +778,6 @@ function shardsCard(c, d, all, raw) {
         onchange: (e) => { ui.showHidden = e.target.checked; writeShowHidden(ui.showHidden); draw(); } }),
       'Show hidden (.) indices'),
     h('div.ns-filters-right',
-      writeToggle(draw),
       loading.has(c.id)
         ? h('span.muted.ns-fresh', h('span.spin'), ' Fetching…')
         : h('span.ns-fresh', { class: fresh.stale || fresh.unknown ? 'muted stale ns-fresh' : 'muted ns-fresh', title: fresh.title }, fresh.text),

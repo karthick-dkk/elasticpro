@@ -2,15 +2,15 @@
  * The write unlock, shared by every page that can act on a cluster.
  *
  * The core owns the switch (session-only, never on disk). This module is the UI's single
- * copy of it plus the two pieces of interface every acting page needs: a toggle to show,
- * and `ensureWrites()` to call before doing something that writes.
+ * copy of it plus `ensureWrites()`, which every acting page calls before doing something that
+ * writes: it asks to allow writes at that moment. No page shows a toggle for it any more (the
+ * owner, 0.3.71): an admin's write action asks when it is pressed.
  *
  * Nothing here grants anything by itself — the core refuses a write unless the session is
  * unlocked AND the individual request carries `allowWrites`, which only a page acting on
  * a person's click sets.
  */
 
-import { h } from '../lib/dom.js';
 import { confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { writeUnlock, workerStatus } from './es.js';
@@ -88,32 +88,4 @@ export async function ensureWrites() {
   if (!isReadOnly()) return true;
   if (unlocked) return true;
   return setWritesUnlocked(true);
-}
-
-/**
- * The checkbox pages put in their header. `onchange` re-renders the page so the rest of
- * the controls (disabled buttons, hints) follow the new state.
- */
-export function writeToggle(onchange) {
-  // A role that cannot write gets no pill (the owner's rule: no "read-only (operator)" anywhere).
-  // The gate is unchanged: each action is disabled with the reason in its title, and the core
-  // refuses the request regardless.
-  if (!roleMayWrite()) return null;
-  if (!isReadOnly()) {
-    return h('span.pill.yellow', { title: 'readOnly: false in the config — every page may write.' },
-      h('i.dot'), 'writes enabled (config)');
-  }
-  return h('label', {
-      title: unlocked
-        ? 'Actions you take by hand will be sent to the cluster. Background refreshes stay read-only.'
-        : 'The core refuses anything but GET/HEAD and search POSTs. Tick to allow the actions you take here.',
-      style: { display: 'inline-flex', alignItems: 'center', gap: '5px', cursor: 'pointer',
-               fontSize: '11px', fontWeight: 600, color: unlocked ? 'var(--warning-ink)' : 'var(--text-muted)' } },
-    h('input', { type: 'checkbox', checked: unlocked, style: { cursor: 'pointer' },
-      onchange: async (e) => {
-        const ok = await setWritesUnlocked(e.target.checked);
-        if (!ok) e.target.checked = unlocked;
-        if (onchange) onchange(unlocked);
-      } }),
-    unlocked ? '✎ writes allowed' : '🔒 read-only');
 }

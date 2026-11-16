@@ -11,7 +11,7 @@ import { coverageStrip } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, empty } from './common.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { confirmDialog } from '../ui/modal.js';
-import { writesAllowed, syncWrites, writeToggle, ensureWrites } from '../core/writes.js';
+import { writesAllowed, syncWrites, ensureWrites } from '../core/writes.js';
 import { rowMenu, ICON, toast, popover } from '../ui/menu.js';
 import { trackTask, snapshotPoll } from '../ui/tasks.js';
 import {
@@ -187,7 +187,6 @@ function clusterSection(c) {
       // No snapshots expected here: its logs are archived to S3 by ULM (core/cluster-kind.js).
       slmExempt(c) ? h('span.pill.grey.snap-ulm', { title: ULM_WHY }, ulmLabel(c)) : null,
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'center' } },
-        writeToggle(draw),
         // The listing's own age and a Refresh that re-reads it now (the verbose one).
         freshnessBar(selected ? scrubFresh(listingFreshness(c, d, selected), c) : 0, () => fetchSnapshots(c.id), { label: 'snapshots', dense: true }))),
     open
@@ -357,7 +356,6 @@ function openedRepoView(c, d, repos, selected, snaps) {
 /* --------------------------------- repositories -------------------------------- */
 
 function repoTable(c, d, repos) {
-  const can = writesAllowed();
   const open = (name) => { ui.open[c.id] = name; ui.page[c.id] = 0; draw(); };
   const trs = repos.map((r) => {
     const o = repoOverview(r, d.snapshots ? (d.snapshots[r.name] || []) : null, d.slm || []);
@@ -397,7 +395,7 @@ function repoTable(c, d, repos) {
             onClick: () => cleanupRepository(c, r.name, { onChanged: () => reload(c) }) },
           { sep: true },
           { label: 'Remove repository…', icon: ICON.delete, danger: true,
-            title: can ? 'Unregister this repository' : 'Allow writes first',
+            title: 'Unregister this repository' + (writesAllowed() ? '' : ' (asks to allow writes first)'),
             onClick: () => deleteRepository(c, r.name, { onChanged: () => reload(c) }) },
         ], { title: `Actions for ${r.name}` }))));
   });
