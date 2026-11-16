@@ -341,7 +341,7 @@ function draw() {
   // into the Query editor (core/console-paste.js). A text input drops the newlines of a
   // paste, so the paste itself is read from the clipboard before the box gets it.
   const pathInput = h('input#c-path', { type: 'text', value: ui.path, list: 'ep-list', spellcheck: false,
-    placeholder: '/_cluster/health', style: { flex: '1 1 240px', minWidth: '0', fontFamily: 'var(--mono)' },
+    placeholder: '/_cluster/health', style: { flex: '1 1 0', minWidth: '0', fontFamily: 'var(--mono)' },
     onpaste: (e) => { if (recognise(pasted(e), { fromBody: false })) e.preventDefault(); },
     oninput: (e) => {
       ui.path = e.target.value;
@@ -378,18 +378,16 @@ function draw() {
   // ---- request line: method · path · run · status · common requests · the two panels
   const requestBar = h('section.card',
     h('div.body', { style: { display: 'grid', gap: '8px', padding: '10px 14px' } },
+      // Row 1: the method and the whole path (every remaining pixel). Row 2: Run, the pickers, and at
+      // the right end the HTTP status with its time and size (owner, 2026-11-16).
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, methodSel, pathInput),
       h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-        methodSel, pathInput,
         h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' }, title: runTitle() }, 'Run ▸'),
-        statusLine(),
         snippetSel,
         panelBtn('c-saved-btn', 'Saved queries', savedCount(), openSavedPanel, 'Named queries kept on the server — open one, or run it from here'),
-        panelBtn('c-history-btn', 'History', historyCount(), openHistoryPanel, 'What this browser has sent to this cluster — load one, or run it again')),
-      // The keyboard hint alone. The "read-only (operator)" / "🔒 read-only" pill that sat here
-      // is banned (owner, 2026-11-14): the write guard is not a thing to look at, it is what
-      // answers a write request on Run (run() → ensureWrites → confirmWrite).
-      h('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', fontSize: '11px', flexWrap: 'wrap' } },
-        h('span.muted', { style: { marginLeft: 'auto' } }, 'Ctrl/⌘+Enter runs · Enter in the path runs'))));
+        panelBtn('c-history-btn', 'History', historyCount(), openHistoryPanel, 'What this browser has sent to this cluster — load one, or run it again'),
+        h('span', { style: { flex: '1' } }),
+        statusLine())));
 
   // ---- Query | Results
   // A whole request pasted here ("POST _x\n{…}", or a curl line) is split the same way: the
@@ -488,7 +486,7 @@ function isWrite(method, path) {
  * says why, here and when pressed.
  */
 function runTitle() {
-  if (!isWrite(ui.method, ui.path)) return 'Send the request (Enter in the path · Ctrl/⌘+Enter in the body)';
+  if (!isWrite(ui.method, ui.path)) return 'Send the request (Ctrl/⌘+Enter runs · Enter in the path runs)';
   if (!roleMayWrite()) return `This request can change the cluster. Your role (${state.caller.role}) reads clusters only — Run refuses it; an ElasticPro admin makes changes.`;
   if (writesAllowed()) return 'This request can change the cluster: Run asks you to confirm it first.';
   return 'This request can change the cluster. Writes are locked for this session: Run asks you to allow them by hand first, then to confirm the request.';

@@ -185,7 +185,7 @@ await go('console');
   const status = doc.getElementById('c-status');
   ok(!!status, 'console: no #c-status beside Run');
   if (status && run) {
-    ok(run.nextElementSibling === status, 'console: the status is not the element right after Run');
+    ok(status.parentElement === run.parentElement && status === run.parentElement.lastElementChild, 'console: the status is not at the end of the Run row');
     ok(status.getAttribute('role') === 'status', 'console: the status pill has no role=status');
     ok(status.textContent.trim() === '—' && !!status.querySelector('.pill.grey'), `console: before a run the status reads "${status.textContent.trim()}", expected a grey dash`);
     ok(!/HTTP|ms|B\b/.test(status.textContent), 'console: a figure is shown before anything was run');
@@ -197,7 +197,7 @@ await go('console');
     ok(st && st.isConnected && /^HTTP 200/.test(st.textContent.trim()), `console: after a run the status reads "${st && st.textContent.trim()}", expected HTTP 200 first`);
     ok(st && !!st.querySelector('.pill.green'), 'console: a 200 is not a green pill');
     ok(st && /\d+ ms/.test(st.textContent) && /\d+(\.\d+)? ?k?B/.test(st.textContent), `console: the status does not carry the time and size: "${st && st.textContent.trim()}"`);
-    ok(doc.getElementById('c-run').nextElementSibling === st, 'console: after a run the status moved away from Run');
+    ok(st.parentElement === doc.getElementById('c-run').parentElement && st === st.parentElement.lastElementChild, 'console: after a run the status left the end of the Run row');
     const resultsHead = doc.querySelector('#c-response section.card > header');
     ok(resultsHead && !/HTTP|\d+ ms/.test(resultsHead.textContent), `console: the Results header still carries the status: "${resultsHead && resultsHead.textContent.trim()}"`);
     const resultsBody = doc.querySelector('#c-response section.card > .body');
@@ -2740,8 +2740,8 @@ await go('console');
 /* ----------------- the brand is the product, not the filename ----------------- */
 
 {
-  const brand = doc.querySelector('.brand');
-  ok(!!brand, 'no brand block in the topbar');
+  const brand = doc.querySelector('.nav-brand');
+  ok(!!brand, 'no brand block at the head of the menu');
   ok(!doc.getElementById('cfg-name'), 'the config filename is back in the brand block');
   ok(brand && !/\.json|\.ya?ml/i.test(brand.textContent),
     `the brand names a config file: "${brand && brand.textContent.trim()}"`);
@@ -7493,8 +7493,10 @@ await settleFor(300);
     g('ld-range-apply').click(); await settleFor(200);
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.to && m.from !== m.to), 'log delay: a 7-day custom range did not ask for its days');
     await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow the range to 7 days');
-    rbtn('12h').click(); await settleFor(200);
-    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '12h', 'log delay: 12h did not stay pressed');
+    // 12h only reaches back inside today after noon; earlier in the day the window spans midnight and is "by day".
+    const todayRange = new Date().getHours() >= 12 ? '12h' : '3h';
+    rbtn(todayRange).click(); await settleFor(200);
+    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === todayRange, `log delay: ${todayRange} did not stay pressed`);
     await waitFor(() => g('ld-chart-critical') && g('ld-chart-critical').querySelectorAll('g.ld-bar').length >= 1 && g('ld-chart-critical').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
     ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === 0, 'log delay: Today has no delay/critical split (the core sends one per window)');
     // A bar opens Devices on its level.
@@ -7578,7 +7580,7 @@ await settleFor(300);
     ok(!/Edit cluster/.test(view().textContent) && !/Edit cluster/.test(g('ld-tz-chip').title), 'log delay: the page offers a time-zone chooser');
     g('ld-tz-chip').click(); await settleFor(120);
     ok([...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join('|') === '+05:30 · 13 devices · majority|+08:00 · 1 device', `log delay: the cluster's zones read ${[...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join(' | ')}`);
-    press(doc.querySelector('#topbar .brand')); await settleFor(120);
+    press(doc.querySelector('#topbar')); await settleFor(120);
     ok(g('ld-tz-panel').hidden, 'log delay: a click outside did not close the time-zone panel');
     // The top bar's chooser followed the link; and it is the control: All clusters → the fleet, a cluster → its board.
     ok(g('cluster-select').value === c0, `log delay: the top-bar chooser does not show the cluster on screen (${g('cluster-select').value})`);
