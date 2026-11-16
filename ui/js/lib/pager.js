@@ -8,7 +8,8 @@
  * Shards pages had no shared notion of "a page" before, and two hand-rolled ones would
  * disagree about the last page the first time a filter changed the row count.
  *
- * `perPage` comes from config (tableRowsPerPage).
+ * `perPage` is the caller's: the Indices list and the documents table remember a choice per
+ * browser (ui/documents-view.js pageSizePref, the sizes in core/documents.js).
  */
 
 import { h } from './dom.js';
@@ -86,10 +87,12 @@ export function pageWindow(page, pages, span = 1) {
  * through, that means the button you are aiming at jumps out from under the cursor.
  *
  * `numbers: true` adds numbered page buttons between them (pageWindow). `sizes` with
- * `perPage` and `onSize` adds a rows-per-page picker.
+ * `perPage` and `onSize` adds a rows-per-page picker. `totalText` replaces the total in the
+ * position label for a count the server did not finish ("10,000+", core/documents.js) —
+ * the number alone would read as a measurement.
  */
 export function pagerBar(slice, onPage, opts = {}) {
-  const { label = 'rows', dense = false, numbers = false, sizes = null, perPage = null, onSize = null } = opts;
+  const { label = 'rows', dense = false, numbers = false, sizes = null, perPage = null, onSize = null, totalText = null } = opts;
   const atStart = slice.page <= 0;
   const atEnd = slice.page >= slice.pages - 1;
   const sizePicker = sizes && onSize
@@ -103,7 +106,7 @@ export function pagerBar(slice, onPage, opts = {}) {
   return h('div.pager', { class: dense ? 'pager sm' : 'pager' },
     h('span.pager-pos.muted',
       slice.total
-        ? `${num(slice.first)}–${num(slice.last)} of ${num(slice.total)} ${label}`
+        ? `${num(slice.first)}–${num(slice.last)} of ${totalText === null ? num(slice.total) : totalText} ${label}`
         : `no ${label}`),
     sizePicker,
     h('span.pager-controls',
