@@ -30,10 +30,12 @@ import { takeFocus } from '../core/focus.js';
 import { indexQuery } from '../core/index-match.js';
 import { INDEX_PAGE_SIZES, documentsTarget, docsHash, docsTargetOf } from '../core/documents.js';
 import { documentsView, pageSizePref } from '../ui/documents-view.js';
+import { indicesSummary, resetIndicesSummary, leaveIndicesSummary } from '../ui/indices-summary.js';
 
 let host = null;
-// `view`: indices | templates | docs — docs is an index's (or a pattern's) documents, drawn in
-// place of the list at #/indices/docs/<target> (ui/documents-view.js); `docs.target` names them.
+// `view`: indices | templates | summary | docs — docs is an index's (or a pattern's) documents, drawn
+// in place of the list at #/indices/docs/<target> (ui/documents-view.js); `docs.target` names them.
+// summary is #/indices/summary (ui/indices-summary.js).
 const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', not: false, status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices', docs: { target: null } };
 /** Rows per page on the list: 10 by default, up to 100, remembered per browser (core/documents.js INDEX_PAGE_SIZES). */
 const IDX_SIZE = pageSizePref('elasticpro.indices.perPage', INDEX_PAGE_SIZES);
@@ -93,6 +95,8 @@ export function render(el) {
     try { window.history.replaceState(null, '', '#/indices'); } catch (_) { /* sandboxed frame */ }
   }
   syncRoute();
+  // Each visit reads the daily record as it is now.
+  resetIndicesSummary();
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
@@ -106,9 +110,12 @@ export function render(el) {
 function syncRoute() {
   const target = docsTargetOf(location.hash);
   if (target) { ui.view = 'docs'; ui.docs.target = target; }
-  else if (ui.view === 'docs') ui.view = 'indices';
+  else if (SUMMARY_HASH.test(location.hash)) ui.view = 'summary';
+  else if (ui.view === 'docs' || ui.view === 'summary') ui.view = 'indices';
 }
+const SUMMARY_HASH = /^#\/indices\/summary\/?$/;
 export function onRoute() { syncRoute(); draw(); }
+export function onLeave() { leaveIndicesSummary(); }
 
 /** Open a target's documents here: drawn now, and the address says so (Back and bookmarks). */
 function openDocuments(target) {
@@ -184,6 +191,8 @@ function drawPage() {
   if (!c) return mount(host, empty('No cluster selected'));
   // Documents: the whole page is theirs; the list waits underneath with its state intact.
   if (ui.view === 'docs' && ui.docs.target) return mount(host, docsPanel(c));
+  // Summary: its own toolbar, with these tabs at its left.
+  if (ui.view === 'summary') return mount(host, ...built.sameAll('ixs', [indicesSummary(c, { tabs: viewSeg, redraw: draw })]));
   const all = state.indices.get(c.id) || [];
   const rows = rowsFor(c);
 
@@ -232,31 +241,34 @@ function drawPage() {
 }
 
 /**
- * Indices / Templates.
+ * Indices / Templates / Summary.
  *
  * "Indices" is the working view — find an index, open it, close it, delete it — and it is
  * what the page opens on. "Templates" is what new indices will be created from —
- * ui/templates-view.js. The daily and monthly summary that was a third tab here moved to
- * Reports › Daily & monthly in 0.3.53 (docs/REPORTS.md, board 7); one line says where.
+ * ui/templates-view.js. "Summary" (0.3.71, #/indices/summary) is the index size per day from
+ * the daily volume record — ui/indices-summary.js. The line that pointed to Reports › Daily &
+ * monthly when the old Summary moved there (0.3.53) is gone: a Summary tab is here again.
  */
-function viewTabs() {
+function viewSeg() {
   const tab = (id, label, title) => h('button.btn.sm', {
     'aria-pressed': ui.view === id ? 'true' : 'false',
     title,
-    onclick: () => { if (ui.view !== id) { ui.view = id; draw(); } },
+    onclick: () => {
+      if (ui.view === id) return;
+      ui.view = id;
+      draw();
+      // Summary has an address of its own; leaving it puts the list's back.
+      const want = id === 'summary' ? '#/indices/summary' : '#/indices';
+      if (location.hash !== want && (id === 'summary' || SUMMARY_HASH.test(location.hash))) location.hash = want;
+    },
   }, label);
-  return h('div.ix-views',
-    h('div.seg', { role: 'group', 'aria-label': 'Indices view' },
-      tab('indices', 'Indices', 'The index list, and the actions that manage it'),
-      tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters')),
-    h('span.ix-moved', 'Daily and monthly summary is now in ',
-      h('a#ix-to-reports', { href: '#/reports/daily', onclick: (e) => { e.preventDefault(); openReportsDaily(); } }, 'Reports › Daily & monthly ›')));
+  return h('div.seg', { role: 'group', 'aria-label': 'Indices view' },
+    tab('indices', 'Indices', 'The index list, and the actions that manage it'),
+    tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters'),
+    tab('summary', 'Summary', 'Index size per day: yesterday, the averages, today so far, and per tag1 value'));
 }
-
-/** The summary's new home, on the cluster this page shows. */
-function openReportsDaily() {
-  const c = cluster();
-  navigateTo('reports', { section: 'daily', mode: 'daily', cluster: c ? c.id : null }, { cluster: c ? c.id : null });
+function viewTabs() {
+  return h('div.ix-views', viewSeg());
 }
 
 function sourceBar(c, sourceList, total) {

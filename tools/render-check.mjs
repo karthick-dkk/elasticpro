@@ -99,7 +99,9 @@ const HOSTED = new Set(['automation', 'accounts']);
 // the address and canonicalises it to #/clusters/overview/<cluster>).
 // `indices/docs/logstash-*`: Indices › Documents, the documents of every open logstash index (0.3.68),
 // drawn in place of the list from its own address.
-const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/docs/logstash-*', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
+// `indices/summary`: Indices › Summary (0.3.71), the index size per day, its record answered from
+// tools/lib/volume-fixture.mjs (a fresh data directory has no daily record).
+const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/docs/logstash-*', 'indices/summary', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
   // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST,
   // and Requests — the Request Centre, its own app page — with its ElasticPro health tab.
@@ -110,6 +112,8 @@ const { ldRoute, ldTab } = await load('core/logdelay-report.js');
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
+const VOLUME_FIXTURE = pathToFileURL(path.join(ROOT, 'tools/lib/volume-fixture.mjs')).href;
+let restoreFetch = () => {};
 for (const name of PAGES) {
   const before = errors.length;
   try {
@@ -128,6 +132,18 @@ for (const name of PAGES) {
     while (view.firstChild) view.removeChild(view.firstChild);
     window.history.replaceState(null, '', `#/${moved || name}`);
     if (linkOnly) (await load('core/intent.js')).intent.reports = { section: 'log-delay' };
+    // Indices › Summary: the daily record from the fixture, everything else from the bridge.
+    if (name === 'indices/summary') {
+      const { volumeAnswer } = await import(VOLUME_FIXTURE);
+      const real = globalThis.fetch;
+      restoreFetch = () => { globalThis.fetch = real; };
+      globalThis.fetch = async (input, init) => {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        const a = String(body.type || '').startsWith('VOLUME_') ? volumeAnswer(body) : null;
+        if (a) { const t = JSON.stringify(a); return { ok: true, status: 200, headers: { get: () => null }, text: async () => t, json: async () => a }; }
+        return real(input, init);
+      };
+    }
     mod.render(view);
     await new Promise((r) => setTimeout(r, section ? 900 : 350));
     if (mod.onData) mod.onData();
@@ -187,6 +203,23 @@ for (const name of PAGES) {
         if (!sel || sel.value !== '5') errors.push(`${name}: the documents rows-per-page picker reads ${sel && sel.value}, expected 5`);
         if (!/of [\d,]+ documents/.test((view.querySelector('#docs-meta') || {}).textContent || '')) errors.push(`${name}: no exact total in the meta line`);
       }
+    } else if (page === 'indices' && section === 'summary') {
+      // Indices › Summary: the tab marked, five tiles, a bar per day of the default 15, the tag1
+      // chips and a table row per day. No subtitle line and no "est." anywhere.
+      const on = [...view.querySelectorAll('.isum .seg button[aria-pressed="true"]')].map((b) => b.textContent.trim());
+      if (!on.includes('Summary') || !on.includes('15d')) errors.push(`${name}: the pressed buttons are ${on.join(' | ')}, want Summary and 15d`);
+      if (configured) {
+        const tiles = view.querySelectorAll('.isum-tiles .stat').length;
+        if (tiles !== 5) errors.push(`${name}: ${tiles} tiles, want 5`);
+        const bars = view.querySelectorAll('svg.isum-cols rect.isum-bar').length;
+        if (bars !== 15) errors.push(`${name}: ${bars} bars, want 15`);
+        if (!view.querySelector('svg.isum-cols polyline.isum-avg')) errors.push(`${name}: no 7-day average line`);
+        if (view.querySelectorAll('.isum-chip').length < 7) errors.push(`${name}: the tag1 chips are not drawn`);
+        const rows = view.querySelectorAll('#isum-tag-table tbody tr').length;
+        if (rows !== 15) errors.push(`${name}: the tag1 table has ${rows} rows, want 15`);
+        if (/\best\./.test(view.textContent)) errors.push(`${name}: "est." is on the page`);
+        if (view.querySelector('.isum .card > header .sub')) errors.push(`${name}: a card has a subtitle line`);
+      }
     } else if (linkOnly) {
       const a = view.querySelector('.rp-nav a[data-section="log-delay"]');
       if (!a || a.getAttribute('href') !== '#/log-delay') errors.push(`${name}: the Reports entry for Log delay is not a link to #/log-delay`);
@@ -195,14 +228,16 @@ for (const name of PAGES) {
       const on = view.querySelector('.rp-nav a[aria-current="page"]');
       if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);
     }
-    // Indices lost its Summary tab to Reports › Daily & monthly (board 7): one line says where.
+    // Indices: Indices | Templates | Summary (0.3.71); the line that pointed to Reports is gone.
     if (page === 'indices' && !section && configured) {
-      if ([...view.querySelectorAll('.seg button')].some((b) => b.textContent.trim() === 'Summary')) errors.push('indices: the Summary tab is still there');
-      if (!/Daily and monthly summary is now in/.test(view.textContent)) errors.push('indices: no line saying the summary moved to Reports');
+      const tabs = [...view.querySelectorAll('.ix-views .seg button')].map((b) => b.textContent.trim());
+      if (tabs.join(' | ') !== 'Indices | Templates | Summary') errors.push(`indices: the view tabs are ${tabs.join(' | ')}`);
+      if (/summary is now in/.test(view.textContent)) errors.push('indices: the old "summary is now in Reports" line is still there');
     }
     if (HOSTED.has(page) && !view.querySelector('.cm-side')) errors.push(`${name}: not drawn inside Config-Management`);
     // Leave the page the way the app does, so a page that re-reads on a timer stops.
     if (mod.onLeave) mod.onLeave();
+    restoreFetch(); restoreFetch = () => {};
     const nodes = view.querySelectorAll('*').length;
     const failed = errors.length > before;
     // Without a config the pages correctly draw a single "No cluster selected" node, so
@@ -212,6 +247,7 @@ for (const name of PAGES) {
     }
     console.log(`${errors.length > before ? '✗' : '✓'} ${name.padEnd(17)} ${String(nodes).padStart(5)} nodes`);
   } catch (e) {
+    restoreFetch(); restoreFetch = () => {};
     console.log(`✗ ${name.padEnd(10)} THREW: ${e.message}`);
     errors.push(`${name}: ${e.message}`);
   }

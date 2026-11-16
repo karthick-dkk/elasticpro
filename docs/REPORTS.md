@@ -52,7 +52,10 @@ disagree, this file wins and the difference is a bug in one of them: fix it.
 ### Daily & monthly (boards 2, 3) — moved from Indices › Summary
 
 - The Indices page loses its *Summary* tab (Indices | Templates remain) and shows one line:
-  "Daily and monthly summary is now in Reports › Daily & monthly ›" (board 7).
+  "Daily and monthly summary is now in Reports › Daily & monthly ›" (board 7). Since 0.3.71
+  Indices has a *Summary* tab again — the **index size** per day (design "Indices › Summary",
+  `ui/js/ui/indices-summary.js`, from the same record) — and that line is gone; Daily &
+  monthly here stays the event_logsize view.
   `ui/js/ui/volume-summary.js` moves under the Reports page; its state, polling and collection
   rules are unchanged (docs/VOLUME.md).
 - Controls: Daily | Monthly, Source, Average over, Collect now, Export CSV. No source line
