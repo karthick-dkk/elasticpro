@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.71
 
+- **Clusters › Overview: the top-bar chooser switches the board.** Picking another cluster used to snap back to the one the address named; now the board shows the cluster picked and the address follows (`#/clusters/overview/<id>`).
+- **No more "🔒 read-only / ✎ writes allowed" toggle on any page** (Snapshots, Indices, Nodes & shards, Jobs). The write gate is unchanged: an admin's write action asks "Allow writes to this cluster?" when it is pressed, and the core still refuses without the unlock and `allowWrites`. The shard-allocation switch, which was disabled while writes were locked, is live for an admin and asks the same way.
+- **Nodes & shards: the node table fits without a sideways scroll** at 1440 and 1280 px with the menu on the left — tighter cells, narrower bars, the disk cell reads "91% · 8.38 GB free" (the sizes are in its tooltip), and the shard count has its own short **Shards** column.
+- **Nodes & shards: Shard allocation and Query pressure are compact** — a 120 px half-gauge (was 200), 18–20 px figures, the tiles side by side, about a third shorter (202 → 140 px). Every figure and label is still there.
+- **The Request Centre is Jobs › Requests** (`#/jobs/requests`, with its ElasticPro health tab at `#/jobs/requests/health`), a tab beside Jobs · History · Settings for operators and admins. Config-Management › Requests is now just the Policy. The old addresses (`#/requests`, `#/settings/requests/centre`) still open it. The ElasticPro health dot moved to the Jobs menu item.
+- **The left menu folds to an icon rail.** « at the foot of the menu, above your name, folds it to 56 px of icons (each with its page name as tooltip and label, the open-alert count as a badge on Alerts, the current page still highlighted); » opens it again. The page uses the width it frees. Remembered per browser; the top menu is unchanged.
 - **Indices › Summary** (the owner's design, approved 2026-11-17): a third tab, Indices | Templates | Summary, at `#/indices/summary`, on the cluster in the top bar. Day buttons **15d** (default) · 30d · 60d · 90d, always ending today; Export CSV; icon-only refresh.
 - Five tiles: **Yesterday** (size, indices, docs), **Avg 7 / 30 / 60 days** per day, **Today so far** ("as of HH:MM · not final"). A day missing from the record is never counted as 0: the tile says "59 of 60 days recorded".
 - **Index size per day** as **Columns** (a bar per day, the 7-day average as an orange line, today lighter, dates "03 Nov" thinned at 60/90 days, the month once under the axis, a tooltip per bar) or **Rows** (newest at the bottom, sizes in one right-aligned column). Two icon buttons switch it; the choice is remembered per browser.

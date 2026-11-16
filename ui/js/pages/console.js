@@ -327,8 +327,9 @@ function draw() {
   const dl = h('datalist#ep-list', ...[...new Set(SNIPPETS.map((s) => s.p))].map((v) => h('option', { value: v })));
 
   // The console offers every method: this is the one page where a person types the
-  // request. Whether the core accepts a write is decided by the toggle below (a session
-  // unlock) or by readOnly:false in the config — never by which options are listed here.
+  // request. Whether the core accepts a write is decided by the session unlock (Run asks for
+  // it, core/writes.js ensureWrites) or by readOnly:false in the config — never by which
+  // options are listed here.
   const methods = METHODS;
   if (!methods.includes(ui.method)) ui.method = 'GET';
   const methodSel = h('select#c-method', { style: { width: '96px', fontWeight: 700 },
@@ -465,9 +466,9 @@ function recognise(text, { fromBody }) {
 
 /**
  * The write unlock. Two states matter here:
- *  - readOnly:false in the config — writes are on everywhere, nothing to toggle.
- *  - readOnly:true (the default) — this switch unlocks writes for THIS session and only
- *    for requests sent from this page. It is held in the core's memory, never written to
+ *  - readOnly:false in the config — writes are on everywhere, nothing to ask.
+ *  - readOnly:true (the default) — Run asks to unlock writes for THIS session, and only
+ *    for requests sent by hand. It is held in the core's memory, never written to
  *    disk, and gone on restart.
  */
 /** The search-family POSTs the core allows even in read-only mode. */

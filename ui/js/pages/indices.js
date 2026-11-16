@@ -15,7 +15,7 @@ import { pauseFor } from '../core/policy.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { card, pill, table, empty, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
-import { syncWrites, writeToggle } from '../core/writes.js';
+import { syncWrites } from '../core/writes.js';
 import {
   openIndices, closeIndices, deleteIndices, moveShardDialog, indexSettingsDialog,
   maintenance, MAINTENANCE_KINDS,
@@ -286,7 +286,6 @@ function sourceBar(c, sourceList, total) {
       // This list's own age, not the last global refresh — the page serves what was
       // already fetched, so how old that is decides whether it is still true.
       freshnessBar(scrubFresh(datasetFreshness(c.id, 'indices'), c), () => load(true), { label: 'Indices', busy: ui.loading }),
-      writeToggle(draw),
       h('button.btn.sm', { onclick: () => { resetFilters(); draw(); } }, 'Clear')));
 }
 

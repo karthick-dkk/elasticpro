@@ -119,16 +119,19 @@ const PAGES = [
   // it (runs name clusters and carry their errors, so not a guest); an admin presses things. It reads
   // JOBS_LIST on its own timer and draws its own answers; the fleet's pushes only rename clusters.
   { id: 'jobs',      label: 'Jobs',           icon: '◷', mod: pJobs,      multi: true,  minRole: 'user' },
-  // Config-Management: an admin's, and an operator's for Clusters, Alerts › Automation and
-  // Requests › Request Centre only (core/config-nav.js decides which tabs inside).
+  // Config-Management: an admin's, and an operator's for Clusters and Alerts › Automation only
+  // (core/config-nav.js decides which tabs inside).
   { id: 'settings',  label: 'Config-Management', icon: '⚙', mod: pSettings, multi: true, minRole: 'operator' },
-  // Three pages that left the page menu and live in Config-Management as tabs (`home`). Each
-  // keeps its id, so #/automation, #/requests, #/accounts, an alert's "go to" and every
-  // navigateTo() still land on it — drawn inside Config-Management (pages/settings.js hostedPage).
+  // Pages that left the page menu and live as a tab of another page (`home`). Each keeps its id,
+  // so #/automation, #/accounts, an alert's "go to" and every navigateTo() still land on it —
+  // Automation and Accounts drawn inside Config-Management (pages/settings.js hostedPage).
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pSettings.hostedPage('automation', pAutomation), multi: true, minRole: 'operator', noTab: true, home: 'settings' },
+  // The Request Centre: Jobs › Requests since 0.3.71 (was Config-Management › Requests › Request
+  // Centre), drawn under the Jobs tab row (pages/jobs.js hostedPage). Its address is #/jobs/requests
+  // (`path`); #/requests and #/settings/requests/centre still open it (reports/route.js movedPath).
   // An operator gets the emergency stop here; the request log itself stays an admin's.
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pSettings.hostedPage('requests', pRequests), multi: true, minRole: 'operator', live: true, noTab: true, home: 'settings' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pJobs.hostedPage(pRequests), multi: true, minRole: 'operator', live: true, noTab: true, home: 'jobs', path: 'jobs/requests' },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pSettings.hostedPage('accounts', pAccounts), multi: true, minRole: 'admin', accountsOnly: true, noTab: true, home: 'settings' },
   // The NOC wall display (docs/PLAY.md): full screen, no tab — the "▶ Play" button in the top
   // bar opens it, and a display link opens nothing else.
@@ -151,6 +154,28 @@ let menuPosition = 'top';
 function applyMenuPosition(v) {
   menuPosition = normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
+}
+/**
+ * The left menu folded to an icon rail (the owner, 0.3.71): « at the foot of the menu, above the
+ * account button, folds it to ~56 px of icons — each with its page name as tooltip and label, the
+ * open-alert count a badge on Alerts — and » opens it again; the page takes the width it frees
+ * (app.css html[data-rail="on"]). Kept per browser; the top menu has no rail.
+ */
+const RAIL_KEY = 'elasticpro.menu.rail';
+let menuRail = (() => { try { return localStorage.getItem(RAIL_KEY) === '1'; } catch (_) { return false; } })();
+function applyRail() {
+  if (menuRail) document.documentElement.dataset.rail = 'on';
+  else delete document.documentElement.dataset.rail;
+}
+applyRail();
+function toggleRail() {
+  menuRail = !menuRail;
+  try { localStorage.setItem(RAIL_KEY, menuRail ? '1' : '0'); } catch (_) { /* kept for this visit */ }
+  applyRail();
+  navBuiltFor = '';
+  renderNav();
+  const btn = $('#nav .nav-rail-btn');
+  if (btn) btn.focus();
 }
 /**
  * The scope the app opens on: this person's own choice when they made one, else the config's
@@ -557,7 +582,7 @@ function renderNav() {
   // The tab's colour is the worst open level: red, orange for High, else yellow.
   const tone = crit ? 'red' : counts && counts.high ? 'high' : 'yellow';
   const shown = visiblePages().filter((p) => !p.noTab);
-  const key = [menuPosition, me && me.name, ...shown.map((p) => p.id)].join(',');
+  const key = [menuPosition, menuRail, me && me.name, ...shown.map((p) => p.id)].join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
     navBuiltFor = key;
@@ -566,8 +591,9 @@ function renderNav() {
     // menu on the left the brand heads it and the person's name sits at its foot.
     nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
     shown.forEach((p) => {
-      nav.append(h('button', { dataset: { page: p.id }, onclick: () => go(p.id) },
-        h('span.ico', p.icon), h('span', p.label)));
+      // The name is the tooltip and the label too: in the icon rail (toggleRail) it is all there is.
+      nav.append(h('button', { dataset: { page: p.id }, title: p.label, 'aria-label': p.label, onclick: () => go(p.id) },
+        h('span.ico', { 'aria-hidden': 'true' }, p.icon), h('span.nav-label', p.label)));
       // Clusters › Overview, the menu's one sub-item (the owner, 2026-11-14: "cluster └ overview"):
       // one cluster on one screen. The address names the section; go() draws it.
       if (p.id === 'overview') {
@@ -576,13 +602,19 @@ function renderNav() {
         h('span.ico', '└'), h('span', 'Overview')));
       }
     });
+    if (menuPosition === 'left') {
+      nav.append(h('button.nav-rail-btn', { type: 'button', onclick: toggleRail, 'aria-expanded': String(!menuRail),
+        title: menuRail ? 'Show the full menu' : 'Fold the menu to icons', 'aria-label': menuRail ? 'Show the full menu' : 'Fold the menu to icons' },
+      menuRail ? '\u00bb' : '\u00ab'));
+    }
     if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
   // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md), on the tab of the
-  // Request Centre's page — Config-Management. From PING, so it moves every ten seconds.
+  // Request Centre's page — Jobs (Jobs › Requests › ElasticPro health), for whoever may open it.
+  // From PING, so it moves every ten seconds.
   {
-    const dot = navDot(coreInfo);
-    const host = nav.querySelector('button[data-page="settings"]');
+    const dot = visiblePages().some((p) => p.id === 'requests') ? navDot(coreInfo) : null;
+    const host = nav.querySelector('button[data-page="jobs"]');
     const had = nav.querySelector('.nav-health-dot');
     const want = dot ? dot.tone : '';
     if (had && (had.dataset.tone !== want || had.parentNode !== host)) had.remove();
@@ -598,7 +630,9 @@ function renderNav() {
     runningDot(snapBtn, ev ? null : snapshotRunningTitle());
     // No dot: what is known and what is not, on hover (an older core says nothing).
     const note = !ev && snapshotReply && !snapshotRunningTitle() ? snapshotNote(snapshotReply, state.selected) : null;
-    if (snapBtn && (snapBtn.title || '') !== (note || '')) { if (note) snapBtn.title = note; else snapBtn.removeAttribute('title'); }
+    // Without a note the tab's name is its tooltip, as on every tab (the icon rail shows nothing else).
+    const want = note || (snapBtn && snapBtn.getAttribute('aria-label')) || '';
+    if (snapBtn && (snapBtn.title || '') !== want) snapBtn.title = want;
   }
   const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
@@ -616,6 +650,10 @@ function renderNav() {
     let badge = b.querySelector('.pill');
     if ((badge ? badge.dataset.v : '') === want) continue;
     if (badge) badge.remove();
+    // The button's own name carries the count: its aria-label (the page name) hides the badge's.
+    const name = want ? `Alerts, ${a.length} open, worst ${worstWord}` : 'Alerts';
+    b.setAttribute('aria-label', name);
+    b.title = want ? `Alerts \u00b7 ${a.length} open \u2014 worst is ${worstWord}` : 'Alerts';
     if (want) {
       badge = h('span.pill', { class: tone, title: `${a.length} open — worst is ${worstWord}`, 'aria-label': `${a.length} open alerts, worst ${worstWord}`, style: { fontSize: '10px', padding: '0 5px' } }, String(a.length));
       badge.dataset.v = want;
@@ -762,6 +800,12 @@ function renderTopbar() {
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
     // for; picking one cluster withdraws it.
     fleetChosen = e.target.value === 'all';
+    // A page whose address names the cluster (Clusters › Overview: #/clusters/overview/<id>) moves
+    // its address first: drawn again under the old one, the page read the old cluster out of it
+    // and put the chooser straight back.
+    const cur = PAGES.find((p) => p.id === currentPage);
+    const addr = cur && cur.mod.addressFor ? cur.mod.addressFor(e.target.value) : null;
+    if (addr && location.hash !== addr) { try { history.replaceState(null, '', addr); } catch (_) { location.hash = addr; } }
     go(currentPage);
   } });
   // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
@@ -1469,6 +1513,9 @@ window.addEventListener('hashchange', () => {
   if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) { go(wanted); return; }
   // Another section of the page on screen (#/reports/daily → #/reports/capacity).
   const p = PAGES.find((x) => x.id === currentPage);
+  // An old address of the page on screen (#/settings/requests/centre while on Jobs › Requests):
+  // drawn again, which puts its own address back.
+  if (wanted === currentPage && p && p.path && !String(location.hash).startsWith(`#/${p.path}`)) { go(wanted); return; }
   // A page whose sections differ in what the chooser offers (Clusters: the List shows the fleet, the
   // Overview one cluster) is drawn again as the shell draws a page — selection, top bar, menu and all.
   if (wanted === currentPage && p && p.mod.singleCluster) { if (location.hash !== routedHash) go(wanted); return; }

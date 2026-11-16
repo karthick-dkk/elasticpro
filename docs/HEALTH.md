@@ -8,7 +8,7 @@ the core's (and the worker's) own state.
 ## Where
 
 Request Centre (page 10) gains a second tab: **Requests · ElasticPro health**
-(`#/requests/health`). Administrators only, like the request log; an operator sees the
+(`#/jobs/requests/health` — Jobs › Requests since 0.3.71). Administrators only, like the request log; an operator sees the
 emergency stop as today and not this tab. While open it reads `SYSTEM_HEALTH` every 5 s (a core
 round trip) and stops when left. Compact density, ElasticPro tokens, no new colours. A small
 dot in the Request Centre nav entry turns amber/red when any check below is amber/red

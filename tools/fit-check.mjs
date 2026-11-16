@@ -89,9 +89,10 @@ const PAGES = ['alerts', 'overview', 'indices',
   'log-delay', 'log-delay/devices', 'log-delay/devices/popover', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/watch', 'log-delay/live', 'log-delay/live/@c/fw-core-02',
   'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
-  // Jobs (docs/JOBS.md "Jobs page"): its three tabs, with runs from tools/lib/jobs-fixture.mjs.
-  'jobs', 'jobs/history', 'jobs/settings',
-  'automation', 'requests', 'accounts', 'settings',
+  // Jobs (docs/JOBS.md "Jobs page"): its three tabs, with runs from tools/lib/jobs-fixture.mjs, and
+  // Requests — the Request Centre, Jobs › Requests since 0.3.71 — with its ElasticPro health tab.
+  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health',
+  'automation', 'accounts', 'settings',
   // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
   'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',
   'settings/reports/fields', 'settings/reports/mail', 'settings/reports/templates', 'settings/data/backend', 'settings/data/schedule',

@@ -422,7 +422,7 @@ export function pausedLine(p, { now = Date.now() } = {}) {
   const left = q.until > now ? Math.max(1, Math.ceil((q.until - now) / 60000)) : 0;
   const ends = left ? ` It ends by itself at ${clock(q.until, now)} (in ${left} min); an operator or administrator can end it sooner`
     : ' An operator or administrator can end it';
-  return `Emergency stop: no request goes to any cluster${when}${who}.${ends} (the button at the top, or Request Centre → Resume now).`;
+  return `Emergency stop: no request goes to any cluster${when}${who}.${ends} (the button at the top, or Jobs › Requests → Resume now).`;
 }
 
 /**
