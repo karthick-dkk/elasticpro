@@ -37,7 +37,7 @@ import { rememberLevels } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
 import {
   LD_COLOURS as C, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
-  PERIODS, minutesText, durationText, whenText, docsText, pctText, countText,
+  minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
   fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands,
@@ -417,7 +417,7 @@ function chartPanels(res, period, b, scopeId) {
   const slot = n ? (W - L - R) / n : W - L - R;
   const bw = Math.max(2, Math.min(14, slot * 0.58));
   const every = labelEvery(n);
-  const sub = `devices · ${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
+  const sub = `devices · ${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || ''}`;
   const panel = ([key, title, colour, filter, value]) => {
     const kids = [];
     for (let v = 0; v <= top; v += step) {
@@ -510,7 +510,7 @@ function stateBar(c, b) {
 
 /* ------------------------------------ the dashboard ------------------------------------ */
 
-const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
+const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || ''}`;
 
 function fleetView() {
   const ids = pickId() ? [pickId()] : [];
@@ -662,7 +662,7 @@ function clusterView(id) {
     return h('div.ld-head',
       h('div.ld-title',
         crumbs(link(ldHash('fleet'), 'Log Delay'), 'cluster'),
-        h('h2.ld-h-row', name, h('span.ld-h-sub', ` · ${(res && res.label) || (PERIODS.find((p) => p[0] === S.period) || ['', ''])[1].toLowerCase()}`),
+        h('h2.ld-h-row', name, h('span.ld-h-sub', ` · ${(res && res.label) || ''}`),
           res ? fixButton({ kind: 'cluster', id: name, items: () => clusterFixItems(res) }) : null),
         h('p.sub', `Every device in this cluster that sends logs. Late means ${b.late}.`),
         tz ? h('div.ld-chips', tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', `Delay shown after the time zone (${timeZoneShort(tz)}) is taken out`)) : null),

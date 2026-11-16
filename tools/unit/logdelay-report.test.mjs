@@ -231,7 +231,6 @@ test('tables: filter by name, cluster or extra; order by time late with unknowns
 test('periods: today, last N days, this month, last month', () => {
   const now = new Date(2026, 10, 7, 12).getTime();
   assert.deepEqual(R.periodQuery('today', now), { days: 1 });
-  assert.equal(R.PERIODS[0][0], 'today');
   assert.deepEqual(R.periodQuery('last30', now), { days: 30 });
   assert.deepEqual(R.periodQuery('last7', now), { days: 7 });
   assert.deepEqual(R.periodQuery('thisMonth', now), { from: '2026-11-01', to: '2026-11-07' });

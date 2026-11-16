@@ -283,10 +283,6 @@ export function valuesText(rows, name, max = 3) {
 
 /* ---------------------------------- the periods ---------------------------------- */
 
-export const PERIODS = Object.freeze([
-  ['today', 'Today'], ['last7', 'Last 7 days'], ['last30', 'Last 30 days'], ['thisMonth', 'This month'], ['lastMonth', 'Last month'],
-]);
-
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 /** A period id as the messages take it: `{days}` or `{from, to}` in local days. */

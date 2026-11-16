@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.67
+
+- **Log Delay: the "Today by window" check no longer depends on the clock.** The behaviour check used a "Last 12 h" or "Last 3 h" button, which crosses midnight early in the day and made the check fail between 00:00 and 03:00. It now sets a Custom range from that day's midnight to now, which stays inside one day at any hour.
+- **Log Delay: dead fallback removed.** The boards no longer look up the old period list (Today, Last 7 days, …) for a label the core always sends; the list itself is gone (`periodQuery` stays for Clusters › Overview).
+
 ## 0.3.66
 
 - **No empty header band** (the owner, 2026-11-16). The cluster chooser and the bell sit at the right end of the page's first row on every page, with the menu on top (the end of the menu row) or on the left (over the page's first row); the product name moved to the head of the menu. Clusters › Overview shows its chooser too.

@@ -7493,10 +7493,10 @@ await settleFor(300);
     g('ld-range-apply').click(); await settleFor(200);
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.to && m.from !== m.to), 'log delay: a 7-day custom range did not ask for its days');
     await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow the range to 7 days');
-    // 12h only reaches back inside today after noon; earlier in the day the window spans midnight and is "by day".
-    const todayRange = new Date().getHours() >= 12 ? '12h' : '3h';
-    rbtn(todayRange).click(); await settleFor(200);
-    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === todayRange, `log delay: ${todayRange} did not stay pressed`);
+    // One local day: Custom from that day's midnight to its To. A "Last N" button would cross midnight early in the day, so the check would depend on the clock.
+    g('ld-range-from').value = `${g('ld-range-to').value.slice(0, 10)}T00:00`;
+    g('ld-range-apply').click(); await settleFor(200);
+    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.from === m.to), 'log delay: a one-day custom range did not ask for its one day');
     await waitFor(() => g('ld-chart-critical') && g('ld-chart-critical').querySelectorAll('g.ld-bar').length >= 1 && g('ld-chart-critical').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
     ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === 0, 'log delay: Today has no delay/critical split (the core sends one per window)');
     // A bar opens Devices on its level.
@@ -7506,6 +7506,7 @@ await settleFor(300);
     await waitFor(() => ldView() === 'fleet' && g('ld-charts'), 'log delay: the Dashboard did not draw again after the chart click');
     ok(/by measurement window/.test(view().textContent), 'log delay: Today does not say it is by window');
     rbtn('1h').click(); await settleFor(200);
+    ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '1h', 'log delay: 1h did not stay pressed');
     await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');
     // Export .xlsx is the log_delay report job.
     g('ld-export').click(); await settleFor(150);
