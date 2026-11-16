@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.66
 
 - **No empty header band** (the owner, 2026-11-16). The cluster chooser and the bell sit at the right end of the page's first row on every page, with the menu on top (the end of the menu row) or on the left (over the page's first row); the product name moved to the head of the menu. Clusters › Overview shows its chooser too.
 - **One red for every level above 90 %** — a single token, `--level-crit`, in every theme; bars and fills that passed 90 % share it.
