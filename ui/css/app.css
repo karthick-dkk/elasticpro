@@ -2504,7 +2504,30 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
   html[data-menu="left"] .nav-me { display: block; margin-top: auto; padding-top: 8px; }
   html[data-menu="left"] .nav-me .me-btn { width: 100%; justify-content: flex-start; height: 40px; max-width: none; background: #2a2a28; color: #e7e6e2; border-color: transparent; }
   html[data-menu="left"] .topbar .brand { display: none; }
+  /* « / »: folds the menu to an icon rail and back (app.js toggleRail), at its foot above the account button. */
+  html[data-menu="left"] #nav.nav .nav-rail-btn { display: inline-flex; align-items: center; justify-content: center; margin-top: auto; align-self: flex-end;
+    width: 32px; height: 26px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: #a9a8a0; font-size: 15px; line-height: 1; }
+  html[data-menu="left"] #nav.nav .nav-rail-btn:hover { background: #2a2a28; color: #fff; }
+  html[data-menu="left"] #nav.nav .nav-rail-btn + .nav-me { margin-top: 0; }
+  /* The rail: icons only, 56 px; the page takes the width it frees. The names stay for screen readers
+     and as each button's tooltip; the alert count is a badge on the Alerts icon; no sub-item. */
+  html[data-menu="left"][data-rail="on"] .app > .head-fix, html[data-menu="left"][data-rail="on"] .app > .main,
+  html[data-menu="left"][data-rail="on"] .head-fix { margin-left: 56px; }
+  html[data-menu="left"][data-rail="on"] #nav.nav { width: 56px; padding: 14px 6px 44px; }
+  html[data-menu="left"][data-rail="on"] #nav.nav button[data-page] { position: relative; justify-content: center; padding: 0; gap: 0; }
+  html[data-menu="left"][data-rail="on"] #nav.nav button[data-page] .ico { font-size: 15px; }
+  html[data-menu="left"][data-rail="on"] #nav.nav .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  html[data-menu="left"][data-rail="on"] #nav.nav button.nav-sub { display: none; }
+  html[data-menu="left"][data-rail="on"] #nav.nav button[data-page] > .pill { position: absolute; top: 1px; right: 1px; font-size: 9px !important; padding: 0 3px !important; line-height: 13px; min-width: 14px; justify-content: center; gap: 0; }
+  html[data-menu="left"][data-rail="on"] #nav.nav button[data-page] .nav-run-dot,
+  html[data-menu="left"][data-rail="on"] #nav.nav button[data-page] .nav-health-dot { position: absolute; top: 5px; right: 5px; margin: 0; }
+  html[data-menu="left"][data-rail="on"] .nav-brand { justify-content: center; padding: 0 0 12px; }
+  html[data-menu="left"][data-rail="on"] .nav-brand b { display: none; }
+  html[data-menu="left"][data-rail="on"] #nav.nav .nav-rail-btn { align-self: center; }
+  html[data-menu="left"][data-rail="on"] .nav-me .me-btn { justify-content: center; padding: 0; }
+  html[data-menu="left"][data-rail="on"] .nav-me .me-name { display: none; }
 }
+.nav-rail-btn { display: none; }
 
 /* Zabbix › roles from user groups, and Zabbix users (ui/zabbix-roles.js) */
 .zr-card .tbl-wrap { border: 0; border-radius: 0; }

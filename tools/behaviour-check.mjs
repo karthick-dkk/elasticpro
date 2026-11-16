@@ -8037,6 +8037,39 @@ await settleFor(300);
   ok(!!doc.querySelector('#view .ov-board') || true, '');
 }
 
+/* ------- The left menu folds to an icon rail (0.3.71): « / », remembered per browser; the top menu has none ------- */
+{
+  await go('alerts');
+  ok(!doc.querySelector('#nav .nav-rail-btn'), 'rail: the top menu offers the fold button');
+  const pickMenu = async (id) => {
+    const me = doc.querySelector('#topbar .me-btn, #nav .me-btn');
+    if (me) { me.click(); await settleFor(200); }
+    const b = doc.querySelector(`.ys-seg button[data-menu="${id}"]`);
+    if (b) { b.click(); await settleFor(300); }
+    return !!b;
+  };
+  if (await pickMenu('left')) {
+    const html = doc.documentElement;
+    let fold = doc.querySelector('#nav .nav-rail-btn');
+    ok(html.dataset.menu === 'left' && !!fold && fold.getAttribute('aria-expanded') === 'true' && fold.textContent === '«', `rail: the left menu has no « at its foot (${fold && fold.textContent})`);
+    ok(!!fold && !!fold.nextElementSibling && fold.nextElementSibling.classList.contains('nav-me') || !doc.querySelector('#nav .nav-me'), 'rail: « is not just above the account button');
+    const pages = [...doc.querySelectorAll('#nav button[data-page]:not(.nav-sub)')];
+    ok(pages.length > 3 && pages.every((b) => b.title && b.getAttribute('aria-label') && b.querySelector('.nav-label')), 'rail: a menu button has no page name as tooltip and label');
+    if (fold) { fold.click(); await settleFor(200); }
+    fold = doc.querySelector('#nav .nav-rail-btn');
+    ok(html.dataset.rail === 'on' && !!fold && fold.textContent === '»' && fold.getAttribute('aria-expanded') === 'false', `rail: « did not fold the menu (${html.dataset.rail}, ${fold && fold.textContent})`);
+    ok(window.localStorage.getItem('elasticpro.menu.rail') === '1', 'rail: the folded menu is not remembered');
+    ok(!!doc.querySelector('#nav button[data-page][aria-current="page"]'), 'rail: the page on screen is not marked in the rail');
+    const al = doc.querySelector('#nav button[data-page="alerts"]');
+    if (al && al.querySelector('.pill')) ok(/^Alerts, \d+ open/.test(al.getAttribute('aria-label')), `rail: the Alerts icon does not say its count (${al.getAttribute('aria-label')})`);
+    if (fold) { fold.click(); await settleFor(200); }
+    ok(!html.dataset.rail && window.localStorage.getItem('elasticpro.menu.rail') === '0', 'rail: » did not open the menu again');
+    await pickMenu('top');
+    ok(html.dataset.menu === 'top' && !doc.querySelector('#nav .nav-rail-btn'), 'rail: back on top, the fold button is still there');
+  } else ok(false, 'rail: Your settings has no Page menu: Left');
+  window.localStorage.removeItem('elasticpro.menu.rail');
+}
+
 /* ------- No page carries a write toggle (0.3.71): an admin's write action asks to allow writes when pressed ------- */
 for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
   await go(id); await settleFor(300);
