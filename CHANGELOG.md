@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.70
+
+From a full UI review: every page, tab and section, signed in on the test VM and locally, with the menu on the left (light and dark) and on top.
+- **Key/value cards no longer split words in the middle.** The value column used `word-break: break-all`, so in a narrow card ordinary words broke at any letter ("3 m ag o", "auto-refr esh", "GET/HEA D"), for example in Config-Management › System › Config file › Diagnostics. It now wraps at spaces, and only a token longer than the line (a path, an address) is split.
+- **Config-Management shows its name once**, in the menu, per the UI rules. The side panel kept its own "Config-Management" title; it now shows only the signed-in role.
+
 ## 0.3.69
 
 - **Menu on the left: the cluster chooser has its own row at the left, and every page uses its full width.** The chooser used to float over the top-right corner of the page, with a 330 px invisible strip reserved for it. A panel laid out as a flex or grid box can't flow around such a strip, so it lost 330 px from top to bottom. On REST, Nodes & shards and most other pages that showed as an empty column on the right. The chooser now starts a thin row of its own at the left of the content, with the pills and the alert bell at the right end of the same row, and nothing is reserved. With the menu on top nothing changes: the chooser stays at the end of the menu row.
