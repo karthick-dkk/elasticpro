@@ -128,8 +128,37 @@ test('open runs: from the page and from each job, once each, newest first', () =
   assert.deepEqual(J.openRuns(list).map((r) => r.id), ['b', 'a', 'old']);
   assert.deepEqual(J.runCounts(list), { running: 2, queued: 1 });
   assert.equal(J.pollDelay(list), 2000);
+  assert.equal(J.pollDelay(list, { jobsTab: true }), 2000, 'a run open: 2 s on any tab');
   assert.equal(J.pollDelay({ runs: [], jobs: [job()] }), 15000);
+  assert.equal(J.pollDelay({ runs: [], jobs: [job()] }, { jobsTab: true }), 5000, 'the Jobs tab, nothing open: 5 s');
   assert.equal(J.pollDelay(null), 15000);
+});
+
+test('just ran: the newest finished runs by their end, never an open one, at most five', () => {
+  const ended = (id, ago, o = {}) => run({ id, status: 'completed', startedAt: NOW - ago - 300, endedAt: NOW - ago, ...o });
+  const list = { runs: [
+    run({ id: 'open' }), run({ id: 'queued', status: 'queued', startedAt: null }),
+    ended('a', 50_000), ended('b', 2000, { status: 'failed', error: 'boom' }), ended('c', 9000), ended('d', 1000),
+    ended('e', 70_000), ended('f', 80_000), run({ id: 'no-end', status: 'completed', endedAt: null }),
+  ] };
+  assert.deepEqual(J.justRan(list).map((r) => r.id), ['d', 'b', 'c', 'a', 'e']);
+  assert.deepEqual(J.justRan(list, 2).map((r) => r.id), ['d', 'b']);
+  assert.deepEqual(J.justRan(null), []);
+  assert.deepEqual(J.justRan({ runs: [run({})] }), [], 'only open runs: nothing just ran');
+});
+
+test('short times for All jobs: relative, cut to fit; Ran is start and duration', () => {
+  assert.equal(J.shortRelative(NOW + 5 * 60_000, NOW), 'in 5m');
+  assert.equal(J.shortRelative(NOW - 12 * 60_000, NOW), '12m ago');
+  assert.equal(J.shortRelative(NOW + 3 * 3600_000, NOW), 'in 3h');
+  assert.equal(J.shortRelative(NOW - 3 * 86400_000, NOW), '3d ago');
+  assert.equal(J.shortRelative(NOW - 5000, NOW), '<1m ago');
+  assert.equal(J.shortRelative(NOW + 5000, NOW), 'in <1m');
+  assert.equal(J.shortRelative(null, NOW), '—');
+  assert.equal(J.ranText(run({ status: 'completed', startedAt: NOW - 12 * 60_000, endedAt: NOW - 12 * 60_000 + 3400 }), NOW), '12m ago · 3 s');
+  assert.equal(J.ranText(run({ startedAt: NOW - 20_000 }), NOW), '<1m ago · 20 s', 'an open run: its duration so far');
+  assert.equal(J.ranText(run({ status: 'queued', startedAt: null }), NOW), null, 'not started: nothing, not a zero');
+  assert.equal(J.ranText(null, NOW), null);
 });
 
 test('up next: timed jobs soonest first, then the held ones; manual jobs are not scheduled', () => {

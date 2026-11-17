@@ -550,12 +550,21 @@ by default) before its `JOB_*` message.
   `state.current`), the clusters it is on, a bar and percent from `progress` ("counting…" and no
   bar when it is null), records, start, live duration, the job's requests (`state.allocation` once
   the governor reports it, else the registry's range) and Stop (`JOB_CANCEL`, asked first); a
-  `stale` run is marked. *Up next* — the automatic jobs by `nextRunAt`, then the paused or off
-  ones with their note; Run now and Pause / Resume. *All jobs* — one table, every column sorted by
-  core/sort.js (unknown last both ways), the error cut short and whole when the row is opened, a
-  row menu of Run now, Pause / Resume, Stop, Retry (the last run, when failed, deferred or
+  `stale` run is marked. Under it, *Just ran* — the five newest finished runs of the page of runs
+  (`core/jobs.js justRan`): most runs last well under a second (a backup or housekeeping a few
+  ms, a collection or a report run a few hundred), far shorter than a read's interval, so the
+  open-run list is nearly always empty and this is where they are seen. *Up next* — the
+  automatic jobs by `nextRunAt`, then the paused or off ones with their note; Run now and
+  Pause / Resume. *All jobs* — one table that fits the page at 1280 px with the menu on the
+  left: Name · Type · Status (a *paused* chip beside a running job's status) · Progress · Ran
+  (start and duration of the open run, else the last) · Next run · Last run (short relative
+  times, the full time on hover; the last result's pill) · Priority · requests; records and the
+  last error a line under the row only when there is one, the error cut short there and whole
+  when the row is opened. Every column sorts by core/sort.js (unknown last both ways). A row
+  menu of Run now, Pause / Resume, Stop, Retry (the last run, when failed, deferred or
   cancelled), Settings and, for a created schedule, Delete (`JOB_DELETE`, asked first). *Created
-  schedules* lists those alone.
+  schedules* lists those alone. The top of the tab is kept (an empty, hidden slot) for a
+  graphical view under review.
 - **History** (`#/jobs/history`): `JOBS_LIST {limit: 50, before, jobId}` a page at a time (Older /
   Newer walk `next`), by job; the result filter applies to the page on screen. Retry on a failed,
   deferred or cancelled run.
@@ -572,7 +581,8 @@ by default) before its `JOB_*` message.
   `name_taken`, the worker's own; anything else is the core's message.
 - **Times**: absolute in the server's zone when `JOBS_LIST` names one (`tz`), else said to be the
   reader's own; relative beside it.
-- **Reads**: every 2 s while a run is open or queued, every 15 s otherwise; none while the browser
-  tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
+- **Reads**: every 2 s while a run is open or queued; otherwise every 5 s on the Jobs tab and
+  every 15 s on History and Settings (`core/jobs.js pollDelay`); at once when the Jobs tab is
+  opened again; none while the browser tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
   (lib/keyed.js): the Stop under a pointer is the same button while its run moves
   (`tools/flicker-check.mjs`, strict).

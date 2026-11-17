@@ -8460,10 +8460,27 @@ await settleFor(300);
     ok(asc[0] === 'logdelay.measure' && unknown.every((id) => asc.indexOf(id) >= asc.length - 3), `jobs: next run ascending is ${asc.join(', ')}`);
     ok(desc[0] === 'settings.backup' && unknown.every((id) => desc.indexOf(id) >= desc.length - 3), `jobs: next run descending is ${desc.join(', ')} — unknown must stay last`);
     th('next').click(); await settleFor(150);   // back to the registry's order (the table has no default column)
-    // An error is cut short in the row and read in full when the row is opened.
+    // An error is a line under its row (no Error column), cut short with the whole of it on hover,
+    // and read in full when the row is opened; a job with neither records nor an error has no line.
     const backup = panel('All jobs').querySelector('tbody tr[data-job="settings.backup"]');
-    const errCell = backup && backup.querySelector('td.jb-err');
-    ok(errCell && errCell.textContent.length < 40 && errCell.title === longError, 'jobs: the error is not cut short with the whole of it on hover');
+    const errCell = panel('All jobs').querySelector('tbody tr[data-sub="settings.backup"] .jb-err');
+    ok(errCell && errCell.textContent.length < 130 && errCell.textContent.length < longError.length && errCell.title === longError,
+      'jobs: the error is not a line under its row, cut short with the whole of it on hover');
+    ok(backup && !backup.querySelector('td.jb-err') && backup.nextElementSibling && backup.nextElementSibling.dataset.sub === 'settings.backup',
+      'jobs: the error line does not follow its own row');
+    ok(!panel('All jobs').querySelector('tbody tr[data-sub="zabbix.sync"]'), 'jobs: a job with no records and no error has a line under it');
+    const volSub = panel('All jobs').querySelector('tbody tr[data-sub="volume.daily"]');
+    ok(volSub && /12 records/.test(volSub.textContent), `jobs: the running collection's records are not under its row: "${volSub && volSub.textContent}"`);
+    // Fewer, merged columns (no sideways scroll at 1280 px — tools/fit-check.mjs measures the width).
+    const heads = [...panel('All jobs').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[▲▼↑↓⇅]/g, '').trim());
+    ok(heads.length === 9 && heads.includes('Ran') && heads.includes('Priority · requests') && !heads.includes('Paused') && !heads.includes('Error') && !heads.includes('Records'),
+      `jobs: All jobs has the columns ${heads.join(' | ')}`);
+    ok(/\d+[mhd] ago · /.test((backup.querySelector('td:nth-child(5)') || {}).textContent || ''), `jobs: Ran reads "${(backup.querySelector('td:nth-child(5)') || {}).textContent}"`);
+    const zbx = panel('All jobs').querySelector('tbody tr[data-job="zabbix.sync"]');
+    ok(zbx && /Paused/.test(zbx.querySelector('td:nth-child(3)').textContent), 'jobs: a paused job does not say so in Status');
+    // Just ran: the newest finished runs, newest end first, under the open ones.
+    const justIds = [...doc.querySelectorAll('tr[data-just]')].map((t) => t.dataset.just);
+    ok(justIds.length === 5 && justIds[0] === 'h1' && justIds[1] === 'h2' && !justIds.includes('run-vol'), `jobs: Just ran lists ${justIds.join(', ')}`);
     backup.querySelector('.jb-x').click(); await settleFor(150);
     const detail = panel('All jobs').querySelector('tr[data-detail="settings.backup"]');
     ok(detail && detail.textContent.includes(longError), 'jobs: opening the row does not show the whole error');

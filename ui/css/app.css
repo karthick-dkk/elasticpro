@@ -2919,6 +2919,29 @@ td.jb-prog { min-width: 150px; }
 .jb-pct { font-variant-numeric: tabular-nums; }
 .jb-of { margin-left: 6px; font-size: 11px; }
 td.jb-err { color: var(--critical-ink); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+/* All jobs (0.3.77): no sideways scroll — merged cells, and records / the error on a line under the row */
+.jb-st { display: inline-flex; align-items: center; gap: 5px; }
+.jb-chiplet { font-size: 10.5px; line-height: 16px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-secondary); }
+.jb-ago { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+tr.jb-has-sub td { border-bottom-color: transparent; }
+/* Long names and lists end in an ellipsis inside their cell, the whole of it on hover: a created
+   schedule's name (up to 80 characters), a run's clusters, a schedule's sentence */
+/* max-width 0 + a share: the column takes what the others leave and never widens the table */
+.jb-page table.tbl td.jb-nm { max-width: 0; width: 28%; }
+td.jb-nm .jb-name { max-width: 100%; }
+td.jb-nm .jb-name b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+td.jb-nm .jb-cr, td.jb-nm .jb-x { flex: none; }
+.jb-page table.tbl td.jb-on, .jb-page table.tbl td.jb-sched, .jb-page table.tbl td.jb-cname, .jb-page table.tbl td.jb-to { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.jb-page table.tbl td.jb-on { width: 30%; }
+.jb-page table.tbl td.jb-sched { width: 40%; }
+.jb-page table.tbl td.jb-cname { width: 30%; }
+.jb-page table.tbl td.jb-to { width: 18%; }
+.jb-page table.tbl tr.jb-sub td.jb-subl { height: auto; padding: 0 8px 5px 30px; font-size: 11.5px; max-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
+.jb-subl .jb-err { color: var(--critical-ink); }
+/* Running now › Just ran: the newest finished runs, under the open ones (or the "nothing running" line) */
+.jb-just { border-top: 1px solid var(--border); }
+.jb-page table.tbl td.jb-why { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+.jb-page table.tbl td.jb-why.jb-err { max-width: 420px; }
 td.jb-acts { text-align: right; width: 1%; }
 .jb-btns { display: inline-flex; gap: 4px; }
 tr.jb-stale td { background: var(--warning-bg); }
@@ -3248,6 +3271,18 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
 .ov-ip { white-space: nowrap; color: var(--text-secondary); }
 .ov-master { margin-left: 6px; background: var(--accent); color: var(--on-accent); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-weight: 600; }
 .ov-idx-name { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Nodes card, a little more compact (0.3.77): 28 px rows, a smaller head, narrower bars; every column kept */
+.ov-panel[data-card="nodes-table"] .ov-panel-h { padding: 5px 12px 2px; }
+.ov-panel[data-card="nodes-table"] .ov-panel-h h2 { font-size: 13px; }
+.dense .ov-panel[data-card="nodes-table"] .ov-tbl th { padding: 4px 8px; font-size: 10.5px; }
+.dense .ov-panel[data-card="nodes-table"] .ov-tbl td { height: 28px; padding: 0 8px; font-size: 12px; }
+.ov-panel[data-card="nodes-table"] .ov-tbl td:first-child, .ov-panel[data-card="nodes-table"] .ov-tbl th:first-child { padding-left: 10px; }
+.ov-panel[data-card="nodes-table"] .ov-tbl th.ov-bar-th { width: 92px; }
+.ov-panel[data-card="nodes-table"] .use-bar { min-width: 72px; gap: 4px; }
+.ov-panel[data-card="nodes-table"] .use-bar > .bar-mini { flex: 1 1 40px; min-width: 28px; max-width: 56px; height: 5px; }
+.ov-panel[data-card="nodes-table"] .use-num { min-width: 30px; font-size: 11px; }
+.ov-panel[data-card="nodes-table"] .ov-master { margin-left: 5px; padding: 0 5px; font-size: 10px; line-height: 15px; }
+.ov-panel[data-card="nodes-table"] .ov-node-name .mono, .ov-panel[data-card="nodes-table"] .ov-ip { font-size: 11.5px; }
 .ov-tbl td.num { white-space: nowrap; }
 /* The board is one screen from 1280 px up. Narrower, it stacks and the page scrolls. */
 @media (max-width: 1279px) {

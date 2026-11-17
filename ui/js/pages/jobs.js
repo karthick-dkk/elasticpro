@@ -10,7 +10,8 @@
  * only an administrator presses anything, and every press goes through the write unlock the
  * other admin pages use (core/writes.js ensureWrites) and says a refusal as a sentence.
  *
- * It reads JOBS_LIST every 2 s while a run is open and every 15 s otherwise, not at all while
+ * It reads JOBS_LIST every 2 s while a run is open, every 5 s on the Jobs tab otherwise and
+ * every 15 s on History and Settings (core/jobs.js pollDelay), not at all while
  * the tab is hidden, and stops when the page is left. Nothing is sent to a cluster. Each row and
  * cell is the one already on screen unless what it shows changed (lib/keyed.js): the row under
  * the pointer, an open menu and a field being typed into stay where they are while runs move.
@@ -103,6 +104,8 @@ export function onRoute() {
   if (tab === 'settings') loadSettings({ again: true });
   if (tab === 'history') loadHistory();
   draw();
+  // Back on Jobs: read now and at its own pace (5 s), not after History's or Settings' 15 s.
+  if (tab === 'jobs') kick();
 }
 
 export function onData() { if (host) draw(); }
@@ -136,7 +139,7 @@ async function tick(g) {
   // A press reads again at once (kick) while the loop's own read may be in flight: whichever
   // ends last sets the one timer, so there is never a second loop.
   clearTimeout(timer);
-  timer = setTimeout(() => tick(g), J.pollDelay(list));
+  timer = setTimeout(() => tick(g), J.pollDelay(list, { jobsTab: tab === 'jobs' }));
 }
 
 /** Read again now (after a press), keeping the same loop. */
@@ -324,7 +327,10 @@ const tz = () => (list && (list.tz || list.serverTz)) || null;
 
 function jobsKids(now) {
   if (!list) return [built.same('loading', h('div.tbl-empty', unsupported ? '' : 'Reading the jobs…'))];
-  return [runningCard(now), upNextCard(now), allJobsCard(now), createdCard(now)].filter(Boolean);
+  // The top of the tab is kept for the graphical jobs view (a design under the owner's review):
+  // an empty, hidden slot — no band on screen until it is built.
+  const slot = built.get('graph-slot', 'div', () => h('div.jb-graph-slot', { hidden: true, dataset: { slot: 'jobs-graph' } }));
+  return [slot, runningCard(now), upNextCard(now), allJobsCard(now), createdCard(now)].filter(Boolean);
 }
 
 function clustersText(r) {
@@ -365,7 +371,7 @@ function runningCard(now) {
       td(`${k}:job`, h('span.jb-name', h('b', job ? job.name : r.jobId), h('span.muted.jb-by', ` ${J.triggerText(r.trigger)}`),
         r.stale ? pill('stale', 'yellow', 'the worker\'s heartbeat is late: this run may have ended with the worker. It is not ended here.') : null,
         r.status === 'queued' ? pill('queued', 'grey') : null)),
-      td(`${k}:on`, `${on.text}${day}`, { title: on.title }),
+      td(`${k}:on`, `${on.text}${day}`, { cls: 'jb-on', title: on.title }),
       progressCell(`${k}:prog`, r),
       td(`${k}:rec`, r.records === null || r.records === undefined ? '—' : fmtNum(r.records), { num: true }),
       td(`${k}:start`, r.startedAt ? J.absoluteText(r.startedAt, { tz: tz(), now }).text : '—', { title: r.startedAt ? dt(r.startedAt) : 'not started yet' }),
@@ -375,8 +381,38 @@ function runningCard(now) {
     ].filter(Boolean), { cls: r.stale ? 'jb-stale' : '', data: { run: r.id, status: r.status } });
   });
   const headers = ['Job', 'On', 'Progress', { label: 'Records', num: true }, 'Started', { label: 'Duration', num: true }, 'Requests', ...(admin ? [''] : [])];
-  const body = runs.length ? keptTable(built, 'run', headers, rows) : built.same('run:none', h('div.jb-none.muted', 'Nothing running or queued.'));
-  return keptCard(built, 'run', 'Running now', `${c.running} running · ${c.queued} queued · read every ${runs.length ? '2' : '15'} s`, body);
+  const just = justRanBlock(now);
+  const body = runs.length ? keptTable(built, 'run', headers, rows)
+    : built.same('run:none', h('div.jb-none.muted', just
+      ? 'Nothing running or queued right now. Most runs end within a second or two, so the newest are listed below.'
+      : 'Nothing running or queued.'));
+  const every = Math.round(J.pollDelay(list, { jobsTab: true }) / 1000);
+  return keptCard(built, 'run', 'Running now', `${c.running} running · ${c.queued} queued · read every ${every} s`, [body, just]);
+}
+
+/**
+ * "Just ran": the newest finished runs (J.justRan) — what Running now would have shown, had a
+ * read landed while they ran. Result, how long ago it ended, how long it took, what it did.
+ */
+function justRanBlock(now) {
+  const runs = J.justRan(list);
+  if (!runs.length) return null;
+  const rows = runs.map((r) => {
+    const k = `just:${r.id}`;
+    const why = r.error || r.note || '';
+    return tr(k, [
+      td(`${k}:job`, h('span.jb-name', h('b', jobName(r.jobId)), h('span.muted.jb-by', ` ${J.triggerText(r.trigger)}`)), { title: `run ${r.id}` }),
+      td(`${k}:res`, pill(J.statusWord(r.status), J.statusTone(r.status))),
+      td(`${k}:end`, J.shortRelative(r.endedAt, now), { title: dt(r.endedAt) }),
+      td(`${k}:dur`, J.durationText(J.durationMs(r, now)), { num: true }),
+      td(`${k}:rec`, r.records === null || r.records === undefined ? '—' : fmtNum(r.records), { num: true }),
+      td(`${k}:why`, why ? J.truncate(why, 60) : '—', { cls: r.error ? 'jb-err.jb-why' : 'muted.jb-why', title: why || null }),
+    ], { data: { just: r.id, status: r.status } });
+  });
+  const tbl = keptTable(built, 'just', ['Just ran', 'Result', 'Ended', { label: 'Took', num: true }, { label: 'Records', num: true }, 'Error or note'], rows);
+  const box = built.get('just:box', 'div', () => h('div.jb-just'));
+  if (box.firstChild !== tbl || box.childNodes.length !== 1) mount(box, tbl);
+  return box;
 }
 
 function upNextCard(now) {
@@ -392,7 +428,7 @@ function upNextCard(now) {
       td(`${k}:job`, h('span.jb-name', h('b', job.name), J.isCreated(job) ? h('span.muted', ' · created') : null)),
       td(`${k}:at`, next.at !== null ? next.text : (st.paused ? 'paused' : 'off'), { title: next.at !== null ? `${dt(next.at)} · ${next.zone}` : next.note }),
       td(`${k}:in`, next.at !== null ? next.rel : J.truncate(next.note, 48), { cls: next.at !== null ? '' : 'muted', title: next.note || null }),
-      td(`${k}:sched`, J.truncate(job.schedule || '—', 56), { cls: 'muted', title: job.schedule || null }),
+      td(`${k}:sched`, job.schedule || '—', { cls: 'muted.jb-sched', title: job.schedule || null }),
       admin ? td(`${k}:act`, h('span.jb-btns', ...acts), { cls: 'jb-acts' }) : null,
     ].filter(Boolean), { data: { job: job.id } });
   });
@@ -416,26 +452,34 @@ function allColumns(now) {
     type: { type: 'text', value: (r) => J.jobTypeText(r.job) },
     status: { type: 'text', value: (r) => J.statusWord(r.status) },
     progress: { type: 'percent', value: (r) => (r.cur ? J.progressOf(r.cur).pct : null), start: -1 },
-    started: { type: 'date', value: (r) => (r.run ? r.run.startedAt : null), start: -1 },
-    duration: { type: 'duration', value: (r) => J.durationMs(r.run, now), start: -1 },
+    ran: { type: 'date', value: (r) => (r.run ? r.run.startedAt : null), start: -1 },
     next: { type: 'date', value: (r) => r.next.at },
     last: { type: 'date', value: (r) => (r.last ? r.last.endedAt : null), start: -1 },
-    result: { type: 'text', value: (r) => (r.last ? J.statusWord(r.last.status) : null) },
-    records: { type: 'number', value: (r) => (r.run ? r.run.records : null), start: -1 },
-    error: { type: 'text', value: (r) => (r.last && r.last.error) || null },
     priority: { type: 'number', value: (r) => J.priorityRank(r.job.priority) },
-    requests: { type: 'number', value: (r) => J.requestsText(r.job).now ?? ((r.job.requests || {}).max ?? null), start: -1 },
-    paused: { type: 'text', value: (r) => (!J.canPause(r.job) ? null : r.job.state && r.job.state.paused ? 'paused' : 'no') },
   };
 }
 
+/**
+ * All jobs fits the page without a sideways scrollbar at 1280 px with the menu on the left
+ * (owner, 0.3.77): Started and Duration are one "Ran" cell, Next and Last run short relative
+ * times (the full time on hover), the last result a pill beside its time, Priority and
+ * Requests one cell, Paused a chip in Status, and Records and Error a line under the row,
+ * only when there is one.
+ */
 const ALL_HEADERS = [
   { label: 'Name', sort: 'name' }, { label: 'Type', sort: 'type' }, { label: 'Status', sort: 'status' },
-  { label: 'Progress', sort: 'progress', num: true }, { label: 'Started', sort: 'started' }, { label: 'Duration', sort: 'duration', num: true },
-  { label: 'Next run', sort: 'next' }, { label: 'Last run', sort: 'last' }, { label: 'Last result', sort: 'result' },
-  { label: 'Records', sort: 'records', num: true }, { label: 'Error', sort: 'error' }, { label: 'Priority', sort: 'priority' },
-  { label: 'Requests', sort: 'requests' }, { label: 'Paused', sort: 'paused' },
+  { label: 'Progress', sort: 'progress', num: true }, { label: 'Ran', sort: 'ran', title: 'when the open run (else the last) started · how long it took' },
+  { label: 'Next run', sort: 'next' }, { label: 'Last run', sort: 'last' },
+  { label: 'Priority · requests', sort: 'priority', title: 'its priority · the requests it may use at once (what the governor gives it now, when it reports it)' },
 ];
+
+/** The line under a row of All jobs: what the run processed and why the last one failed. Null when neither. */
+function subLineOf(run, last) {
+  const rec = run && run.records !== null && run.records !== undefined ? `${fmtNum(run.records)} record${run.records === 1 ? '' : 's'}` : '';
+  const err = last && last.error ? String(last.error) : '';
+  if (!rec && !err) return null;
+  return { rec, err };
+}
 
 function allJobsCard(now) {
   const admin = isAdmin();
@@ -448,28 +492,34 @@ function allJobsCard(now) {
     const open = expanded.has(job.id);
     const p = cur ? J.progressOf(cur) : null;
     const req = J.requestsText(job);
-    const err = last && last.error ? String(last.error) : '';
+    const st = job.state || {};
+    const sub = subLineOf(run, last);
+    const ran = J.ranText(run, now);
     const toggle = h('button.jb-x', {
       type: 'button', 'aria-expanded': String(open), title: open ? 'Hide the details' : 'Show the details',
       onclick: () => { if (expanded.has(job.id)) expanded.delete(job.id); else expanded.add(job.id); draw(); },
     }, open ? '▾' : '▸');
+    // Paused while a run goes: the run's status, and a chip that says the timer is held.
+    const pausedChip = st.paused && r.status !== 'paused' ? h('span.jb-chiplet', { title: `paused${st.pausedBy ? ` by ${st.pausedBy}` : ''}: its timer starts nothing; this run finishes` }, 'paused') : null;
     trs.push(tr(k, [
-      td(`${k}:name`, h('span.jb-name', toggle, h('b', job.name), J.isCreated(job) ? h('span.muted', ' · created') : null), { title: job.id }),
+      td(`${k}:name`, h('span.jb-name', toggle, h('b', job.name), J.isCreated(job) ? h('span.muted.jb-cr', ' · created') : null), { cls: 'jb-nm', title: `${job.name} · ${job.id}` }),
       td(`${k}:type`, J.jobTypeText(job)),
-      td(`${k}:status`, pill(J.statusWord(r.status), J.statusTone(r.status), r.status === 'paused' && job.state.pausedBy ? `paused by ${job.state.pausedBy}` : null)),
+      td(`${k}:status`, h('span.jb-st', pill(J.statusWord(r.status), J.statusTone(r.status), r.status === 'paused' && st.pausedBy ? `paused by ${st.pausedBy}` : null), pausedChip)),
       td(`${k}:prog`, p ? p.text : '—', { num: true, cls: p && p.pct === null ? 'muted' : '' }),
-      td(`${k}:start`, run && run.startedAt ? J.relativeText(run.startedAt, now) : '—', { title: run && run.startedAt ? dt(run.startedAt) : null }),
-      td(`${k}:dur`, J.durationText(J.durationMs(run, now)), { num: true }),
-      td(`${k}:next`, r.next.at !== null ? r.next.rel : '—', { title: r.next.at !== null ? `${r.next.text} · ${r.next.zone}` : r.next.note }),
-      td(`${k}:last`, last && last.endedAt ? J.relativeText(last.endedAt, now) : '—', { title: last && last.endedAt ? dt(last.endedAt) : null }),
-      td(`${k}:result`, last ? pill(J.statusWord(last.status), J.statusTone(last.status)) : dash()),
-      td(`${k}:rec`, run && run.records !== null && run.records !== undefined ? fmtNum(run.records) : '—', { num: true }),
-      td(`${k}:err`, err ? J.truncate(err, 36) : '—', { cls: err ? 'jb-err' : 'muted', title: err || null }),
-      td(`${k}:prio`, J.priorityText(job.priority)),
-      td(`${k}:req`, req.text, { title: req.title }),
-      td(`${k}:paused`, !J.canPause(job) ? '—' : job.state && job.state.paused ? 'paused' : 'no', { title: job.state && job.state.pausedBy ? `by ${job.state.pausedBy}` : null }),
+      td(`${k}:ran`, ran || '—', { cls: ran ? '' : 'muted', title: run && run.startedAt ? `started ${dt(run.startedAt)}${run.endedAt ? ` · ended ${dt(run.endedAt)}` : ' · still running'}` : null }),
+      td(`${k}:next`, r.next.at !== null ? J.shortRelative(r.next.at, now) : '—', { cls: r.next.at !== null ? '' : 'muted', title: r.next.at !== null ? `${r.next.text} · ${r.next.zone}` : r.next.note }),
+      td(`${k}:last`, last ? h('span.jb-st', pill(J.statusWord(last.status), J.statusTone(last.status)), last.endedAt ? h('span.jb-ago', J.shortRelative(last.endedAt, now)) : null) : dash(),
+        { title: last && last.endedAt ? dt(last.endedAt) : null }),
+      td(`${k}:req`, `${J.priorityText(job.priority)} · ${req.text}`, { title: req.title }),
       admin ? td(`${k}:act`, rowMenu(() => jobMenu(job.id), { title: `Actions for ${job.name}`, menuLabel: job.name }), { cls: 'jb-acts' }) : null,
-    ].filter(Boolean), { data: { job: job.id, status: r.status } }));
+    ].filter(Boolean), { cls: sub ? 'jb-has-sub' : '', data: { job: job.id, status: r.status } }));
+    if (sub) {
+      trs.push(tr(`${k}:sub`, [td(`${k}:sub:td`, [
+        sub.rec ? h('span.jb-rec', sub.rec) : null,
+        sub.rec && sub.err ? h('span.muted', ' · ') : null,
+        sub.err ? h('span.jb-err', { title: sub.err }, `Error: ${J.truncate(sub.err, 110)}`) : null,
+      ].filter(Boolean), { colspan: n, cls: 'jb-subl' })], { cls: 'jb-sub', data: { sub: job.id } }));
+    }
     if (open) trs.push(tr(`${k}:more`, [td(`${k}:more:td`, detailsOf(job, cur, last, now), { colspan: n, cls: 'jb-more' })], { cls: 'jb-detail', data: { detail: job.id } }));
   }
   const headers = [...ALL_HEADERS, ...(admin ? [''] : [])];
@@ -522,11 +572,11 @@ function createdCard(now) {
     const cl = c.clusters === 'all' || !c.clusters ? 'All clusters' : clustersText({ clusters: c.clusters }).text;
     const to = Array.isArray(c.to) ? c.to : null;
     return tr(k, [
-      td(`${k}:name`, h('b', job.name)),
+      td(`${k}:name`, h('b', job.name), { cls: 'jb-cname', title: job.name }),
       td(`${k}:rep`, job.report || '—'),
       td(`${k}:cl`, cl),
       td(`${k}:when`, `${c.cadence || '—'}${c.at ? `, ${c.at}` : ''}`),
-      td(`${k}:to`, to ? (to.length ? `${to[0]}${to.length > 1 ? ` +${to.length - 1}` : ''}` : 'nobody') : '—', { title: to ? to.join(', ') : 'recipients are an administrator\'s to read' }),
+      td(`${k}:to`, to ? (to.length ? `${to[0]}${to.length > 1 ? ` +${to.length - 1}` : ''}` : 'nobody') : '—', { cls: 'jb-to', title: to ? to.join(', ') : 'recipients are an administrator\'s to read' }),
       td(`${k}:next`, next.at !== null ? next.rel : J.truncate(next.note, 36), { title: next.at !== null ? `${next.text} · ${next.zone}` : next.note }),
       admin ? td(`${k}:act`, h('button.btn.sm.danger', { type: 'button', onclick: () => deleteJob(job.id) }, 'Delete'), { cls: 'jb-acts' }) : null,
     ].filter(Boolean), { data: { job: job.id } });
