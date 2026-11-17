@@ -191,7 +191,8 @@ export function niceScale(top) {
   const unit = 1024 ** Math.max(0, Math.floor(Math.log(t) / Math.log(1024)));
   const v = t / unit;
   const mag = 10 ** Math.floor(Math.log10(v / 4));
-  const step = [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s * 4 >= v) * unit;
+  // Never a step under one byte: a fraction of a byte has no name, and "0.25 B" drew as "undefined".
+  const step = Math.max(1, [1, 2, 2.5, 5, 10].map((s) => s * mag).find((s) => s * 4 >= v) * unit);
   return { max: step * 4, step };
 }
 
