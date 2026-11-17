@@ -76,6 +76,7 @@ function keepWheel(el) {
 }
 
 function close() {
+  cancelHoverClose();
   if (!open) return;
   open.el.remove();
   open.trigger.setAttribute('aria-expanded', 'false');
@@ -92,12 +93,23 @@ export function closeMenus() { close(); }
  * @param items  [{ label, icon, onClick, danger, disabled, title, sep, hint, note }]
  *               `sep: true` draws a divider; `hint` is a line of muted text; `note` is a
  *               quiet word at the end of an item's line (where it leads, say).
- * @param opts   { label, title, trigger, menuLabel } — `label` is the trigger's content
+ * @param opts   { label, title, trigger, menuLabel, hover } — `label` is the trigger's content
  *               (default '⋮', a node is fine); `trigger` its tag and classes (default
- *               'button.btn.sm.menu-trigger'); `menuLabel` names the menu for a reader.
+ *               'button.btn.sm.menu-trigger'); `menuLabel` names the menu for a reader;
+ *               `hover: true` also opens it when the pointer rests on the trigger (the owner,
+ *               0.3.77: the Indices bulk "Actions") and closes it shortly after the pointer
+ *               leaves both — a click still opens it, and pins one the hover opened.
  *               `items` may be a function, called each time the menu opens.
  */
+const HOVER_CLOSE_MS = 250;
+let hoverTimer = null;
+const cancelHoverClose = () => { clearTimeout(hoverTimer); hoverTimer = null; };
+const scheduleHoverClose = (trigger) => {
+  cancelHoverClose();
+  hoverTimer = setTimeout(() => { if (open && open.trigger === trigger && open.byHover) close(); }, HOVER_CLOSE_MS);
+};
 export function rowMenu(items, opts = {}) {
+  const list = () => (typeof items === 'function' ? items() : items);
   const trigger = h(opts.trigger || 'button.btn.sm.menu-trigger', {
     type: 'button',
     title: opts.title || 'More actions',
@@ -105,12 +117,23 @@ export function rowMenu(items, opts = {}) {
     'aria-expanded': 'false',
     onclick: (e) => {
       e.stopPropagation();
-      const wasOpen = open && open.trigger === trigger;
+      const mine = open && open.trigger === trigger;
+      // A menu the hover opened stays: the click pins it and hands it the keyboard.
+      if (mine && open.byHover) { cancelHoverClose(); open.byHover = false; const b = open.el.querySelector('button:not(:disabled)'); if (b) b.focus(); return; }
       close();
-      if (wasOpen) return;             // clicking the same trigger closes it
-      show(trigger, typeof items === 'function' ? items() : items, opts);
+      if (mine) return;                // clicking the same trigger closes it
+      show(trigger, list(), opts);
     },
   }, opts.label || '⋮');
+  if (opts.hover) {
+    trigger.addEventListener('mouseenter', () => {
+      cancelHoverClose();
+      if (trigger.disabled || (open && open.trigger === trigger)) return;
+      close();
+      show(trigger, list(), { ...opts, byHover: true });
+    });
+    trigger.addEventListener('mouseleave', () => scheduleHoverClose(trigger));
+  }
   return trigger;
 }
 
@@ -166,7 +189,13 @@ function show(trigger, items, opts = {}) {
   const onScroll = closeOnOuterScroll(() => el, close, trigger);
   window.addEventListener('scroll', onScroll, true);
 
-  open = { el, trigger, away, key, onScroll };
+  open = { el, trigger, away, key, onScroll, byHover: !!opts.byHover };
+  if (opts.byHover) {
+    // Opened by the pointer: it keeps the keyboard where it was, and stays while the pointer is on it.
+    el.addEventListener('mouseenter', cancelHoverClose);
+    el.addEventListener('mouseleave', () => scheduleHoverClose(trigger));
+    return;
+  }
   const first = el.querySelector('button:not(:disabled)');
   if (first) first.focus();
 }

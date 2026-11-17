@@ -818,7 +818,18 @@ await go('indices');
       ok(!!next && ticks.length > 0 && ticks.every((x) => x.checked), `indices: page 2 has ${ticks.filter((x) => !x.checked).length} of ${ticks.length} rows unticked after the head tick`);
       ok(headBox() && headBox().checked && /selected/.test(headBox().parentElement.textContent), 'indices: the head tick lost the selection on page 2');
       const acts = [...doc.querySelectorAll('#idx-bulk button')].find((b) => /Actions/.test(b.textContent));
-      if (acts) { press(acts); await settleFor(100); }
+      // The pointer resting on Actions opens it, without taking the keyboard; leaving closes it (0.3.77).
+      if (acts) {
+        acts.dispatchEvent(new window.MouseEvent('mouseenter')); await settleFor(60);
+        const pop = doc.querySelector('.menu-pop');
+        ok(!!pop && acts.getAttribute('aria-expanded') === 'true' && !pop.contains(doc.activeElement), 'indices: hovering Actions did not open its menu (or took the focus)');
+        acts.dispatchEvent(new window.MouseEvent('mouseleave')); await settleFor(400);
+        ok(!doc.querySelector('.menu-pop'), 'indices: the hover-opened Actions menu stayed after the pointer left');
+        acts.dispatchEvent(new window.MouseEvent('mouseenter')); await settleFor(60);
+        press(acts); await settleFor(60);
+        acts.dispatchEvent(new window.MouseEvent('mouseleave')); await settleFor(400);
+        ok(!!doc.querySelector('.menu-pop'), 'indices: a click did not pin the hover-opened Actions menu');
+      }
       const del = [...doc.querySelectorAll('[role=menuitem]')].find((b) => /Delete [\d,]+ indices/.test(b.textContent));
       ok(!!del && Number(del.textContent.match(/Delete ([\d,]+)/)[1].replace(/,/g, '')) === matching, `indices: the bulk Delete reads "${del && del.textContent.trim()}" for ${matching} selected`);
       doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settleFor(60);
