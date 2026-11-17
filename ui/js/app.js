@@ -149,8 +149,9 @@ const tabOf = (id) => { const p = PAGES.find((x) => x.id === id); return p && p.
  * the account (core/prefs.js, docs/HANDBOOK.md "Your settings"): the account's choice, else
  * this browser's copy, else the shipped default. `source` says which, per setting.
  */
-let prefs = { menu: 'top', theme: 'system', opensOn: 'last', source: {}, supported: false };
-let menuPosition = 'top';
+let prefs = { menu: 'left', theme: 'system', opensOn: 'last', source: {}, supported: false };
+// The left menu unless someone chose the top one (the owner, 0.3.72); a choice is kept (prefs).
+let menuPosition = 'left';
 function applyMenuPosition(v) {
   menuPosition = normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
@@ -609,6 +610,22 @@ function runningDot(btn, title) {
   if (dot.title !== title) { dot.title = title; dot.setAttribute('aria-label', title); }
 }
 
+/**
+ * The top menu puts the cluster chooser first, right after the brand (the owner, 0.3.72); the left
+ * menu keeps it at the left of the content's first row. The top bar draws a new chooser on every
+ * redraw, so the one moved before is dropped. Called after both renderNav and renderTopbar.
+ */
+function placeChooser() {
+  const nav = $('#nav'), bar = $('#topbar');
+  if (!nav || !bar) return;
+  const fresh = bar.querySelector('.cluster-pick') || nav.querySelector('.cluster-pick');
+  for (const old of document.querySelectorAll('.cluster-pick')) if (old !== fresh) old.remove();
+  if (!fresh) return;
+  if (menuPosition === 'top') {
+    const brand = nav.querySelector('.nav-brand');
+    if (brand && brand.nextElementSibling !== fresh) brand.after(fresh);
+  } else if (fresh.parentNode !== bar) bar.insertBefore(fresh, bar.firstElementChild ? bar.firstElementChild.nextSibling : null);
+}
 /** « / », at the top of the left menu and at its foot (one definition for both). */
 function railButton(where) {
   const label = menuRail ? 'Show the full menu' : autoFold ? 'Keep the menu open' : 'Fold the menu to icons';
@@ -706,6 +723,7 @@ function renderNav() {
       b.append(badge);
     }
   }
+  placeChooser();
 }
 // A report job starting or ending moves the dot on Reports without waiting for a refresh.
 onReports(() => renderNav());
@@ -880,7 +898,7 @@ function renderTopbar() {
     // Evidence: the same chooser, one cluster at a time — no "All clusters", no finder (its
     // placeholder counts the fleet) and the dot is that cluster's, not the fleet's.
     ev && !evCluster ? null
-      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(ev ? [evCluster] : activeClusters()), sel, finder),
+      : h('label.field.cluster-pick', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(ev ? [evCluster] : activeClusters()), sel, finder),
     h('div.spacer'),
     (() => {
       const need = needCreds.length;
@@ -940,6 +958,7 @@ function renderTopbar() {
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
     // where accounts exist: the name is not part of a client's screenshot.
     (me && ev) || menuPosition === 'left' ? null : meButton());
+  placeChooser();
 }
 
 /* ------------------------------ evidence layout ------------------------------ */

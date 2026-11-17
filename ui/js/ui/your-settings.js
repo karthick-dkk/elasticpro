@@ -1,6 +1,7 @@
 /**
- * "Your settings" (board 8, LeftMenu.dc.html): the page menu on the Top or on the Left, the
- * theme, and which cluster the app opens on — one person's own choices, opened from their name.
+ * "Your settings" (board 8, LeftMenu.dc.html): the page menu on the Left (default) or on the Top,
+ * the theme, and which cluster the app opens on — one person's own choices, opened from their name.
+ * Icons only since 0.3.72 (the owner): the names are in the buttons' titles and labels.
  *
  * Kept with the account where the core keeps them (core/prefs.js, PREFS_GET / PREFS_SET), and
  * always in this browser too; the panel says which is true for this core rather than promising
@@ -11,12 +12,17 @@
 
 import { h } from '../lib/dom.js';
 
-export const MENU_POSITIONS = Object.freeze([['top', 'Top'], ['left', 'Left']]);
+export const MENU_POSITIONS = Object.freeze([['left', 'Left'], ['top', 'Top']]);
+/** The menu buttons' pictures: a bar down the left, a bar across the top (names in title + aria-label). */
+const MENU_ICON = {
+  left: '<svg aria-hidden="true" width="18" height="16" viewBox="0 0 18 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1" width="16" height="14" rx="2"/><rect x="1" y="1" width="5" height="14" rx="1.5" fill="currentColor" stroke="none"/></svg>',
+  top: '<svg aria-hidden="true" width="18" height="16" viewBox="0 0 18 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="1" width="16" height="14" rx="2"/><rect x="1" y="1" width="16" height="4" rx="1.5" fill="currentColor" stroke="none"/></svg>',
+};
 /** core/prefs-rules.js OPENS_ON, with '' for "not chosen": the config's default for everyone applies. */
-export const OPENS_ON = Object.freeze([['', 'As the defaults say (System › Defaults)'], ['last', 'The cluster last chosen in this browser'], ['all', 'All clusters']]);
+export const OPENS_ON = Object.freeze([['', 'Default'], ['last', 'Last cluster chosen'], ['all', 'All clusters']]);
 
-/** A menu position as stored, made safe: 'top' unless it is exactly 'left'. */
-export const normaliseMenuPosition = (v) => (v === 'left' ? 'left' : 'top');
+/** A menu position as stored, made safe: the left menu unless it is exactly 'top' (the owner, 0.3.72: left by default). */
+export const normaliseMenuPosition = (v) => (v === 'top' ? 'top' : 'left');
 
 let open = null;
 
@@ -40,29 +46,34 @@ export function closeYourSettings() {
  */
 export function openYourSettings(anchor, { prefs, supported = false, themes, who, onChange, onSignOut }) {
   if (open) { const same = open.anchor === anchor; closeYourSettings(); if (same) return; }
-  const seg = h('span.ys-seg', { role: 'group', 'aria-label': 'Page menu position' },
-    ...MENU_POSITIONS.map(([id, label]) => h('button', {
-      type: 'button', 'aria-pressed': String(prefs.menu === id), dataset: { menu: id },
-      onclick: (e) => {
-        for (const b of seg.children) b.setAttribute('aria-pressed', String(b === e.currentTarget));
-        onChange('menu', id);
-      },
-    }, label)));
-  const theme = themes ? h('select#ys-theme', { onchange: (e) => onChange('theme', e.target.value) },
-    ...themes.map((t) => h('option', { value: t.id, selected: t.id === prefs.theme }, t.label.replace(/^\S+\s/, '')))) : null;
-  const opensOn = h('select#ys-open', { onchange: (e) => onChange('opensOn', e.target.value) },
+  // Icons only (the owner, 0.3.72): every choice is a picture with its name in title and aria-label.
+  const pick = (group, key, value) => (e) => {
+    for (const b of group.children) b.setAttribute('aria-pressed', String(b === e.currentTarget));
+    onChange(key, value);
+  };
+  const seg = h('span.ys-seg', { role: 'group', 'aria-label': 'Page menu' });
+  for (const [id, label] of MENU_POSITIONS) {
+    const b = h('button', { type: 'button', 'aria-pressed': String(prefs.menu === id), dataset: { menu: id }, title: `Menu on the ${label.toLowerCase()}`, 'aria-label': `Menu on the ${label.toLowerCase()}`, onclick: pick(seg, 'menu', id) });
+    b.innerHTML = MENU_ICON[id];
+    seg.append(b);
+  }
+  // A theme's label is "<glyph> <name>" (app.js THEMES): the glyph is the button, the name its title.
+  const theme = themes ? h('span.ys-seg#ys-theme', { role: 'group', 'aria-label': 'Theme' }) : null;
+  if (theme) {
+    for (const t of themes) {
+      const [glyph, ...name] = t.label.split(' ');
+      theme.append(h('button', { type: 'button', 'aria-pressed': String(t.id === prefs.theme), dataset: { theme: t.id }, title: name.join(' '), 'aria-label': name.join(' '),
+        onclick: pick(theme, 'theme', t.id) }, glyph));
+    }
+  }
+  const opensOn = h('select#ys-open', { 'aria-label': 'Opens on', title: 'Which cluster the app opens on', onchange: (e) => onChange('opensOn', e.target.value) },
     ...OPENS_ON.map(([v, l]) => h('option', { value: v, selected: v === (prefs.opensOn || '') }, l)));
-  const el = h('section.ys-pop', { role: 'dialog', 'aria-labelledby': 'ys-h' },
-    h('div.ys-head', h('h2#ys-h', 'Your settings'), h('span.muted', who ? `${who.name} · ${who.role}` : 'only for you')),
+  const el = h('section.ys-pop', { role: 'dialog', 'aria-labelledby': 'ys-h', title: supported ? 'Kept with your account' : 'Kept in this browser' },
+    h('div.ys-head', h('h2#ys-h', 'Your settings'), h('span.muted', who ? `${who.name} · ${who.role}` : '')),
     h('div.ys-body',
-      h('div.ys-row', h('span.ys-l', 'Page menu'), seg,
-        h('span.ys-hint', 'Left gives the content the full window height. On a narrow window the menu goes back across the top.')),
-      theme ? h('label.ys-row', h('span.ys-l', 'Theme'), theme) : null,
-      h('label.ys-row', h('span.ys-l', 'Opens on'), opensOn)),
-    h('div.ys-foot',
-      h('span', supported ? 'Kept with your account, so it follows you to any browser. Applies at once; nothing to save.'
-        : 'Kept in this browser (this server does not keep them with the account). Applies at once; nothing to save.'),
-      onSignOut ? h('button.btn.sm', { type: 'button', onclick: () => { closeYourSettings(); onSignOut(); } }, '⏻ Sign out') : null));
+      h('div.ys-row.ys-line', seg, theme),
+      h('label.ys-row', opensOn)),
+    onSignOut ? h('div.ys-foot', h('button.btn.sm', { type: 'button', title: 'Sign out', onclick: () => { closeYourSettings(); onSignOut(); } }, '⏻ Sign out')) : null);
   document.body.append(el);
   // Under the name in the top bar; above it when the name is at the foot of the left menu.
   const r = anchor.getBoundingClientRect();

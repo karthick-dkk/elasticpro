@@ -8039,7 +8039,6 @@ await settleFor(300);
 /* ------- The left menu folds to an icon rail (0.3.71/0.3.72): « at the top and the foot; by hand (remembered, no hover) or by itself after idle minutes (hover shows it); the top menu has none ------- */
 {
   await go('alerts');
-  ok(!doc.querySelector('#nav .nav-rail-btn'), 'rail: the top menu offers the fold button');
   const pickMenu = async (id) => {
     const me = doc.querySelector('#topbar .me-btn, #nav .me-btn');
     if (me) { me.click(); await settleFor(200); }
@@ -8047,6 +8046,20 @@ await settleFor(300);
     if (b) { b.click(); await settleFor(300); }
     return !!b;
   };
+  // The left menu is the default (0.3.72); the top one has no fold button, puts the cluster chooser
+  // first after the brand, and its account button is the initials alone.
+  ok(doc.documentElement.dataset.menu === 'left', `rail: the default menu is ${doc.documentElement.dataset.menu}, not left`);
+  if (await pickMenu('top')) {
+    ok(!doc.querySelector('#nav .nav-rail-btn'), 'rail: the top menu offers the fold button');
+    const brand = doc.querySelector('#nav .nav-brand');
+    ok(!!brand && !!brand.nextElementSibling && brand.nextElementSibling.classList.contains('cluster-pick') && !!brand.nextElementSibling.querySelector('#cluster-select'),
+      'top menu: the cluster chooser is not first after the brand');
+    ok(doc.querySelectorAll('.cluster-pick').length === 1, `top menu: ${doc.querySelectorAll('.cluster-pick').length} cluster choosers drawn`);
+    for (const id of ['jobs', 'settings']) {
+      const b = doc.querySelector(`#nav button[data-page="${id}"]`);
+      ok(!b || (b.title && b.getAttribute('aria-label') && b.querySelector('.nav-label')), `top menu: ${id} has no name for its icon`);
+    }
+  }
   // The idle fold is shortened for the check (app.js armRailIdle reads __EP_RAIL_IDLE_MS); nothing here moves the mouse.
   window.__EP_RAIL_IDLE_MS = 60 * 60 * 1000;
   if (await pickMenu('left')) {
@@ -8088,6 +8101,8 @@ await settleFor(300);
     ok(!html.dataset.rail, 'rail: » did not open the self-folded menu');
     await pickMenu('top');
     ok(html.dataset.menu === 'top' && !doc.querySelector('#nav .nav-rail-btn'), 'rail: back on top, the fold button is still there');
+    await pickMenu('left');
+    ok(html.dataset.menu === 'left' && !!doc.querySelector('#topbar .cluster-pick') && doc.querySelectorAll('.cluster-pick').length === 1, 'rail: back on the left, the chooser did not return to the first row');
   } else ok(false, 'rail: Your settings has no Page menu: Left');
   window.localStorage.removeItem('elasticpro.menu.rail');
   delete window.__EP_RAIL_IDLE_MS;
