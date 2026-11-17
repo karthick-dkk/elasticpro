@@ -844,10 +844,8 @@ function renderTopbar() {
   topbarKey = key;
 
   const sel = h('select#cluster-select', { onchange: (e) => {
-    // An explicit choice replaces any remembered fleet-wide view, including one this
-    // page borrowed from it.
+    // The choice holds on every page until the next one (the owner, 2026-11-17).
     state.selected = e.target.value;
-    fleetView = e.target.value === 'all';
     // The cluster this browser opens on next time ("last selected" scope).
     if (e.target.value !== 'all') { lastCluster = e.target.value; idb.setKV('lastCluster', e.target.value); }
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
@@ -991,7 +989,6 @@ function evidenceChooser() {
     onchange: (e) => {
       if (!e.target.value) return;
       state.selected = e.target.value;
-      fleetView = false;
       fleetChosen = false;
       idb.setKV('lastCluster', e.target.value);
       go(currentPage);
@@ -1008,50 +1005,53 @@ function evidenceChooser() {
 /* ---------------------------------- router ---------------------------------- */
 
 /**
- * Single-cluster pages need one cluster; fleet pages should not lose "All clusters".
+ * The cluster chosen stays chosen on every page (the owner, 2026-11-17: "while moving from Log
+ * Delay to other pages, why does the cluster name change to All clusters? It should not
+ * change"). Until 0.3.74 a fleet page put "All clusters" back whenever the opening selection had
+ * been the fleet, so a cluster picked on one page was gone on the next. Only a page that cannot
+ * show "All clusters" (an evidence page, a `singleCluster` section, a page that is not `multi`)
+ * picks one cluster when "All clusters" is selected; a `defaultSingle` page opens on one unless
+ * "All clusters" was asked for by name.
  *
- * Indices, the REST console and Live logs cannot show a fleet, so they pick a cluster.
- * They used to do that by overwriting state.selected, which quietly threw away the
- * user's fleet-wide view: glance at Indices, go back to Clusters, and you are looking
- * at one cluster with no idea why. The fleet view is remembered and restored instead.
- */
-let fleetView = true;
-
-/**
- * Whether "All clusters" was asked for, as opposed to inherited.
+ * A page that cannot show "All clusters" borrows one cluster for itself (`borrowed`): it is the
+ * person's choice that stays, not the page's. While the selection is still the cluster borrowed,
+ * a page that can show "All clusters" gives it back; any change of the selection — the picker, a
+ * link that names a cluster — ends the loan, and from then on that cluster is the choice.
  *
- * `fleetView` cannot answer that: it starts true, so on the first visit it is
- * indistinguishable from a deliberate choice. This is set only by the picker, which is
- * the only place a person can express one.
+ * Whether "All clusters" was asked for, as opposed to inherited: set only by the picker, the only
+ * place a person can express one.
  */
 let fleetChosen = false;
+let borrowed = null;
 
 /** The cluster last chosen in this browser (idb 'lastCluster'), kept here so a page can use it synchronously. */
 let lastCluster = '';
 
 function resolveSelection(page) {
+  // A chosen cluster that is no longer in the config (reloaded, removed, hidden) is no choice at all.
+  if (state.selected && state.selected !== 'all' && !clusters().some((c) => c.id === state.selected)) state.selected = 'all';
+  // Somebody moved the selection since a page borrowed a cluster: that is the choice now.
+  if (borrowed && state.selected !== borrowed) borrowed = null;
+  const borrow = (id) => { if (id && state.selected === 'all') { state.selected = id; borrowed = id; } };
   // An evidence page shows one cluster: the one it was left on, else the one last chosen,
-  // else the first. fleetView is not touched, so a fleet page after it is "All clusters" again.
-  // So does a page section that shows one cluster (Clusters › Overview, `singleCluster`).
+  // else the first. So does a page section that shows one cluster (Clusters › Overview, `singleCluster`).
   if (EVIDENCE_PAGES.has(page.id) || (page.mod.singleCluster && page.mod.singleCluster())) {
-    const pick = evidenceSelection(state.selected, lastCluster, clusters().map((c) => c.id));
-    if (pick) state.selected = pick;
+    borrow(evidenceSelection(state.selected, lastCluster, clusters().map((c) => c.id)));
     return;
   }
   if (!page.multi) {
-    if (state.selected === 'all' && clusters()[0]) state.selected = clusters()[0].id;
+    borrow(clusters()[0] && clusters()[0].id);
     return;
   }
   // `defaultSingle`: the page offers every cluster but opens on one. Nodes & shards is
   // this — a page of per-cluster tables, where the fleet view is one long scroll of
   // repeats and is worth having only when somebody asks for it by name.
-  if (page.defaultSingle && state.selected === 'all' && !fleetChosen && clusters()[0]) {
-    state.selected = clusters()[0].id;
+  if (page.defaultSingle) {
+    if (!fleetChosen) borrow(clusters()[0] && clusters()[0].id);
     return;
   }
-  if (!page.defaultSingle && fleetView && state.selected !== 'all') {
-    state.selected = 'all';
-  }
+  // A page that can show "All clusters": the cluster a page only borrowed goes back.
+  if (borrowed && state.selected === borrowed) { state.selected = 'all'; borrowed = null; }
 }
 
 /**
@@ -1173,14 +1173,14 @@ async function start(config, handle) {
     if (typeof last === 'string') lastCluster = last;
     // This person's own choice (Your settings) first, then the config's default for everyone.
     const open = openingSelection({ scope: openingScope(), last, clusters: clusters() });
-    if (open !== 'all') { state.selected = open; fleetView = false; }
+    if (open !== 'all') state.selected = open;
   }
   renderShell();
   // Opened from a Zabbix problem: arrive at the cluster it is about, on the page that
   // answers it, and then forget the request so a later start does not repeat it.
   const target = troubleshootTarget(readLaunch(location).trouble, clusters(), pageForProblem);
   if (target) {
-    if (target.cluster) { state.selected = target.cluster; fleetView = false; }
+    if (target.cluster) state.selected = target.cluster;
     try { history.replaceState(null, '', withoutTrouble(location.href)); } catch (_) { /* sandboxed frame */ }
   }
   // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
@@ -1528,10 +1528,6 @@ const scheduleNavRedraw = coalesce(() => renderNav());
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
 // Stopped or resumed: the top bar's pill and the page (which asks again on a resume).
 bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); bus.emit('data'); });
-// Reports › Overview opens on the whole fleet (owner, 2026-11-10): a cluster chosen on another page
-// would otherwise narrow it to one. Only the selection moves: the cluster last chosen is still what
-// an evidence page picks, and a cluster picked here afterwards is kept.
-bus.on('fleet-view', () => { if (state.selected === 'all') return; state.selected = 'all'; topbarKey = ''; renderTopbar(); });
 // A page whose address names a cluster (Log Delay: #/log-delay/cluster/X, reached by a link, Back
 // or a bookmark) moves the chooser with it, so the top bar is the one cluster choice; 'all' when
 // the address names none. Only the chooser moves: the page is already showing it.
@@ -1539,7 +1535,6 @@ bus.on('select-cluster', (id) => {
   const v = id && id !== 'all' && clusters().some((c) => c.id === id) ? id : 'all';
   if (state.selected === v) return;
   state.selected = v;
-  fleetView = v === 'all';
   if (v !== 'all') { lastCluster = v; idb.setKV('lastCluster', v); }
   topbarKey = ''; renderTopbar();
 });
@@ -1555,14 +1550,9 @@ for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
 window.addEventListener('ep:navigate', (e) => {
   const id = pageAlias(e.detail && e.detail.page);
   if (!id || !PAGES.some((p) => p.id === id)) return;
-  // Arriving with a cluster named means arriving AT that cluster. The fleet preference
-  // has to give way or resolveSelection puts "All clusters" straight back on a page that
-  // can show one, and the hand-off silently does nothing.
+  // Arriving with a cluster named means arriving AT that cluster.
   const wanted = e.detail && e.detail.cluster;
-  if (wanted && clusters().some((c) => c.id === wanted)) {
-    state.selected = wanted;
-    fleetView = false;
-  }
+  if (wanted && clusters().some((c) => c.id === wanted)) state.selected = wanted;
   go(id);
 });
 
