@@ -8375,7 +8375,8 @@ for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
     // "All clusters" was chosen: the page picks one, as the evidence pages do, and says which in the address.
     ok(st.state.selected !== 'all', 'overview: opened on "All clusters" instead of picking one');
     ok(location.hash === `#/clusters/overview/${encodeURIComponent(st.state.selected)}`, `overview: the address (${location.hash}) does not name the cluster shown (${st.state.selected})`);
-    ok(sub.getAttribute('aria-current') === 'page' && (doc.querySelector('#nav button[data-page="overview"]:not(.nav-sub)') || {}).getAttribute('aria-current') === 'page', 'overview: the menu does not mark Clusters and its Overview sub-item');
+    // The sub-item alone is marked (the owner, 0.3.72): Clusters steps back while its Overview is on screen.
+    ok(sub.getAttribute('aria-current') === 'page' && !(doc.querySelector('#nav button[data-page="overview"]:not(.nav-sub)') || { hasAttribute: () => false }).hasAttribute('aria-current'), 'overview: the menu does not mark the Overview sub-item alone');
     ok(!!view().querySelector('.cl-tabs a[data-section="overview"][aria-current="page"]'), 'overview: the Overview tab is not marked');
     // The menu marks the sub-item alone: "└ Overview", not Clusters as well (0.3.72).
     {

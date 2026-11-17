@@ -40,7 +40,7 @@ test('the panel saves what was picked, icons only, and says where it is kept', (
   const got = [];
   const el = Y.openYourSettings(anchor, {
     prefs: { menu: 'top', theme: 'dark', opensOn: '' }, supported: true,
-    themes: R.THEMES.map((id) => ({ id, label: `x ${id}` })), who: { name: 'ann', role: 'admin' },
+    themes: R.THEMES.map((id) => ({ id, label: `\u25D0 ${id}` })), who: { name: 'ann', role: 'admin' },
     onChange: (k, v) => got.push([k, v]), onSignOut: null,
   });
   assert.match(el.title, /Kept with your account/);

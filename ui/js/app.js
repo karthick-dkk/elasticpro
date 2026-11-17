@@ -152,6 +152,8 @@ const tabOf = (id) => { const p = PAGES.find((x) => x.id === id); return p && p.
 let prefs = { menu: 'left', theme: 'system', opensOn: 'last', source: {}, supported: false };
 // The left menu unless someone chose the top one (the owner, 0.3.72); a choice is kept (prefs).
 let menuPosition = 'left';
+// Drawn on the left from the first paint; the saved choice (initTheme, loadPrefs) replaces it.
+document.documentElement.dataset.menu = menuPosition;
 function applyMenuPosition(v) {
   menuPosition = normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
