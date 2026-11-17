@@ -14,7 +14,8 @@
  *
  * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
  * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
- * one tools row: the time range (one button group on every tab: 5m to 12h, or custom) and the
+ * one tools row: the time range (one button group; the boards 30m to 12h with 1d to 60d in a More
+ * menu, the live tabs 5m to 12h, each set keeping its own choice; or custom) and the
  * cluster's log time zone as a chip (not on Summary, whose figures are the core's totals for every
  * zone). Every time on the page is in the server's zone.
  *
@@ -41,7 +42,7 @@ import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { bus, clusters } from '../core/state.js';
 import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
-import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
+import { BOARD_RANGES, LIVE_RANGES, BOARD_MAX_DAYS, rangeLabel, rangeDays, normaliseRange, browserZone, zonedParts, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
 import {
   boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope,
@@ -68,14 +69,31 @@ const TABS = [
 
 /* ------------------------------------ the range ------------------------------------ */
 
+/*
+ * Two ranges, kept apart (core/log-range.js): the boards' (Dashboard, Summary, Devices and the
+ * cluster and device views; 30m to 60d) and the live tabs' (Live Watch, Live logs; 5m to 12h), so
+ * a 30-day board never becomes a 30-day measurement from this browser. Both live in one
+ * localStorage entry, `{boards, live}`; the single range kept before there were two seeds both, each
+ * normalised to its own set (a 5m board is 30m, nothing said).
+ */
 const RANGE_KEY = 'elasticpro.logdelay.range';
-function readRange() {
-  try { const raw = localStorage.getItem(RANGE_KEY); return normaliseRange(raw ? JSON.parse(raw) : null); } catch (_) { return normaliseRange(null); }
+function readRanges() {
+  let raw = null;
+  try { const s = localStorage.getItem(RANGE_KEY); raw = s ? JSON.parse(s) : null; } catch (_) { raw = null; }
+  const old = raw && typeof raw === 'object' && !('boards' in raw) && !('live' in raw) ? raw : null;
+  return {
+    boards: normaliseRange(old || (raw && raw.boards), BOARD_RANGES),
+    live: normaliseRange(old || (raw && raw.live), LIVE_RANGES),
+  };
 }
-let range = readRange();
+/** Read again on every visit (render, arriving): another browser tab may have chosen since. */
+let ranges = readRanges();
+/** Which of the two ranges a tab reads. */
+const rangeKind = (tab = ldTab(route.view)) => (tab === 'watch' || tab === 'live' ? 'live' : 'boards');
 function setRange(r) {
-  range = normaliseRange(r);
-  try { localStorage.setItem(RANGE_KEY, JSON.stringify(range)); } catch (_) { /* kept for this visit */ }
+  const kind = rangeKind();
+  ranges[kind] = normaliseRange(r, kind === 'live' ? LIVE_RANGES : BOARD_RANGES);
+  try { localStorage.setItem(RANGE_KEY, JSON.stringify(ranges)); } catch (_) { /* kept for this visit */ }
   if (ldTab(route.view) === 'live') liveRangeChanged();
   draw();
 }
@@ -83,8 +101,8 @@ function setRange(r) {
 /** The zone every time on the page is written in: the server's when it said it, else this browser's. */
 const zone = () => serverZoneName() || browserZone();
 
-/** What the views read from the page: the redraw, the time range, the zone times are written in, the time-zone filter. */
-const viewCtx = () => ({ repaint: draw, range: () => range, zone, tz: () => route.tz });
+/** What the live views read from the page: the redraw, their time range, the zone times are written in, the time-zone filter. */
+const viewCtx = () => ({ repaint: draw, range: () => ranges.live, zone, tz: () => route.tz });
 
 /* ------------------------------------ the page ------------------------------------ */
 
@@ -93,7 +111,7 @@ export function render(el) {
   el.classList.add('dense', 'rp-page', 'ld-page');
   if (isSnapshotMode()) { mount(host, snapshotNotice()); return; }
   const arriving = !visiting;
-  if (arriving) { visiting = true; boardsReset(); P.clear(); }
+  if (arriving) { visiting = true; boardsReset(); P.clear(); ranges = readRanges(); moreOpen = false; }
   setDisplayZone(zone());
   // From a "logs arriving late" alert or its playbook (core/focus.js): Live Watch, checking the
   // fleet. From a link that named a view (navigateTo('log-delay', {view, cluster, device})): that view.
@@ -219,21 +237,29 @@ function bar() {
 
 /* ------------------------------------ the time zone ------------------------------------ */
 
-/** Whether the Expand panel is open; Esc and a click outside close it (wired once). */
+/**
+ * Whether the time-zone panel (tzOpen) or the boards range's More menu (moreOpen) is open; Esc
+ * and a click outside close either, and Esc gives the focus back to the button (wired once).
+ */
 let tzOpen = false;
-let tzWired = false;
-function wireTz() {
-  if (tzWired) return;
-  tzWired = true;
+let moreOpen = false;
+let popWired = false;
+function wirePopups() {
+  if (popWired) return;
+  popWired = true;
   document.addEventListener('click', (e) => {
-    if (!tzOpen) return;
-    if (e.target.closest && e.target.closest('.ld-tz-tools')) return;
-    tzOpen = false; draw();
+    const inside = (sel) => e.target.closest && e.target.closest(sel);
+    let changed = false;
+    if (tzOpen && !inside('.ld-tz-tools')) { tzOpen = false; changed = true; }
+    if (moreOpen && !inside('.ld-range-wrap')) { moreOpen = false; changed = true; }
+    if (changed) draw();
   }, true);
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || !tzOpen) return;
-    e.stopPropagation(); tzOpen = false; draw();
-    const b = document.getElementById('ld-tz-chip'); if (b) b.focus();
+    if (e.key !== 'Escape' || (!tzOpen && !moreOpen)) return;
+    e.stopPropagation();
+    const back = tzOpen ? 'ld-tz-chip' : 'ld-range-more';
+    tzOpen = false; moreOpen = false; draw();
+    const b = document.getElementById(back); if (b) b.focus();
   }, true);
 }
 
@@ -251,7 +277,7 @@ function setTz(tz) {
  * address, `?tz=`), and "Show all time zones" lets go of it.
  */
 function tzTools() {
-  wireTz();
+  wirePopups();
   const rows = boardsZoneRows(route);
   const zones = devicesByZone(rows);
   const tz = route.tz;
@@ -285,34 +311,63 @@ function tzTools() {
 }
 
 /**
- * The one time range of every tab (core/log-range.js RANGES): 5m · 10m · 30m · 1h · 3h · 12h ·
- * Custom as one button group; Custom opens From and To in the server's zone and Apply. The
- * boards read it as the days it touches (boards.js boardsSetWindow), Live Watch and Live logs as
- * the minutes. `withZone` adds the zone every time is written in (the boards have the chip instead).
+ * The tab's time range as one button group (core/log-range.js). On the boards (BOARD_RANGES):
+ * 30m · 1h · 2h · 4h · 8h · 12h, then More ▾ — a menu of 1d · 3d · 7d · 15d · 30d · 60d; with one
+ * of those chosen the button reads it ("7d ▾") and is pressed — then Custom. On Live Watch and
+ * Live logs (LIVE_RANGES): 5m · 10m · 30m · 1h · 3h · 12h · Custom. Each set keeps its own choice.
+ * Custom opens From and To in the server's zone and Apply. The boards read their range as the
+ * days it touches (boards.js boardsSetWindow), the live tabs theirs as minutes. `withZone` adds
+ * the zone every time is written in (the boards have the chip instead).
  */
 function rangePick(withZone) {
+  wirePopups();
   const tz = zone();
   const off = offsetText(zoneOffsetMinutes(tz));
-  return P.get('range', `${JSON.stringify(range)}|${tz}|${off}|${withZone}`, () => {
+  const kind = rangeKind();
+  const range = ranges[kind];
+  return P.get('range', `${kind}|${JSON.stringify(range)}|${tz}|${off}|${withZone}|${kind === 'boards' && moreOpen}`, () => {
     const pick = (id) => {
+      moreOpen = false;
       if (id !== 'custom') { setRange({ id }); return; }
       // A custom range opens on the last hour, so both fields start filled.
       const now = Date.now();
       setRange({ id: 'custom', from: range.id === 'custom' && range.from ? range.from : now - 3600000, to: range.id === 'custom' && range.to ? range.to : now });
     };
-    const group = h('div.seg-group#ld-range', { role: 'group', 'aria-label': 'Time range' },
-      ...RANGES.map(([id, label]) => h('button.seg-btn', { type: 'button', dataset: { range: id }, title: label, 'aria-pressed': String(range.id === id), onclick: () => pick(id) }, id === 'custom' ? 'Custom' : id)));
+    const btn = (id) => h('button.seg-btn', { type: 'button', dataset: { range: id }, title: rangeLabel(id), 'aria-pressed': String(range.id === id), onclick: () => pick(id) }, id === 'custom' ? 'Custom' : id);
+    const set = kind === 'live' ? LIVE_RANGES : BOARD_RANGES;
+    const days = set.filter((id) => rangeDays(id) !== null);
+    let group; let menu = null;
+    if (!days.length) group = h('div.seg-group#ld-range', { role: 'group', 'aria-label': 'Time range' }, ...set.map(btn));
+    else {
+      const onDay = days.includes(range.id);
+      const open = moreOpen;
+      const more = h('button.seg-btn.ld-range-more#ld-range-more', {
+        type: 'button', title: onDay ? `${rangeLabel(range.id)} — longer ranges, in whole local days (today included)` : 'Longer ranges, in whole local days (today included)',
+        'aria-haspopup': 'menu', 'aria-expanded': String(open), 'aria-controls': 'ld-range-menu', 'aria-pressed': String(onDay),
+        onclick: () => { moreOpen = !moreOpen; draw(); if (moreOpen) { const f = document.querySelector('#ld-range-menu [aria-checked="true"]') || document.querySelector('#ld-range-menu .ld-range-entry'); if (f) f.focus(); } },
+      }, onDay ? range.id : 'More', h('span.ld-tz-caret', { 'aria-hidden': 'true' }, ' ▾'));
+      group = h('div.seg-group#ld-range', { role: 'group', 'aria-label': 'Time range' },
+        ...set.filter((id) => id !== 'custom' && !days.includes(id)).map(btn), more, ...(set.includes('custom') ? [btn('custom')] : []));
+      menu = h('div.ld-range-menu#ld-range-menu', { role: 'menu', 'aria-label': 'Longer ranges', hidden: !open },
+        ...days.map((id) => h('button.ld-range-entry', { type: 'button', role: 'menuitemradio', 'aria-checked': String(range.id === id), dataset: { range: id }, title: rangeLabel(id), onclick: () => pick(id) },
+          h('b', id), h('span.muted', ` ${rangeLabel(id)}`))));
+    }
+    const wrap = h('div.ld-range-wrap', group, menu);
     const custom = range.id === 'custom';
     const from = custom ? h('input#ld-range-from', { type: 'datetime-local', value: zonedInputValue(range.from, tz), 'aria-label': 'From' }) : null;
     const to = custom ? h('input#ld-range-to', { type: 'datetime-local', value: zonedInputValue(range.to, tz), 'aria-label': 'To' }) : null;
     const apply = custom ? h('button.btn.sm#ld-range-apply', { type: 'button', onclick: () => {
       const a = fromZonedInput(from.value, tz); const b = fromZonedInput(to.value, tz);
       if (a === null || b === null) { from.reportValidity && from.reportValidity(); return; }
-      if (a > b) { to.setCustomValidity('To must be after From'); to.reportValidity && to.reportValidity(); to.setCustomValidity(''); return; }
+      const refuse = (msg) => { to.setCustomValidity(msg); to.reportValidity && to.reportValidity(); to.setCustomValidity(''); };
+      if (a > b) { refuse('To must be after From'); return; }
+      // The core takes at most BOARD_MAX_DAYS local days in one question: said here, not sent to be refused.
+      const dayNo = (ms) => { const p = zonedParts(ms, tz); return Date.UTC(p.year, p.month - 1, p.day) / 86400000; };
+      if (kind === 'boards' && dayNo(b) - dayNo(a) > BOARD_MAX_DAYS) { refuse(`At most ${BOARD_MAX_DAYS} days in one range`); return; }
       setRange({ id: 'custom', from: a, to: b });
     } }, 'Apply') : null;
     // One element (display: contents), so the cache keeps one node per draw.
-    return h('div.ld-tools-range', group,
+    return h('div.ld-tools-range', wrap,
       custom ? h('label.ld-tool', 'From', from) : null,
       custom ? h('label.ld-tool', 'To', to) : null,
       apply,
@@ -338,7 +393,7 @@ function body() {
   const tab = ldTab(route.view);
   if (tab === 'watch') return watchNodes();
   if (tab === 'live') return liveNodes();
-  boardsSetWindow(range, zone());
+  boardsSetWindow(ranges.boards, zone());
   return boardsNode(route, { repaint: draw });
 }
 

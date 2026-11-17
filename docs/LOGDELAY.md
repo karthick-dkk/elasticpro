@@ -607,13 +607,23 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   moves the chooser (`pages/log-delay.js reconcile`, the shell's `select-cluster`). The tabs link
   to the chosen cluster's views. Live Watch and Live logs read the chooser as they always did.
 * **One tools row** under the bar, every control on one line at 30 px: the **time range** — one
-  button group on every tab, `5m · 10m · 30m · 1h · 3h · 12h · Custom` (`core/log-range.js RANGES`,
-  default 1h, remembered per browser; Custom opens From / To in the server's zone and Apply). Live
-  Watch and Live logs read it as minutes; the Dashboard and Devices ask the store for the local
-  days it touches (`from`/`to` `YYYY-MM-DD`, so a window inside one day is Today's measurement
-  windows) and, where the window is after the last scheduled run, say so in words ("No scheduled
-  measurement in the last 30 minutes — last run 11:40"), never zeros; *Report covers › Period
-  shown* is those days. Beside it the **time zone** — plain text, never a chooser
+  button group, in two sets that each keep their own choice (`core/log-range.js`; default 1h for
+  both, remembered per browser in one entry `{boards, live}`; Custom opens From / To in the
+  server's zone and Apply). **The boards** (Dashboard, Summary, Devices, the cluster and device
+  views; `BOARD_RANGES`): `30m · 1h · 2h · 4h · 8h · 12h · More ▾ · Custom`, *More* a menu of
+  `1d · 3d · 7d · 15d · 30d · 60d` — whole local days ending today (7d is today and the 6 days
+  before; 1d is Today) — the button reading the day range chosen ("7d ▾", pressed). **Live Watch
+  and Live logs** (`LIVE_RANGES`, measured from the browser, so nothing longer):
+  `5m · 10m · 30m · 1h · 3h · 12h · Custom`. A 30d board never becomes a 30-day live measurement.
+  A range kept from before there were two (one `{id}`) seeds both, each read in its own set: the
+  shortest range that covers as much, else the set's longest (a 5m board is 30m, a 7d live tab is
+  12h), said nowhere. Live Watch and Live logs read theirs as minutes; the boards ask the store
+  for the local days theirs touches (`from`/`to` `YYYY-MM-DD`, so a window inside one day is
+  Today's measurement windows; 60d is far inside the core's 1200-day limit, and a custom range
+  over it is refused at Apply, not sent) and, where the window is after the last scheduled run,
+  say so in words ("No scheduled measurement in the last 30 minutes — last run 11:40"), never
+  zeros; *Report covers › Period shown* is those days. Summary's *Day by day* is a day range's own
+  days from 7d up (7d, 15d, 30d, 60d), and the last 7 days for anything shorter. Beside it the **time zone** — plain text, never a chooser
   (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
   counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
   (`timeZoneChipText`), "Time zone not detected" when no zone has a majority. **The chip is the
@@ -628,7 +638,7 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   zones". Devices behind and the heat map are the core's day totals for every zone; a note says
   so while the filter is on. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" or
   "not detected · 41 % agree" (`timeZoneCell`). Live Watch and Live logs show the time range (Last
-  1 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
+  5 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
   `tz`), else the browser's.
 * **Levels from the config, never a figure of the page's own**: the tile names, the chips, the
   chart legend and the Fetch now menu read `levels` (`delayFrom`, `criticalOver`) from the

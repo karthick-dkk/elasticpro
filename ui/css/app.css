@@ -2992,6 +2992,17 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-chartbox svg.ld-chart:hover g.ld-bar:not(:hover) { opacity: .55; }
 .ld-chartbox .ld-gap-fill { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 2 2; opacity: .8; }
 .ld-tools-range { display: contents; }
+/* The boards' range: More ▾ opens the day ranges (1d to 60d) under the group; the group clips, so the menu sits beside it. */
+.ld-range-wrap { position: relative; display: inline-flex; align-items: center; }
+.ld-range-wrap .seg-btn.ld-range-more { white-space: nowrap; }
+.ld-range-wrap .seg-btn.ld-range-more[aria-pressed="true"] .ld-tz-caret { color: inherit; }
+.ld-range-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 35; min-width: 170px; max-width: calc(100vw - 32px); background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; display: grid; }
+.ld-range-menu[hidden] { display: none; }
+.ld-range-entry { border: 0; background: none; text-align: left; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 12.5px; color: var(--text-primary); cursor: pointer; white-space: nowrap; display: flex; gap: 8px; align-items: baseline; }
+.ld-range-entry b { font-weight: 600; min-width: 2.6em; }
+.ld-range-entry:hover, .ld-range-entry:focus-visible { background: var(--surface-2); outline: none; }
+.ld-range-entry[aria-checked="true"] { background: var(--accent-soft); }
+.ld-range-entry[aria-checked="true"] b { font-weight: 700; }
 .ld-chartbox .ld-line-end { stroke: var(--surface-1); stroke-width: 2; }
 .ld-charts3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .ld-charts3 .ld-chart-card { min-width: 0; margin: 0; }

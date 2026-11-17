@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Log Delay: longer ranges on the boards, the live tabs keep theirs.** Dashboard, Summary and Devices (and the cluster and device views) offer 30m · 1h · 2h · 4h · 8h · 12h, then **More ▾** with 1d · 3d · 7d · 15d · 30d · 60d — whole local days ending today, as the store keeps them (the button reads the one chosen, "7d ▾") — then Custom; no 5m or 10m there. Live Watch and Live logs keep 5m · 10m · 30m · 1h · 3h · 12h · Custom, since they measure from the browser. The two choices are kept apart, so a 30-day board is never a 30-day live measurement; a range remembered from before seeds both, each read in its own set (a 5m board opens on 30m, a 7d live tab on 12h). Summary's Day by day is the chosen days from 7d up. One definition of every range in `core/log-range.js` (`BOARD_RANGES`, `LIVE_RANGES`), unit-tested; a custom board range over the core's 1200 days is refused at Apply instead of sent.
+
 ## 0.3.75
 
 - **The cluster chosen stays chosen on every page.** Picking a cluster on Log Delay and moving to another page no longer puts "All clusters" back: a fleet page reset the chooser whenever the session had opened on the fleet, and Reports › Overview put "All clusters" back on arrival (the 2026-11-10 rule, withdrawn by the owner). Only a page that cannot show every cluster (an evidence page, Clusters › Overview, Indices, REST) picks one when "All clusters" is chosen, as before; Nodes & shards still opens on one unless "All clusters" was asked for there. That cluster is only borrowed: the next page that can show every cluster gives "All clusters" back, unless the person picked a cluster in between. A chosen cluster that a reloaded config no longer names falls back to "All clusters".

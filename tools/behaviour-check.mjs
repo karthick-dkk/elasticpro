@@ -7723,9 +7723,33 @@ await settleFor(300);
       ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from === want[0] && m.to === want[1]),
         `log delay: the default 1 h window did not ask LOGDELAY_SUMMARY for its local days (${want[0]} → ${want[1]})`);
     }
-    // One time range on every tab: 5m 10m 30m 1h 3h 12h Custom, 1h pressed; no Period select, no description lines.
-    ok([...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',') === '5m,10m,30m,1h,3h,12h,Custom' && !g('ld-period'), 'log delay: the Dashboard time range is not the one button group');
+    // The boards' time range: 30m 1h 2h 4h 8h 12h, More ▾ (1d to 60d), Custom — no 5m or 10m; 1h pressed; no Period select, no description lines.
+    ok([...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',') === '30m,1h,2h,4h,8h,12h,More ▾,Custom' && !g('ld-period'), `log delay: the Dashboard time range reads ${[...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',')}`);
     ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '1h', 'log delay: the default range is not 1h');
+    {
+      // More ▾ opens the day ranges; 7d asks LOGDELAY_SUMMARY for the 7 local days ending today and marks "7d ▾".
+      const more = g('ld-range-more');
+      ok(more && more.getAttribute('aria-haspopup') === 'menu' && more.getAttribute('aria-expanded') === 'false' && g('ld-range-menu') && g('ld-range-menu').hidden, 'log delay: More is not a closed menu button');
+      press(more); await settleFor(120);
+      ok(!g('ld-range-menu').hidden && g('ld-range-more').getAttribute('aria-expanded') === 'true', 'log delay: More did not open its menu');
+      const entries = [...g('ld-range-menu').querySelectorAll('[role="menuitemradio"]')].map((b) => b.dataset.range);
+      ok(entries.join(',') === '1d,3d,7d,15d,30d,60d', `log delay: the More menu offers ${entries.join(',')}`);
+      (doc.activeElement || doc).dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(120);
+      ok(g('ld-range-menu').hidden && doc.activeElement === g('ld-range-more'), 'log delay: Escape did not close the More menu and give the focus back');
+      press(g('ld-range-more')); await settleFor(120);
+      const n0 = lsent.length;
+      press(g('ld-range-menu').querySelector('[data-range="7d"]')); await settleFor(250);
+      const day = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+      const now = Date.now(); const d = new Date(now); const from7 = day(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 6, 12).getTime()); const to7 = day(now);
+      ok(lsent.slice(n0).some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from === from7 && m.to === to7), `log delay: 7d did not ask LOGDELAY_SUMMARY for ${from7} → ${to7} (${lsent.slice(n0).filter((m) => m.type === 'LOGDELAY_SUMMARY').map((m) => `${m.from}→${m.to}`).join(', ')})`);
+      ok(g('ld-range-more').textContent === '7d ▾' && g('ld-range-more').getAttribute('aria-pressed') === 'true' && g('ld-range').querySelectorAll('[aria-pressed="true"]').length === 1 && g('ld-range-menu').hidden,
+        `log delay: 7d is not marked on its menu button (${g('ld-range-more').textContent})`);
+      await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow 7d to 7 days');
+      press(g('ld-range-more')); await settleFor(120);
+      ok(g('ld-range-menu').querySelector('[data-range="7d"]').getAttribute('aria-checked') === 'true', 'log delay: the open menu does not check 7d');
+      press(g('ld-range').querySelector('[data-range="1h"]')); await settleFor(250);
+      ok(g('ld-range-more').textContent === 'More ▾' && g('ld-range-more').getAttribute('aria-pressed') === 'false' && g('ld-range-menu').hidden, 'log delay: back on 1h, More does not read More again');
+    }
     // The window holds no scheduled run: said in words, never zeros.
     ok(g('ld-window-note') && /No scheduled measurement in the last 1 hour — last run (\d{4}-\d\d-\d\d )?\d\d:\d\d/.test(g('ld-window-note').textContent), `log delay: no note for a window without a run (${(g('ld-window-note') || {}).textContent})`);
     ldKnobs.lastRunAgoMs = 4 * 60000;
@@ -7985,6 +8009,42 @@ await settleFor(300);
       ok(/30 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent), 'log delay: a 30-day Day by day does not say its 30 days');
       g('ld-range').querySelector('[data-range="1h"]').click(); await settleFor(200);
       await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 7, 'log delay: Summary did not go back to the last 7 days on 1 h');
+      {
+        // The same boards range on Summary: no 5m or 10m, More ▾; 30d is exactly the 30 local days ending today, Day by day its own days (not widened).
+        ok([...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',') === '30m,1h,2h,4h,8h,12h,More ▾,Custom', 'log delay: Summary’s range is not the boards’ set');
+        const ymdL = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+        const d = new Date(); const back = (n) => ymdL(new Date(d.getFullYear(), d.getMonth(), d.getDate() - n, 12).getTime());
+        const n0 = lsent.length;
+        press(g('ld-range-more')); await settleFor(120);
+        press(g('ld-range-menu').querySelector('[data-range="30d"]')); await settleFor(250);
+        await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 30, 'log delay: Summary on 30d does not draw 30 days');
+        // The 30-day custom range above asked for the same days, so the answer may be the one already read: look at every question.
+        const sent = lsent.filter((m) => m.type === 'LOGDELAY_SUMMARY');
+        ok(sent.some((m) => m.from === back(29) && m.to === back(0) && m.maxDevices === 2000) && !lsent.slice(n0).some((m) => m.type === 'LOGDELAY_SUMMARY' && m.maxDevices === 1),
+          `log delay: Summary on 30d did not read ${back(29)} → ${back(0)} (${sent.slice(-4).map((m) => `${m.from}→${m.to}/${m.maxDevices}`).join(', ')})`);
+        ok(g('ld-range-more').textContent === '30d ▾' && /30 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent) && !/Last 30 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent), 'log delay: Summary on 30d is not marked, or its Day by day does not say 30 days');
+        // 7d: exactly 7 days, its own answer.
+        press(g('ld-range-more')); await settleFor(120);
+        press(g('ld-range-menu').querySelector('[data-range="7d"]')); await settleFor(250);
+        await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 7 && g('ld-range-more').textContent === '7d ▾', 'log delay: Summary on 7d does not draw its 7 days');
+        ok(/7 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent) && !/Last 7 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent), 'log delay: Summary on 7d widened Day by day instead of reading its own 7 days');
+        // Each set keeps its own choice: Live Watch and Live logs show 5m…12h on their own range; back on Summary 7d is still chosen.
+        const liveIds = () => [...g('ld-range').querySelectorAll('button')].map((b) => b.dataset.range).join(',');
+        const pressedId = () => (g('ld-range').querySelector('[aria-pressed="true"]') || {}).dataset?.range || '';
+        press(doc.querySelector('.ld-tabs a[data-tab="watch"]'));
+        await waitFor(() => location.hash === '#/log-delay/watch' && g('ld-range') && !g('ld-range-more'), 'log delay: Live Watch did not draw its own range');
+        ok(liveIds() === '5m,10m,30m,1h,3h,12h,custom' && pressedId() === '1h', `log delay: Live Watch's range reads ${liveIds()} with ${pressedId()} pressed (the boards' 7d leaked)`);
+        press(g('ld-range').querySelector('[data-range="10m"]')); await settleFor(200);
+        press(doc.querySelector('.ld-tabs a[data-tab="live"]'));
+        await waitFor(() => /^#\/log-delay\/live/.test(location.hash) && g('ld-range') && !g('ld-range-more'), 'log delay: Live logs did not draw its own range');
+        ok(liveIds() === '5m,10m,30m,1h,3h,12h,custom' && pressedId() === '10m', `log delay: Live logs' range reads ${liveIds()} with ${pressedId()} pressed`);
+        press(g('ld-range').querySelector('[data-range="1h"]')); await settleFor(200);
+        press(doc.querySelector('.ld-tabs a[data-tab="summary"]'));
+        await waitFor(() => ldView() === 'summary' && g('ld-sum-tiles') && g('ld-range-more'), 'log delay: Summary did not draw again after the live tabs');
+        ok(g('ld-range-more').textContent === '7d ▾', `log delay: Summary lost its 7d after the live tabs (${g('ld-range-more').textContent})`);
+        press(g('ld-range').querySelector('[data-range="1h"]')); await settleFor(250);
+        await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 7 && g('ld-rings'), 'log delay: Summary did not go back to 1 h');
+      }
       // The rings: All clusters first, then worst first; a cluster never measured last, saying so (no 0 % ring).
       const rings = () => [...g('ld-rings').querySelectorAll('a.ld-ring')];
       const share = (a) => (a.dataset.known === 'true' ? Number(a.querySelector('.ld-ring-mid b').textContent.replace(/[^\d.]/g, '')) : -1);
@@ -8201,6 +8261,42 @@ await settleFor(300);
     globalThis.fetch = realFetch;
   }
   await go('overview');
+}
+
+/* ---------- Log Delay ranges kept before there were two: the one range seeds both sets, each normalised to its own ---------- */
+{
+  const KEY = 'elasticpro.logdelay.range';
+  let saved = null;
+  try { saved = window.localStorage.getItem(KEY); } catch (_) { saved = null; }
+  const g = (id) => doc.getElementById(id);
+  const pressedId = () => { const b = g('ld-range') && g('ld-range').querySelector('[aria-pressed="true"]'); return b ? (b.dataset.range || b.textContent) : ''; };
+  const liveTab = async () => {
+    press(doc.querySelector('.ld-tabs a[data-tab="live"]'));
+    await waitFor(() => /^#\/log-delay\/live/.test(location.hash) && g('ld-range') && !g('ld-range-more'), 'log delay ranges: Live logs did not draw its range');
+  };
+  try {
+    window.localStorage.setItem(KEY, JSON.stringify({ id: '5m' }));
+    await go('log-delay');
+    await waitFor(() => g('ld-range') && g('ld-range-more'), 'log delay ranges: the Dashboard did not draw its range');
+    ok(pressedId() === '30m' && !g('ld-range').querySelector('[data-range="5m"]'), `log delay ranges: a kept 5m reads ${pressedId()} on the boards, not 30m`);
+    await liveTab();
+    ok(pressedId() === '5m', `log delay ranges: a kept 5m reads ${pressedId()} on Live logs`);
+    await go('overview');
+    window.localStorage.setItem(KEY, JSON.stringify({ id: '7d' }));
+    await go('log-delay');
+    await waitFor(() => g('ld-range-more'), 'log delay ranges: the Dashboard did not draw again');
+    ok(g('ld-range-more').textContent === '7d ▾', `log delay ranges: a kept 7d reads ${g('ld-range-more').textContent} on the boards`);
+    await liveTab();
+    ok(pressedId() === '12h' && !g('ld-range').querySelector('[data-range="7d"]'), `log delay ranges: a kept 7d reads ${pressedId()} on Live logs, not 12h`);
+    const kept = JSON.parse(window.localStorage.getItem(KEY) || 'null');
+    ok(!kept || (kept.id === '7d') || (kept.boards && kept.live), 'log delay ranges: the kept entry is neither the old one untouched nor {boards, live}');
+    press(g('ld-range').querySelector('[data-range="3h"]')); await settleFor(200);
+    const now2 = JSON.parse(window.localStorage.getItem(KEY) || 'null');
+    ok(now2 && now2.boards && now2.boards.id === '7d' && now2.live && now2.live.id === '3h', `log delay ranges: a choice on Live logs keeps ${JSON.stringify(now2)}, not both ranges`);
+  } finally {
+    try { if (saved === null) window.localStorage.removeItem(KEY); else window.localStorage.setItem(KEY, saved); } catch (_) { /* gone */ }
+    await go('overview');
+  }
 }
 
 /* ------------- Jobs (docs/JOBS.md "Jobs page"): contract-shaped answers at the network edge ------------- */
