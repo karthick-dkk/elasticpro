@@ -150,13 +150,13 @@ on `PRIME` by the UI).
 naming the devices that show the offset as delay; "confirm it" once it is). UTC as the plurality
 raises no Cluster finding: nothing would change.
 
-**Browser.** `ui/js/core/log-tz.js` is the same rule for what the browser measures itself (Live
-Watch, Live logs, Play, the Zabbix scraper): the cluster's `timeZone` as the core said it
+**Browser.** `ui/js/core/log-tz.js` is the same rule for what the browser measures itself (Log
+Delay › Live, Play, the Zabbix scraper): the cluster's `timeZone` as the core said it
 (`delay-levels.js zoneOf`, remembered from `byCluster`/`resolved`/a cluster answer), a named zone
 applied at the event's time through Intl, a detected offset fixed, `none` corrects nothing. A live
 row cannot know steadiness, so it says *looks like +08:00* for a gap at another offset and levels
-the corrected delay. Live logs write `@timestamp` and the event time in the same (cluster) zone,
-the offset in each head, so the difference seen is the delay.
+the corrected delay. Live's Logs card writes Arrived and Event time in the same (cluster) zone,
+named in the card's head, so the difference seen is the delay.
 
 ## Measurement (`logdelay/measure.rs`, `bridge.rs` `run_delay_sink`)
 
@@ -585,12 +585,58 @@ else (no little-delay band, no median, percentile or average anywhere), an "i" o
 | `#/log-delay/summary[/<cluster>]` | **Summary** (second tab; the fleet view of Reports › Log delay before 0.3.60, back on the owner's word): four tiles from `totals` (total devices; with delay now, split by the two late levels; with no delay and the on-time share; the shares without delay / delayed / silent / can't measure), *Delay reduced* (`reduced`, 2 h to 24 h, green bars), *Day by day* (`days[]` stacked: below the line, the delay band, above the critical line, another time zone, silent or can't measure; at least the last 7 days — `dayChartDays`: a shorter page range asks one more `LOGDELAY_SUMMARY` for the 7 days ending today (`maxDevices: 1`), a Custom range of 7+ days is its own days; the header says which ("Last 7 days · 11 Nov – 17 Nov"); each tick its own date; only this card widens) and *Delayed devices by cluster* (a ring per cluster from `byCluster` `delay`/`critical`/`latePct` — All clusters first, then worst first, never measured last as an empty ring; a ring opens the cluster on Dashboard). One cluster chosen: its tiles, its days, its own ring. The core's totals for every zone: no time-zone chip on this tab | `ui/js/logdelay/summary.js` |
 | `#/log-delay/devices[/<cluster>]` | **Devices**: the delayed devices of the period (the delay band and above the critical line) until *Show all devices* (never remembered, each visit starts on the delayed ones), a search box, level chips with counts over every device (a level that is not delayed shows every device's set; a chip pressed again lets go), zone and tag1 selects, CSV; each row ends in "i" and *Open in logs* | |
 | `#/log-delay/device/<cluster>/<device>` | one device (Device board) beside the short list of its cluster's devices (the delayed ones; a device opened by a link that is not delayed is listed too, with a line saying why): facts (no median), the Recommendation (the core's finding — the same words as the row's "i"), the graph, every delay | |
-| `#/log-delay/watch` | **Live Watch**: every cluster measured now from the browser over the time range; one plain line ("N devices 30 min or more behind · live, seconds fresh") with an "i" about the view (the 500-devices-per-cluster limit); rows end in "i", *Details* (the device on Devices) and *Open in logs*; a row click does nothing | `ui/js/logdelay/watch.js` |
-| `#/log-delay/live[/<cluster>[/<device>]]` | **Live logs**: the documents over the time range, narrowed to one device by *Open in logs* | `ui/js/logdelay/live-logs.js` |
+| `#/log-delay/live[/<cluster>[/<device>]]` | **Live** (Live Watch and Live logs as one tab since the merge; see *Live* below): "Delayed now" — the cluster chosen in the top bar measured from the browser on **Fetch**, one device watched — above "Logs", its documents on **Search**. Nothing runs until pressed. `#/log-delay/watch` (the old Live Watch) opens it; a device address puts the device in the Logs filters and waits for Search | `ui/js/logdelay/watch.js`, `ui/js/logdelay/live-logs.js` |
 
 The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
-`#/reports/log-delay[/…]` (the mail's link), `#/logs` (Live logs) and `#/log-delay/fixes[/<cluster>]`
+`#/reports/log-delay[/…]` (the mail's link), `#/logs` (Live), `#/log-delay/watch` (Live) and `#/log-delay/fixes[/<cluster>]`
 (the Recommended fixes tab, gone in 0.3.62: Devices).
+
+### Live (the merged Live Watch and Live logs)
+
+One tab, **Live** (`#/log-delay/live`), approved on the plan canvas: Dashboard · Summary · Devices ·
+Live. **Nothing is fetched by default** — no preflight, measurement, log search, live tail or
+re-measure is sent on arrival, on a tab change, on a range change or by a timer; the empty states
+say so ("Nothing fetched yet … Nothing runs until you press it.", "Nothing searched yet …"). The
+time range is `LIVE_RANGES` (5m … 12h, Custom with From/To). The title bar's core Fetch now is not
+drawn on Live (Live's Fetch is the browser's).
+
+* **Delayed now** (`ui/js/logdelay/watch.js`): head "Delayed now" with what is shown ("4 of 412
+  devices · mock-lab fetched 14:02 · last 1 hour", or "… · not fetched"), an "i" about the view
+  (the 500-devices-per-cluster limit), **Fetch** — a split button whose main part runs the choice
+  last made and whose ▾ offers *Fetch delayed devices* (the default: devices at the delay level or
+  above), *Fetch all devices* (every device that sent logs in the range) and *Fetch all devices in
+  cluster* (also the devices silent in the range: the 7 days before it, `buildSeenSearchBody` /
+  `measureSeenIn`, one terms aggregation with a max, no documents; such a device is a silent row,
+  no delay figure) — *Report (.xlsx)* and *Schedule…*. Fetch measures **only the cluster chosen in
+  the top bar** (a preflight, then one aggregation; `FAN_OUT` 3 at a time, aborted on leaving).
+  With **All clusters** chosen it sends nothing to Elasticsearch and shows a warning instead:
+  every cluster would be searched from this browser, and the server already measures every
+  cluster on its schedule — interval and last run as the core says them (`scheduleOf` on one
+  small `LOGDELAY_SUMMARY`: "every N h, last run HH:MM", "interval not known yet", or that the
+  server does not run it / it is switched off) — with *Open Dashboard*, *Pick one cluster* (the top
+  chooser) and *Fetch N clusters anyway*, the one way to start it. The list is delayed first
+  (critical, delayed, clock ahead, silent …), columns Device · (Cluster, when several) · zone ·
+  tag1 · the address field · Delay now (a bar against the worst in the table, and the minutes) ·
+  Level · "i" and **Watch**. A cluster that could not be measured is named in a coverage card.
+* **Watch** on a row draws the device strip at the top of the Logs card — Delay now (the
+  measurement's), Late since (the core's store, one `LOGDELAY_DEVICE` read; "not known" when the
+  store has not seen the device), Measured — with **Re-measure** (the measurement's own search,
+  that one device named; only on press), *Device details ›* and *Stop watching*, and narrows the
+  Logs filters to the device (its name in the device field, an address in the address field). No
+  search is sent until Search or Re-measure.
+* **Logs** (`ui/js/logdelay/live-logs.js`): head "Logs" ("Logs · fw-core-02" when watching), the
+  cluster, the filter in words and the zone the times are in; *Start live tail* (off until pressed;
+  searches again every refresh interval until stopped; not for a custom range) and *Export CSV*.
+  Filters: Source (the tenant in the index name), the device field, the address field, tag1 and a
+  Query — **Search** sends one search, nothing before. The field names are the cluster's configured
+  log fields (`logFilterFields`: `delayFields.device`, the address field where `deviceFieldsFor`
+  looks an address up — the first address-like context field, else `src_ip` — and tag1); a filled
+  filter whose field the indices do not map (one `_field_caps`, on the first Search that needs it)
+  is refused in words and nothing is searched. A value is one exact value (quoted), a pattern with
+  `*`/`?`, or for the address an `a.b.c.d/n` range (`logFilterClause`). Then the documents over time
+  (a time axis) and the table Arrived · Event time · src_hostname · src_ip · tag1 · Delay · Message;
+  a row opens the whole document. With All clusters chosen the card follows one cluster, picked in
+  its Cluster select.
 
 * **The title bar** carries the name, the tabs and, at the right end, **Fetch now**
   (`ui/js/logdelay/fetch-now.js`): a split button. The main click re-measures the late devices
@@ -605,19 +651,19 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   the address — All clusters → the fleet / every device, one cluster → its board / its devices, on
   the tab open — and an address that names a cluster (a By cluster link, an alert, a bookmark, Back)
   moves the chooser (`pages/log-delay.js reconcile`, the shell's `select-cluster`). The tabs link
-  to the chosen cluster's views. Live Watch and Live logs read the chooser as they always did.
+  to the chosen cluster's views. Live reads the chooser itself: its Fetch measures the cluster chosen.
 * **One tools row** under the bar, every control on one line at 30 px: the **time range** — one
   button group, in two sets that each keep their own choice (`core/log-range.js`; default 1h for
   both, remembered per browser in one entry `{boards, live}`; Custom opens From / To in the
   server's zone and Apply). **The boards** (Dashboard, Summary, Devices, the cluster and device
   views; `BOARD_RANGES`): `30m · 1h · 2h · 4h · 8h · 12h · More ▾ · Custom`, *More* a menu of
   `1d · 3d · 7d · 15d · 30d · 60d` — whole local days ending today (7d is today and the 6 days
-  before; 1d is Today) — the button reading the day range chosen ("7d ▾", pressed). **Live Watch
-  and Live logs** (`LIVE_RANGES`, measured from the browser, so nothing longer):
+  before; 1d is Today) — the button reading the day range chosen ("7d ▾", pressed). **Live**
+  (`LIVE_RANGES`, measured from the browser, so nothing longer):
   `5m · 10m · 30m · 1h · 3h · 12h · Custom`. A 30d board never becomes a 30-day live measurement.
   A range kept from before there were two (one `{id}`) seeds both, each read in its own set: the
   shortest range that covers as much, else the set's longest (a 5m board is 30m, a 7d live tab is
-  12h), said nowhere. Live Watch and Live logs read theirs as minutes; the boards ask the store
+  12h), said nowhere. Live reads its range as minutes; the boards ask the store
   for the local days theirs touches (`from`/`to` `YYYY-MM-DD`, so a window inside one day is
   Today's measurement windows; 60d is far inside the core's 1200-day limit, and a custom range
   over it is refused at Apply, not sent) and, where the window is after the last scheduled run,
@@ -633,11 +679,11 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   its cluster's detected offset, `zoneOfRow`). Esc and a click outside close it. **A zone is a
   filter**, kept in the address like the other filters (`?tz=480`, `?tz=none`; `tzOfHash`,
   `ldHash(view, cluster, device, {tz})`): every view follows it — the tiles and By cluster are
-  counted from the devices in that zone (`tileCounts`, `matchesZone`), Devices and Live Watch list
+  counted from the devices in that zone (`tileCounts`, `matchesZone`), Devices and Live list
   them, the chip reads "Time zone +08:00 · only these devices" and the panel gains "Show all time
   zones". Devices behind and the heat map are the core's day totals for every zone; a note says
   so while the filter is on. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" or
-  "not detected · 41 % agree" (`timeZoneCell`). Live Watch and Live logs show the time range (Last
+  "not detected · 41 % agree" (`timeZoneCell`). Live shows the time range (Last
   5 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
   `tz`), else the browser's.
 * **Levels from the config, never a figure of the page's own**: the tile names, the chips, the
@@ -656,7 +702,7 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   measured says so).
 * **The "i"** (`ui/js/logdelay/fix-popover.js` `fixButton`, `fixesFor`): one popover for every
   button, the core's own words (`DeviceRow.fix`, `byCluster[].fixes`, a device board's `finding`,
-  Live Watch's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,
+  Live's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,
   cause = `why`, fix, where = the step, a cluster's grouped by finding with the device count. A
   device the core has no finding for says exactly that. Clicking "i" never triggers the row; Esc,
   × or a click outside closes it and Esc gives the focus back.
@@ -668,10 +714,12 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   keeps AA. Never red with yellow. The heat ramp is one blue (#3f78c0) at 7 / 24 / 45 / 70 /
   100 % over the surface. The "back below the line" line stays green.
 * **One device row** (`ui/js/logdelay/rows.js`) for every device table — Devices, a cluster's
-  devices, Live Watch. A device Live Watch measured is turned into a board row (`liveDeviceRow`);
-  what one measurement cannot know reads unknown. The row's actions are buttons at its right end.
+  devices, Live. A device Live measured is turned into a board row (`liveDeviceRow`; one silent in
+  the range, `silentDeviceRow`); what one measurement cannot know reads unknown. The row's actions
+  are buttons at its right end: "i" and *Open in logs* on the boards, "i" and *Watch* on Live.
 * **zone and tag1** are columns of every device and log table (`extraOf`: the row's extras or
-  meta, any case). Live Watch asks for them in the measurement's `_source`.
+  meta, any case). Live asks for them in the measurement's `_source`. Live's documents table has
+  tag1 and the device and address fields, as approved.
 * **Drawing**: each card is kept until what it shows changed (`lib/keyed.js`); each view's
   requests carry an AbortController that leaving the view aborts; an answer for a view no longer
   shown redraws nothing. The chart's hover is CSS only (`<title>` per bar), so a parked pointer

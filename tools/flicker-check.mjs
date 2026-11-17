@@ -92,9 +92,12 @@ const PAGES = [
   { id: 'log-delay/devices', search: '#ld-dev-filter', hover: ['#ld-devices tbody tr', '#view .ld-chip-btn', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/cluster/@c', search: '#ld-cd-filter', hover: ['#ld-cluster-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/device/@c/@d', search: '#ld-q-name', hover: ['#ld-periods tbody tr', '#view .ld-kpi', '#view .ld-tabs a'] },
-  { id: 'log-delay/watch', search: null, setup: async (F) => { await F.evaluate(() => document.querySelector('#delay-fetch')?.click()); await sleep(4000); },
-    hover: ['#ld-watch-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
-  { id: 'log-delay/live', search: '#ld-live-value', hover: ['#ld-live-logs tbody tr', '#view .ld-tabs a', '#view .btn'] },
+  // Live: nothing runs until pressed — Fetch ("Fetch anyway" with All clusters), then Search.
+  { id: 'log-delay/live', search: '#ld-live-host', setup: async (F) => {
+    await F.evaluate(() => document.querySelector('#delay-fetch')?.click()); await sleep(500);
+    await F.evaluate(() => document.querySelector('#ld-warn-anyway')?.click()); await sleep(4000);
+    await F.evaluate(() => document.querySelector('#ld-live-search')?.click()); await sleep(1500);
+  }, hover: ['#ld-watch-devices tbody tr', '#ld-live-logs tbody tr', '#view .ld-tabs a', '#view .btn'] },
   // The history is a panel behind the History button; its filter is the search box typed into.
   { id: 'console', search: '#c-histfilter', setup: async (F) => { await F.evaluate(() => document.querySelector('#c-history-btn')?.click()); await sleep(300); },
     hover: ['#view .btn', '#view .tab'] },

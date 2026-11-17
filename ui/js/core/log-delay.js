@@ -496,6 +496,32 @@ export async function measureDelayIn(esClient, cluster, pre, { from, to }, level
   };
 }
 
+/**
+ * Live › Fetch all devices in cluster: the devices seen in a lookback before the range (the core's
+ * tracker keeps a device 7 days unseen, docs/LOGDELAY.md "Which devices"), each with its newest
+ * arrival — one terms aggregation with a max, no documents. The devices of the range are measured
+ * by measureDelayIn; one seen here and not there is silent in the range.
+ */
+export const SEEN_LOOKBACK = 'now-7d';
+export function buildSeenSearchBody(resolved, { from, to, size = LATE_MAX } = {}) {
+  return {
+    size: 0,
+    query: { bool: { filter: [{ range: { [resolved.arrival]: { gte: from, lte: to, format: 'strict_date_optional_time' } } }] } },
+    aggs: { devices: { terms: { field: resolved.device, size, order: { last: 'desc' } }, aggs: { last: { max: { field: resolved.arrival } } } } },
+  };
+}
+
+/** The devices seen between `from` and `to`: `{devices: [{device, lastArrival}], truncated}`. */
+export async function measureSeenIn(esClient, cluster, pre, { from, to }, opts = {}) {
+  const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', buildSeenSearchBody(pre.resolved, { from, to }),
+    { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000, ...(opts.signal ? { signal: opts.signal } : {}) });
+  const agg = (res.aggregations || {}).devices || {};
+  return {
+    devices: (agg.buckets || []).map((b) => ({ device: String(b.key), lastArrival: b.last && Number.isFinite(b.last.value) ? b.last.value : null })),
+    truncated: agg.sum_other_doc_count || 0,
+  };
+}
+
 export function summarise(records) {
   const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, OTHER_TZ: 0, ERROR: 0, NO_DATA: 0, UNKNOWN: 0 };
   let worst = null;
@@ -602,6 +628,36 @@ export function deviceFieldsFor(value, resolved, fields) {
     .map((f) => String(f).replace(/\.keyword$/, ''))
     .filter((f) => IP_LIKE.test(f));
   return ips.length ? [...new Set(ips)] : ['src_ip'];
+}
+
+/**
+ * The fields Live's Logs filters search, as the cluster's configured log fields name them (one
+ * definition, resolveFields): the device field (src_hostname by default), the address field —
+ * where deviceFieldsFor looks an address up: the first address-like context field, else src_ip —
+ * and tag1 (the extra always measured). Whether the indices map them is asked on Search.
+ */
+export function logFilterFields(cluster) {
+  const f = resolveFields(cluster);
+  const plain = (x) => String(x || '').replace(/\.keyword$/, '');
+  return {
+    host: plain(f.device) || null,
+    ip: deviceFieldsFor('0.0.0.0', { device: f.device, metadata: f.metadata }, { metadata: f.metadata })[0] || null,
+    tag1: f.metadata.map(plain).find((m) => m.toLowerCase() === 'tag1') || 'tag1',
+  };
+}
+
+/**
+ * One Logs filter as a query clause: a value with a wildcard is a pattern, one without is one exact
+ * value — quoted, so a dash or a dot in a device name is not query syntax; an address range
+ * ("10.4.0.0/16") is a term on the field, which an ip field reads as a CIDR. The field and its
+ * .keyword are both searched (which one exists is the mapping's); `lenient` keeps a field an index
+ * lacks from failing the whole search.
+ */
+export function logFilterClause(field, value) {
+  const v = String(value || '').trim();
+  if (!field || !v) return null;
+  if (/^[0-9a-f:.]+\/\d{1,3}$/i.test(v)) return { term: { [field]: v } };
+  return { query_string: { query: /[*?]/.test(v) ? v : `"${v.replace(/(["\\])/g, '\\$1')}"`, analyze_wildcard: true, lenient: true, fields: [field, `${field}.keyword`] } };
 }
 
 /**

@@ -79,7 +79,7 @@ if (configPath) {
 const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
 // The Log Delay page (docs/LOGDELAY.md): every view — the fleet, its Summary (every cluster, one cluster), the fixes, one cluster, a device the
 // store does not hold (a fresh data directory has none, which must say so rather than draw blank),
-// Live Watch and Live logs (one device too).
+// Live (the merged Live Watch and Live logs; its old Live Watch address, and one device named by the address).
 const LD_FIRST = configured ? ((await load('core/state.js')).clusters()[0] || null) : null;
 const LD_VIEWS = ['log-delay', 'log-delay/summary', 'log-delay/devices', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live',
   ...(LD_FIRST ? [`log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/summary/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/device/${encodeURIComponent(LD_FIRST.id)}/no-such-device`,
@@ -186,8 +186,10 @@ for (const name of PAGES) {
       // zone and tag1 are columns of every device and log table the view drew.
       for (const t of view.querySelectorAll('table.tbl')) {
         const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent.toLowerCase());
-        const devices = t.id === 'ld-devices' || t.id === 'ld-cluster-devices' || t.id === 'ld-fix-devices' || t.id === 'ld-watch-devices' || t.id === 'ld-live-logs';
+        const devices = t.id === 'ld-devices' || t.id === 'ld-cluster-devices' || t.id === 'ld-fix-devices' || t.id === 'ld-watch-devices';
         if (devices && !(heads.some((x) => x.startsWith('zone')) && heads.some((x) => x.startsWith('tag1')))) errors.push(`${name}: table ${t.id} has no zone or tag1 column`);
+        // Live's documents: the approved columns (Arrived, Event time, the device and address fields, tag1, Delay, Message).
+        if (t.id === 'ld-live-logs' && !heads.some((x) => x.startsWith('tag1'))) errors.push(`${name}: table ${t.id} has no tag1 column`);
       }
     } else if (page === 'indices' && section === 'docs') {
       // Documents inside Indices: the view, its fields panel (from _mapping), rows of hits with

@@ -104,7 +104,7 @@ export const ldSendNow = () => send({ type: 'REPORT_SEND_NOW', kind: LD_KIND });
 /* ---------------------------------- the routes ---------------------------------- */
 
 /** The page's views, in the order its tabs show them; the boards' views are below. */
-export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'summary', 'devices', 'device', 'watch', 'live']);
+export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'summary', 'devices', 'device', 'live']);
 
 /**
  * Which view of the Log Delay page a hash names: `{view, clusterId, device}`. Anything else
@@ -123,7 +123,8 @@ export function ldRoute(hash) {
   if (kind === 'summary') return { view: 'summary', clusterId: a ? dec(a) : null, device: null, tz };
   // `fixes` is the old Recommended fixes address: its devices, with their fixes, are on Devices.
   if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null, tz };
-  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null, tz };
+  // `watch` is the old Live Watch address: Live Watch and Live logs are one tab, Live, since the merge.
+  if (kind === 'watch') return { view: 'live', clusterId: null, device: null, tz };
   if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null, tz };
   return fleet;
 }
@@ -152,14 +153,14 @@ export function ldHash(view, clusterId, device, o) {
   if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;
   if (view === 'summary') return `${clusterId ? `${base}/summary/${enc(clusterId)}` : `${base}/summary`}${q}`;
   if (view === 'devices' || view === 'fixes') return `${clusterId ? `${base}/devices/${enc(clusterId)}` : `${base}/devices`}${q}`;
-  if (view === 'watch') return `${base}/watch${q}`;
-  if (view === 'live') return `${clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`}${q}`;
+  if (view === 'live' || view === 'watch') return `${clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`}${q}`;
   return `${base}${q}`;
 }
 
-/** The tab a view is shown under: Dashboard (the fleet, a cluster), Summary, Devices (the list, one device), Live Watch, Live logs. */
+/** The tab a view is shown under: Dashboard (the fleet, a cluster), Summary, Devices (the list, one device), Live. */
 export function ldTab(view) {
-  if (view === 'watch' || view === 'live' || view === 'summary') return view;
+  if (view === 'watch' || view === 'live') return 'live';
+  if (view === 'summary') return view;
   if (view === 'devices' || view === 'device' || view === 'fixes') return 'devices';
   return 'fleet';
 }
@@ -275,6 +276,36 @@ export function liveDeviceRow(rec, cluster, levels) {
     lastArrival: rec.arrival ?? null, lastEvent: rec.event ?? null, silentSince: null,
     pattern: rec.pattern && rec.pattern !== '-' ? rec.pattern : null, patternNote: rec.patternNote || '',
     extras: rec.meta || {}, live: true,
+  };
+}
+
+/**
+ * A device the browser did not see in the range but did see before it (Live › Fetch all devices
+ * in cluster: the lookback's newest arrival, core/log-delay.js measureSeenIn), as a board's
+ * device row: silent, no delay figure (unknown, never 0), `silentSince` its last arrival.
+ */
+export function silentDeviceRow(name, lastArrival, cluster) {
+  return {
+    ...liveDeviceRow({ device: name, delayMinutes: null, arrival: finite(lastArrival) ? lastArrival : null, meta: {} }, cluster, null),
+    state: 'silent', silentSince: finite(lastArrival) ? lastArrival : null,
+  };
+}
+
+/**
+ * The scheduled measurement as a LOGDELAY_SUMMARY answer says it — the one reading the boards'
+ * Fetch now note and Live's All-clusters warning both use: `{supported, enabled, everyHours,
+ * lastRunAt, nextDueAt}`, each null when the answer does not say (never a figure of ours).
+ */
+export function scheduleOf(res) {
+  const sch = (res && res.schedule) || null;
+  const st = (sch && sch.state) || {};
+  const lastRun = (res && res.byCluster || []).reduce((m, c) => (finite(c.lastRunAt) && (m === null || c.lastRunAt > m) ? c.lastRunAt : m), null);
+  return {
+    supported: sch ? sch.supported !== false : res ? false : null,
+    enabled: sch ? sch.enabled !== false : null,
+    everyHours: sch && finite(sch.everyHours) ? sch.everyHours : res && finite(res.everyHours) ? res.everyHours : null,
+    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : lastRun,
+    nextDueAt: finite(st.nextDueAt) ? st.nextDueAt : null,
   };
 }
 

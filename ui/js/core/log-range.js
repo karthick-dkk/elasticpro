@@ -5,7 +5,7 @@
  *
  * Two sets of ranges, each kept on its own (pages/log-delay.js): the boards (Dashboard, Summary,
  * Devices and the cluster and device views — the core's store) offer 30m to 12h and, in a menu,
- * 1d to 60d; Live Watch and Live logs (measured from this browser, heavy over long windows) offer
+ * 1d to 60d; Live (measured from this browser, heavy over long windows) offer
  * 5m to 12h. An id means the same in both sets: the sets are lists of ids from one table.
  */
 
@@ -25,7 +25,7 @@ const DEFS = Object.freeze({
 
 /** The boards' ranges, in the order the selector lists them: six buttons, the day ranges in its More menu, Custom. */
 export const BOARD_RANGES = Object.freeze(['30m', '1h', '2h', '4h', '8h', '12h', '1d', '3d', '7d', '15d', '30d', '60d', 'custom']);
-/** Live Watch's and Live logs' ranges, in order. */
+/** Live's ranges (Log Delay › Live), in order. */
 export const LIVE_RANGES = Object.freeze(['5m', '10m', '30m', '1h', '3h', '12h', 'custom']);
 export const DEFAULT_RANGE = '1h';
 /**
@@ -49,7 +49,7 @@ const spanOf = (id) => (DEFS[id][1] !== null ? DEFS[id][1] : DEFS[id][2] !== nul
  * A range as kept: `{id}`, or `{id: 'custom', from, to}` in unix ms. Unknown is the default.
  * With `set` (BOARD_RANGES, LIVE_RANGES), a range from the other set becomes the shortest of this
  * one that covers as much, else its longest — a 5m kept from before is 30m on the boards, a 7d
- * on Live Watch is 12h — said nowhere, the buttons show what is used.
+ * on Live is 12h — said nowhere, the buttons show what is used.
  */
 export function normaliseRange(r, set = null) {
   let id = r && Object.prototype.hasOwnProperty.call(DEFS, r.id) ? r.id : DEFAULT_RANGE;

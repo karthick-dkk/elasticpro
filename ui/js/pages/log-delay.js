@@ -8,12 +8,13 @@
  *               tiles, Delay reduced, Day by day, a ring per cluster worst first (logdelay/summary.js)
  *   Devices     every device, searched and filtered by level, each with its fix ("i") and its
  *               logs; one device beside the list (logdelay/boards.js)
- *   Live Watch  every cluster measured now from this browser, the delayed devices, one device
- *               live (logdelay/watch.js)
- *   Live logs   the documents over the time range, one device at a time if asked (logdelay/live-logs.js)
+ *   Live        Live Watch and Live logs as one tab: "Delayed now" — the chosen cluster measured
+ *               from this browser on Fetch, one device watched (logdelay/watch.js) — and "Logs",
+ *               its documents on Search (logdelay/live-logs.js). Nothing runs until pressed.
  *
- * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
- * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
+ * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js; not on
+ * Live, which has its own Fetch from the browser): one cluster at a time, its late devices by
+ * default, the whole cluster from its ▾ menu. Under it
  * one tools row: the time range (one button group; the boards 30m to 12h with 1d to 60d in a More
  * menu, the live tabs 5m to 12h, each set keeping its own choice; or custom) and the
  * cluster's log time zone as a chip (not on Summary, whose figures are the core's totals for every
@@ -48,8 +49,8 @@ import {
   boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope,
   pickId, boardsSetWindow, boardsInfo, boardsZoneRows, boardsMajorityPercent,
 } from '../logdelay/boards.js';
-import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
-import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
+import { watchCard, watchStrip, watchEnter, watchLeave, watchBusy } from '../logdelay/watch.js';
+import { liveCard, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
 import { fetchNowControl, fetchNowLeave, fetchNowBusy } from '../logdelay/fetch-now.js';
 
 let host = null;
@@ -63,15 +64,14 @@ const TABS = [
   ['fleet', 'Dashboard', 'The core’s measurements: every cluster, or one cluster'],
   ['summary', 'Summary', 'Every device in four figures, delays reduced, day by day, and a ring per cluster worst first'],
   ['devices', 'Devices', 'Every device, by level, with its fix and its logs; one device in detail'],
-  ['watch', 'Live Watch', 'Live check from this browser (500 devices per cluster at most): the delayed devices, and one device live'],
-  ['live', 'Live logs', 'The log documents over the time range, with each one’s delay'],
+  ['live', 'Live', 'Measured now from this browser on Fetch, one device watched, and its logs on Search: nothing runs until pressed'],
 ];
 
 /* ------------------------------------ the range ------------------------------------ */
 
 /*
  * Two ranges, kept apart (core/log-range.js): the boards' (Dashboard, Summary, Devices and the
- * cluster and device views; 30m to 60d) and the live tabs' (Live Watch, Live logs; 5m to 12h), so
+ * cluster and device views; 30m to 60d) and Live's (5m to 12h), so
  * a 30-day board never becomes a 30-day measurement from this browser. Both live in one
  * localStorage entry, `{boards, live}`; the single range kept before there were two seeds both, each
  * normalised to its own set (a 5m board is 30m, nothing said).
@@ -89,7 +89,7 @@ function readRanges() {
 /** Read again on every visit (render, arriving): another browser tab may have chosen since. */
 let ranges = readRanges();
 /** Which of the two ranges a tab reads. */
-const rangeKind = (tab = ldTab(route.view)) => (tab === 'watch' || tab === 'live' ? 'live' : 'boards');
+const rangeKind = (tab = ldTab(route.view)) => (tab === 'live' ? 'live' : 'boards');
 function setRange(r) {
   const kind = rangeKind();
   ranges[kind] = normaliseRange(r, kind === 'live' ? LIVE_RANGES : BOARD_RANGES);
@@ -113,13 +113,13 @@ export function render(el) {
   const arriving = !visiting;
   if (arriving) { visiting = true; boardsReset(); P.clear(); ranges = readRanges(); moreOpen = false; }
   setDisplayZone(zone());
-  // From a "logs arriving late" alert or its playbook (core/focus.js): Live Watch, checking the
-  // fleet. From a link that named a view (navigateTo('log-delay', {view, cluster, device})): that view.
+  // From a "logs arriving late" alert or its playbook (core/focus.js): Live, ready to Fetch (nothing
+  // starts on its own). From a link that named a view (navigateTo('log-delay', {view, cluster, device})): that view.
   const f = takeFocus('log-delay') || takeFocus('logs');
   const asked = intent.logDelay;
   intent.logDelay = null;
   let want = null;
-  if (f && f.view === 'delay') want = ldHash('watch');
+  if (f && f.view === 'delay') want = ldHash('live');
   if (asked && asked.view) want = ldHash(asked.view, asked.cluster, asked.device);
   if (want && location.hash !== want) { try { history.replaceState(null, '', want); } catch (_) { location.hash = want; } }
   route = ldRoute(location.hash);
@@ -128,7 +128,6 @@ export function render(el) {
   // the shell draws the page again because the chooser moved, the chooser is.
   reconcile(arriving && route.clusterId ? 'address' : 'chooser');
   enter(route);
-  if (f && f.view === 'delay') watchStart();
   draw();
 }
 
@@ -138,11 +137,11 @@ export function render(el) {
  * it names, or to All clusters when it names none; 'chooser' moves the address to the same tab
  * for the cluster chosen — the cluster board, its summary or its devices; the fleet, the fleet's
  * summary or every device for All.
- * Live Watch and Live logs read the chooser themselves (activeClusters), so they are left alone.
+ * Live reads the chooser itself (pickId, activeClusters), so it is left alone.
  */
 function reconcile(lead) {
   const tab = ldTab(route.view);
-  if (tab === 'watch' || tab === 'live') return;
+  if (tab === 'live') return;
   const named = route.clusterId && clusters().some((c) => c.id === route.clusterId) ? route.clusterId : null;
   const sel = pickId();
   if (named === sel) return;
@@ -184,21 +183,19 @@ export function onLeave() {
 
 function leave(tab) {
   if (tab === 'fleet' || tab === 'summary' || tab === 'devices') boardsLeave();
-  if (tab === 'watch') watchLeave();
-  if (tab === 'live') liveLeave();
+  if (tab === 'live') { watchLeave(); liveLeave(); }
 }
 
 function enter(r) {
   const tab = ldTab(r.view);
   if (entered && entered !== tab) leave(entered);
   entered = tab;
-  if (tab === 'watch') watchEnter(viewCtx());
-  if (tab === 'live') liveEnter(viewCtx(), r);
+  if (tab === 'live') { watchEnter(viewCtx()); liveEnter(viewCtx(), r); }
 }
 
 function busy() {
   const tab = ldTab(route.view);
-  return fetchNowBusy() || (tab === 'watch' ? watchBusy() : tab === 'live' ? liveBusy() : boardsLoading());
+  return fetchNowBusy() || (tab === 'live' ? watchBusy() || liveBusy() : boardsLoading());
 }
 
 /* ------------------------------------ the bar ------------------------------------ */
@@ -229,7 +226,8 @@ function bar() {
   // No "Log Delay" heading: the page's name is in the menu, once (the owner, 2026-11-14).
   const top = P.get('bar', '', () => h('div.rp-head.ld-bar', h('div.ld-bar-tabs'), h('div.ld-bar-right')));
   mount(top.children[0], tabs());
-  mount(top.children[1], status, fetchControl());
+  // Live has its own Fetch, from the browser: the core's Fetch now beside it would be a second button for a different thing.
+  mount(top.children[1], status, ldTab(route.view) === 'live' ? null : fetchControl());
   return top;
 }
 
@@ -313,8 +311,8 @@ function tzTools() {
 /**
  * The tab's time range as one button group (core/log-range.js). On the boards (BOARD_RANGES):
  * 30m · 1h · 2h · 4h · 8h · 12h, then More ▾ — a menu of 1d · 3d · 7d · 15d · 30d · 60d; with one
- * of those chosen the button reads it ("7d ▾") and is pressed — then Custom. On Live Watch and
- * Live logs (LIVE_RANGES): 5m · 10m · 30m · 1h · 3h · 12h · Custom. Each set keeps its own choice.
+ * of those chosen the button reads it ("7d ▾") and is pressed — then Custom. On Live
+ * (LIVE_RANGES): 5m · 10m · 30m · 1h · 3h · 12h · Custom. Each set keeps its own choice.
  * Custom opens From and To in the server's zone and Apply. The boards read their range as the
  * days it touches (boards.js boardsSetWindow), the live tabs theirs as minutes. `withZone` adds
  * the zone every time is written in (the boards have the chip instead).
@@ -378,12 +376,12 @@ function rangePick(withZone) {
 
 /**
  * One tools row for every tab: the time range, then the time-zone chip (Dashboard, Devices) or the
- * zone's name (Live Watch, Live logs); Summary has the range alone. The cluster is the top bar's chooser.
+ * zone's name (Live); Summary has the range alone. The cluster is the top bar's chooser.
  */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
-  if (tab === 'watch' || tab === 'live') mount(row, rangePick(true));
+  if (tab === 'live') mount(row, rangePick(true));
   else if (tab === 'summary') mount(row, rangePick(false));
   else mount(row, rangePick(false), tzTools());
   return row;
@@ -391,8 +389,11 @@ function tools() {
 
 function body() {
   const tab = ldTab(route.view);
-  if (tab === 'watch') return watchNodes();
-  if (tab === 'live') return liveNodes();
+  if (tab === 'live') {
+    const wrap = P.get('live', '', () => h('div.rp-section.ld.ld-live', { dataset: { ld: 'live' } }));
+    mount(wrap, watchCard(), liveCard(watchStrip()));
+    return wrap;
+  }
   boardsSetWindow(ranges.boards, zone());
   return boardsNode(route, { repaint: draw });
 }

@@ -42,7 +42,7 @@ import {
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
+  scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
@@ -130,7 +130,7 @@ export const pickId = () => (state.selected && state.selected !== 'all' && clust
 const ymdIn = (ms, tz) => { const p = zonedParts(ms, tz); return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`; };
 /**
  * The window every board reads is the page's boards range (core/log-range.js BOARD_RANGES; Live
- * Watch and Live logs keep their own): the store holds whole local days, so the summary is asked
+ * keeps its own): the store holds whole local days, so the summary is asked
  * for the days the window touches — a day range is exactly its days, 7d the 7 ending today (an
  * incomplete custom range asks for today). Where the window holds no scheduled run, windowNote says so.
  */
@@ -177,11 +177,12 @@ export function boardsInfo() {
   for (const [k, e] of S.cache) if (k.startsWith('sum|') && e.state === 'ok' && e.res) res = e.res;
   const lv = res ? sharedLevels(res.byCluster) : null;
   const sch = (res && res.schedule) || null;
-  const st = (sch && sch.state) || {};
+  const o = scheduleOf(res);
   return {
     schedule: sch, levels: lv, delayFrom: lv ? lv.delayFrom : null,
-    everyHours: sch && finite(sch.everyHours) ? sch.everyHours : res && finite(res.everyHours) ? res.everyHours : null,
-    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : null, nextDueAt: finite(st.nextDueAt) ? st.nextDueAt : null,
+    everyHours: o.everyHours,
+    // The schedule's own last run only (not the clusters'), as this note always read it.
+    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : null, nextDueAt: o.nextDueAt,
     sig: res ? `${objId(res)}` : '-',
   };
 }

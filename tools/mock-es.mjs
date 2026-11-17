@@ -621,6 +621,14 @@ const routes = [
       return { took: 3, timed_out: false, hits: { total: { value: 0 }, hits: [] },
                aggregations: { devices: { value: DEVICES.length } } };
     }
+    // Log Delay › Live, "Fetch all devices in cluster": the devices seen in the 7 days before the
+    // range, each with its newest arrival — every device of the range, and one silent for two days.
+    if (body.aggs && body.aggs.devices && body.aggs.devices.aggs && body.aggs.devices.aggs.last) {
+      const now = Date.now();
+      const buckets = [...DEVICES.map(([device]) => ({ key: device, doc_count: 50, last: { value: now - 60000 } })),
+        { key: 'old-sw-09', doc_count: 12, last: { value: now - 2 * 86400000 } }];
+      return { took: 5, timed_out: false, hits: { total: { value: 0 }, hits: [] }, aggregations: { devices: { buckets, sum_other_doc_count: 0 } } };
+    }
     if (body.aggs && body.aggs.devices) {
       const now = Date.now();
       const iso = (ms) => new Date(ms).toISOString();

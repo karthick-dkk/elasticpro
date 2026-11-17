@@ -1,15 +1,15 @@
 /**
  * The device row of the Log Delay page: one definition of how a device is drawn, used by every
  * table that lists devices — the fleet's Devices, a cluster's devices, the late devices of
- * Recommended fixes and Live Watch. A board row (docs/LOGDELAY.md DeviceRow) and a device Live
- * Watch measured (core/logdelay-report.js liveDeviceRow) are the same shape, so they are the same
+ * Recommended fixes and Live. A board row (docs/LOGDELAY.md DeviceRow) and a device Live
+ * measured (core/logdelay-report.js liveDeviceRow) are the same shape, so they are the same
  * row; a figure a row does not carry reads unknown, never 0.
  *
  * Every table shows zone and tag1 (the device's own, from its latest log), and every row can
- * open its logs: Live logs narrowed to the device over the page's time range.
+ * open its logs: Log Delay › Live with the device ready to search (nothing is searched until Search).
  */
 
-import { h } from '../lib/dom.js';
+import { h, svg } from '../lib/dom.js';
 import { sortTh } from '../lib/table-sort.js';
 import { clusters } from '../core/state.js';
 import {
@@ -50,6 +50,13 @@ const COLS = {
   // The figure after the zone step; its title spells the sum out (docs/LOGDELAY.md "Time zones").
   now: ['Delay now', true, (r, ctx) => h('td.num', { title: delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true })) || null }, nowText(r)),
     { type: 'number', value: (r) => r.nowMinutes }],
+  // Live's delay: a bar against the worst in the table (ctx.barMax) and the minutes; unknown is an empty track and "—", never 0.
+  nowBar: ['Delay now', true, (r, ctx) => {
+    const m = finite(r.nowMinutes) ? r.nowMinutes : null;
+    const pct = m !== null && m > 0 && finite(ctx.barMax) && ctx.barMax > 0 ? Math.max(3, Math.round((100 * m) / ctx.barMax)) : 0;
+    return h('td.num.ld-dbar-cell', { title: delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true })) || null },
+      h('span.ld-dbar', { dataset: { state: r.state } }, h('i', { style: { width: `${pct}%` } })), h('b', nowText(r)));
+  }, { type: 'number', value: (r) => r.nowMinutes }],
   rawGap: ['Raw gap', true, (r) => h('td.num.muted', { title: 'arrival − event as measured, before the time zone is taken out' },
     finite(r.rawGapMinutes) ? minutesText(r.rawGapMinutes) : '—'), { type: 'number', value: (r) => r.rawGapMinutes }],
   deviceTz: ['Device time zone', false, (r) => h('td', { title: 'the real UTC offset the device’s gap sits at, against the cluster’s zone' },
@@ -93,24 +100,29 @@ export function deviceHead(sort, keys, extra = {}, { labels = {}, actions = 'Ope
 }
 
 /**
- * One device. `ctx`: `now` (the answer's), `mode: 'watch'` for Live Watch (the row is not
- * clickable; actions are "i", Details, Open in logs) and `graph` false to leave out the device
+ * One device. `ctx`: `now` (the answer's), `mode: 'live'` for Log Delay › Live (the row is not
+ * clickable; actions are "i" and Watch — `onWatch(r)`, `watching(r)`; `barMax` scales the
+ * delay bar) and `graph` false to leave out the device
  * board link (the device board itself). Otherwise a click on the row opens the device, except on
  * a button or a link inside it; the last column is "i" and Open in logs.
  */
 export function deviceRow(r, keys, ctx = {}, extra = {}) {
   const all = { ...COLS, ...extra };
-  const watch = ctx.mode === 'watch';
+  const live = ctx.mode === 'live';
   const device = ldHash('device', r.cluster, r.device);
   const logs = ldHash('live', r.cluster, r.device);
+  const watching = live && ctx.watching ? ctx.watching(r) : false;
   const acts = [
     fixButton({ kind: 'device', id: r.device, items: () => fixesFor(r, 'device') }),
-    watch ? h('button.btn.sm.ld-details', { type: 'button', dataset: { href: ldHash('devices', r.cluster) }, title: `${r.device}: delay over time and every delay`, onclick: () => { location.hash = ldHash('devices', r.cluster); } }, 'Details') : null,
-    h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href: logs }, title: `${r.device}: its logs over the page's time range (Live logs)`, onclick: () => { location.hash = logs; } }, 'Open in logs'),
-  ].filter(Boolean);
-  const open = !watch && ctx.graph !== false;
+    // Live: Watch narrows the Logs card below to the device (nothing is searched until Search).
+    live ? h(`button.btn.sm.ld-watch-btn${watching ? '.on' : ''}`, { type: 'button', 'aria-pressed': String(watching), title: watching ? `Stop watching ${r.device}` : `${r.device}: its delay and its logs below`, onclick: () => ctx.onWatch && ctx.onWatch(r) },
+      svg('svg', { viewBox: '0 0 24 24', width: '14', height: '14', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+        svg('path', { d: 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z' }), svg('path', { d: 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z' })), watching ? ' Watching' : ' Watch')
+      : h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href: logs }, title: `${r.device}: its logs over the Live range (Log Delay › Live)`, onclick: () => { location.hash = logs; } }, 'Open in logs'),
+  ];
+  const open = !live && ctx.graph !== false;
   const cls = `${r.state === 'critical' || r.state === 'delay' ? '.ld-late' : ''}${open ? '.ld-rowlink' : ''}`;
-  return h(`tr${cls}`, {
+  return h(`tr${cls}${watching ? '.ld-watched' : ''}`, {
     dataset: { device: r.device, cluster: r.cluster },
     onclick: open ? (e) => { if (!e.target.closest('a, button')) location.hash = device; } : null,
   },
