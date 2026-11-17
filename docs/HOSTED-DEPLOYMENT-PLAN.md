@@ -20,6 +20,11 @@ precondition for phase 1.** Nothing below is deployed without it.
 
 ## Architecture
 
+> **What was built differs on one point (2026-11-17):** PostgreSQL was never wired up, and the
+> `db` container has left the stack. Accounts and roles are files in the core's data directory
+> (`auth.rs`), the audit log is the core's stdout, and shared state is in the optional Redis.
+> Every PostgreSQL mention below is the plan as it was written, not the stack as it runs.
+
 ```
 browser ──TLS──▶ nginx ──▶ elasticpro-bridge (Rust core) ──▶ Elasticsearch clusters
                   │             │                          └─ via SSH jump hosts, as today
@@ -170,9 +175,9 @@ control.
 
 ### Still open
 
-- What the second destination is, if there is one. The hosted deployment already
-  runs postgres for `users`/`acks`/`notes`/`audit`, so it is the candidate that
-  costs no new dependency — but that is an option, not a decision.
+- What the second destination is, if there is one. The hosted deployment no longer
+  runs a database (the unused PostgreSQL container left the stack), so a local store
+  would be a new dependency — an option, not a decision.
 - Whether a write to a destination inside this process needs the double write-gate
   in `guard.rs`. That gate exists because writes leave the process and land on
   someone's cluster. Writing to the Elasticsearch sink plainly does; a local store

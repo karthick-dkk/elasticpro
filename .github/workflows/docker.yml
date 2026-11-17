@@ -103,7 +103,9 @@ jobs:
           retention-days: 1
 
   # The tags, applied to a manifest list over both digests.
-  # nginx, PostgreSQL and Redis, each a thin layer over the official image (deploy/images/).
+  # nginx and Redis, each a thin layer over the official image (deploy/images/).
+  # (elasticpro-postgres is no longer published: the hosted stack has no db service. Its
+  # earlier tags stay on Docker Hub, so --rollback to a release that had it still works.)
   #
   # These are published rather than built by `docker compose` on the target, and that is a
   # correction rather than a preference: with a `build:` section the hosted install has to
@@ -112,8 +114,8 @@ jobs:
   # stopped. Pulling a finished image has no such dependency.
   #
   # QEMU rather than two native runners, unlike the core: the only emulated step is one
-  # `apk upgrade` per image. There is no compilation here, and buildkit does the flattening
-  # COPY natively, so emulation costs seconds instead of the hour it would cost the core.
+  # `apk upgrade` per image. There is no compilation here, so emulation costs seconds instead
+  # of the hour it would cost the core.
   support-images:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -123,7 +125,6 @@ jobs:
       matrix:
         include:
           - { name: nginx,    dockerfile: nginx.Dockerfile,    repo: elasticpro-nginx }
-          - { name: postgres, dockerfile: postgres.Dockerfile, repo: elasticpro-postgres }
           - { name: redis,    dockerfile: redis.Dockerfile,    repo: elasticpro-redis }
     steps:
       - uses: actions/checkout@v4

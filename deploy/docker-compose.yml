@@ -76,7 +76,7 @@ services:
       - core-data:/app/data            # pins.json — trust decisions
       - ${SSH_KEYS_DIR:-./ssh}:/app/ssh:ro   # jump-host keys, read-only
       # Only ./secrets/redis, never the whole ./secrets directory — the core has no
-      # business being able to read secrets/db_password. Empty (the `cache` profile is
+      # business reading anything else kept there. Empty (the `cache` profile is
       # not in use) is fine: compose creates it, the file below is simply absent, and the
       # entrypoint below leaves ELASTICPRO_REDIS_URL unset. Redis is optional at run time; the
       # core's own disk cache ($ELASTICPRO_DATA_DIR/cache) works with no Redis at all.
@@ -231,34 +231,8 @@ services:
       driver: json-file
       options: { max-size: "50m", max-file: "10" }
 
-  db:
-    # Every advisory against postgres:16-alpine is in the bundled `gosu`, a static Go
-    # binary no package manager can patch; images/postgres.Dockerfile swaps it for su-exec
-    # and flattens the result so the old binary is not left behind in a lower layer.
-    # PostgreSQL itself is untouched and still 16.15. Pulled rather than built, for the
-    # reason given on nginx above.
-    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.3.76}
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: elasticpro
-      POSTGRES_USER: elasticpro
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-    secrets: [db_password]
-    volumes:
-      - db-data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks: [internal]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U elasticpro"]
-      interval: 10s
-
-secrets:
-  db_password:
-    file: ./secrets/db_password
-
 volumes:
   core-data:
-  db-data:
 
 networks:
   internal:

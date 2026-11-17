@@ -30,11 +30,11 @@ case $TRIAL_PERIOD in \{*) PERIOD_JSON=$TRIAL_PERIOD ;; *) PERIOD_JSON="\"$TRIAL
 U=alice; PW='test-password-1'
 fail=0; ok(){ echo "  ✓ $1"; }; bad(){ echo "  ✗ $1"; fail=1; }
 
-# The certificate, the auth gate and the database password are all gitignored, so on a
-# fresh clone — and in CI — none of them exist. Make throwaway ones; never overwrite.
+# The certificate and the auth gate are both gitignored, so on a fresh clone — and in CI —
+# neither exists. Make throwaway ones; never overwrite.
 ./trial-setup.sh
 
-# The three support images are pinned in docker-compose.yml to the version being
+# The two support images are pinned in docker-compose.yml to the version being
 # released, but they are only pushed to the registry by docker.yml, which runs on the
 # release tag. Between the commit that bumps the pin and the tag that publishes the
 # images, the pinned tag does not exist — so this trial, which runs on every push, failed
@@ -46,7 +46,6 @@ fail=0; ok(){ echo "  ✓ $1"; }; bad(){ echo "  ✗ $1"; fail=1; }
 # test.
 export ELASTICPRO_NGINX_IMAGE=${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:latest}
 export ELASTICPRO_REDIS_IMAGE=${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:latest}
-export ELASTICPRO_DB_IMAGE=${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:latest}
 
 # TRIAL_SKIP_BUILD=1: the image ELASTICPRO_IMAGE names was built already (with other build args).
 [ "${TRIAL_SKIP_BUILD:-}" = 1 ] || docker compose build core 2>&1 | tail -2
@@ -57,7 +56,7 @@ docker compose up -d 2>&1 | tail -3
 # returning 200 would be reported as "UI served over TLS". Check the stack is actually up
 # before believing anything it says.
 running=$(docker compose ps --services --filter status=running | sort | tr '\n' ' ')
-for svc in core worker db nginx; do
+for svc in core worker nginx; do
   case " $running " in
     *" $svc "*) ;;
     *) echo "  ✗ service '$svc' is not running — the trial would be testing something else"

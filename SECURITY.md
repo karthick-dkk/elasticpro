@@ -55,7 +55,6 @@ Every image was scanned with Trivy on 2026-10-07, at every severity, against a c
 | --- | --- | --- |
 | `elasticpro-core` | **0** (and zero at LOW and MEDIUM too) | Alpine + a musl build |
 | `elasticpro-nginx` | **0** | `nginx:1.30-alpine` + `apk upgrade` |
-| `elasticpro-postgres` | **0** | `postgres:16-alpine`, `gosu` replaced by `su-exec`, flattened |
 | `redis:8-alpine` | **0** | upstream, unmodified |
 
 Reproduce any of them with:
@@ -76,21 +75,16 @@ and the musl build is a recompile rather than a port. The image also fell from 1
 most of the surface this base exists to avoid — so the healthcheck posts its probe with
 busybox `wget`, which supports `--header` and `--post-data`.
 
-*PostgreSQL is flattened, and that is not cosmetic.* Every advisory against
-`postgres:16-alpine` — one CRITICAL and twenty-one HIGH — is in `/usr/local/bin/gosu`, a
-static Go binary carrying an old Go standard library that no package manager can patch.
-17-alpine and 18-alpine report the identical twenty-two, so a database major would not have
-helped, and the Debian variants are worse (16-bookworm: 4 CRITICAL / 84 HIGH; 16-trixie:
-2 CRITICAL / 82 HIGH). `gosu` is replaced by `su-exec`, Alpine's C equivalent, which does the
-one thing the entrypoint asks of it. Deleting a file in a later layer, however, leaves it in
-the earlier one: the unflattened image still reported all twenty-two on a cold cache while
-the same container's live filesystem scanned clean. Copying the finished tree into `scratch`
-leaves one layer with no history behind it. PostgreSQL itself is untouched, still 16.15.
+*There is no database image any more.* The stack used to carry `elasticpro-postgres`
+(`postgres:16-alpine` with `gosu` swapped for `su-exec` and the result flattened, which is
+what it took to scan clean). Nothing in ElasticPro ever connected to it — accounts are files
+in the data directory and shared state is in Redis — so it was taken out of the stack and is
+no longer published, which removes that image and its maintenance from the surface altogether.
 
-*nginx and PostgreSQL are built by `docker compose`, not pulled.* Both are a thin layer over
-the official image, and both exist only because upstream rebuilds lag the fixes their own
-distributions have already published. If upstream starts scanning clean on its own, delete
-`deploy/images/` and go back to the plain tags.
+*nginx and Redis are thin layers over the official images*, built from `deploy/images/` and
+published by CI rather than built on the host. Both exist only because upstream rebuilds lag
+the fixes their own distributions have already published. If upstream starts scanning clean
+on its own, delete `deploy/images/` and go back to the plain tags.
 
 `deploy/vault/` is optional and pins `hashicorp/vault:2.1`; 1.18 reported four CRITICAL and
 eighty HIGH. Upgrading a Vault that already holds data is a major-version migration, not a tag
