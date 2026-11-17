@@ -69,6 +69,7 @@ import { parseHash, pageAlias } from './reports/route.js';
 import { navDot } from './core/system-health.js';
 import * as pIndices from './pages/indices.js';
 import * as pLogDelay from './pages/log-delay.js';
+import { idleMs, onActivity } from './core/activity.js';
 import * as pSnapshots from './pages/snapshots.js';
 import * as pShards from './pages/shards.js';
 import * as pConsole from './pages/console.js';
@@ -166,12 +167,11 @@ function applyMenuPosition(v) {
  * label, the open-alert count a badge on Alerts — and » opens it again; the page takes the width
  * it frees (app.css html[data-rail="on"]). Two ways to be folded:
  *  - by hand (« pressed): kept per browser, icons only, the menu never opens on hover;
- *  - by itself after RAIL_IDLE_MS with no mouse, key, wheel or touch anywhere in the app: this visit
+ *  - by itself after IDLE_MS (core/activity.js, the app's one "idle") with no mouse, key, wheel or touch anywhere in the app: this visit
  *    only, and the full menu shows over the page while the mouse is on it (html[data-peek]).
  * » (or any rail button) opens it for good again. The top menu has no rail.
  */
 const RAIL_KEY = 'elasticpro.menu.rail';
-const RAIL_IDLE_MS = 3 * 60 * 1000;
 let menuRail = (() => { try { return localStorage.getItem(RAIL_KEY) === '1'; } catch (_) { return false; } })();
 let autoFold = false;
 let railIdleTimer = null;
@@ -184,7 +184,7 @@ function applyRail() {
 }
 applyRail();
 /** Starts (or restarts) the inactivity count while the full left menu is shown. The browser checks
- *  can shorten it (`window.__EP_RAIL_IDLE_MS`): nobody waits three minutes in a test. */
+ *  can shorten it (`window.__EP_RAIL_IDLE_MS`, read by idleMs): nobody waits three minutes in a test. */
 function armRailIdle() {
   clearTimeout(railIdleTimer);
   railIdleTimer = null;
@@ -197,12 +197,10 @@ function armRailIdle() {
     applyRail();
     navBuiltFor = '';
     renderNav();
-  }, Number(window.__EP_RAIL_IDLE_MS) || RAIL_IDLE_MS);
+  }, idleMs('__EP_RAIL_IDLE_MS'));
 }
-for (const t of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart']) {
-  // Re-armed at most once a second: a moving mouse is one long activity, not a hundred.
-  document.addEventListener(t, () => { if (!railOn() && Date.now() - railArmedAt > 1000) armRailIdle(); }, { passive: true, capture: true });
-}
+// Re-armed at most once a second: a moving mouse is one long activity, not a hundred.
+onActivity(() => { if (!railOn() && Date.now() - railArmedAt > 1000) armRailIdle(); });
 function toggleRail() {
   if (railOn()) { menuRail = false; autoFold = false; } else menuRail = true;
   try { localStorage.setItem(RAIL_KEY, menuRail ? '1' : '0'); } catch (_) { /* kept for this visit */ }

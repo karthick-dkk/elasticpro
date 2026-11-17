@@ -22,6 +22,8 @@ const EXTRAS = ['tag1', 'fwd_tag', 'parser_tag', 'Zone'];
  */
 export function timeZoneOf(ci, now) {
   const base = { majorityPercent: 60, toleranceMinutes: 3, runsNeeded: 3 };
+  // knobs.zonesUnknown: every cluster not detected — logs stamped in UTC with a few minutes of lag, the normal case.
+  if (knobs.zonesUnknown) ci = 2;
   if (ci === 0) return { ...base, setting: 'detect', mode: 'detected', zone: 'Asia/Kolkata', offsetMinutes: 330, offset: '+05:30', agree: 12, of: 13, pct: 92.3, pluralityOffset: 330, pluralityOffsetText: '+05:30', since: now - 9 * DAY, steadyRuns: 3 };
   if (ci === 1) return { ...base, setting: 'UTC', mode: 'set', zone: 'UTC', offsetMinutes: 0, offset: '+00:00', agree: 10, of: 13, pct: 76.9, pluralityOffset: 0, pluralityOffsetText: '+00:00', since: null, steadyRuns: 3 };
   return { ...base, setting: 'detect', mode: 'none', zone: null, offsetMinutes: null, offset: null, agree: 5, of: 12, pct: 41.7, pluralityOffset: 60, pluralityOffsetText: '+01:00', since: null, steadyRuns: 0 };
@@ -47,7 +49,7 @@ function devicesOf(c, ci, now) {
     const tz = timeZoneOf(ci, now);
     const clusterTzOffset = tz.offsetMinutes;
     let tzOffsetMinutes = clusterTzOffset; let deviceTzOffset = clusterTzOffset;
-    if (ci === 0 && i === 5) { state = 'other_tz'; nowMinutes = 1; tzOffsetMinutes = 480; deviceTzOffset = 480; }
+    if (ci === 0 && i === 5 && !knobs.zonesUnknown) { state = 'other_tz'; nowMinutes = 1; tzOffsetMinutes = 480; deviceTzOffset = 480; }
     const rawGapMinutes = nowMinutes === null ? null : nowMinutes + (tzOffsetMinutes || 0);
     const late = state === 'critical' || state === 'delay';
     const episodes = late ? 5 - ci : seed % 3;
@@ -122,9 +124,14 @@ function windowsOf(now, ci, late) {
   return out;
 }
 
-/** How the last run read a cluster (docs/LOGDELAY.md "Measurement" lastRead). */
-const lastRead = (rows, now) => ({ at: now - 4 * 60000, from: now - 2 * 3600000 - 4 * 60000, to: now - 4 * 60000,
-  devices: rows.filter((r) => r.inLastRun).length, pages: 1, complete: true, truncated: false });
+/**
+ * How the last run read a cluster (docs/LOGDELAY.md "Measurement" lastRead). `noDevice`, the
+ * documents with no device name: 3,183 on the first cluster, none on the second, 9,221 on any other.
+ */
+const NO_DEVICE = (ci) => (ci === 0 ? 3183 : ci === 1 ? 0 : 9221);
+export const noDeviceOf = NO_DEVICE;
+const lastRead = (rows, now, ci = 1) => ({ at: now - 4 * 60000, from: now - 2 * 3600000 - 4 * 60000, to: now - 4 * 60000,
+  devices: rows.filter((r) => r.inLastRun).length, pages: 1, complete: true, truncated: false, noDevice: NO_DEVICE(ci) });
 
 const FINDINGS = (c, rows) => [
   { cluster: c.id, clusterName: c.name, step: 'forwarder', stepLabel: 'Forwarder', devices: rows.slice(0, 2).map((r) => r.device), group: ['fwd_tag', rows[0].extras.fwd_tag],
@@ -157,7 +164,7 @@ export function logDelayData(clusters, now = Date.now()) {
 }
 
 /** What a test turns: how long ago the scheduled run last ran (the Log Delay window note). */
-export const knobs = { lastRunAgoMs: 4 * 60000 };
+export const knobs = { lastRunAgoMs: 4 * 60000, zonesUnknown: false };
 
 export function logDelayAnswer(body, clusters, now = Date.now()) {
   const t = String((body && body.type) || '');
@@ -184,8 +191,8 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
         below: tt.devices - tt.late, belowPct: Math.round(((tt.devices - tt.late) / tt.devices) * 1000) / 10, latePct: Math.round((tt.late / tt.devices) * 1000) / 10,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),
         worst: { device: p.rows[0].device, minutes: p.rows[0].nowMinutes, state: 'critical' }, levels: LEVELS, lastRunAt: now - knobs.lastRunAgoMs,
-        counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now) },
-        lastRead: lastRead(p.rows, now) };
+        counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now, p.ci) },
+        lastRead: lastRead(p.rows, now, p.ci) };
     });
     for (const c of never.filter((x) => !only || only.has(x.id))) {
       byCluster.push({ id: c.id, name: c.name, devices: 0, measured: 0, lateNow: 0, delay: 0, critical: 0, silent: 0, unmeasured: 0, otherTz: 0, below: 0, belowPct: null, latePct: null,
@@ -208,8 +215,8 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       return { ...common, cluster: c.id, name: c.name, levels: LEVELS, fields, lastRunAt: null, totals: totalsOf([]), started: 0, solved: 0, medianNow: null, medianPrevious: null, windows: [], days: [], devices: [],
         timeZone: { setting: 'detect', mode: 'none', zone: null, offsetMinutes: null, offset: null, agree: null, of: null, pct: null, since: null, steadyRuns: 0, runsNeeded: 3, majorityPercent: 60, toleranceMinutes: 3 } };
     }
-    return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - knobs.lastRunAgoMs, lastRead: lastRead(p.rows, now), timeZone: timeZoneOf(p.ci, now),
-      counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now) },
+    return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - knobs.lastRunAgoMs, lastRead: lastRead(p.rows, now, p.ci), timeZone: timeZoneOf(p.ci, now),
+      counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now, p.ci) },
       totals: totalsOf(p.rows), started: 7, solved: 5, fixes: FINDINGS(p.c, p.rows),
       medianNow: 5.1, medianPrevious: 4.2, windows: windowsOf(now, p.ci, totalsOf(p.rows).late), days: daysOf(n, now, p.ci, p.rows.length), devices: withFix(p) };
   }

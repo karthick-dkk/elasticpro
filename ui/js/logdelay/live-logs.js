@@ -5,6 +5,9 @@
  * the merge (Live Watch and Live logs became one tab, Live; docs/LOGDELAY.md "Live").
  *
  * Nothing is searched until Search is pressed, and the live tail is off until Start live tail is.
+ * The tail stops by itself when the tab or the page is left, and after IDLE_MS (core/activity.js,
+ * three minutes — the same "idle" the menu rail folds on) with no mouse, key, wheel or touch in
+ * the app; then the card says so, with Start again (0.3.77).
  * Watching a device in "Delayed now" (logdelay/watch.js), or arriving by a row's address
  * (#/log-delay/live/<cluster>/<device>), narrows the filters to that device and waits for Search.
  *
@@ -18,6 +21,7 @@
  */
 
 import { tailTick } from '../core/tail.js';
+import { idleMs, idleWords, onActivity } from '../core/activity.js';
 import { h, mount, activatable, svg } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { num, dur, ymdDots, eachDay, download, toCsv } from '../lib/fmt.js';
@@ -42,6 +46,7 @@ const ui = {
   error: null,
   hits: [], total: 0, totalRelation: 'eq', tookMs: 0, buckets: [], resolved: null, rangeText: '',
   tail: false,
+  tailStopped: null,      // 'idle': the tail stopped itself after IDLE_MS without activity (said, with Start again)
   expanded: new Set(),
   narrowed: null,         // { clusterId, device }: watched above, or named by the address
   mapped: new Map(),      // cluster id -> Set of the filter fields its indices map (asked once, on the first Search that needs it)
@@ -49,6 +54,11 @@ const ui = {
 };
 
 let tailTimer = null;
+/** The tail's idle stop (armTailIdle): its timer, when it was last armed, and the activity listener to let go of. */
+const TAIL_SEAM = '__EP_TAIL_IDLE_MS';
+let tailIdleTimer = null;
+let tailArmedAt = 0;
+let tailActive = null;
 /** The search still out: a newer one, or leaving the tab, lets go of it. */
 let searchCtl = null;
 let searchSeq = 0;
@@ -94,6 +104,7 @@ export function liveEnter(c, route) {
 /** The tab is left: the tail stops and the search still out is let go of. */
 export function liveLeave() {
   stopTail();
+  ui.tailStopped = null;
   if (searchCtl) searchCtl.abort();
   searchCtl = null;
   ui.running = false;
@@ -194,7 +205,7 @@ async function search({ silent = false } = {}) {
   const signal = searchCtl ? searchCtl.signal : undefined;
   const mine = ++searchSeq;
   ui.running = true; ui.error = null; ui.searched = true;
-  if (!silent) bump();
+  if (!silent) { ui.tailStopped = null; bump(); }
   // The clusters' log time zones (core/delay-levels.js zoneOf), for each document's delay.
   await loadLevels().catch(() => {});
   if (!state.indices.get(c.id)) { try { await fetchIndices(c.id, '*'); } catch (_) { /* the pattern below still works */ } }
@@ -234,11 +245,41 @@ async function search({ silent = false } = {}) {
 function startTail() {
   stopTail();
   ui.tail = true;
+  ui.tailStopped = null;
   tailTimer = setInterval(() => tailTick(() => ui.running, () => search({ silent: true })),
     Math.max(5, state.defaults.refreshIntervalSec || 30) * 1000);
+  armTailIdle();
+  // Any activity in the app restarts the count, at most a few times a second-or-so (a moving mouse is one activity).
+  tailActive = onActivity(() => { if (ui.tail && Date.now() - tailArmedAt > Math.min(1000, idleMs(TAIL_SEAM) / 4)) armTailIdle(); });
   search();
 }
-function stopTail() { ui.tail = false; if (tailTimer) clearInterval(tailTimer); tailTimer = null; }
+function stopTail() {
+  ui.tail = false;
+  if (tailTimer) clearInterval(tailTimer);
+  tailTimer = null;
+  clearTimeout(tailIdleTimer);
+  tailIdleTimer = null;
+  if (tailActive) tailActive();
+  tailActive = null;
+}
+
+/**
+ * The tail's idle stop: IDLE_MS (core/activity.js) after the last activity it stops and says so.
+ * A browser check shortens it with `window.__EP_TAIL_IDLE_MS`, as the menu rail's `__EP_RAIL_IDLE_MS`.
+ */
+function armTailIdle() {
+  clearTimeout(tailIdleTimer);
+  tailArmedAt = Date.now();
+  tailIdleTimer = setTimeout(() => {
+    tailIdleTimer = null;
+    if (!ui.tail) return;
+    stopTail();
+    ui.tailStopped = 'idle';
+    bump();
+  }, idleMs(TAIL_SEAM));
+}
+// Leaving the page for good (closed, reloaded, gone elsewhere): no tail left behind.
+if (typeof window !== 'undefined') window.addEventListener('pagehide', () => { if (ui.tail) { stopTail(); bump(); } });
 
 /* -------------------------------- the columns -------------------------------- */
 
@@ -434,6 +475,9 @@ export function liveCard(strip) {
         ui.resolved.exact ? `${ui.resolved.list.length} daily ${ui.resolved.list.length === 1 ? 'index' : 'indices'}: ` : 'No matching daily indices cached — the pattern ',
         h('code.inline', ui.resolved.list.slice(0, 3).join(', ') + (ui.resolved.list.length > 3 ? ` +${ui.resolved.list.length - 3} more` : ''))) : null,
       ui.error ? h('div.banner.err.ld-flat#ld-live-error', h('div', h('div.ttl', 'Not searched'), h('div', ui.error))) : null) : null));
+    const stopped = L.get('live:stopped', `${ui.tailStopped}|${custom}`, () => (ui.tailStopped === 'idle' ? h('div.ld-live-stopped#ld-live-tail-stopped', { role: 'status' },
+      `Live tail stopped after ${idleWords()} without activity · `,
+      h('button.linkish#ld-live-tail-again', { type: 'button', disabled: custom, onclick: () => startTail() }, 'Start again')) : null));
     let results;
     if (!ui.searched) {
       results = L.get('live:idle', `${!!n}`, () => h('div.ld-lidle#ld-live-idle', 'Nothing searched yet. Set filters and press ', h('b', 'Search'),
@@ -446,7 +490,7 @@ export function liveCard(strip) {
             formatX: (x) => zonedText(x, z.tz, { seconds: false }).slice(11) })));
       results = [chart, tableNode(c)];
     }
-    mount(shell.lastChild, ...[strip, filtersRow(c), status].concat(results).filter(Boolean));
+    mount(shell.lastChild, ...[strip, filtersRow(c), stopped, status].concat(results).filter(Boolean));
     return shell;
   } finally { L.end(); }
 }

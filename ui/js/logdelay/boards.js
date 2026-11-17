@@ -43,7 +43,7 @@ import {
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
-  LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
+  LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER, noDeviceTotal, noDeviceLine,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
@@ -374,15 +374,25 @@ function lastReadText(lr) {
 }
 const noDeviceText = (lr) => (!lr ? '—' : finite(lr.noDevice) ? countText(lr.noDevice) : 'not reported');
 
-/** A cluster whose last run was cut or failed, or whose documents had no device name: said above the figures. */
+/** A cluster whose last run was cut or failed: said above the figures. */
 function readNotes(items) {
   const bad = items.filter((x) => x.lastRead && (x.lastRead.truncated || x.lastRead.complete === false || x.lastRead.error));
-  const lost = items.filter((x) => x.lastRead && finite(x.lastRead.noDevice) && x.lastRead.noDevice > 0);
-  if (!bad.length && !lost.length) return null;
+  if (!bad.length) return null;
   return h('div.banner.warn.ld-flat',
     bad.map((x) => h('div', `${x.name}: the last run ${x.lastRead.truncated ? 'stopped at the device cap, so the devices after it are not in the figures; raise ' : 'did not read every device'}`,
-      x.lastRead.truncated ? [h('b', capSetting), '.'] : '.')),
-    lost.map((x) => h('div', `${x.name}: ${countText(x.lastRead.noDevice)} document${x.lastRead.noDevice === 1 ? ' has' : 's have'} no device name and ${x.lastRead.noDevice === 1 ? 'is' : 'are'} in no device’s figures.`)));
+      x.lastRead.truncated ? [h('b', capSetting), '.'] : '.')));
+}
+
+/**
+ * Documents without a device name (the owner, 0.3.77: not a note per cluster above the figures):
+ * one quiet line, summed over the clusters in view (noDeviceTotal); `where` says where each
+ * cluster's count is (the Dashboard's How the last run read each cluster). Null when none.
+ */
+function noDeviceNote(byCluster, where = '') {
+  const sum = noDeviceTotal(byCluster);
+  if (!sum) return null;
+  return h('div.muted.ld-note#ld-nodevice-note', { title: 'Documents in the last run’s window whose device field is empty: they are in no bucket, so no device’s delay or count includes them. Check the parser’s device field.' },
+    `${noDeviceLine(sum)}.${where ? ` ${where}` : ''}`);
 }
 
 /** One cluster's three counts, one line, with what each means. */
@@ -581,6 +591,7 @@ function fleetView() {
 
   const notice = B.get('fleet:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  const noDevNote = B.get('fleet:nodevice', rid, () => noDeviceNote(res.byCluster, 'Each cluster’s count: How the last run read each cluster, below.'));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and the heat map are the core’s day totals for every zone.`)
@@ -681,7 +692,7 @@ function fleetView() {
   // The owner's order (prototype v22): tiles, the state bar with its legend, By cluster, Devices behind, the heat map.
   const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
   // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, Hourly Delay Status.
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, readCard, neverNote];
+  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, noDevNote, readCard, neverNote];
 }
 
 /* ------------------------------------ the summary ------------------------------------ */
@@ -701,6 +712,8 @@ function summaryView(clusterId) {
   const rid = objId(res);
   const notice = B.get('sum:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('sum:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  // Documents without a device name: one line under the cards, summed (the owner, 0.3.77).
+  const noDevNote = B.get('sum:nodevice', rid, () => noDeviceNote(res.byCluster, clusterId ? '' : 'Each cluster’s count: Dashboard › How the last run read each cluster.'));
   const winNote = B.get('sum:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   const tzNote = B.get('sum:tz', `${S.tz}`, () => (S.tz === null ? null
     : h('div.muted.ld-note#ld-sum-tz-note', `Summary counts every time zone (the core’s totals): the time-zone filter — ${tzWords()} — applies to Dashboard and Devices.`)));
@@ -712,7 +725,7 @@ function summaryView(clusterId) {
   const daysRes = dent.state === 'ok' ? dent.res : null;
   const cards = B.get('sum:cards', `${rid}|${clusterId}|${win.from}..${win.to}|${entSig(dent)}`, () => summaryCards(res, {
     clusterId, nameOf, daysRes, win, daysPending: daysRes ? null : problem(dent, 'The days of the last week') }));
-  return [notice, readNote, winNote, tzNote, ...cards];
+  return [notice, readNote, winNote, tzNote, ...cards, noDevNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */

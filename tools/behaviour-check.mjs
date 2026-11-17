@@ -3046,6 +3046,29 @@ await go('log-delay');
       ok(g('ld-live-tail').getAttribute('aria-pressed') === 'true' && /Stop live tail/.test(g('ld-live-tail').textContent), 'live: Start live tail did not start it');
       press(g('ld-live-tail')); await settleFor(150);
       ok(g('ld-live-tail').getAttribute('aria-pressed') === 'false', 'live: Stop live tail did not stop it');
+      // 0.3.77: the tail stops by itself after the app's idle time (core/activity.js; shortened here) without a mouse, key,
+      // wheel or touch, and says so with Start again; activity keeps it going; leaving the page stops it.
+      window.__EP_TAIL_IDLE_MS = 400;
+      try {
+        press(g('ld-live-tail')); await settleFor(150);
+        ok(g('ld-live-tail').getAttribute('aria-pressed') === 'true' && !g('ld-live-tail-stopped'), 'live: Start live tail did not start it again');
+        for (let i = 0; i < 6; i++) { doc.dispatchEvent(new window.Event('pointermove', { bubbles: true })); await settleFor(120); }
+        ok(g('ld-live-tail').getAttribute('aria-pressed') === 'true', 'live: the tail stopped while the mouse was moving');
+        await waitFor(() => g('ld-live-tail').getAttribute('aria-pressed') === 'false' && g('ld-live-tail-stopped'), 'live: the tail did not stop after the idle time', 3000);
+        ok(/^Live tail stopped after 3 min without activity · Start again$/.test(g('ld-live-tail-stopped').textContent.trim()) && g('ld-live-tail-stopped').getAttribute('role') === 'status',
+          `live: the idle stop reads "${(g('ld-live-tail-stopped') || {}).textContent}"`);
+        press(g('ld-live-tail-again')); await settleFor(150);
+        ok(g('ld-live-tail').getAttribute('aria-pressed') === 'true' && !g('ld-live-tail-stopped'), 'live: Start again did not start the tail');
+        window.dispatchEvent(new window.Event('pagehide')); await settleFor(120);
+        ok(g('ld-live-tail').getAttribute('aria-pressed') === 'false' && !g('ld-live-tail-stopped'), 'live: leaving the page did not stop the tail');
+        // Another tab of the page: the tail stops; back on Live it is off.
+        press(g('ld-live-tail')); await settleFor(150);
+        location.hash = '#/log-delay/summary';
+        await waitFor(() => /^#\/log-delay\/summary/.test(location.hash) && !g('ld-live-tail'), `live: the Summary tab did not open (${location.hash})`);
+        location.hash = '#/log-delay/live';
+        await waitFor(() => g('ld-live-tail') && g('ld-delayed-now'), 'live: Live did not draw again');
+        ok(g('ld-live-tail').getAttribute('aria-pressed') === 'false', 'live: the tail kept running after the tab was left');
+      } finally { delete window.__EP_TAIL_IDLE_MS; }
       // Stop watching: the device leaves Logs.
       press(g('ld-watch-stop')); await settleFor(200);
       ok(!g('ld-watch-strip') && g('ld-live-host').value === '' && g('ld-live-idle'), 'live: Stop watching kept the device in Logs');
@@ -7792,6 +7815,30 @@ await settleFor(300);
     ok(!g('ld-fleet-counts'), 'log delay: the counts line under the state bar is still drawn');
     // The tools row is one line: every control the same height class, none a labelled field.
     ok(!doc.querySelector('.ld-tools label.field') && doc.querySelector('.ld-tools .seg-group') && doc.querySelector('.ld-tools .ld-tz-chip'), 'log delay: the tools row is not the range group beside the time-zone chip');
+    {
+      // 0.3.77: the range sits at the right end of the tools row, behind a toggle that folds it away and is kept per browser.
+      const row = doc.querySelector('.ld-tools');
+      ok(row.lastElementChild && row.lastElementChild.classList.contains('ld-tools-range') && row.firstElementChild.classList.contains('ld-tz-tools'),
+        `log delay: the tools row is not the time-zone chip then the range at the right end (${[...row.children].map((x) => x.className).join(' | ')})`);
+      const tg = g('ld-range-toggle');
+      ok(tg && tg.tagName === 'BUTTON' && tg.getAttribute('aria-controls') === 'ld-range-body' && tg.getAttribute('aria-expanded') === 'true' && /1h/.test(tg.textContent) && tg.querySelector('svg') && !g('ld-range-body').hidden,
+        `log delay: the range toggle is not an open button reading the range (${tg && tg.outerHTML.slice(0, 160)})`);
+      tg.focus(); press(tg); await settleFor(120);
+      ok(g('ld-range-toggle').getAttribute('aria-expanded') === 'false' && g('ld-range-body').hidden && /1h ▾/.test(g('ld-range-toggle').textContent),
+        `log delay: the toggle did not fold the range group to its chip ("${g('ld-range-toggle').textContent}")`);
+      ok(window.localStorage.getItem('elasticpro.logdelay.rangeShown') === '0', 'log delay: the folded range is not kept per browser');
+      ok(doc.activeElement === g('ld-range-toggle'), 'log delay: the focus left the toggle when it folded the range');
+      g('ld-range-toggle').click(); await settleFor(120);
+      ok(g('ld-range-toggle').getAttribute('aria-expanded') === 'true' && !g('ld-range-body').hidden && window.localStorage.getItem('elasticpro.logdelay.rangeShown') === '1', 'log delay: the toggle did not show the range group again');
+      // Documents without a device name: no note per cluster above the figures, one summed line instead (the owner, 0.3.77).
+      const fxN = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list);
+      const lost = (fxN.byCluster || []).filter((c) => c.lastRead && c.lastRead.noDevice > 0);
+      const docsN = lost.reduce((a, c) => a + c.lastRead.noDevice, 0);
+      ok(![...fleet.querySelectorAll('.banner')].some((b) => /no device name/.test(b.textContent)), 'log delay: a banner above the figures still names documents without a device name');
+      ok(lost.length ? g('ld-nodevice-note') && fleet.querySelectorAll('.ld-note').length >= 1 && [...fleet.querySelectorAll('.ld-note')].filter((x) => /no device name/.test(x.textContent)).length === 1
+        && g('ld-nodevice-note').textContent.startsWith(`${docsN.toLocaleString('en')} document`) && (lost.length === 1 || new RegExp(`in ${lost.length} clusters`).test(g('ld-nodevice-note').textContent)) : !g('ld-nodevice-note'),
+        `log delay: the no-device line reads "${(g('ld-nodevice-note') || {}).textContent}" for ${docsN} documents in ${lost.length} clusters`);
+    }
     // The five count tiles: the three configured levels, another time zone, silent. No median, percentile or average anywhere.
     for (const k of ['below', 'delay', 'critical', 'tz', 'silent']) ok(!!fleet.querySelector(`[data-kpi="${k}"]`), `log delay: no ${k} tile`);
     ok(fleet.querySelectorAll('.ld-kpi').length === 5, `log delay: ${fleet.querySelectorAll('.ld-kpi').length} tiles, not five`);
@@ -8092,6 +8139,21 @@ await settleFor(300);
       ok(rings().length === list.length + 1, `log delay: ${rings().length} rings for ${list.length} clusters`);
       const shares = rings().slice(1).map(share);
       ok(shares.every((v, i) => i === 0 || v <= shares[i - 1]), `log delay: the rings are not worst first (${shares.join(', ')})`);
+      {
+        // 0.3.77: a ring above LD_RING_RED_PCT (2 %) delayed draws its arcs in the critical red; at or below, the level colours. All clusters too.
+        const fxR = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list);
+        const pctOf = (a) => (a.dataset.ring === 'all' ? fxR.totals.pctLate : (fxR.byCluster.find((c) => c.id === a.dataset.ring) || {}).latePct);
+        const bad = rings().filter((a) => a.dataset.known === 'true').filter((a) => {
+          const red = pctOf(a) > 2;
+          const arcs = [...a.querySelectorAll('.ld-arc')];
+          return a.dataset.alert !== String(red) || arcs.some((c) => /level-crit/.test(c.getAttribute('stroke') || '') !== red);
+        });
+        ok(rings().some((a) => a.dataset.known === 'true') && bad.length === 0, `log delay: rings red the wrong way: ${bad.map((a) => `${a.dataset.ring} ${pctOf(a)} % alert=${a.dataset.alert}`).join(', ')}`);
+        ok(/Above 2 % delayed/.test(g('ld-rings').closest('section').textContent), 'log delay: the rings legend does not name the red line');
+        // The summed no-device line, under the cards, once; no per-cluster note above them.
+        ok([...view().querySelectorAll('.banner')].every((b) => !/no device name/.test(b.textContent)) && [...view().querySelectorAll('.ld-note')].filter((x) => /no device name/.test(x.textContent)).length <= 1,
+          'log delay: Summary still writes a note per cluster for documents without a device name');
+      }
       const last = rings().at(-1);
       ok(last.dataset.known === 'false' && /never measured/.test(last.textContent) && !last.querySelector('.ld-arc') && /—/.test(last.querySelector('.ld-ring-mid b').textContent),
         `log delay: the never-measured cluster's ring reads "${last.textContent}"`);
@@ -8300,6 +8362,16 @@ await settleFor(300);
     const find = g('cm-find');
     if (find) { find.value = 'delay levels'; find.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(150); }
     ok(/Delay levels/.test((g('cm-find-results') || {}).textContent || ''), 'log delay settings: Find a setting does not index Delay levels');
+    // 0.3.77: every cluster "not detected" (logs stamped in UTC, the normal case) — the boards draw no time-zone chip at all;
+    // the zone stays in By cluster's Time zone column. The range toggle is still there.
+    ldKnobs.zonesUnknown = true;
+    try {
+      await go('reports');
+      await go('log-delay');
+      await waitFor(() => g('ld-range-toggle') && (g('ld-by-cluster') || g('ld-cluster-devices')), 'log delay: the boards did not draw with every zone unknown');
+      ok(!g('ld-tz-chip') && !doc.querySelector('.ld-tools .ld-tz-tools'), `log delay: a time-zone chip is drawn with no zone detected anywhere ("${(g('ld-tz-chip') || {}).textContent}")`);
+      ok(!g('ld-by-cluster') || /not detected · \d+ % agree/.test(g('ld-by-cluster').textContent), 'log delay: By cluster no longer says a cluster’s zone is not detected');
+    } finally { ldKnobs.zonesUnknown = false; }
   } finally {
     globalThis.fetch = realFetch;
   }

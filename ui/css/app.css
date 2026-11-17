@@ -2726,6 +2726,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld[data-ld="summary"] .ld-ring-pic { width: 84px; height: 84px; }
 .ld[data-ld="summary"] .ld-ring-mid b { font-size: 15px; }
 .ld[data-ld="summary"] .ld-ring[data-known="false"] .ld-ring-mid b { color: var(--text-muted); }
+.ld[data-ld="summary"] .ld-ring[data-alert="true"] .ld-ring-mid b { color: var(--critical-ink); }
 .ld-spark { display: inline-block; line-height: 0; }
 .ld-foot { padding: 7px 2px 0; font-size: 12px; color: var(--text-secondary); }
 .ld-note { font-size: 12px; }
@@ -2804,6 +2805,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld .ld-acts { white-space: nowrap; font-size: 12px; }
 .ld .ld-acts a { text-decoration: none; }
 .ld .ld-acts .btn.sm { height: 24px; padding: 0 8px; }
+.ld-live-stopped { font-size: 12px; color: var(--text-secondary); padding: 5px 9px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
 .ld-live-status { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 11.5px; min-height: 18px; margin-bottom: 8px; }
 .ld table.tbl.ld-logs td.ld-msg { max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
 .ld table.tbl.ld-logs td.ld-msg.ld-open-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -3037,7 +3039,14 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-chartbox g.ld-bar { transition: opacity .12s; cursor: default; }
 .ld-chartbox svg.ld-chart:hover g.ld-bar:not(:hover) { opacity: .55; }
 .ld-chartbox .ld-gap-fill { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 2 2; opacity: .8; }
-.ld-tools-range { display: contents; }
+/* The time range at the right end of the tools row, behind its toggle ("⏱ 1h ▾"), which folds the group away. */
+.ld-tools-range { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 10px; margin-left: auto; min-width: 0; }
+.ld-range-body { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 10px; min-width: 0; }
+.ld-range-body[hidden] { display: none; }
+.ld-page button.ld-range-toggle { height: 30px; cursor: pointer; font: inherit; color: var(--text-secondary); background: var(--surface-1); }
+.ld-page button.ld-range-toggle b { font-weight: 600; }
+.ld-page button.ld-range-toggle:hover { border-color: var(--accent); }
+.ld-page button.ld-range-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* The boards' range: More ▾ opens the day ranges (1d to 60d) under the group; the group clips, so the menu sits beside it. */
 .ld-range-wrap { position: relative; display: inline-flex; align-items: center; }
 .ld-range-wrap .seg-btn.ld-range-more { white-space: nowrap; }
