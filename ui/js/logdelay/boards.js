@@ -817,7 +817,7 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
   const head = narrow ? null : B.get('dev:head', `${clusterId}|${S.pk}|${entSig(ent)}`, () => h('div.ld-head',
     h('div.ld-title',
       h('h2', clusterId ? `Devices · ${nameOf(clusterId)}` : 'Devices'),
-      h('p.sub', `Every device measured in the period, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
+      h('p.sub', `The delayed devices of the period until Show all devices, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
     h('div.ld-actions',
       h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'),
       h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, ids, res) }, 'Build report (.xlsx)'))));

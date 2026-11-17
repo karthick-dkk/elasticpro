@@ -3013,7 +3013,11 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
 /* Devices: the search, the level chips with counts, zone and tag1. */
 .ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
-.ld .ld-dev-bar input[type="search"] { min-width: 230px; height: 28px; }
+.ld .ld-dev-bar input[type="search"] { min-width: 190px; height: 28px; }
+/* "Show all devices N" ⇄ "Show delayed only": which set a device list holds (the delayed ones by default). */
+.ld .ld-set-btn { height: 28px; padding: 0 9px; white-space: nowrap; }
+.ld .ld-set-btn b { font-variant-numeric: tabular-nums; }
+.ld .ld-set-btn[aria-pressed="true"] { border-color: var(--accent); }
 .ld .ld-chip-btn { cursor: pointer; font: inherit; border-radius: 999px; height: 24px; }
 .ld .ld-chip-btn b { font-weight: 650; color: var(--text-primary); }
 .ld .ld-chip-btn[aria-pressed="true"] { background: var(--surface-3); color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }
