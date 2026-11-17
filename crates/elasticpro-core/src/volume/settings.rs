@@ -113,6 +113,12 @@ pub struct VolumeSettings {
     pub top_values: u32,
     pub keep_months: u32,
     pub collect_at: String,
+    /// How many days back the daily run fills days the record does not hold as final and
+    /// measured (docs/VOLUME.md "Backfill"). 0: off — every unfinished day is asked every run,
+    /// as before 0.3.75.
+    pub backfill_days: u32,
+    /// The most such days one run fills for one cluster, oldest first.
+    pub backfill_per_run: u32,
 }
 
 fn list(xs: &[&str]) -> Vec<String> {
@@ -139,6 +145,8 @@ impl Default for VolumeSettings {
             top_values: 25,
             keep_months: 13,
             collect_at: "06:00".into(),
+            backfill_days: 30,
+            backfill_per_run: 7,
         }
     }
 }
@@ -161,7 +169,14 @@ pub const MANAGED: &[(&str, &str, &str)] = &[
     ("UI_VOLUME_TOP_VALUES", "topValues", "volumeTopValues"),
     ("UI_VOLUME_KEEP_MONTHS", "keepMonths", "volumeKeepMonths"),
     ("UI_VOLUME_COLLECT_AT", "collectAt", "volumeCollectAt"),
+    ("UI_VOLUME_BACKFILL_DAYS", "backfillDays", "volumeBackfillDays"),
+    ("UI_VOLUME_BACKFILL_PER_RUN", "backfillPerRun", "volumeBackfillPerRun"),
 ];
+
+/// `backfillDays`: 0 (off) to a year and a day.
+pub const BACKFILL_DAYS: (u64, u64) = (0, 366);
+/// `backfillPerRun`: one to a month of days a run.
+pub const BACKFILL_PER_RUN: (u64, u64) = (1, 31);
 
 /// A field list: an array of names, or one comma-separated string. Blank names dropped;
 /// an empty result is "not set" and leaves the layer below standing.
@@ -300,6 +315,13 @@ impl VolumeSettings {
                 self.collect_at = t.to_string();
             }
         }
+        let within = |(lo, hi): (u64, u64)| move |n: &u64| (lo..=hi).contains(n);
+        if let Some(n) = int(m.get("backfillDays")).filter(within(BACKFILL_DAYS)) {
+            self.backfill_days = n as u32;
+        }
+        if let Some(n) = int(m.get("backfillPerRun")).filter(within(BACKFILL_PER_RUN)) {
+            self.backfill_per_run = n as u32;
+        }
     }
 
     /// config.txt, last. Returns the managed names (PING's) of the keys it set.
@@ -314,7 +336,7 @@ impl VolumeSettings {
                 Some(sub) => {
                     extra.insert(sub.into(), json!(v));
                 }
-                None if matches!(*field, "topValues" | "keepMonths") => {
+                None if matches!(*field, "topValues" | "keepMonths" | "backfillDays" | "backfillPerRun") => {
                     layer.insert((*field).into(), json!(v.parse::<u64>().unwrap_or(0)));
                 }
                 None => {
@@ -530,6 +552,39 @@ mod tests {
         assert_eq!((v["topValues"].as_u64(), v["keepMonths"].as_u64()), (Some(25), Some(13)));
         assert_eq!(v["collectAt"], "06:00");
         assert_eq!(v["sourceIp"], json!(["src_ip", "source.ip", "host.ip"]));
+        assert_eq!((v["backfillDays"].as_u64(), v["backfillPerRun"].as_u64()), (Some(30), Some(7)));
+    }
+
+    /// `backfillDays` (0 = off, at most 366) and `backfillPerRun` (1..31): file, cluster
+    /// override and config.txt like the other keys; a value out of range leaves the layer below,
+    /// and a config.txt key locks its row.
+    #[test]
+    fn backfill_settings_layer_validate_and_lock() {
+        let none = Settings::default();
+        let raw = json!({ "defaults": { "volume": { "backfillDays": 14, "backfillPerRun": 3,
+                                                    "overrides": { "big": { "backfillDays": 0 } } } } });
+        let (d, _) = resolve(&layers_from_config(&raw, None), &none);
+        assert_eq!((d.backfill_days, d.backfill_per_run), (14, 3));
+        let (big, _) = resolve(&layers_from_config(&raw, Some("big")), &none);
+        assert_eq!((big.backfill_days, big.backfill_per_run), (0, 3), "0 is off, and a valid value");
+        let mut s = VolumeSettings::default();
+        s.apply(&json!({ "backfillDays": 367, "backfillPerRun": 0 }));
+        assert_eq!((s.backfill_days, s.backfill_per_run), (30, 7), "out of range: the layer below stands");
+        s.apply(&json!({ "backfillDays": "366", "backfillPerRun": "31" }));
+        assert_eq!((s.backfill_days, s.backfill_per_run), (366, 31));
+        s.apply(&json!({ "backfillPerRun": 32, "backfillDays": -1 }));
+        assert_eq!((s.backfill_days, s.backfill_per_run), (366, 31));
+
+        let txt = Settings::parse("UI_VOLUME_BACKFILL_DAYS=10\nUI_VOLUME_BACKFILL_PER_RUN=2\n");
+        assert!(txt.warnings().is_empty(), "{:?}", txt.warnings());
+        let (t, managed) = resolve(&layers_from_config(&raw, Some("big")), &txt);
+        assert_eq!((t.backfill_days, t.backfill_per_run), (10, 2), "config.txt over every layer");
+        assert_eq!(managed, vec!["volumeBackfillDays", "volumeBackfillPerRun"]);
+        let bad = Settings::parse("UI_VOLUME_BACKFILL_DAYS=400\nUI_VOLUME_BACKFILL_PER_RUN=0\n");
+        assert_eq!(bad.warnings().len(), 2, "{:?}", bad.warnings());
+        assert!(!bad.manages("UI_VOLUME_BACKFILL_DAYS") && !bad.manages("UI_VOLUME_BACKFILL_PER_RUN"));
+        let (b, managed) = resolve(&layers_from_config(&raw, None), &bad);
+        assert_eq!((b.backfill_days, b.backfill_per_run, managed.len()), (14, 3, 0), "a refused key locks nothing");
     }
 
     #[test]

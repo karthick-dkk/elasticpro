@@ -162,6 +162,8 @@ const SPECS: &[Spec] = &[
     spec("UI_VOLUME_TOP_VALUES", Kind::Int(5, 100), To::Direct),
     spec("UI_VOLUME_KEEP_MONTHS", Kind::Int(1, 36), To::Direct),
     spec("UI_VOLUME_COLLECT_AT", Kind::Text, To::Direct),
+    spec("UI_VOLUME_BACKFILL_DAYS", Kind::Int(0, 366), To::Direct),
+    spec("UI_VOLUME_BACKFILL_PER_RUN", Kind::Int(1, 31), To::Direct),
     // The volume report by mail (docs/VOLUME.md "Reports and mail"): the mail server, and the
     // mailed report's recipients and schedule. Server settings, not UI defaults: read where
     // they are used (report::mail, report::schedule), shown as locked through `managed` in
@@ -254,6 +256,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("UI_VOLUME_TOP_VALUES", "volumeTopValues"),
     ("UI_VOLUME_KEEP_MONTHS", "volumeKeepMonths"),
     ("UI_VOLUME_COLLECT_AT", "volumeCollectAt"),
+    ("UI_VOLUME_BACKFILL_DAYS", "volumeBackfillDays"),
+    ("UI_VOLUME_BACKFILL_PER_RUN", "volumeBackfillPerRun"),
 ];
 
 /// The `zabbix:` options of the config file, by the name the UI and the file use.

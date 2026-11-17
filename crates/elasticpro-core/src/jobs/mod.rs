@@ -446,29 +446,53 @@ pub struct Outcome {
     pub records: Option<u64>,
     pub error: Option<String>,
     pub note: Option<String>,
+    /// Named figures summed over a run's parts and said in its note when it has several
+    /// (`COUNT_*`): what one part's own note would say, for the run as a whole.
+    pub counts: Vec<(&'static str, u64)>,
 }
 
+/// Days the volume backfill filled (docs/VOLUME.md "Backfill"), summed over a run's clusters.
+pub const COUNT_BACKFILLED: &str = "days backfilled";
+/// Clusters whose backfill stopped for query pressure.
+pub const COUNT_BACKFILL_PAUSED: &str = "backfills paused for query pressure";
+
 impl Outcome {
+    fn new(status: RunStatus, records: Option<u64>, error: Option<String>, note: Option<String>) -> Outcome {
+        Outcome { status, records, error, note, counts: vec![] }
+    }
     pub fn completed(records: Option<u64>) -> Outcome {
-        Outcome { status: RunStatus::Completed, records, error: None, note: None }
+        Outcome::new(RunStatus::Completed, records, None, None)
     }
     pub fn failed(error: impl Into<String>, records: Option<u64>) -> Outcome {
-        Outcome { status: RunStatus::Failed, records, error: Some(error.into()), note: None }
+        Outcome::new(RunStatus::Failed, records, Some(error.into()), None)
     }
     pub fn skipped(why: impl Into<String>) -> Outcome {
-        Outcome { status: RunStatus::Skipped, records: None, error: Some(why.into()), note: None }
+        Outcome::new(RunStatus::Skipped, None, Some(why.into()), None)
     }
     pub fn deferred(why: impl Into<String>, records: Option<u64>) -> Outcome {
-        Outcome { status: RunStatus::Deferred, records, error: Some(why.into()), note: None }
+        Outcome::new(RunStatus::Deferred, records, Some(why.into()), None)
     }
     /// Stopped at a safe point because `JOB_CANCEL` asked.
     pub fn cancelled(by: &str, records: Option<u64>) -> Outcome {
-        Outcome { status: RunStatus::Cancelled, records, error: None, note: Some(format!("cancelled by {by}")) }
+        Outcome::new(RunStatus::Cancelled, records, None, Some(format!("cancelled by {by}")))
     }
     pub fn with_note(mut self, note: Option<String>) -> Outcome {
         self.note = note;
         self
     }
+    /// One named figure (`COUNT_*`); 0 is left out.
+    pub fn with_count(mut self, name: &'static str, n: u64) -> Outcome {
+        if n > 0 {
+            self.counts.push((name, n));
+        }
+        self
+    }
+}
+
+/// The counts of a run of several parts, as its note says them: "12 days backfilled, ...".
+pub fn counts_note(counts: &BTreeMap<&'static str, u64>) -> Option<String> {
+    let parts: Vec<String> = counts.iter().filter(|(_, n)| **n > 0).map(|(k, n)| format!("{n} {k}")).collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /* ------------------------------------------ the log ------------------------------------------ */
@@ -554,6 +578,8 @@ struct Open {
     records: Option<u64>,
     first_error: Option<String>,
     note: Option<String>,
+    /// `Outcome::counts`, summed over the parts ended so far.
+    counts: BTreeMap<&'static str, u64>,
     /// Begun by `reserve` for a person's `JOB_RUN`: the job's own code adopts it with its
     /// first non-timer `begin`, instead of being refused.
     reserved: bool,
@@ -915,6 +941,9 @@ impl Jobs {
         if out.note.is_some() {
             o.note = out.note.clone();
         }
+        for (k, n) in &out.counts {
+            *o.counts.entry(k).or_insert(0) += n;
+        }
         let last = o.ended >= o.parts;
         let o = o.clone();
         if last {
@@ -947,7 +976,11 @@ impl Jobs {
                 r.note = if o.counted && o.parts > 1 {
                     let parts: Vec<String> = ["completed", "failed", "deferred", "cancelled", "skipped"].iter()
                         .filter(|k| n(k) > 0).map(|k| format!("{} {k}", n(k))).collect();
-                    Some(format!("{} clusters: {}", o.parts, parts.join(", ")))
+                    // One part's own note would say only its cluster's: the counts say the run's.
+                    Some(match counts_note(&o.counts) {
+                        Some(c) => format!("{} clusters: {}; {c}", o.parts, parts.join(", ")),
+                        None => format!("{} clusters: {}", o.parts, parts.join(", ")),
+                    })
                 } else {
                     o.note.clone()
                 };

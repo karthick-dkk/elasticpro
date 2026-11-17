@@ -258,6 +258,12 @@ UI_VOLUME_KEEP_MONTHS=
 # core container: set TZ in deploy/.env (an IANA name such as Asia/Kolkata, or a POSIX
 # string such as IST-5:30); unset is UTC. Default 06:00.
 UI_VOLUME_COLLECT_AT=
+# Backfill (docs/VOLUME.md "Backfill"): after the normal day, each run fills days of the last
+# UI_VOLUME_BACKFILL_DAYS (0-366, 0 = off; default 30) that the record does not hold as final
+# and measured while the cluster still has their indices, at most UI_VOLUME_BACKFILL_PER_RUN
+# (1-31, default 7) a run, oldest first, and only while the cluster is not under query pressure.
+UI_VOLUME_BACKFILL_DAYS=
+UI_VOLUME_BACKFILL_PER_RUN=
 
 # The volume report by mail (Config > Volume fields; docs/VOLUME.md "Reports and mail").
 # Each key set here locks its field on that page. The mail server:
