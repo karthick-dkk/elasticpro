@@ -15,10 +15,12 @@
  * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js; not on
  * Live, which has its own Fetch from the browser): one cluster at a time, its late devices by
  * default, the whole cluster from its ▾ menu. Under it
- * one tools row: the time range (one button group; the boards 30m to 12h with 1d to 60d in a More
- * menu, the live tabs 5m to 12h, each set keeping its own choice; or custom) and the
- * cluster's log time zone as a chip (not on Summary, whose figures are the core's totals for every
- * zone). Every time on the page is in the server's zone.
+ * one tools row: at the left the cluster's log time zone as a chip (Dashboard and Devices, and only
+ * when a zone is set or detected in view: "not detected" everywhere said nothing, 0.3.77), at the
+ * right end the time range (one button group; the boards 30m to 12h with 1d to 60d in a More
+ * menu, the live tabs 5m to 12h, each set keeping its own choice; or custom) behind its toggle
+ * ("⏱ 1h ▾"), which folds the group away, kept per browser. Every time on the page is in the
+ * server's zone.
  *
  * The cluster is the app's one chooser, in the top bar (the owner, 2026-11-14: the page had a
  * second one of its own, and two controls for one choice is one too many). `reconcile()` keeps
@@ -35,14 +37,14 @@
  * Leaving a view lets go of what it asked (each view's AbortController).
  */
 
-import { h, mount } from '../lib/dom.js';
+import { h, mount, svg } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { bus, clusters } from '../core/state.js';
-import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
+import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, timeZoneChipText, zoneChipShown, devicesByZone, countText } from '../core/logdelay-report.js';
 import { BOARD_RANGES, LIVE_RANGES, BOARD_MAX_DAYS, rangeLabel, rangeDays, normaliseRange, browserZone, zonedParts, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
 import {
@@ -98,6 +100,20 @@ function setRange(r) {
   draw();
 }
 
+/**
+ * Whether the range group is shown, or folded to its toggle ("⏱ 1h ▾") at the right end of the
+ * tools row (the owner, 0.3.77): one choice for every tab, kept per browser; shown until folded.
+ */
+const RANGE_OPEN_KEY = 'elasticpro.logdelay.rangeShown';
+const readRangeOpen = () => { try { return localStorage.getItem(RANGE_OPEN_KEY) !== '0'; } catch (_) { return true; } };
+let rangeOpen = readRangeOpen();
+function setRangeOpen(open) {
+  rangeOpen = !!open;
+  if (!rangeOpen) moreOpen = false;
+  try { localStorage.setItem(RANGE_OPEN_KEY, rangeOpen ? '1' : '0'); } catch (_) { /* kept for this visit */ }
+  draw();
+}
+
 /** The zone every time on the page is written in: the server's when it said it, else this browser's. */
 const zone = () => serverZoneName() || browserZone();
 
@@ -111,7 +127,7 @@ export function render(el) {
   el.classList.add('dense', 'rp-page', 'ld-page');
   if (isSnapshotMode()) { mount(host, snapshotNotice()); return; }
   const arriving = !visiting;
-  if (arriving) { visiting = true; boardsReset(); P.clear(); ranges = readRanges(); moreOpen = false; }
+  if (arriving) { visiting = true; boardsReset(); P.clear(); ranges = readRanges(); rangeOpen = readRangeOpen(); moreOpen = false; }
   setDisplayZone(zone());
   // From a "logs arriving late" alert or its playbook (core/focus.js): Live, ready to Fetch (nothing
   // starts on its own). From a link that named a view (navigateTo('log-delay', {view, cluster, device})): that view.
@@ -272,13 +288,17 @@ function setTz(tz) {
  * chip): "Time zone +05:30" — the majority zone of the devices in view — or "not detected"; with
  * the filter on, "+08:00 · only these devices". The chip is the button: it opens the zones with
  * their device counts, majority first; a zone filters every view (the filter lives in the
- * address, `?tz=`), and "Show all time zones" lets go of it.
+ * address, `?tz=`), and "Show all time zones" lets go of it. Not drawn at all while no device in
+ * view has a zone and no filter is on (zoneChipShown): every cluster "not detected" is the normal
+ * state of logs stamped in UTC, and a chip that always says it is noise (the owner, 0.3.77).
  */
 function tzTools() {
   wirePopups();
   const rows = boardsZoneRows(route);
   const zones = devicesByZone(rows);
   const tz = route.tz;
+  // Drawn only when it can say something (zoneChipShown): a zone set or detected in view, or the filter on.
+  if (!zoneChipShown(zones, tz)) { tzOpen = false; return null; }
   const pct = boardsMajorityPercent();
   const text = timeZoneChipText(zones, tz, offsetLabel);
   const sig = `${tz}|${tzOpen}|${zones.map((z) => `${z.key}:${z.devices}`).join(',')}|${pct}`;
@@ -309,21 +329,21 @@ function tzTools() {
 }
 
 /**
- * The tab's time range as one button group (core/log-range.js). On the boards (BOARD_RANGES):
+ * The tab's time range as one button group (core/log-range.js), at the right end of the tools
+ * row behind its toggle — a clock and the range chosen ("1h ▾", `aria-expanded`), which folds the
+ * group away and shows it again (rangeOpen, kept per browser). On the boards (BOARD_RANGES):
  * 30m · 1h · 2h · 4h · 8h · 12h, then More ▾ — a menu of 1d · 3d · 7d · 15d · 30d · 60d; with one
  * of those chosen the button reads it ("7d ▾") and is pressed — then Custom. On Live
  * (LIVE_RANGES): 5m · 10m · 30m · 1h · 3h · 12h · Custom. Each set keeps its own choice.
  * Custom opens From and To in the server's zone and Apply. The boards read their range as the
- * days it touches (boards.js boardsSetWindow), the live tabs theirs as minutes. `withZone` adds
- * the zone every time is written in (the boards have the chip instead).
+ * days it touches (boards.js boardsSetWindow), the live tabs theirs as minutes.
  */
-function rangePick(withZone) {
+function rangePick() {
   wirePopups();
   const tz = zone();
-  const off = offsetText(zoneOffsetMinutes(tz));
   const kind = rangeKind();
   const range = ranges[kind];
-  return P.get('range', `${kind}|${JSON.stringify(range)}|${tz}|${off}|${withZone}|${kind === 'boards' && moreOpen}`, () => {
+  return P.get('range', `${kind}|${JSON.stringify(range)}|${tz}|${kind === 'boards' && moreOpen}|${rangeOpen}`, () => {
     const pick = (id) => {
       moreOpen = false;
       if (id !== 'custom') { setRange({ id }); return; }
@@ -364,26 +384,42 @@ function rangePick(withZone) {
       if (kind === 'boards' && dayNo(b) - dayNo(a) > BOARD_MAX_DAYS) { refuse(`At most ${BOARD_MAX_DAYS} days in one range`); return; }
       setRange({ id: 'custom', from: a, to: b });
     } }, 'Apply') : null;
-    // One element (display: contents), so the cache keeps one node per draw.
-    return h('div.ld-tools-range', wrap,
-      custom ? h('label.ld-tool', 'From', from) : null,
-      custom ? h('label.ld-tool', 'To', to) : null,
-      apply,
-      withZone ? h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
-        `Times in ${tz} (${off})`) : null);
+    // The toggle: a clock and the range chosen; it folds the group away and shows it again.
+    const clock = svg('svg', { viewBox: '0 0 24 24', width: '13', height: '13', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+      svg('circle', { cx: 12, cy: 12, r: 9 }), svg('path', { d: 'M12 7v5l3 2' }));
+    const toggle = h('button.ld-chip.ld-range-toggle#ld-range-toggle', {
+      type: 'button', 'aria-expanded': String(rangeOpen), 'aria-controls': 'ld-range-body',
+      title: `${rangeLabel(range.id)} · ${rangeOpen ? 'hide the time ranges' : 'show the time ranges'}`,
+      onclick: () => setRangeOpen(!rangeOpen),
+    }, clock, h('b', custom ? 'Custom' : range.id), h('span.ld-tz-caret', { 'aria-hidden': 'true' }, rangeOpen ? ' ▴' : ' ▾'));
+    // One element, so the cache keeps one node per draw.
+    return h('div.ld-tools-range', { dataset: { open: String(rangeOpen) } }, toggle,
+      h('div.ld-range-body#ld-range-body', { hidden: !rangeOpen }, wrap,
+        custom ? h('label.ld-tool', 'From', from) : null,
+        custom ? h('label.ld-tool', 'To', to) : null,
+        apply));
   });
 }
 
+/** Live: the zone every time is written in (the boards have the time-zone chip instead). */
+function zoneNote() {
+  const tz = zone();
+  const off = offsetText(zoneOffsetMinutes(tz));
+  return P.get('zone', `${tz}|${off}`, () => h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
+    `Times in ${tz} (${off})`));
+}
+
 /**
- * One tools row for every tab: the time range, then the time-zone chip (Dashboard, Devices) or the
- * zone's name (Live); Summary has the range alone. The cluster is the top bar's chooser.
+ * One tools row for every tab: at the left the time-zone chip (Dashboard, Devices; only when it
+ * has a zone to say) or the zone's name (Live); the time range at the right end. Summary has the
+ * range alone. The cluster is the top bar's chooser.
  */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
-  if (tab === 'live') mount(row, rangePick(true));
-  else if (tab === 'summary') mount(row, rangePick(false));
-  else mount(row, rangePick(false), tzTools());
+  if (tab === 'live') mount(row, zoneNote(), rangePick());
+  else if (tab === 'summary') mount(row, rangePick());
+  else mount(row, tzTools(), rangePick());
   return row;
 }
 

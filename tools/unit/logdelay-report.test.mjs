@@ -367,3 +367,35 @@ test('Live: a device silent in the range is a silent row, its last arrival kept;
     { supported: false, enabled: null, everyHours: null, lastRunAt: 7, nextDueAt: null }, 'no schedule in the answer: not run here; the newest cluster run');
   assert.deepEqual(R.scheduleOf(null), { supported: null, enabled: null, everyHours: null, lastRunAt: null, nextDueAt: null }, 'no answer: nothing known');
 });
+
+test('summary rings: red above LD_RING_RED_PCT delayed, one figure for every ring (0.3.77)', () => {
+  assert.equal(R.LD_RING_RED_PCT, 2, 'the owner’s line: 2 %');
+  assert.equal(R.ringAlert(2.0), false, '2.0 % is at the line: not red');
+  assert.equal(R.ringAlert(2.1), true, '2.1 % is above it: red');
+  assert.equal(R.ringAlert(0), false);
+  assert.equal(R.ringAlert(null), false, 'unknown is not red (nor 0)');
+  assert.equal(R.ringAlert(undefined), false);
+});
+
+test('documents without a device name: one summed line, never a note per cluster (0.3.77)', () => {
+  const by = [
+    { id: 'a', lastRead: { noDevice: 3183 } }, { id: 'b', lastRead: { noDevice: 0 } },
+    { id: 'c', lastRead: { noDevice: 9221 } }, { id: 'd', lastRead: {} }, { id: 'e', lastRead: null }, { id: 'f' },
+  ];
+  assert.deepEqual(R.noDeviceTotal(by), { docs: 12404, clusters: 2 }, 'only the clusters that said a count above 0; not reported is left out, not 0');
+  assert.equal(R.noDeviceLine(R.noDeviceTotal(by)), '12,404 documents in 2 clusters have no device name and are in no device’s figures');
+  assert.equal(R.noDeviceLine({ docs: 3183, clusters: 1 }), '3,183 documents have no device name and are in no device’s figures', 'one cluster: no "in 1 cluster"');
+  assert.equal(R.noDeviceLine({ docs: 1, clusters: 1 }), '1 document has no device name and is in no device’s figures');
+  assert.equal(R.noDeviceTotal([{ lastRead: { noDevice: 0 } }, {}]), null, 'none: no line');
+  assert.equal(R.noDeviceLine(null), '');
+});
+
+test('the time-zone chip is drawn only when it has a zone to say (0.3.77)', () => {
+  const none = [{ key: 'none', offsetMinutes: null, devices: 40 }];
+  assert.equal(R.zoneChipShown(none, null), false, 'every device not detected: no chip');
+  assert.equal(R.zoneChipShown([], null), false, 'nothing in view: no chip');
+  assert.equal(R.zoneChipShown(none, 'none'), true, 'the filter on: the chip says so, with Show all time zones');
+  assert.equal(R.zoneChipShown(none, 480), true);
+  assert.equal(R.zoneChipShown([...none, { key: '0', offsetMinutes: 0, devices: 2 }], null), true, 'UTC detected is a zone');
+  assert.equal(R.zoneChipShown([{ key: '330', offsetMinutes: 330, devices: 12 }], null), true);
+});

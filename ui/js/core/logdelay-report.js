@@ -528,6 +528,34 @@ export function ringArcs(delay, critical, devices) {
 }
 
 /**
+ * A Summary ring turns red above this share of its devices delayed (percent; the owner, 0.3.77):
+ * at or below it the ring keeps the level colours. One figure for every ring, All clusters too.
+ */
+export const LD_RING_RED_PCT = 2;
+/** Whether a ring's delayed share (`latePct`, `pctLate`, percent) is above LD_RING_RED_PCT; unknown is not red. */
+export const ringAlert = (pct) => finite(pct) && pct > LD_RING_RED_PCT;
+
+/**
+ * The documents the last runs read with no device name, summed over the clusters that said a
+ * count above 0: `{docs, clusters}`, or null when none did (a cluster that did not report is not
+ * counted as 0 — it is left out). `items` are `byCluster` rows, or `{lastRead}`.
+ */
+export function noDeviceTotal(items) {
+  let docs = 0; let n = 0;
+  for (const x of items || []) {
+    const v = x && x.lastRead && x.lastRead.noDevice;
+    if (finite(v) && v > 0) { docs += v; n += 1; }
+  }
+  return n ? { docs, clusters: n } : null;
+}
+/** That sum in one line: "12,404 documents in 9 clusters have no device name …"; one cluster needs no "in 1 cluster". */
+export function noDeviceLine(sum) {
+  if (!sum) return '';
+  const one = sum.docs === 1;
+  return `${countText(sum.docs)} document${one ? '' : 's'}${sum.clusters > 1 ? ` in ${countText(sum.clusters)} clusters` : ''} ${one ? 'has' : 'have'} no device name and ${one ? 'is' : 'are'} in no device’s figures`;
+}
+
+/**
  * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz, unk}`
  * in pixels — on time (`onTimeAll`: under the delay line), the delay band, above the critical line,
  * another time zone, silent + can't measure. A day without totals is a gap (drawn hatched,
@@ -688,6 +716,17 @@ export function devicesByZone(rows) {
  * "+05:30", the majority zone of the devices in view, or "not detected"; with a filter on,
  * "+08:00 · only these devices".
  */
+/**
+ * Whether the boards draw the time-zone chip at all (0.3.77): only when it can say something —
+ * a device in view sits in a set or detected zone, or the zone filter is on. "not detected" is
+ * what every cluster says whose logs are stamped in UTC with more than 3 min of lag, or whose
+ * devices do not agree (docs/LOGDELAY.md "Time zones"): nothing is corrected, so nothing to show.
+ * The zone stays in By cluster's Time zone column and Config › Edit cluster › Log time zone.
+ */
+export function zoneChipShown(zones, tz) {
+  return (tz !== null && tz !== undefined) || (zones || []).some((z) => z && z.offsetMinutes !== null && z.offsetMinutes !== undefined);
+}
+
 export function timeZoneChipText(zones, tz, offsetText) {
   if (tz !== null && tz !== undefined) return `${tz === 'none' ? 'not detected' : offsetText(tz)} · only these devices`;
   const top = (zones || []).find((z) => z.offsetMinutes !== null);

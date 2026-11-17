@@ -100,9 +100,71 @@ impl Core {
             h.schedules = schedules;
             h.mail_configured = mail_configured;
         }
-        let checks = self.health_checks(now, &worker, None);
+        let poller = self.health_poller(now);
+        let checks = self.health_checks(now, &worker, Some(&poller));
         self.health.set_level(health::overall(&checks));
         self.health.held.write().checks = checks;
+        // The Jobs page's health lines (docs/HEALTH.md "History"): this minute's point, kept 7 days.
+        // Each line sits beside its check's tile, so it stores the tile's own figure — the 5-minute
+        // refused count and the 5-minute message p95 — not the day ring's per-minute ones.
+        let w5 = self.health.times.lock().window(5, now).own.p95_ms;
+        let r5 = self.gate.window(crate::gate::STATS_WINDOW_MS);
+        self.health_history_push(n, now, &worker, &poller, w5, (r5.overloaded + r5.queue_timeout) as f64);
+    }
+
+    /// One point of the 7-day history: the figures the Jobs page's Health and ElasticPro health
+    /// cards show, read where those cards read them (the strip's `process`, REQUEST_STATS, the
+    /// busy clusters, the checks). Written every `PERSIST_EVERY` minutes.
+    fn health_history_push(&self, n: u64, now: u64, worker: &WorkerView, poller: &PollerFigures, own_p95: Option<u64>, refused: f64) {
+        use crate::health_history::{History, Point, PERSIST_EVERY};
+        let (mem, cpu) = self.health.monitor.lock().figures();
+        let w = worker.status.as_ref().filter(|_| worker.state == "up" || worker.state == "late");
+        let sent: usize = self.sent_counts(super::REQUEST_WINDOW).iter().map(|(_, k)| k).sum();
+        let mut p = Point::new(now);
+        p.set("workerCpu", w.and_then(|s| s.cpu.pct_1m));
+        p.set("coreCpu", cpu.pct_1m);
+        p.set("coreMem", mem.used_pct);
+        p.set("workerMem", w.and_then(|s| s.memory.used_pct));
+        p.set("rps", Some(sent as f64 / super::REQUEST_WINDOW.as_secs_f64()));
+        p.set("busy", Some(self.busy_now().len() as f64));
+        p.set("coreRss", mem.rss_bytes.map(|b| b as f64));
+        p.set("workerRss", w.and_then(|s| s.memory.rss_bytes).map(|b| b as f64));
+        p.set("p95Ms", own_p95.map(|v| v as f64));
+        p.set("refused", Some(refused));
+        p.set("latePct", poller.late_pct);
+        p.set("diskFreePct", self.health.held.read().disk.as_ref().and_then(|d| d.free_pct));
+        let body = {
+            let mut h = self.health.history.lock();
+            h.push(p);
+            (n + 1).is_multiple_of(PERSIST_EVERY).then(|| h.to_json(self.health.role))
+        };
+        if let (Some(body), Some(d)) = (body, self.data_dir.as_deref()) {
+            if let Err(e) = crate::volume::store::write_atomic(&History::path(d, self.health.role), &body) {
+                tracing::warn!(error = %e, "health: the week's history could not be written");
+            }
+        }
+    }
+
+    /// `HEALTH_HISTORY {range: "1h"|"6h"|"24h"|"7d"}` (docs/HEALTH.md "History"): the Jobs page's
+    /// health lines. A user's, as JOBS_LIST: the strip's figures to anybody who reads the strip;
+    /// the ElasticPro health figures (an administrator's `SYSTEM_HEALTH`) to administrators; the
+    /// fleet-wide counts (requests/s, busy clusters) not to a caller limited to some clusters.
+    pub(crate) fn health_history(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+        use crate::health_history::{fields_for, range_ms, rows};
+        let range = msg.get("range").and_then(Value::as_str).unwrap_or("24h");
+        if range_ms(range).is_none() {
+            return json!({ "ok": false, "kind": "bad_request", "message": "range must be 1h, 6h, 24h or 7d" });
+        }
+        let admin = caller.is_none_or(|c| c.role >= crate::auth::Role::Admin);
+        let limited = caller.is_some_and(|c| c.limited());
+        let fields = fields_for(admin, limited);
+        let now = crate::fleet::now_ms();
+        let (step, points) = self.health.history.lock().read(range, now).unwrap_or_default();
+        let mut names = vec!["t"];
+        names.extend(fields.iter().copied());
+        json!({ "ok": true, "range": range, "at": now, "stepMs": step, "from": now.saturating_sub(range_ms(range).unwrap_or(0)),
+                "fields": names, "points": rows(&points, &fields),
+                "keptDays": 7, "limited": limited })
     }
 
     /// The worker as the tab shows it, from its status file.
@@ -207,8 +269,8 @@ impl Core {
         }
         #[cfg(not(feature = "bridge"))]
         out.push(chip("redis", "Redis", Level::Off, "not in this build".into(), None));
-        out.push(chip("database", "Database", Level::Unknown,
-            "not known — the core does not connect to it (the db container has its own healthcheck)".into(), None));
+        // No Database part: ElasticPro does not use the db container (nothing in the core connects
+        // to it), so a "not known" chip for it was noise (0.3.77).
         // Zabbix sync.
         {
             let configured = self.edition == crate::auth::Edition::Hosted && self.zbx_api().configured();

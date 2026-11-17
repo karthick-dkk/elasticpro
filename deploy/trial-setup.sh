@@ -3,7 +3,7 @@
 # the real ones exist because every one of them is gitignored.
 #
 # Everything here is deliberately worthless: a self-signed certificate, one user whose
-# password is printed in this file, a random database password. Nothing is overwritten —
+# password is printed in this file. Nothing is overwritten —
 # if a file is already there it is left exactly as it is, so running this on a machine
 # that holds real credentials cannot destroy them.
 set -euo pipefail
@@ -71,12 +71,6 @@ if [ ! -f config.txt ]; then
   port=$(sed -n 's/^LISTEN=//p' .env | tail -1)
   if [ -n "$port" ]; then sed -i.tmp "s|^LISTEN_PORT=.*|LISTEN_PORT=$port|" config.txt && rm -f config.txt.tmp; fi
   echo "  made config.txt (from config.txt.example — the one settings file; deploy.sh --apply-config puts it in force)"; made=1
-fi
-
-if [ ! -s secrets/db_password ]; then
-  mkdir -p secrets
-  openssl rand -base64 32 > secrets/db_password
-  echo "  made secrets/db_password"; made=1
 fi
 
 [ $made -eq 1 ] || echo "  nothing to do — every file the trial needs is already here"

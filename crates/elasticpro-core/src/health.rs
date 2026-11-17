@@ -1500,6 +1500,8 @@ pub struct Health {
     pub samples: std::sync::atomic::AtomicU64,
     pub started: std::sync::atomic::AtomicBool,
     pub data: Option<PathBuf>,
+    /// The Jobs page's health lines, 7 days (crate::health_history): written by the minute task.
+    pub history: parking_lot::Mutex<crate::health_history::History>,
 }
 
 impl Health {
@@ -1523,6 +1525,7 @@ impl Health {
             samples: Default::default(),
             started: Default::default(),
             data: data.map(Path::to_path_buf),
+            history: parking_lot::Mutex::new(data.map(|d| crate::health_history::History::load(d, role, now)).unwrap_or_default()),
         }
     }
 

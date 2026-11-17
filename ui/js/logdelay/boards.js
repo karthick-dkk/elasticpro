@@ -43,7 +43,7 @@ import {
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
-  LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
+  LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER, noDeviceTotal, noDeviceLine,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
@@ -374,15 +374,25 @@ function lastReadText(lr) {
 }
 const noDeviceText = (lr) => (!lr ? '—' : finite(lr.noDevice) ? countText(lr.noDevice) : 'not reported');
 
-/** A cluster whose last run was cut or failed, or whose documents had no device name: said above the figures. */
+/** A cluster whose last run was cut or failed: said above the figures. */
 function readNotes(items) {
   const bad = items.filter((x) => x.lastRead && (x.lastRead.truncated || x.lastRead.complete === false || x.lastRead.error));
-  const lost = items.filter((x) => x.lastRead && finite(x.lastRead.noDevice) && x.lastRead.noDevice > 0);
-  if (!bad.length && !lost.length) return null;
+  if (!bad.length) return null;
   return h('div.banner.warn.ld-flat',
     bad.map((x) => h('div', `${x.name}: the last run ${x.lastRead.truncated ? 'stopped at the device cap, so the devices after it are not in the figures; raise ' : 'did not read every device'}`,
-      x.lastRead.truncated ? [h('b', capSetting), '.'] : '.')),
-    lost.map((x) => h('div', `${x.name}: ${countText(x.lastRead.noDevice)} document${x.lastRead.noDevice === 1 ? ' has' : 's have'} no device name and ${x.lastRead.noDevice === 1 ? 'is' : 'are'} in no device’s figures.`)));
+      x.lastRead.truncated ? [h('b', capSetting), '.'] : '.')));
+}
+
+/**
+ * Documents without a device name (the owner, 0.3.77: not a note per cluster above the figures):
+ * one quiet line, summed over the clusters in view (noDeviceTotal); `where` says where each
+ * cluster's count is (the Dashboard's How the last run read each cluster). Null when none.
+ */
+function noDeviceNote(byCluster, where = '') {
+  const sum = noDeviceTotal(byCluster);
+  if (!sum) return null;
+  return h('div.muted.ld-note#ld-nodevice-note', { title: 'Documents in the last run’s window whose device field is empty: they are in no bucket, so no device’s delay or count includes them. Check the parser’s device field.' },
+    `${noDeviceLine(sum)}.${where ? ` ${where}` : ''}`);
 }
 
 /** One cluster's three counts, one line, with what each means. */
@@ -581,6 +591,7 @@ function fleetView() {
 
   const notice = B.get('fleet:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  const noDevNote = B.get('fleet:nodevice', rid, () => noDeviceNote(res.byCluster, 'Each cluster’s count: How the last run read each cluster, below.'));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and the heat map are the core’s day totals for every zone.`)
@@ -628,26 +639,31 @@ function fleetView() {
     const pages = Math.max(1, Math.ceil(total / CLUSTER_PAGE));
     const page = Math.min(S.clPage, pages - 1);
     const shown = S.clAll ? sortedAll.slice(page * CLUSTER_PAGE, (page + 1) * CLUSTER_PAGE) : sortedAll.slice(0, CLUSTER_TOP);
+    // Other time zone only when some cluster has a zone set or detected: otherwise every cell reads
+    // "—" and the table no longer fits (owner's window, 0.3.77). Time zone always stays: it says why.
+    const anyZone = sortedAll.some((c) => c.timeZone && c.timeZone.mode && c.timeZone.mode !== 'none');
     const cl = shown.map((c) => {
       const cb = bands(c.levels);
       const neverRun = c.lastRunAt === null || c.lastRunAt === undefined;
       const devs = devsOf(c.id);
       return h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
+        // Always drawn: "not detected · 40 % agree" is the reason, not a blank (unknown is not zero).
         h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
           : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
-        neverRun ? h('td', { colspan: 9 }, h('span.muted', LD_NEVER_MEASURED))
+        neverRun ? h('td', { colspan: anyZone ? 8 : 7 }, h('span.muted', LD_NEVER_MEASURED))
           : [h('td', stateBar(c, cb)),
-            h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now` }, countText(c.lateNow)),
-            h('td.num', { title: `share of the cluster's devices ${cb.late} now` }, pctText(c.latePct)),
+            // Late now and its share in one cell: "12 · 3 %".
+            h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now · their share of the cluster's devices` },
+              countText(c.lateNow), h('span.muted', ` · ${pctText(c.latePct)}`)),
             h(`td.num${c.critical ? '.ld-crit' : ''}`, countText(c.critical)),
-            h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
-              c.timeZone && c.timeZone.mode !== 'none' ? countText(c.otherTz) : h('span.muted', '—')),
+            anyZone ? h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
+              c.timeZone && c.timeZone.mode !== 'none' ? countText(c.otherTz) : h('span.muted', '—')) : null,
             h('td.num', countText(c.devices)),
             h('td.num', { title: COUNT_HINT }, countText(c.counts && c.counts.inLastRun)),
-            h('td.mono', c.worst && c.worst.device
+            h('td.mono.ld-worst', c.worst && c.worst.device
               ? [link(ldHash('device', c.id, c.worst.device), c.worst.device, { title: `${c.worst.device} · delay details` }), h('span.muted', ` ${minutesText(c.worst.minutes)}`)]
               : h('span.muted', '—')),
             h('td.ld-acts', fixButton({ kind: 'cluster', id: c.name || c.id, items: () => clusterFixItems(c) }))]);
@@ -662,9 +678,9 @@ function fleetView() {
         h('button.linkish#ld-cl-top', { type: 'button', onclick: () => { S.clAll = false; S.clPage = 0; repaint(); } }, `Show the top ${CLUSTER_TOP} only`));
     return card('By cluster', '',
       [h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', b.lateShort, 1], ['latePct', 'Late share', 1],
-          ['critical', b.high, 1], ['otherTz', 'Other time zone', 1], ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']]),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 13 }, empty('No cluster you can see is measured.')))])))), foot]);
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', `${b.lateShort} · share`, 1],
+          ['critical', b.high, 1], anyZone ? ['otherTz', 'Other time zone', 1] : null, ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']].filter(Boolean)),
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 12 : 11 }, empty('No cluster you can see is measured.')))])))), foot]);
   });
   const tzNote = B.get('fleet:tznote', rid, () => tzSinceNote((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), tz: c.timeZone }))));
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', '',
@@ -681,7 +697,7 @@ function fleetView() {
   // The owner's order (prototype v22): tiles, the state bar with its legend, By cluster, Devices behind, the heat map.
   const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
   // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, Hourly Delay Status.
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, readCard, neverNote];
+  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, noDevNote, readCard, neverNote];
 }
 
 /* ------------------------------------ the summary ------------------------------------ */
@@ -701,6 +717,8 @@ function summaryView(clusterId) {
   const rid = objId(res);
   const notice = B.get('sum:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('sum:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  // Documents without a device name: one line under the cards, summed (the owner, 0.3.77).
+  const noDevNote = B.get('sum:nodevice', rid, () => noDeviceNote(res.byCluster, clusterId ? '' : 'Each cluster’s count: Dashboard › How the last run read each cluster.'));
   const winNote = B.get('sum:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   const tzNote = B.get('sum:tz', `${S.tz}`, () => (S.tz === null ? null
     : h('div.muted.ld-note#ld-sum-tz-note', `Summary counts every time zone (the core’s totals): the time-zone filter — ${tzWords()} — applies to Dashboard and Devices.`)));
@@ -712,7 +730,7 @@ function summaryView(clusterId) {
   const daysRes = dent.state === 'ok' ? dent.res : null;
   const cards = B.get('sum:cards', `${rid}|${clusterId}|${win.from}..${win.to}|${entSig(dent)}`, () => summaryCards(res, {
     clusterId, nameOf, daysRes, win, daysPending: daysRes ? null : problem(dent, 'The days of the last week') }));
-  return [notice, readNote, winNote, tzNote, ...cards];
+  return [notice, readNote, winNote, tzNote, ...cards, noDevNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */

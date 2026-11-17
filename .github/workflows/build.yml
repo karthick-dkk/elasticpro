@@ -155,7 +155,7 @@ jobs:
             **This release carries**
 
             - The Docker images on Docker Hub, tagged with this release:
-              `karthickdk02/elasticpro-core`, `-nginx`, `-redis`, `-postgres`
+              `karthickdk02/elasticpro-core`, `-nginx`, `-redis`
               (amd64 and arm64 for the core). Install with `install.sh` (hosted Docker
               stack, the default).
             - The Zabbix modules: `elasticpro-zabbix-modules-*.tar.gz`, its `.sha256`,

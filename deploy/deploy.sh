@@ -19,9 +19,9 @@
 # Nobody is signed out. A normal deploy and --upgrade do the same render at the start, and
 # restart the core anyway; config.txt is created from the example first when it is missing.
 #
-# --upgrade moves all four released images together, core, nginx, PostgreSQL and Redis, to
-# one version, through .env (ELASTICPRO_IMAGE, ELASTICPRO_NGINX_IMAGE, ELASTICPRO_DB_IMAGE,
-# ELASTICPRO_REDIS_IMAGE), so docker-compose.yml is never edited. Every image is pulled
+# --upgrade moves all three released images together, core, nginx and Redis, to one version,
+# through .env (ELASTICPRO_IMAGE, ELASTICPRO_NGINX_IMAGE, ELASTICPRO_REDIS_IMAGE), so
+# docker-compose.yml is never edited. Every image is pulled
 # before anything changes; a version that is not published fails with nothing touched. The
 # images come from Docker Hub's karthickdk02/ unless ELASTICPRO_REGISTRY names another
 # namespace. Going to an older version is refused without --force (--rollback is the usual
@@ -38,6 +38,13 @@
 # or the one before it): an edited one stops the upgrade with nothing changed and says what to
 # do — --replace-compose replaces it anyway, the backup kept. --dry-run shows the difference.
 #
+# PostgreSQL (the `db` service) left the stack: ElasticPro never connected to it. A compose file
+# that still has it is replaced the same way (as a release shipped it, or with --replace-compose),
+# and the stack comes up with --remove-orphans, so the db container stops and goes. Its data
+# volume (db-data) is never deleted — the upgrade says how to delete it by hand — and
+# --rollback brings the old file, and with it the db, back. An edited file with a db is left as
+# it is (the upgrade goes on; a note says the service can be removed).
+#
 # In order:
 #   1. checks: .env and the stack's secrets exist, Docker Compose v2 is there;
 #   2. names the new image elasticpro-core:<version>-<commit> (or takes --image), keeping
@@ -48,7 +55,7 @@
 #   5. waits for the core's health check. Not healthy in time: ELASTICPRO_IMAGE goes back to the
 #      previous image, the core is restarted on it, and the script fails.
 #
-# The rest of the stack (nginx, database) is left running as it is; `--all` restarts it too.
+# The rest of the stack (nginx, Redis) is left running as it is; `--all` restarts it too.
 # One exception: when deploy/nginx/nginx.conf differs from the config the running nginx has,
 # nginx is recreated — a bind-mounted file is not picked up by a restart or a reload.
 # Options: --pull, --image TAG, --upgrade[=VERSION], --force, --replace-compose, --rollback,
@@ -96,9 +103,13 @@ env_del() {   # KEY — remove the line if it is there
   sed -i.tmp "/^$1=/d" .env && rm -f .env.tmp
 }
 
-# The four images a release publishes: the .env key compose reads, and the image's name.
-RELEASED="ELASTICPRO_IMAGE:core ELASTICPRO_NGINX_IMAGE:nginx ELASTICPRO_DB_IMAGE:postgres ELASTICPRO_REDIS_IMAGE:redis"
-SUPPORT_KEYS="ELASTICPRO_NGINX_IMAGE ELASTICPRO_DB_IMAGE ELASTICPRO_REDIS_IMAGE"
+# The three images a release publishes: the .env key compose reads, and the image's name.
+RELEASED="ELASTICPRO_IMAGE:core ELASTICPRO_NGINX_IMAGE:nginx ELASTICPRO_REDIS_IMAGE:redis"
+SUPPORT_KEYS="ELASTICPRO_NGINX_IMAGE ELASTICPRO_REDIS_IMAGE"
+# Images no release publishes any more (elasticpro-postgres: the stack has no db service now).
+# Never pulled or moved; an upgrade that takes the db out of the compose file moves the key from
+# .env to <key>_PREVIOUS, so --rollback, which brings the old file back, runs the same image.
+RETIRED_KEYS="ELASTICPRO_DB_IMAGE"
 # The image a key stands for now: .env when it says, else the default in docker-compose.yml.
 image_of() {
   local v; v=$(env_get "$1")
@@ -162,6 +173,29 @@ COMPOSE_MARK=.compose-previous     # the backup --rollback puts back (one line: 
 RELEASE_URL=${ELASTICPRO_RELEASE_URL:-https://raw.githubusercontent.com/karthick-dkk/elasticpro}
 COMPOSE_NEW=; COMPOSE_BACKUP=
 has_worker() { grep -Eq '^  worker:[[:space:]]*(#.*)?$' "$1"; }
+# The PostgreSQL service compose files had until it left the stack (nothing ever connected to it).
+has_db() { grep -Eq '^  db:[[:space:]]*(#.*)?$' "$1" && grep -q 'elasticpro-postgres' "$1"; }
+DROP_DB=0    # 1: this upgrade's compose file takes the db service out
+# This install's compose project name (volumes are <name>_<volume>); empty when it cannot be told.
+compose_project() { docker compose config 2>/dev/null | sed -n 's/^name: *//p' | head -1; }
+# A db container of this project that the compose file no longer has (a file replaced by hand,
+# by git or rsync): `up -d --remove-orphans` is what takes it away.
+db_leftover() {
+  local p; has_db "$COMPOSE" && return 1
+  p=$(compose_project); [ -n "$p" ] || return 1
+  [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$p" --filter label=com.docker.compose.service=db 2>/dev/null)" ]
+}
+# One line: the db's data stays, and how to delete it. Never deleted here — not by `down -v`,
+# not by `docker volume rm`.
+db_volume_note() {
+  local p vol; p=$(compose_project); vol=${p:-<project>}_db-data
+  say "   the PostgreSQL data volume $vol is kept (nothing reads it; --rollback uses it) — to delete it by hand once you will not roll back: docker volume rm $vol"
+}
+# An install whose compose file still has the db but cannot be replaced safely: left as it is.
+db_left_note() {
+  say "! deploy/$COMPOSE still has the db service (PostgreSQL), which ElasticPro does not use — $1, so it is left as it is and the db keeps running."
+  say "  To take it out: delete the db service, the db_password secret and the db-data volume line from $COMPOSE (or move your own changes into docker-compose.override.yml and run this again with --replace-compose), then: docker compose up -d --remove-orphans — the db-data volume is kept either way."
+}
 release_compose() {   # VERSION DEST — the docker-compose.yml that release shipped
   local t
   for t in "v${1#v}" "${1#v}"; do
@@ -170,8 +204,9 @@ release_compose() {   # VERSION DEST — the docker-compose.yml that release shi
   return 1
 }
 # The release a compose file came from, read from its own default image pins
-# (elasticpro-nginx/-postgres/-redis:X.Y.Z, which every release sets to itself); empty unless
-# they all name the same version. The core's line is left out: a comment there names 0.2.0.
+# (elasticpro-nginx/-redis:X.Y.Z, and -postgres in a file from before the db left the stack;
+# every release sets them to itself); empty unless they all name the same version. The core's
+# line is left out: a comment there names 0.2.0.
 pinned_version() {
   local vs
   vs=$(grep -Eo 'elasticpro-(nginx|postgres|redis):[0-9]+\.[0-9]+\.[0-9]+' "$1" 2>/dev/null | sed 's/.*://' | sort -u)
@@ -179,14 +214,24 @@ pinned_version() {
 }
 # Decides whether this upgrade brings in TARGET's compose file (COMPOSE_NEW, a temporary copy),
 # and stops the script, nothing changed, when it cannot do so safely. $1 TARGET, $2 the version
-# running now (may be empty).
+# running now (may be empty). Two reasons to bring it in: the file has no report worker (0.3.54),
+# or it still has the db service (PostgreSQL, which left the stack). Without a worker the upgrade
+# cannot go on safely and stops; with only the db it goes on and leaves the file alone.
 compose_plan() {
-  has_worker "$COMPOSE" && return 0
+  local need_worker=0 drop_db=0
+  has_worker "$COMPOSE" || need_worker=1
+  ! has_db "$COMPOSE" || drop_db=1
+  [ "$need_worker$drop_db" != 00 ] || return 0
   [ -n "$CFG_TMP" ] || CFG_TMP=$(mktemp -d)
-  local new=$CFG_TMP/compose.release shipped=$CFG_TMP/compose.shipped v matched='' fetched=''
-  release_compose "$1" "$new" \
-    || fail "deploy/$COMPOSE has no report worker, and the $1 release's copy could not be fetched from $RELEASE_URL — nothing changed. Check the network, set ELASTICPRO_RELEASE_URL to a mirror (or file:///dir holding v$1/deploy/$COMPOSE), or see deploy/README.md (Updating)"
-  has_worker "$new" || return 0      # that release predates the worker: nothing to bring in
+  local new=$CFG_TMP/compose.release shipped=$CFG_TMP/compose.shipped v matched='' fetched='' what=''
+  if ! release_compose "$1" "$new"; then
+    [ "$need_worker" = 0 ] || fail "deploy/$COMPOSE has no report worker, and the $1 release's copy could not be fetched from $RELEASE_URL — nothing changed. Check the network, set ELASTICPRO_RELEASE_URL to a mirror (or file:///dir holding v$1/deploy/$COMPOSE), or see deploy/README.md (Updating)"
+    db_left_note "the $1 file could not be fetched from $RELEASE_URL"
+    return 0
+  fi
+  has_worker "$new" || need_worker=0   # that release predates the worker: nothing to bring in
+  ! has_db "$new" || drop_db=0         # nor has it taken the db out
+  [ "$need_worker$drop_db" != 00 ] || return 0
   # Edited here? It must be byte for byte what a release shipped: the one running now, the one
   # before it, or the one its own image pins name — a deploy.sh from before 0.3.54 upgraded the
   # images and left the file behind, so an install upgraded several times still has the file it
@@ -199,6 +244,11 @@ compose_plan() {
     if cmp -s "$COMPOSE" "$shipped"; then matched=$v; break; fi
   done
   if [ -z "$matched" ] && [ "$REPLACE_COMPOSE" != 1 ]; then
+    if [ "$need_worker" = 0 ]; then
+      if [ -n "$fetched" ]; then db_left_note "it differs from the file each of these releases shipped:$fetched (it was edited here)"
+      else db_left_note "whether it was edited here cannot be told (the file of the version running now, ${2:-not known}, could not be fetched)"; fi
+      return 0
+    fi
     if [ -n "$fetched" ]; then
       say "✗ deploy/$COMPOSE has no report worker, and it differs from the file each of these releases shipped:$fetched — it was edited here." >&2
     else
@@ -211,9 +261,11 @@ compose_plan() {
     say "  Until then the core runs everything itself (role all), as before 0.3.54." >&2
     exit 1
   fi
-  COMPOSE_NEW=$new
-  if [ -n "$matched" ]; then say "   $COMPOSE: as $matched shipped it — the $1 file replaces it (adds the report worker)"
-  else say "   $COMPOSE: replaced by the $1 file although it was not as a release shipped it (--replace-compose)"; fi
+  COMPOSE_NEW=$new; DROP_DB=$drop_db
+  [ "$need_worker" = 0 ] || what="adds the report worker"
+  [ "$drop_db" = 0 ] || what="${what:+$what, }takes out the unused PostgreSQL service db"
+  if [ -n "$matched" ]; then say "   $COMPOSE: as $matched shipped it — the $1 file replaces it ($what)"
+  else say "   $COMPOSE: replaced by the $1 file although it was not as a release shipped it (--replace-compose; $what)"; fi
   if [ "$DRY" = 1 ]; then
     say "   the change:"
     diff -u --label "$COMPOSE (now)" --label "$COMPOSE ($1)" "$COMPOSE" "$new" | sed 's/^/     /' || true
@@ -723,7 +775,8 @@ apply_config() {
 # A dry --apply-config only validates and renders, which needs no Docker.
 docker compose version >/dev/null 2>&1 || { [ "$APPLY$DRY" = 11 ] || fail "Docker Compose v2 is needed (docker compose …)"; }
 [ -f .env ] || fail "deploy/.env is missing — a first install starts with README.md (Install)"
-[ -f secrets/db_password ] || [ "$APPLY$DRY" = 11 ] || fail "deploy/secrets/db_password is missing — see README.md (Install, step 4)"
+# Only a compose file that still has the db service (PostgreSQL, gone from the stack) needs it.
+! has_db "$COMPOSE" || [ -f secrets/db_password ] || [ "$APPLY$DRY" = 11 ] || fail "deploy/secrets/db_password is missing and deploy/$COMPOSE still has the db service that reads it — put the password file back, or take the unused db service out of $COMPOSE"
 # Before any compose command: the core mounts it, and Docker makes a directory of a missing file.
 ensure_config
 
@@ -738,9 +791,10 @@ CURRENT=${CURRENT:-elasticpro-core:latest}
 PREVIOUS_BEFORE=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
 
 # --- rollback only ----------------------------------------------------------------------
-# Every image the last deploy changed goes back: the core always, and nginx, PostgreSQL and
-# Redis too when it was an --upgrade that moved them; and the compose file, when that upgrade
-# brought in a new one (.compose-previous names the old one).
+# Every image the last deploy changed goes back: the core always, and nginx and Redis too when
+# it was an --upgrade that moved them; and the compose file, when that upgrade brought in a new
+# one (.compose-previous names the old one) — with the db service and its image, when that
+# upgrade took them out (the db-data volume was kept, so the data is as it was).
 if [ "$ROLLBACK" = 1 ]; then
   PREV=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
   [ -n "$PREV" ] || fail "no previous image recorded (ELASTICPRO_IMAGE_PREVIOUS in .env)"
@@ -749,12 +803,14 @@ if [ "$ROLLBACK" = 1 ]; then
   env_set ELASTICPRO_IMAGE "$PREV"
   env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
   STACK=0
-  for key in $SUPPORT_KEYS; do
+  for key in $SUPPORT_KEYS $RETIRED_KEYS; do
     old=$(env_get "${key}_PREVIOUS"); [ -n "$old" ] || continue
-    now=$(image_of "$key")
+    now=$(image_of "$key")    # empty for a retired image the compose file in place has no line for
     docker image inspect "$old" >/dev/null 2>&1 || run docker pull -q "$old" >/dev/null || fail "the previous image $old cannot be found or pulled"
-    say "   ${key#ELASTICPRO_}: $now → $old"
-    env_set "$key" "$old"; env_set "${key}_PREVIOUS" "$now"; STACK=1
+    say "   ${key#ELASTICPRO_}: ${now:-not in the stack} → $old"
+    env_set "$key" "$old"
+    if [ -n "$now" ]; then env_set "${key}_PREVIOUS" "$now"; else env_del "${key}_PREVIOUS"; fi
+    STACK=1
   done
   # The compose file goes back too; the one in place now is kept, and named, so a second
   # --rollback goes forward again — as the images do.
@@ -772,7 +828,8 @@ if [ "$ROLLBACK" = 1 ]; then
       say "! $COMPOSE_MARK does not name a backup that is here — $COMPOSE stays as it is"
     fi
   fi
-  # --remove-orphans: going back to a compose file without the worker takes its container away.
+  # --remove-orphans: going back to a compose file without the worker (or forward again to one
+  # without the db) takes that container away. Never a volume.
   # shellcheck disable=SC2046
   if [ "$STACK" = 1 ]; then run docker compose up -d --remove-orphans; else run docker compose up -d $(app_services); fi
   [ "$DRY" = 1 ] || { wait_healthy && say "✓ core healthy on $PREV"; } || fail "core not healthy on $PREV either — docker compose logs core"
@@ -847,7 +904,7 @@ sync_nginx() {
   fi
 }
 
-# --- upgrade: a published release, all four images ------------------------------------
+# --- upgrade: a published release, all three images -----------------------------------
 if [ -n "$UPGRADE" ]; then
   API="https://api.github.com/repos/karthick-dkk/elasticpro"
   REG=${ELASTICPRO_REGISTRY:-karthickdk02}
@@ -873,10 +930,14 @@ if [ -n "$UPGRADE" ]; then
   if [ -n "$NOW" ] && older "$TARGET" "$NOW" && [ "$FORCE" != 1 ]; then
     fail "$TARGET is older than the $NOW running now — use --rollback to go back, or add --force"
   fi
-  # A compose file without the worker: the release's comes in too (or the script stops here,
-  # nothing changed, and says why).
+  # A compose file without the worker, or still with the db: the release's comes in too (or,
+  # without the worker, the script stops here, nothing changed, and says why).
   compose_plan "$TARGET" "$NOW"
-  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ]; then
+  # A db container the compose file no longer has (the file came by git or rsync): this restart
+  # takes it away too.
+  LEFTOVER_DB=0
+  [ "$DROP_DB" = 1 ] || ! db_leftover || { LEFTOVER_DB=1; say "   a db container (PostgreSQL) is still there, but deploy/$COMPOSE no longer has the service — the restart removes it"; }
+  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ] && [ "$LEFTOVER_DB" = 0 ]; then
     apply_config keep
     say "✓ already on $TARGET — nothing else to do (the core was not restarted: deploy.sh --apply-config does that)"
     exit 0
@@ -909,15 +970,28 @@ if [ -n "$UPGRADE" ]; then
   fi
   # The core's previous image is always recorded; a support image's only when it moves, and
   # a stale record from an older upgrade is dropped so --rollback undoes exactly this one.
-  for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
+  for key in $SUPPORT_KEYS $RETIRED_KEYS; do env_del "${key}_PREVIOUS"; done
   for item in $PLAN; do
     key=${item%%=*}; img=${item#*=}
     env_set "${key}_PREVIOUS" "$(image_of "$key")"
     env_set "$key" "$img"
   done
+  # The db's image key leaves .env with the db; --rollback puts it back with the old file.
+  if [ "$DROP_DB" = 1 ]; then
+    for key in $RETIRED_KEYS; do
+      img=$(env_get "$key"); [ -n "$img" ] || continue
+      env_set "${key}_PREVIOUS" "$img"; env_del "$key"
+    done
+  fi
   printf '%s' "$PLAN" | grep -q 'ELASTICPRO_IMAGE=' || env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
   say "== restarting the stack on $TARGET"
-  run docker compose up -d
+  if [ "$DROP_DB$LEFTOVER_DB" != 00 ]; then
+    # The db container stops and is removed; its volume is not (no -v, no `volume rm`).
+    run docker compose up -d --remove-orphans
+    db_volume_note
+  else
+    run docker compose up -d
+  fi
   [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
   say "== waiting for the core's health check (up to ${TIMEOUT}s)"
   if wait_healthy; then
@@ -960,7 +1034,7 @@ fi
 env_set ELASTICPRO_IMAGE "$IMAGE"
 # This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx,
 # nor its compose file.
-for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
+for key in $SUPPORT_KEYS $RETIRED_KEYS; do env_del "${key}_PREVIOUS"; done
 compose_forget
 say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || app_services)"
 # shellcheck disable=SC2046
@@ -973,6 +1047,8 @@ if wait_healthy; then
   say "✓ core healthy on $IMAGE"
   sync_nginx
   say "  .env before this deploy: $BACKUP   ·   undo: deploy/deploy.sh --rollback"
+  # This deploy restarts the core alone, so a db container the compose file no longer has stays.
+  ! db_leftover || say "! a db container (PostgreSQL) is still there, but deploy/$COMPOSE no longer has the service — ElasticPro never used it. docker compose up -d --remove-orphans removes it (its db-data volume is kept)."
   docker compose ps
   exit 0
 fi

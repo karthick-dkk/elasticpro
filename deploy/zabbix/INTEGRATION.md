@@ -52,7 +52,6 @@ flowchart LR
   subgraph epstack["Hosted ElasticPro (deploy/docker-compose.yml)"]
     nginx["ElasticPro nginx\n(:443, TLS, accounts, rate limits)"]
     core["core — elasticpro-bridge\n(:8765, internal only)"]
-    edb[("ElasticPro Postgres")]
   end
 
   vault[("Vault\nsecret/elasticpro/*")]
@@ -74,7 +73,6 @@ flowchart LR
   core -- "AppRole, read-only ES passwords (vault_net)" --> vault
   scraper -- "reads via API token, over internal/zabbix networks" --> core
   scraper -- "zabbix_sender, client plan + alert states, :10051" --> zserver
-  core --- edb
   zserver --- zdb
 ```
 
@@ -104,7 +102,7 @@ running everything for a first install):
 | 8765 | ElasticPro core | **never published** — internal compose network only |
 | 22 | each Windows jump host | from the Zabbix server only |
 
-Nothing else is published: both Postgres instances, Redis, the Zabbix web service and the core
+Nothing else is published: Zabbix's Postgres, Redis, the Zabbix web service and the core
 stay on their compose networks (`deploy_internal`, `zabbix_zbx`, `ep_sso`, `vault_net`).
 
 **Memory, on a 4 GB host that also runs Elasticsearch.** The container memory caps, as shipped,
@@ -177,7 +175,6 @@ cd deploy
 cp .env.example .env
 mkdir -p tls && openssl req -x509 -newkey rsa:4096 -nodes -days 825 \
   -keyout tls/privkey.pem -out tls/fullchain.pem -subj "/CN=elasticpro.internal"
-mkdir -p secrets && openssl rand -base64 32 > secrets/db_password
 docker compose up -d --build
 ```
 
@@ -845,7 +842,6 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 
 | File | Holds | Owner / mode | Made by |
 |---|---|---|---|
-| `deploy/secrets/db_password` | ElasticPro's Postgres password | container-readable | `deploy/README.md` step 4 |
 | `deploy/secrets/redis/redis_password` | optional Redis cache auth | container-readable | README.md, "Scaling to a large fleet" |
 | `deploy/secrets/zabbix_sso_secret` | HMAC key, Zabbix module ↔ core | 0640 | step 8, by hand |
 | `deploy/secrets/zabbix_api_token` | ElasticPro's read-only Zabbix API token | 0640 | `zbx_api_user.py` (step 5) |

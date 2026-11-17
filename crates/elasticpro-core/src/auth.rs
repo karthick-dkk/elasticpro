@@ -119,8 +119,8 @@ impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s.trim().to_ascii_lowercase().as_str() {
             "admin" => Some(Role::Admin),
-            // "viewer" and "operator" are the names deploy/db/init.sql used while this
-            // was still a plan. Accepted on the way in so an early row still resolves.
+            // "viewer" and "operator" are the names an early plan (a PostgreSQL schema that
+            // was never wired up) used. Accepted on the way in so an early row still resolves.
             "user" | "viewer" => Some(Role::User),
             "guest" => Some(Role::Guest),
             // It meant admin while it was only a name in a plan; it is its own role now.
@@ -564,6 +564,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // whose page is cluster health only: runs name clusters and carry their errors. A
         // caller limited to some clusters reads only the runs about theirs (the handler).
         "JOBS_LIST" => Some(Role::User),
+        // The Jobs page's health lines (docs/HEALTH.md "History"): a user's, as the strip it draws
+        // from; the ElasticPro health figures and the fleet-wide counts are narrowed in the handler.
+        "HEALTH_HISTORY" => Some(Role::User),
         // The job controls: starting, pausing, cancelling and retrying fleet-wide work, and the
         // limits it runs under. An administrator's; the handler refuses one limited to some
         // clusters (every change but JOB_SETTINGS_GET).
