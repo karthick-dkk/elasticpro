@@ -544,12 +544,27 @@ export function dayTicks(days) {
   });
 }
 
-/** Which days an answer covers, in words: "17 Nov", or "16 Nov – 17 Nov". */
-export function daysCoveredText(res) {
-  const days = ((res && res.days) || []).map((d) => d && d.day).filter(Boolean);
-  const a = (res && res.from) || days[0]; const z = (res && res.to) || days[days.length - 1];
-  if (!a) return 'no day';
-  return !z || a === z ? dayText(a) : `${dayText(a)} – ${dayText(z)}`;
+/** The fewest days Day by day covers (the owner's screenshot is the old board at "Last 7 days"). */
+export const DAY_CHART_MIN_DAYS = 7;
+
+/**
+ * The days Summary's Day by day covers — the one definition: the page window's own local days
+ * (`{from, to}` YYYY-MM-DD) when they are at least DAY_CHART_MIN_DAYS, else the last
+ * DAY_CHART_MIN_DAYS days ending `today` (YYYY-MM-DD in the page's zone). Only this card widens;
+ * the tiles and the rings stay on the page's window. `{from, to, days, widened}`.
+ */
+export function dayChartDays(win, today, min = DAY_CHART_MIN_DAYS) {
+  const n = periodDays(win && win.from, win && win.to);
+  if (n !== null && n >= min) return { from: win.from, to: win.to, days: n, widened: false };
+  const t = Date.parse(`${today}T00:00:00Z`);
+  return { from: new Date(t - (min - 1) * 86400000).toISOString().slice(0, 10), to: today, days: min, widened: true };
+}
+
+/** Day by day's header: "Last 7 days · 11 Nov – 17 Nov", or a longer range's "30 days · 19 Oct – 17 Nov". */
+export function dayChartWords(w) {
+  if (!w) return '';
+  const span = w.from === w.to ? dayText(w.from) : `${dayText(w.from)} – ${dayText(w.to)}`;
+  return `${w.widened ? `Last ${w.days} days` : `${w.days} day${w.days === 1 ? '' : 's'}`} · ${span}`;
 }
 
 /* ------------------------------------ the dashboard's charts ------------------------------------ */

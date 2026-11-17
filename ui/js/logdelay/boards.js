@@ -42,7 +42,7 @@ import {
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate,
+  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
@@ -702,7 +702,14 @@ function summaryView(clusterId) {
   const winNote = B.get('sum:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   const tzNote = B.get('sum:tz', `${S.tz}`, () => (S.tz === null ? null
     : h('div.muted.ld-note#ld-sum-tz-note', `Summary counts every time zone (the core’s totals): the time-zone filter — ${tzWords()} — applies to Dashboard and Devices.`)));
-  const cards = B.get('sum:cards', `${rid}|${clusterId}`, () => summaryCards(res, { clusterId, nameOf }));
+  // Day by day covers at least the last 7 days (dayChartDays): a shorter range asks for those days
+  // once more, its own question (no device rows), and only that card reads it.
+  const win = dayChartDays(S.win, ymdIn(Date.now(), S.zone));
+  const own = !win.widened && win.from === S.win.from && win.to === S.win.to;
+  const dent = own ? ent : need(`sumdays|${win.from}..${win.to}|${ids.join(',')}`, (signal) => ldSummary({ from: win.from, to: win.to, clusterIds: ids, maxDevices: 1, signal }));
+  const daysRes = dent.state === 'ok' ? dent.res : null;
+  const cards = B.get('sum:cards', `${rid}|${clusterId}|${win.from}..${win.to}|${entSig(dent)}`, () => summaryCards(res, {
+    clusterId, nameOf, daysRes, win, daysPending: daysRes ? null : problem(dent, 'The days of the last week') }));
   return [notice, readNote, winNote, tzNote, ...cards];
 }
 

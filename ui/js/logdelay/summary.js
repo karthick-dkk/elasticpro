@@ -5,7 +5,8 @@
  *   four tiles      total devices · with delay now (the delay band and above the critical line) ·
  *                   with no delay (on time %) · the shares: without delay, delayed, silent, can't measure
  *   Delay reduced   devices back under the delay line in the last 2 / 4 / 6 / 12 / 24 h
- *   Day by day      one stacked bar per day the answer covers, each tick its own date
+ *   Day by day      one stacked bar per day, each tick its own date — at least the last 7 days
+ *                   (dayChartDays): a shorter page range widens this card only, from its own answer
  *   Delayed devices by cluster   All clusters first, then a ring per cluster, worst first; a ring
  *                   opens that cluster on Dashboard
  *
@@ -19,7 +20,7 @@ import { h, svg } from '../lib/dom.js';
 import { card, empty } from '../pages/common.js';
 import {
   LD_COLOURS as C, LD_NEVER_MEASURED, ldHash, bands, sharedLevels, countText, pctText,
-  lateSplitText, reducedBars, ringsOrder, ringArcs, dayBars, dayTitle, dayTicks, daysCoveredText,
+  lateSplitText, reducedBars, ringsOrder, ringArcs, dayBars, dayTitle, dayTicks, dayChartWords,
 } from '../core/logdelay-report.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -50,15 +51,20 @@ function tiles(res, b, lv) {
       h('div.ld-red-labels', ...red.map((r) => h('span', r.label)))));
 }
 
-/** Day by day: one stacked bar per day the answer covers; nothing measured says so, never an empty chart read as 0. */
-function dayCard(res, b) {
-  const list = res.days || [];
+/**
+ * Day by day over `win` (dayChartDays: at least the last 7 days) from `daysRes`, its own answer;
+ * `pending` is drawn instead while that answer is read or could not be. Nothing measured says so,
+ * never an empty chart read as 0.
+ */
+function dayCard(daysRes, win, b, pending) {
+  const sub = `${dayChartWords(win)} · a bar’s figures on hover`;
+  if (!daysRes) return card('Day by day', sub, pending);
+  const list = daysRes.days || [];
   const H = 132;
   const measured = list.filter((d) => d && finite(d.devices) && d.devices > 0);
-  const covered = daysCoveredText(res);
-  const sub = `${covered} · ${list.length > 1 ? 'the days' : 'the day'} the time range touches (the store keeps whole days) · a bar’s figures on hover`;
+  const covered = dayChartWords(win);
   if (!measured.length) {
-    return card('Day by day', sub, empty(`No day in ${covered} has totals: nothing was measured.`, { detail: 'A day appears here once the scheduled measurement has run on it.' }));
+    return card('Day by day', sub, empty(`No day in ${covered.split(' · ').pop()} has totals: nothing was measured.`, { detail: 'A day appears here once the scheduled measurement has run on it.' }));
   }
   const bars = dayBars(list, H);
   const ticks = dayTicks(list);
@@ -111,11 +117,14 @@ function ringsCard(res, b, clusterId, nameOf) {
 }
 
 /**
- * The Summary's cards for one LOGDELAY_SUMMARY answer: `clusterId` names the one cluster in view
- * (its tiles, its days, its own ring), null for every cluster. `nameOf` names a cluster by id.
+ * The Summary's cards: `res` is the LOGDELAY_SUMMARY answer for the page's range (the tiles, Delay
+ * reduced, the rings), `daysRes` the one for Day by day's days `win` (the same answer when the
+ * range already covers them; null while it is read, then `daysPending` is drawn). `clusterId`
+ * names the one cluster in view (its tiles, its days, its own ring), null for every cluster.
  */
-export function summaryCards(res, { clusterId = null, nameOf = (id) => id } = {}) {
+export function summaryCards(res, { clusterId = null, nameOf = (id) => id, daysRes = res, win = null, daysPending = null } = {}) {
   const lv = sharedLevels(res.byCluster);
   const b = bands(lv);
-  return [tiles(res, b, lv), dayCard(res, b), ringsCard(res, b, clusterId, nameOf)];
+  const w = win || { from: res.from, to: res.to, days: (res.days || []).length, widened: false };
+  return [tiles(res, b, lv), dayCard(daysRes, w, b, daysPending), ringsCard(res, b, clusterId, nameOf)];
 }

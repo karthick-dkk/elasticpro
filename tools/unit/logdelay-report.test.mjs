@@ -72,7 +72,7 @@ test('summary: the late split, Delay reduced, the rings worst first and their ar
   assert.equal(R.sharedLevels([]), null);
 });
 
-test('summary day by day: a day without totals is a gap, every tick its own date, the days covered in words', () => {
+test('summary day by day: a day without totals is a gap, every tick its own date', () => {
   const day = (d, o = {}) => ({ day: d, devices: 10, onTimeAll: 6, delayed: 2, critical: 1, otherTz: 0, silent: 1, unmeasured: 0, ...o });
   const bars = R.dayBars([day('2026-11-09'), { day: '2026-11-10', devices: 0 }, day('2026-11-11', { onTimeAll: 1, delayed: 0, critical: 0, silent: 0 })], 100);
   assert.equal(bars[1].gap, true); assert.equal(bars[1].ok + bars[1].delay + bars[1].critical + bars[1].unk, 0);
@@ -88,9 +88,18 @@ test('summary day by day: a day without totals is a gap, every tick its own date
   assert.equal(ticks.length, 6);
   assert.equal(new Set(ticks).size, ticks.length, 'no date twice');
   assert.deepEqual(ticks, ['19 Oct', '24', '29', '3 Nov', '8', '13'], 'the month once, and again where it changes');
-  assert.equal(R.daysCoveredText({ from: '2026-11-17', to: '2026-11-17' }), '17 Nov');
-  assert.equal(R.daysCoveredText({ from: '2026-11-16', to: '2026-11-17' }), '16 Nov – 17 Nov');
-  assert.equal(R.daysCoveredText({ days: [] }), 'no day');
+});
+
+test('summary day by day covers at least the last 7 days: a short range widens, a long one is its own days', () => {
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-17', to: '2026-11-17' }, '2026-11-17'), { from: '2026-11-11', to: '2026-11-17', days: 7, widened: true });
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-16', to: '2026-11-17' }, '2026-11-17'), { from: '2026-11-11', to: '2026-11-17', days: 7, widened: true }, 'a 1 h window past midnight is still short');
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-01', to: '2026-11-10' }, '2026-11-17'), { from: '2026-11-01', to: '2026-11-10', days: 10, widened: false }, 'a 10-day custom range is its own days');
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-11', to: '2026-11-17' }, '2026-11-17').widened, false, 'exactly 7 days is not widened');
+  assert.deepEqual(R.dayChartDays({ from: '2026-12-03', to: '2026-12-03' }, '2026-12-03'), { from: '2026-11-27', to: '2026-12-03', days: 7, widened: true }, 'across a month boundary');
+  assert.deepEqual(R.dayChartDays({ from: '2027-01-02', to: '2027-01-02' }, '2027-01-02').from, '2026-12-27', 'across a year boundary');
+  assert.deepEqual(R.dayChartDays(null, '2026-11-17').from, '2026-11-11', 'no window: the last 7 days');
+  assert.equal(R.dayChartWords(R.dayChartDays({ from: '2026-11-17', to: '2026-11-17' }, '2026-11-17')), 'Last 7 days · 11 Nov – 17 Nov');
+  assert.equal(R.dayChartWords({ from: '2026-10-19', to: '2026-11-17', days: 30, widened: false }), '30 days · 19 Oct – 17 Nov');
 });
 
 test('the old addresses open the matching view of the Log Delay page', () => {

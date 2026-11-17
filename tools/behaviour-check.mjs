@@ -7898,11 +7898,18 @@ await settleFor(300);
       ok(reds.length === 5 && reds.map((r) => r.querySelector('b').textContent).join() === fx.reduced.map((r) => r.n).join() && reds.every((r) => r.querySelector('i')),
         `log delay: Delay reduced draws ${reds.map((r) => r.querySelector('b').textContent).join(', ')}`);
       ok([...tile('reduced').querySelectorAll('.ld-red-labels span')].map((x) => x.textContent).join() === '2 h,4 h,6 h,12 h,24 h' && /back under 30 min in the last/.test(tile('reduced').textContent), 'log delay: Delay reduced is not 2 h to 24 h under the delay level');
-      // The 1 h range: the day(s) it touches, each tick its own date, the header says which.
+      // The 1 h range: the tiles stay on it, Day by day widens to the last 7 days (its own LOGDELAY_SUMMARY), each tick its own date.
       const ticks = () => [...g('ld-sum-ticks').querySelectorAll('span')].map((x) => x.textContent).filter(Boolean);
-      const days = g('ld-sum-days').querySelectorAll('.ld-day').length;
-      ok(days >= 1 && days <= 2 && ticks().length === days && new Set(ticks()).size === ticks().length, `log delay: Summary on 1 h draws ${days} day(s), ticks ${ticks().join(' · ')}`);
-      ok(/the days? the time range touches/.test(g('ld-sum-days').closest('section').textContent), 'log delay: Day by day does not say which days it covers');
+      await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 7, `log delay: Summary on 1 h does not draw the last 7 days (${g('ld-sum-days') ? g('ld-sum-days').querySelectorAll('.ld-day').length : 'no chart'})`);
+      ok(ticks().length === 7 && new Set(ticks()).size === 7, `log delay: the 7 day ticks repeat a date (${ticks().join(' · ')})`);
+      {
+        const ymdL = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+        const now = Date.now(); const from7 = ymdL(now - 6 * 86400000); const to7 = ymdL(now);
+        ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from === from7 && m.to === to7 && m.maxDevices === 1), `log delay: Day by day did not ask for ${from7} → ${to7} on its own`);
+        ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.to === to7 && m.from !== from7 && m.maxDevices === 2000), 'log delay: the tiles no longer read the page’s 1 h range');
+        const head = g('ld-sum-days').closest('section').querySelector('header').textContent;
+        ok(/Last 7 days · \d+ \w{3} – \d+ \w{3}/.test(head), `log delay: Day by day's header reads "${head}"`);
+      }
       // A 30-day custom range: 30 bars, a day without totals a gap, the ticks every one its own date.
       g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);
       g('ld-range-from').value = new Date(Date.parse(`${g('ld-range-to').value}:00Z`) - 29 * 86400000).toISOString().slice(0, 16);
@@ -7913,8 +7920,9 @@ await settleFor(300);
       ok(gapDay && !gapDay.querySelector('i') && /no measurement/.test(gapDay.title), 'log delay: a day without totals is not a gap in Day by day');
       ok([...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent or can’t measure',
         `log delay: the Day by day legend reads ${[...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join(' · ')}`);
+      ok(/30 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent), 'log delay: a 30-day Day by day does not say its 30 days');
       g('ld-range').querySelector('[data-range="1h"]').click(); await settleFor(200);
-      await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length <= 2, 'log delay: Summary did not go back to the 1 h range');
+      await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 7, 'log delay: Summary did not go back to the last 7 days on 1 h');
       // The rings: All clusters first, then worst first; a cluster never measured last, saying so (no 0 % ring).
       const rings = () => [...g('ld-rings').querySelectorAll('a.ld-ring')];
       const share = (a) => (a.dataset.known === 'true' ? Number(a.querySelector('.ld-ring-mid b').textContent.replace(/[^\d.]/g, '')) : -1);
