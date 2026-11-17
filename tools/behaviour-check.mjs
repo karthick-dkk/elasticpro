@@ -4747,6 +4747,44 @@ restoreConsole();
   await go('overview');
 }
 
+// The top bar (the owner, 2026-11-17): the bell on Clusters and Clusters › Overview only, no
+// "1 green · 1 yellow" pill on any page, and a notice raised elsewhere still reaches the bell.
+{
+  const menu = await load('ui/menu.js');
+  const st = await load('core/state.js');
+  const bell = () => doc.querySelector('#topbar .bell');
+  const fleetPill = () => [...doc.querySelectorAll('#topbar .pill')].map((p) => p.textContent.trim())
+    .find((t) => /\d+\s+(green|yellow|red|unreachable|loading)\b/.test(t) || / · (green|yellow|red|unreachable|loading)$/.test(t)) || '';
+  st.state.selected = 'all';
+  await go('overview');
+  ok(!!bell(), 'top bar: no bell on Clusters');
+  ok(!fleetPill(), `top bar: the fleet health pill is on Clusters ("${fleetPill()}")`);
+  ok(!!doc.querySelector('#topbar [aria-label^="Fleet health"], #topbar [aria-label^="Cluster health"]'), 'top bar: the health dot on the chooser is gone');
+  const first = st.clusters()[0];
+  if (first) {
+    location.hash = `#/clusters/overview/${first.id}`; await settleFor(600);
+    ok(/^#\/clusters\/overview/.test(location.hash) && !!bell(), `top bar: no bell on Clusters › Overview (${location.hash})`);
+    ok(!fleetPill(), `top bar: the fleet health pill is on Clusters › Overview ("${fleetPill()}")`);
+  }
+  for (const p of ['indices', 'console', 'snapshots', 'shards', 'log-delay', 'reports', 'jobs', 'alerts']) {
+    await go(p);
+    ok(!bell(), `top bar: the bell is drawn on ${p}`);
+    ok(!fleetPill(), `top bar: the fleet health pill is on ${p} ("${fleetPill()}")`);
+  }
+  // A notice that goes "to the bell" while no bell is drawn is kept, and the bell on Clusters lists it.
+  await go('indices');
+  menu.toast('top-bar check: a bell-only notice', 'warn', 0, { bellOnly: true });
+  ok(menu.notifications().some((n) => n.message === 'top-bar check: a bell-only notice'), 'top bar: a bell-only notice raised off Clusters was lost');
+  st.state.selected = 'all';
+  await go('overview');
+  const b = bell();
+  if (b) {
+    b.click(); await settleFor(100);
+    ok([...doc.querySelectorAll('.notif')].some((n) => /top-bar check: a bell-only notice/.test(n.textContent)), 'top bar: the bell on Clusters does not list the notice raised on Indices');
+    menu.closePopover(); await settleFor(30);
+  }
+}
+
 // Request policy: Config → Requests asks the core once per visit, stays quiet under fleet
 // events, and saves what the presets decide; the Request Centre's emergency stop has an end.
 {
@@ -5813,8 +5851,11 @@ consolePanels: {
     d.ilm = { operation_mode: 'RUNNING' }; d.ilmErrors = { 'logstash-x-1': {} };
     st.invalidateAlerts();
     notify.announceNewAlerts();
+    // The bell is drawn on Clusters (and Clusters › Overview) only (2026-11-17); the notices
+    // raised on Alerts are in it there.
+    await go('overview'); await settleFor(120);
     const bell = doc.querySelector('button.bell');
-    ok(!!bell, 'alerts: the shell has no bell');
+    ok(!!bell, 'alerts: the Clusters page has no bell');
     if (bell) {
       bell.click(); await settleFor(80);
       const entries = [...doc.querySelectorAll('.notif')].filter((n) => /quiet-lab: \d+ new alert/.test(n.textContent));
@@ -5975,6 +6016,7 @@ if (viaFleet) {
     ok(!/\d+\s+(green|yellow|red|unreachable|loading)\b/.test(bar.textContent), `evidence ${where}: a fleet status chip is in the top bar: "${bar.textContent}"`);
     ok(![...bar.querySelectorAll('button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), `evidence ${where}: the alerts chip is in the top bar`);
     ok(!bar.querySelector('.bell'), `evidence ${where}: the bell is in the top bar`);
+    ok(!bar.querySelector('[aria-label^="Fleet health"]'), `evidence ${where}: the picker's dot is the fleet's, not this cluster's`);
     const pickEl = bar.querySelector('#cluster-select');
     ok(!!pickEl, `evidence ${where}: no cluster chooser in the top bar`);
     ok(!bar.querySelector('#cluster-finder, .cl-find'), `evidence ${where}: the find-box is in the top bar`);
@@ -5995,7 +6037,9 @@ if (viaFleet) {
   await go('overview'); await settleFor(300);
   {
     const bar = doc.getElementById('topbar').textContent;
-    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
+    // The fleet's health is the picker's dot since the "1 green · 1 yellow" pill went (2026-11-17).
+    const fdot = doc.querySelector('#topbar [aria-label^="Fleet health"]');
+    ok(!!fdot && /\d+\s+(green|yellow|red|unreachable)/.test(fdot.getAttribute('aria-label')), `evidence control: Clusters has no fleet health dot, so the absence checks prove nothing: "${fdot ? fdot.getAttribute('aria-label') : bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
     ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
     await go('alerts'); ok(!doc.getElementById('side-foot'), 'evidence control: Alerts has a status strip again'); await go('overview');
@@ -6112,7 +6156,7 @@ if (viaFleet) {
     { const sel = doc.getElementById('cluster-select'); ok(!!sel, 'evidence: the picker did not come back on Clusters');
       if (sel) { sel.value = 'all'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(400); } }
     const bar = doc.getElementById('topbar').textContent;
-    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence: the fleet chip did not come back on Clusters: "${bar}"`);
+    ok(!!doc.querySelector('#topbar [aria-label^="Fleet health"]'), `evidence: the fleet health dot did not come back on Clusters: "${bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence: the bell did not come back on Clusters');
     ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
     // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.

@@ -697,25 +697,6 @@ function pickDot(list) {
   const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`).join(' \u00b7 ');
   return h(`i.pick-dot.${HEALTH_COLOUR[worst]}`, { role: 'img', 'aria-label': `Fleet health: ${parts}`, title: parts });
 }
-function healthPill(list) {
-  if (!list.length) return null;
-  const states = list.map((c) => healthState(state.data.get(c.id)));
-  if (list.length === 1) {
-    const st = states[0];
-    return h(`span.pill.${HEALTH_COLOUR[st]}`, { title: `Cluster health of ${list[0].name}` },
-      h('i.dot'), `${list[0].name} · ${st}`);
-  }
-  const order = ['red', 'unreachable', 'yellow', 'loading', 'green'];
-  const n = Object.fromEntries(order.map((k) => [k, states.filter((s) => s === k).length]));
-  const worst = order.find((k) => n[k]) || 'loading';
-  const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`);
-  return h(`button.pill.${HEALTH_COLOUR[worst]}`, {
-    // the edge every toned pill has (app.css), drawn as an inset ring: the button has no border to give it
-    type: 'button', style: { cursor: 'pointer', border: 0, boxShadow: 'inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent)' }, onclick: () => go('overview'),
-    title: 'Health of every cluster in the picker — open Clusters for the list',
-  }, h('i.dot'), parts.join(' · '));
-}
-
 /** Above this many clusters the top bar adds a find-as-you-type box beside the picker. */
 const FINDER_ABOVE = 30;
 
@@ -860,8 +841,9 @@ function renderTopbar() {
     // progress never rebuilds the bar. Absent while reports run or sit idle — the owner
     // (2026-11-14): the bar shows nothing in a normal state.
     reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest'), evidence: ev }),
-    // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
-    ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
+    // Health is the dot on the picker (the fleet's worst when several are chosen). The "1 green ·
+    // 1 yellow" pill that repeated it here is gone from every page (the owner, 2026-11-17): the
+    // Clusters page lists each cluster's health.
     // The alert count is on the Alerts tab, where going there is one click anyway; the
     // button that repeated it here is gone (Clusters board, 2026-10-25).
     // The read-only / writes-enabled pill used to sit here. Every page that can write
@@ -887,9 +869,11 @@ function renderTopbar() {
       : null,
     // Inside Zabbix the theme follows the Zabbix user's; a second switch here would be one
     // that the next page load undoes.
-    // The bell lists every cluster's notices; it stays off an evidence page and comes back
-    // with everything in it when the person leaves.
-    ev ? null : notificationBell(),
+    // The bell lists every cluster's notices. It is drawn on Clusters and Clusters › Overview only
+    // (the owner, 2026-11-17) — never on an evidence page. Elsewhere notices still go into it
+    // (ui/menu.js keeps the history whether or not the bell is on screen) and it shows them all
+    // the next time it is drawn.
+    ev || page.id !== 'overview' ? null : notificationBell(),
     // Your settings (page menu, theme, opens on, sign out), from the person's name. With the
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
     // where accounts exist: the name is not part of a client's screenshot.

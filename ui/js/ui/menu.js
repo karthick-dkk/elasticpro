@@ -336,7 +336,7 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
       h('span.toast-msg', { title: String(message) }, message),
       ...detail.slice(0, TOAST_DETAIL_LINES).map((d) => h('div.toast-detail', { title: d }, d)),
       detail.length > TOAST_DETAIL_LINES
-        ? h('div.toast-detail.muted', `+${detail.length - TOAST_DETAIL_LINES} more \u2014 open the bell for all of it`) : null,
+        ? h('div.toast-detail.muted', `+${detail.length - TOAST_DETAIL_LINES} more \u2014 all of it is in the bell, on the Clusters page`) : null,
       meta ? h('div.toast-meta', meta) : null),
     h('button.toast-x', { type: 'button', title: 'Close', 'aria-label': 'Close notification',
       onclick: (e) => { e.stopPropagation(); dismiss(el); } }, '×'),

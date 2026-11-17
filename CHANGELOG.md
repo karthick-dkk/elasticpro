@@ -3,6 +3,8 @@
 ## Unreleased
 
 - **REST: the Query and Results boxes reach the footer.** Their height is the window's less where they start (measured, so it holds with the menu on top or at the left and with one to ten tabs) and the footer; a long answer scrolls inside Results, and the request body fills Query.
+- **The alerts bell is on Clusters and Clusters › Overview only.** Other pages no longer draw it; notices raised there are still kept and are in the bell the next time it is opened.
+- **No "1 green · 1 yellow" health pill in the top bar on any page.** The dot on the cluster chooser still shows health (the worst of the fleet when several clusters are chosen).
 
 ## 0.3.71
 
