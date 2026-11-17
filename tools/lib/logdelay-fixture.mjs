@@ -228,8 +228,12 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
     }
     if (r.nowMinutes !== null) points.push({ t: now - 60000, m: r.nowMinutes, s: r.state });
     const late = r.state === 'critical' || r.state === 'delay';
+    // The open delay started up to 3 h ago but never before local midnight: the device page shows
+    // today, so a start on yesterday (any run between 00:00 and 03:00) drew no start marker.
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    const openFor = Math.min(3 * 3600000, (now - midnight.getTime()) / 2);
     const periods = [
-      ...(late ? [{ started: now - 3 * 3600000, solved: null, lastedMs: 3 * 3600000, worstMinutes: r.nowMinutes, worstState: r.state, lastMinutes: r.nowMinutes, lastState: r.state, measurements: 2, pattern: null, extras: r.extras }] : []),
+      ...(late ? [{ started: now - openFor, solved: null, lastedMs: openFor, worstMinutes: r.nowMinutes, worstState: r.state, lastMinutes: r.nowMinutes, lastState: r.state, measurements: 2, pattern: null, extras: r.extras }] : []),
       { started: now - 10 * DAY, solved: now - 10 * DAY + 3.5 * 3600000, lastedMs: 3.5 * 3600000, worstMinutes: 61, worstState: 'critical', lastMinutes: 12, lastState: 'no_delay', measurements: 3, pattern: 'a whole hour off: time zone', extras: r.extras },
       { started: now - 19 * DAY, solved: now - 19 * DAY + 10.5 * 3600000, lastedMs: 10.5 * 3600000, worstMinutes: 212, worstState: 'critical', lastMinutes: 8, lastState: 'no_delay', measurements: 6, pattern: null, extras: r.extras },
     ];
