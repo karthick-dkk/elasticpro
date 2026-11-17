@@ -61,14 +61,14 @@ pair the two UIs with a one-time code from Config → Zabbix.
 
 ## Server spec requirement to run
 
-Hosted (the stack: core, nginx, Redis, PostgreSQL):
+Hosted (the stack: core, report worker, nginx, Redis):
 
 | | Minimum | Notes |
 |---|---|---|
 | OS | Linux x86_64 with Docker Engine and Docker Compose v2 | Ubuntu 22.04 / 24.04 and Debian 12 are what the installer is exercised on |
 | CPU | 2 vCPU | the poller's concurrency (16 requests at once by default) is the only CPU load; lower it on a small host |
-| Memory | 4 GB | the shipped container caps are core 1 GB, Redis 512 MB, plus PostgreSQL and nginx; typical use is well under 3 GB. On a host shared with Zabbix or Elasticsearch, plan 8 GB |
-| Disk | 10 GB free | images, the fleet cache on disk, PostgreSQL, logs |
+| Memory | 4 GB | the shipped container caps are core 1 GB, Redis 512 MB, plus the report worker and nginx; typical use is well under 3 GB. On a host shared with Zabbix or Elasticsearch, plan 8 GB |
+| Disk | 10 GB free | images, the fleet cache on disk, logs |
 | Network | port 443 (or `--listen`) inbound; outbound to each cluster, directly or through its jump host over SSH | the core is never reachable except through nginx |
 
 Desktop (deprecated, last released in 0.3.51): Windows 10/11 x64 with WebView2; macOS 10.15 or

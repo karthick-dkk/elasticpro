@@ -116,8 +116,8 @@ Decisions made while building, within the contract:
   due time, on a cluster that answers, is not held back (budget/back-off) and while the poller is
   not idle; one being fetched counts as not due. Late % is of those tracked. The emergency stop
   makes the check *off*, not red. Cycle time is how long a poller pass (`fleet_tick`) took.
-- **Database** is always *not known*: the core does not connect to it (the db container has its
-  own healthcheck). **Redis** is the write-through store's last success / last failure, no extra
+- **Database** is always *not known*: the core has no database (the unused `db` container has
+  left the stack). **Redis** is the write-through store's last success / last failure, no extra
   round trip.
 - **Reports share** of the memory budget is `budget.reports = {budgetBytes, usedBytes, pageMaxBytes,
   holder}` from `memory.rs` (L/8, at least 64 MiB): `usedBytes` is `null` — what the share holds is

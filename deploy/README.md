@@ -8,8 +8,12 @@ production: [PRODUCTION.md](PRODUCTION.md).
 
 ```
 browser ──TLS──▶ nginx (auth gate) ──▶ core (elasticpro-bridge) ──▶ your clusters / jump hosts
-                                        └──▶ postgres
+                                        └──▶ report worker, Redis (optional cache)
 ```
+
+There is no database: accounts, trust decisions and reports are files on the core's data
+volume, and the optional Redis is a cache. (Releases up to 0.3.76 also ran a PostgreSQL
+container, `db`, that nothing ever connected to; see "Updating" for how an upgrade takes it out.)
 
 ## Before you start — read this
 
@@ -42,16 +46,13 @@ mkdir -p tls && openssl req -x509 -newkey rsa:4096 -nodes -days 825 \
 ./make-htpasswd.sh alice
 ./make-htpasswd.sh bob
 
-# 4. Database password
-mkdir -p secrets && openssl rand -base64 32 > secrets/db_password
-
-# 5. The cluster config — the same config_cluster.json the desktop app writes,
+# 4. The cluster config — the same config_cluster.json the desktop app writes,
 #    secrets sealed with the master password. Copy it in, and the SSH keys it names.
 mkdir -p config ssh
 cp /path/to/config_cluster.json config/
 cp ~/.ssh/id_ed25519 ssh/                  # any keyFile the config refers to
 
-# 6. Up
+# 5. Up
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -101,16 +102,15 @@ needs `X-Auth-User` to arrive from something it can trust.
 ## What phase 1 does not do yet
 
 - **Roles.** Every authenticated user has the same rights as the desktop operator. RBAC is
-  phase 2 and uses the `users.role` column the schema already has.
+  phase 2.
 - **A per-user write unlock.** *Allow writes* is a switch inside the core process, and in
   phase 1 there is one core process for everyone — so once any signed-in user turns it on,
   writes are permitted for every user until it is turned off or the container restarts.
   Every write is still audited under the name of whoever sent it, so the record is right;
   the *permission* is just shared. Phase 2 makes the unlock a per-user, per-role decision.
   Until then, treat "who may sign in" as "who may write".
-- **Notes in Postgres.** The `acks` and `notes` tables exist; the UI still keeps them in the
-  browser. Wiring the UI to the database is next, and until then two people do not see each
-  other's notes.
+- **Shared notes.** The UI keeps acknowledgements and notes in the browser, so two people do
+  not see each other's notes.
 - **Zabbix.** A polling endpoint for alerts and the volume report is planned; see the plan.
 
 ## Trying it on one machine first
@@ -120,8 +120,8 @@ deploy/trial.sh          # nothing to set up first
 ```
 
 It builds the image, makes throwaway credentials for anything missing (`trial-setup.sh`:
-a self-signed certificate, one user `alice` / `test-password-1`, a random database
-password — it never overwrites a file that is already there), brings the stack up and
+a self-signed certificate and one user `alice` / `test-password-1` — it never overwrites a
+file that is already there), brings the stack up and
 proves the four things the deployment exists for: no credentials → 401 at nginx; valid
 credentials → the UI and the bridge over TLS; a write appears in the core's audit log
 under the signed-in user's name; and the core has no host port binding and is unreachable
@@ -149,9 +149,9 @@ deploy/deploy.sh --upgrade=0.3.16     # one particular release (v0.3.16 works to
 deploy/deploy.sh --rollback           # back to the images that ran before
 ```
 
-`--upgrade` moves all four images together (core, nginx, PostgreSQL, and Redis when the cache
-profile is on) by setting `ELASTICPRO_IMAGE`, `ELASTICPRO_NGINX_IMAGE`, `ELASTICPRO_DB_IMAGE` and
-`ELASTICPRO_REDIS_IMAGE` in `.env`. It pulls everything first, so a version that is not published
+`--upgrade` moves all three images together (core, nginx, and Redis when the cache profile is
+on) by setting `ELASTICPRO_IMAGE`, `ELASTICPRO_NGINX_IMAGE` and `ELASTICPRO_REDIS_IMAGE` in
+`.env`. It pulls everything first, so a version that is not published
 changes nothing (an image already on this host under the release's name is used as it is). If the
 core is not healthy in time it puts the previous `.env` back and restarts on it. Going to an older
 version needs `--force`. `--dry-run` shows the plan. The images come from `karthickdk02/` unless
@@ -169,9 +169,9 @@ brings the file in:
   or under `ELASTICPRO_RELEASE_URL` — a mirror, or `file:///dir` holding `v<version>/deploy/docker-compose.yml`
   on a host without internet access) before anything is pulled or changed.
 - It replaces the file **only if it is exactly as a release shipped it**: the version running
-  now, the one before it, or the release the file's own image pins name (`elasticpro-nginx`,
-  `-postgres` and `-redis` defaults, all the same version). A `deploy.sh` from before 0.3.54
-  upgraded the images and left the file behind, so an install upgraded several times still has
+  now, the one before it, or the release the file's own image pins name (`elasticpro-nginx`
+  and `-redis` defaults — and `-postgres` in a file from before the db left — all the same
+  version). A `deploy.sh` from before 0.3.54 upgraded the images and left the file behind, so an install upgraded several times still has
   the file it was installed with; the pins say which that was. The old file is kept as `docker-compose.yml.bak-<time>` and named in
   `.compose-previous`. `.env`, `config.txt` and `docker-compose.override.yml` are not touched; the
   new file is loaded with them (`docker compose config`) before anything restarts, and a file that
@@ -197,6 +197,32 @@ deploy/deploy.sh --upgrade=0.3.54
 
 (If an older `deploy.sh` already moved the images to 0.3.54, running the new one with
 `--upgrade=0.3.54` brings in just the compose file.)
+
+### Upgrading from a release with the PostgreSQL container (`db`)
+
+Releases up to 0.3.76 ran a PostgreSQL container, `db`, that nothing in ElasticPro ever
+connected to; the stack no longer has it and `elasticpro-postgres` is no longer published.
+On an install whose `docker-compose.yml` still has the `db` service, `--upgrade`:
+
+- brings in the release's compose file by the same rule as above — only a file exactly as a
+  release shipped it, or any file with `--replace-compose`; the old one is kept as
+  `docker-compose.yml.bak-<time>` and named in `.compose-previous`;
+- restarts the stack with `docker compose up -d --remove-orphans`, so the `db` container stops
+  and is removed;
+- **keeps the `db-data` volume** — never `down -v`, never `docker volume rm` — and prints its
+  name and the command to delete it by hand: `docker volume rm <project>_db-data`
+  (`deploy_db-data` for an install in `deploy/`). `secrets/db_password` and `db/init.sql`, if
+  there, are left too; delete them when you no longer want to roll back;
+- never pulls or sets `elasticpro-postgres`. `ELASTICPRO_DB_IMAGE` leaves `.env` and is kept as
+  `ELASTICPRO_DB_IMAGE_PREVIOUS`, so `--rollback` puts the old compose file and that image back,
+  and the db starts again on its kept volume.
+
+An **edited** compose file that still has the `db` is not replaced: the upgrade goes on (the
+images move), the `db` keeps running, and the upgrade says it can be removed — delete the `db`
+service, the `db_password` secret and the `db-data` volume line by hand, then
+`docker compose up -d --remove-orphans`. `--dry-run` shows all of this. A compose file that
+lost its `db` some other way (a `git pull`, an rsync) while the container still runs: the next
+`--upgrade` removes the container the same way; a plain `deploy.sh` says how.
 
 From this checkout instead (builds the core here):
 

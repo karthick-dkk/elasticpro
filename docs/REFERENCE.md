@@ -345,7 +345,8 @@ record that answers "who deleted that index".
 
 Every [release](../../releases) carries the Zabbix modules archive (`elasticpro-zabbix-modules-<ver>.tar.gz`,
 its `.sha256`, `zabbix-modules-install.sh`), `install.sh` and `SHA256SUMS.txt`. The Docker images are on Docker Hub as
-`karthickdk02/elasticpro-core`, `-nginx`, `-redis` and `-postgres`, tagged with the release.
+`karthickdk02/elasticpro-core`, `-nginx` and `-redis`, tagged with the release
+(`-postgres` was published up to 0.3.76; the stack no longer has a database).
 
 ### Deprecated: desktop packages
 

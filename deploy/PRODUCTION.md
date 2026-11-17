@@ -60,7 +60,7 @@ deploy/deploy.sh --pull                      # git pull, build, switch, wait for
 deploy/deploy.sh --image <registry>/elasticpro-core:0.1.0   # or run an image built elsewhere
 ```
 
-`--upgrade` needs no build: it moves the core, nginx, PostgreSQL and Redis images to one
+`--upgrade` needs no build: it moves the core, nginx and Redis images to one
 published version through `.env`, pulls them all before changing anything, and on an unhealthy
 core puts the previous `.env` back. An older version needs `--force`.
 
@@ -78,8 +78,14 @@ starts the account with a password of your own instead — see `deploy/README.md
 sign-in". Redeploying an existing host changes nothing: its accounts are kept.
 
 **Rollback later:** `deploy/deploy.sh --rollback` — back to the images before the last deploy
-(`ELASTICPRO_IMAGE_PREVIOUS` in `.env`, and after an `--upgrade` the nginx, PostgreSQL and Redis
+(`ELASTICPRO_IMAGE_PREVIOUS` in `.env`, and after an `--upgrade` the nginx and Redis
 `*_PREVIOUS` too).
+
+**The PostgreSQL container goes:** the stack no longer has the unused `db` service. The first
+`--upgrade` past 0.3.76 replaces a compose file that still has it (as a release shipped it) and
+removes the container; the `db-data` volume is kept, and the upgrade prints how to delete it by
+hand. `--rollback` brings the db back. See `deploy/README.md`, "Upgrading from a release with the
+PostgreSQL container".
 
 A cluster behind a Windows jump host now appears in ElasticPro's Zabbix listing. ElasticPro
 reaches it through its own jump host with the same address and port (`jump_hosts` in the config);
