@@ -372,7 +372,9 @@ async function run(browserName, [vw, vh], framed = false) {
     return spot || farPoint;
   };
   {
-    // the bell, with a long history
+    // the bell, with a long history — on Clusters, the one page that draws it (2026-11-17)
+    await goPage('overview');
+    await toTop();
     await F.evaluate(async () => {
       const m = await import('/js/ui/menu.js');
       for (let i = 0; i < 45; i++) m.toast(`scroll-check notice ${i} — a line long enough to wrap onto a second row in the bell`, i % 5 ? 'ok' : 'err', 100);
@@ -419,6 +421,7 @@ async function run(browserName, [vw, vh], framed = false) {
       }
     }
     await p.keyboard.press('Escape');
+    await goPage('alerts');
     await toTop();
   }
   {

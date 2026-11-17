@@ -149,33 +149,74 @@ const tabOf = (id) => { const p = PAGES.find((x) => x.id === id); return p && p.
  * the account (core/prefs.js, docs/HANDBOOK.md "Your settings"): the account's choice, else
  * this browser's copy, else the shipped default. `source` says which, per setting.
  */
-let prefs = { menu: 'top', theme: 'system', opensOn: 'last', source: {}, supported: false };
-let menuPosition = 'top';
+let prefs = { menu: 'left', theme: 'system', opensOn: 'last', source: {}, supported: false };
+// The left menu unless someone chose the top one (the owner, 0.3.72); a choice is kept (prefs).
+let menuPosition = 'left';
+// Drawn on the left from the first paint; the saved choice (initTheme, loadPrefs) replaces it.
+document.documentElement.dataset.menu = menuPosition;
 function applyMenuPosition(v) {
   menuPosition = normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
 }
 /**
- * The left menu folded to an icon rail (the owner, 0.3.71): « at the foot of the menu, above the
- * account button, folds it to ~56 px of icons — each with its page name as tooltip and label, the
- * open-alert count a badge on Alerts — and » opens it again; the page takes the width it frees
- * (app.css html[data-rail="on"]). Kept per browser; the top menu has no rail.
+ * The left menu folded to an icon rail (the owner, 0.3.71/0.3.72): « at the top of the menu (beside
+ * the brand) and at its foot folds it to ~56 px of icons — each with its page name as tooltip and
+ * label, the open-alert count a badge on Alerts — and » opens it again; the page takes the width
+ * it frees (app.css html[data-rail="on"]). Two ways to be folded:
+ *  - by hand (« pressed): kept per browser, icons only, the menu never opens on hover;
+ *  - by itself after RAIL_IDLE_MS with no mouse, key, wheel or touch anywhere in the app: this visit
+ *    only, and the full menu shows over the page while the mouse is on it (html[data-peek]).
+ * » (or any rail button) opens it for good again. The top menu has no rail.
  */
 const RAIL_KEY = 'elasticpro.menu.rail';
+const RAIL_IDLE_MS = 3 * 60 * 1000;
 let menuRail = (() => { try { return localStorage.getItem(RAIL_KEY) === '1'; } catch (_) { return false; } })();
+let autoFold = false;
+let railIdleTimer = null;
+let railArmedAt = 0;
+const railOn = () => menuRail || autoFold;
 function applyRail() {
-  if (menuRail) document.documentElement.dataset.rail = 'on';
+  if (railOn()) document.documentElement.dataset.rail = 'on';
   else delete document.documentElement.dataset.rail;
+  if (!autoFold || menuRail) delete document.documentElement.dataset.peek;
 }
 applyRail();
+/** Starts (or restarts) the inactivity count while the full left menu is shown. The browser checks
+ *  can shorten it (`window.__EP_RAIL_IDLE_MS`): nobody waits three minutes in a test. */
+function armRailIdle() {
+  clearTimeout(railIdleTimer);
+  railIdleTimer = null;
+  if (menuPosition !== 'left' || railOn()) return;
+  railArmedAt = Date.now();
+  railIdleTimer = setTimeout(() => {
+    railIdleTimer = null;
+    if (menuPosition !== 'left' || railOn()) return;
+    autoFold = true;
+    applyRail();
+    navBuiltFor = '';
+    renderNav();
+  }, Number(window.__EP_RAIL_IDLE_MS) || RAIL_IDLE_MS);
+}
+for (const t of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  // Re-armed at most once a second: a moving mouse is one long activity, not a hundred.
+  document.addEventListener(t, () => { if (!railOn() && Date.now() - railArmedAt > 1000) armRailIdle(); }, { passive: true, capture: true });
+}
 function toggleRail() {
-  menuRail = !menuRail;
+  if (railOn()) { menuRail = false; autoFold = false; } else menuRail = true;
   try { localStorage.setItem(RAIL_KEY, menuRail ? '1' : '0'); } catch (_) { /* kept for this visit */ }
   applyRail();
   navBuiltFor = '';
   renderNav();
+  armRailIdle();
   const btn = $('#nav .nav-rail-btn');
   if (btn) btn.focus();
+}
+/** Folded by itself: the full menu shows over the page while the mouse is on it. Wired once. */
+function wireRailPeek(nav) {
+  if (!nav || nav.dataset.peekWired) return;
+  nav.dataset.peekWired = '1';
+  nav.addEventListener('mouseenter', () => { if (autoFold && !menuRail) document.documentElement.dataset.peek = 'on'; });
+  nav.addEventListener('mouseleave', () => { delete document.documentElement.dataset.peek; });
 }
 /**
  * The scope the app opens on: this person's own choice when they made one, else the config's
@@ -571,6 +612,28 @@ function runningDot(btn, title) {
   if (dot.title !== title) { dot.title = title; dot.setAttribute('aria-label', title); }
 }
 
+/**
+ * The top menu puts the cluster chooser first, right after the brand (the owner, 0.3.72); the left
+ * menu keeps it at the left of the content's first row. The top bar draws a new chooser on every
+ * redraw, so the one moved before is dropped. Called after both renderNav and renderTopbar.
+ */
+function placeChooser() {
+  const nav = $('#nav'), bar = $('#topbar');
+  if (!nav || !bar) return;
+  const fresh = bar.querySelector('.cluster-pick') || nav.querySelector('.cluster-pick');
+  for (const old of document.querySelectorAll('.cluster-pick')) if (old !== fresh) old.remove();
+  if (!fresh) return;
+  if (menuPosition === 'top') {
+    const brand = nav.querySelector('.nav-brand');
+    if (brand && brand.nextElementSibling !== fresh) brand.after(fresh);
+  } else if (fresh.parentNode !== bar) bar.insertBefore(fresh, bar.firstElementChild ? bar.firstElementChild.nextSibling : null);
+}
+/** « / », at the top of the left menu and at its foot (one definition for both). */
+function railButton(where) {
+  const label = menuRail ? 'Show the full menu' : autoFold ? 'Keep the menu open' : 'Fold the menu to icons';
+  return h(`button.nav-rail-btn.${where}`, { type: 'button', onclick: toggleRail, 'aria-expanded': String(!railOn()), title: label, 'aria-label': label },
+    railOn() ? '\u00bb' : '\u00ab');
+}
 function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
@@ -582,31 +645,32 @@ function renderNav() {
   // The tab's colour is the worst open level: red, orange for High, else yellow.
   const tone = crit ? 'red' : counts && counts.high ? 'high' : 'yellow';
   const shown = visiblePages().filter((p) => !p.noTab);
-  const key = [menuPosition, menuRail, me && me.name, ...shown.map((p) => p.id)].join(',');
+  const key = [menuPosition, menuRail, autoFold, me && me.name, ...shown.map((p) => p.id)].join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
     navBuiltFor = key;
     // One row of the pages of a shift, Config-Management last (the ☰ that held Automation,
     // Requests, Accounts and Config is gone: those live in Config-Management now). With the
     // menu on the left the brand heads it and the person's name sits at its foot.
-    nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
+    nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro'),
+      menuPosition === 'left' ? railButton('nav-rail-top') : null));
     shown.forEach((p) => {
       // The name is the tooltip and the label too: in the icon rail (toggleRail) it is all there is.
       nav.append(h('button', { dataset: { page: p.id }, title: p.label, 'aria-label': p.label, onclick: () => go(p.id) },
         h('span.ico', { 'aria-hidden': 'true' }, p.icon), h('span.nav-label', p.label)));
       // Clusters › Overview, the menu's one sub-item (the owner, 2026-11-14: "cluster └ overview"):
       // one cluster on one screen. The address names the section; go() draws it.
-      if (p.id === 'overview') {
+      // Only in the left menu (the owner, 0.3.72): across the top the Clusters page's own List ·
+      // Overview tabs are enough, and the row has no room for it.
+      if (p.id === 'overview' && menuPosition === 'left') {
         nav.append(h('button.nav-sub', { dataset: { page: p.id, section: OVERVIEW }, title: 'One cluster on one screen',
           onclick: () => { location.hash = overviewHash(); go(p.id); } },
         h('span.ico', '└'), h('span', 'Overview')));
       }
     });
-    if (menuPosition === 'left') {
-      nav.append(h('button.nav-rail-btn', { type: 'button', onclick: toggleRail, 'aria-expanded': String(!menuRail),
-        title: menuRail ? 'Show the full menu' : 'Fold the menu to icons', 'aria-label': menuRail ? 'Show the full menu' : 'Fold the menu to icons' },
-      menuRail ? '\u00bb' : '\u00ab'));
-    }
+    if (menuPosition === 'left') nav.append(railButton('nav-rail-foot'));
+    wireRailPeek(nav);
+    armRailIdle();
     if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
   // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md), on the tab of the
@@ -637,8 +701,11 @@ function renderNav() {
   const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
-    // A sub-item is current only when its section is the one on screen; its page's own button is current for both.
-    const cur = here === id && (!b.dataset.section || clustersSection(location.hash) === b.dataset.section);
+    // A sub-item is current when its section is the one on screen, and then it alone is marked: the
+    // page's own button steps back (the owner, 0.3.72). Folded to icons the sub-item is hidden, so
+    // the page's icon stays marked there.
+    const subOn = !railOn() && [...nav.querySelectorAll('button.nav-sub')].some((x) => x.dataset.page === id && clustersSection(location.hash) === x.dataset.section);
+    const cur = here === id && (b.dataset.section ? clustersSection(location.hash) === b.dataset.section : !subOn);
     if (cur) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
     else if (b.hasAttribute('aria-current')) b.removeAttribute('aria-current');
     // The alert count belongs on the tab: it is the reason to go there. Nothing else
@@ -660,6 +727,7 @@ function renderNav() {
       b.append(badge);
     }
   }
+  placeChooser();
 }
 // A report job starting or ending moves the dot on Reports without waiting for a refresh.
 onReports(() => renderNav());
@@ -697,25 +765,6 @@ function pickDot(list) {
   const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`).join(' \u00b7 ');
   return h(`i.pick-dot.${HEALTH_COLOUR[worst]}`, { role: 'img', 'aria-label': `Fleet health: ${parts}`, title: parts });
 }
-function healthPill(list) {
-  if (!list.length) return null;
-  const states = list.map((c) => healthState(state.data.get(c.id)));
-  if (list.length === 1) {
-    const st = states[0];
-    return h(`span.pill.${HEALTH_COLOUR[st]}`, { title: `Cluster health of ${list[0].name}` },
-      h('i.dot'), `${list[0].name} · ${st}`);
-  }
-  const order = ['red', 'unreachable', 'yellow', 'loading', 'green'];
-  const n = Object.fromEntries(order.map((k) => [k, states.filter((s) => s === k).length]));
-  const worst = order.find((k) => n[k]) || 'loading';
-  const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`);
-  return h(`button.pill.${HEALTH_COLOUR[worst]}`, {
-    // the edge every toned pill has (app.css), drawn as an inset ring: the button has no border to give it
-    type: 'button', style: { cursor: 'pointer', border: 0, boxShadow: 'inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent)' }, onclick: () => go('overview'),
-    title: 'Health of every cluster in the picker — open Clusters for the list',
-  }, h('i.dot'), parts.join(' · '));
-}
-
 /** Above this many clusters the top bar adds a find-as-you-type box beside the picker. */
 const FINDER_ABOVE = 30;
 
@@ -834,7 +883,7 @@ function renderTopbar() {
     // Evidence: the same chooser, one cluster at a time — no "All clusters", no finder (its
     // placeholder counts the fleet) and the dot is that cluster's, not the fleet's.
     ev && !evCluster ? null
-      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(ev ? [evCluster] : activeClusters()), sel, finder),
+      : h('label.field.cluster-pick', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(ev ? [evCluster] : activeClusters()), sel, finder),
     h('div.spacer'),
     (() => {
       const need = needCreds.length;
@@ -860,8 +909,9 @@ function renderTopbar() {
     // progress never rebuilds the bar. Absent while reports run or sit idle — the owner
     // (2026-11-14): the bar shows nothing in a normal state.
     reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest'), evidence: ev }),
-    // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
-    ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
+    // Health is the dot on the picker (the fleet's worst when several are chosen). The "1 green ·
+    // 1 yellow" pill that repeated it here is gone from every page (the owner, 2026-11-17): the
+    // Clusters page lists each cluster's health.
     // The alert count is on the Alerts tab, where going there is one click anyway; the
     // button that repeated it here is gone (Clusters board, 2026-10-25).
     // The read-only / writes-enabled pill used to sit here. Every page that can write
@@ -887,13 +937,16 @@ function renderTopbar() {
       : null,
     // Inside Zabbix the theme follows the Zabbix user's; a second switch here would be one
     // that the next page load undoes.
-    // The bell lists every cluster's notices; it stays off an evidence page and comes back
-    // with everything in it when the person leaves.
-    ev ? null : notificationBell(),
+    // The bell lists every cluster's notices. It is drawn on Clusters and Clusters › Overview only
+    // (the owner, 2026-11-17) — never on an evidence page. Elsewhere notices still go into it
+    // (ui/menu.js keeps the history whether or not the bell is on screen) and it shows them all
+    // the next time it is drawn.
+    ev || page.id !== 'overview' ? null : notificationBell(),
     // Your settings (page menu, theme, opens on, sign out), from the person's name. With the
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
     // where accounts exist: the name is not part of a client's screenshot.
     (me && ev) || menuPosition === 'left' ? null : meButton());
+  placeChooser();
 }
 
 /* ------------------------------ evidence layout ------------------------------ */

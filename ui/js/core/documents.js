@@ -5,8 +5,8 @@
  * them). Everything here is pure: which indices a Documents request names and whether that
  * path is too long for one request, the `_search` body for a page of hits and for a field's
  * top values, the field list read out of `_mapping`, the time field, the "x–y of total" label
- * (10,000+ when Elasticsearch stops counting — never a guessed number), the page-size clamp,
- * and the line diff the Review and save dialog shows. tools/unit/documents.test.mjs holds it.
+ * (10,000+ when Elasticsearch stops counting — never a guessed number) and the page-size clamp.
+ * tools/unit/documents.test.mjs holds it.
  */
 
 /** Rows per page on the Indices table: 10 by default, up to 100 (the owner, 2026-11-16). */
@@ -112,8 +112,7 @@ function filterClauses({ query = '', timeField = null, window = null } = {}) {
  * The body for one page of hits: newest first by the time field when there is one, else by
  * `_doc`; the total counted up to MAX_RESULT_WINDOW only (past it nothing can be paged, and
  * counting every match of a large log pattern is work the cluster need not do — the label
- * says "10,000+"), and each hit's `_seq_no` / `_primary_term` so an edit or a delete can name
- * the version it read.
+ * says "10,000+").
  */
 export function searchBody({ query = '', timeField = null, window = null, from = 0, size = 5 } = {}) {
   return {
@@ -122,7 +121,6 @@ export function searchBody({ query = '', timeField = null, window = null, from =
     from: Math.max(0, Math.floor(from) || 0),
     size: Math.max(1, Math.floor(size) || 1),
     track_total_hits: MAX_RESULT_WINDOW,
-    seq_no_primary_term: true,
   };
 }
 
@@ -240,66 +238,8 @@ export function addTerm(query, field, value) {
   return `${q} AND ${term}`;
 }
 
-/**
- * The path of one document for an edit or a delete: the version read (`if_seq_no`,
- * `if_primary_term`) so a document changed since is refused (409) rather than overwritten,
- * and the routing when the hit carried one.
- */
-export function docPath(hit) {
-  const qs = [`if_seq_no=${encodeURIComponent(hit._seq_no)}`, `if_primary_term=${encodeURIComponent(hit._primary_term)}`];
-  if (hit._routing) qs.push(`routing=${encodeURIComponent(hit._routing)}`);
-  return `/${encodeURIComponent(hit._index)}/_doc/${encodeURIComponent(hit._id)}?${qs.join('&')}`;
-}
-
 /** The GET the REST console opens for a hit. */
 export const docGetPath = (hit) => `/${encodeURIComponent(hit._index)}/_doc/${encodeURIComponent(hit._id)}`;
 
 /** Pretty JSON, two spaces, the key order as given. */
 export const pretty = (v) => JSON.stringify(v, null, 2);
-
-/**
- * The editor's status for its text: `{ ok, error, value, changes }` — parsed, the parse
- * error's message, and how many lines differ from the original (lineDiff).
- */
-export function editStatus(text, original) {
-  try {
-    const value = JSON.parse(text);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'A document is a JSON object', value: null, changes: 0 };
-    const changes = lineDiff(pretty(original), pretty(value)).filter((l) => l.kind !== 'same').length;
-    return { ok: true, error: '', value, changes };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || 'Not valid JSON', value: null, changes: 0 };
-  }
-}
-
-/**
- * A line diff of two texts: `[{ kind: 'same' | 'del' | 'add', text }]`, in order. The
- * longest common subsequence over lines; small inputs (a document), so the quadratic table
- * is fine.
- */
-export function lineDiff(a, b) {
-  const A = String(a ?? '').split('\n'), B = String(b ?? '').split('\n');
-  const n = A.length, m = B.length;
-  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-  }
-  const out = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (A[i] === B[j]) { out.push({ kind: 'same', text: A[i] }); i++; j++; }
-    else if (L[i + 1][j] >= L[i][j + 1]) { out.push({ kind: 'del', text: A[i] }); i++; }
-    else { out.push({ kind: 'add', text: B[j] }); j++; }
-  }
-  while (i < n) out.push({ kind: 'del', text: A[i++] });
-  while (j < m) out.push({ kind: 'add', text: B[j++] });
-  return out;
-}
-
-/** What a write answered, read the same way for an edit and a delete. */
-export function writeOutcome(err) {
-  const res = err && err.res;
-  const status = res && Number(res.status);
-  if (status === 409) return { conflict: true, message: 'Someone changed this document since you opened it — nothing was overwritten. Reload it.' };
-  return { conflict: false, message: (err && err.message) || 'The cluster refused the request' };
-}

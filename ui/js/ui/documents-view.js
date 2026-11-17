@@ -4,11 +4,10 @@
  * Drawn by the Indices page in place of its list when the address is `#/indices/docs/<target>`:
  * a query-string box, the time range (when the indices have a date field), a fields panel
  * read from `_mapping` whose aggregatable fields show their top values, a page of hits with
- * server paging, and the document picked on the right. Edit and Delete are an admin's, from
- * the row's ⋯ menu, through the same write gate every page uses (core/writes.js): a write
- * names the version it read (`if_seq_no` / `if_primary_term`), so a document changed since is
- * refused by the cluster and said so, never overwritten. The arithmetic and the request shapes
- * are core/documents.js; nothing here computes a second copy.
+ * server paging, and the document picked on the right. Read-only: the view never changes a
+ * document (Edit and Delete were removed in 0.3.72 at the owner's request); the row's ⋯ menu
+ * copies the JSON or opens it in REST. The arithmetic and the request shapes are
+ * core/documents.js; nothing here computes a second copy.
  */
 
 import { h, mount } from '../lib/dom.js';
@@ -18,9 +17,7 @@ import { hideAddress } from '../core/evidence.js';
 import { jsonView } from '../lib/jsonview.js';
 import { empty } from '../pages/common.js';
 import { rowMenu, ICON, toast } from './menu.js';
-import { modal } from './modal.js';
 import { navigateTo } from '../core/intent.js';
-import { roleMayWrite, ensureWrites } from '../core/writes.js';
 import { pagerBar } from '../lib/pager.js';
 import * as D from '../core/documents.js';
 
@@ -59,7 +56,6 @@ export function documentsView(cluster, target, { onBack } = {}) {
     hits: [], hitsFrom: 0, total: null, loading: false, error: null, searched: false,   // hitsFrom: the `from` the hits on screen were read at
     selected: null,                     // the hit on the right
     values: null,                       // { field, list, other, loading, error } under the clicked field
-    edit: null,                         // { hit, text } while an admin edits the selected document
     gen: 0,                             // the search in flight; an older answer is dropped
   };
   const cl = () => client(cluster.id);
@@ -93,8 +89,8 @@ export function documentsView(cluster, target, { onBack } = {}) {
     st.loading = true; st.error = null; drawTop(); drawMain();
     const from = st.page * st.perPage;
     try {
-      // A person's search, often right after their own write: asked of the cluster, never served
-      // from the core's short read cache (maxAgeMs 0, as a Refresh reads).
+      // A person's search: asked of the cluster, never served from the core's short read cache
+      // (maxAgeMs 0, as a Refresh reads).
       const r = await cl().json('POST', D.documentsPath(target),
         D.searchBody({ query: st.query, timeField: st.timeField, window: windowNow(), from, size: st.perPage }), { timeoutMs: 60000, maxAgeMs: 0 });
       if (gen !== st.gen) return;
@@ -105,7 +101,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
       // The selected document, re-read: the same _index/_id on this page is the newer copy.
       if (st.selected) {
         const again = st.hits.find((x) => x._index === st.selected._index && x._id === st.selected._id);
-        if (again && !st.edit) st.selected = again;
+        if (again) st.selected = again;
       }
     } catch (e) {
       if (gen !== st.gen) return;
@@ -217,17 +213,10 @@ export function documentsView(cluster, target, { onBack } = {}) {
   }
 
   function menuFor(hit) {
-    const items = [
+    return [
       { label: 'Copy JSON', icon: '⧉', onClick: () => copyText(D.pretty(hit._source)) },
       { label: 'Open in REST', icon: ICON.console, onClick: () => navigateTo('console', { method: 'GET', path: D.docGetPath(hit), body: '' }) },
     ];
-    // Edit and Delete are an admin's: anyone else never sees them (the core refuses regardless).
-    if (roleMayWrite()) {
-      items.push({ sep: true },
-        { label: 'Edit…', icon: ICON.edit, onClick: () => startEdit(hit) },
-        { label: 'Delete…', icon: ICON.delete, danger: true, onClick: () => deleteDoc(hit) });
-    }
-    return items;
   }
 
   function drawMain() {
@@ -243,7 +232,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
     const rows = st.hits.map((hit) => {
       const sel = st.selected && st.selected._index === hit._index && st.selected._id === hit._id;
       return h('tr', { 'aria-selected': sel ? 'true' : 'false', dataset: { id: hit._id, index: hit._index },
-        onclick: () => { if (st.edit && st.edit.hit !== hit && !leaveEdit()) return; st.selected = hit; drawMain(); drawDetail(); } },
+        onclick: () => { st.selected = hit; drawMain(); drawDetail(); } },
         tf ? h('td.mono', { style: { fontSize: '11.5px' } }, timeCell(hit._source ? hit._source[tf] : null)) : null,
         h('td.mono', { title: hit._index }, hit._index),
         h('td.mono', { title: hit._id }, hit._id),
@@ -267,7 +256,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
       }) : null);
   }
 
-  /* ------------------------------------ detail / edit ------------------------------------ */
+  /* ------------------------------------ detail ------------------------------------ */
 
   function drawDetail() {
     const hit = st.selected;
@@ -279,102 +268,8 @@ export function documentsView(cluster, target, { onBack } = {}) {
       h('button.btn.sm', { type: 'button', title: 'Copy the document as JSON', onclick: () => copyText(D.pretty(hit._source)) }, 'Copy'),
       h('button.btn.sm', { type: 'button', title: `Open GET ${D.docGetPath(hit)} in the REST console`,
         onclick: () => navigateTo('console', { method: 'GET', path: D.docGetPath(hit), body: '' }) }, 'REST'),
-      h('button.btn.sm.ghost', { type: 'button', title: 'Close', 'aria-label': 'Close the document', onclick: () => { if (st.edit && !leaveEdit()) return; st.selected = null; drawMain(); drawDetail(); } }, '×'));
-    if (st.edit && st.edit.hit === hit) { mount(detail, head, editor(hit)); return; }
+      h('button.btn.sm.ghost', { type: 'button', title: 'Close', 'aria-label': 'Close the document', onclick: () => { st.selected = null; drawMain(); drawDetail(); } }, '×'));
     mount(detail, head, jsonView(hit._source || {}));
-  }
-
-  /** Leaving an edit with changes asks nothing and keeps nothing: the text is the dialog's job. */
-  function leaveEdit() { st.edit = null; return true; }
-
-  async function startEdit(hit) {
-    if (!(await ensureWrites())) return;
-    st.selected = hit;
-    st.edit = { hit, text: D.pretty(hit._source || {}) };
-    drawMain(); drawDetail();
-  }
-
-  function editor(hit) {
-    const status = h('div#docs-edit-status.docs-edit-status', { role: 'status' });
-    const review = h('button#docs-review.btn.sm.primary', { type: 'button' }, 'Review and save…');
-    const paint = () => {
-      const s = D.editStatus(st.edit.text, hit._source || {});
-      status.className = `docs-edit-status ${s.ok ? 'good' : 'bad'}`;
-      status.textContent = s.ok ? `✓ Valid JSON · ${s.changes === 1 ? '1 change' : `${num(s.changes)} changes`}` : `✕ ${s.error}`;
-      review.disabled = !s.ok || s.changes === 0;
-      review.title = !s.ok ? 'Fix the JSON first' : s.changes === 0 ? 'Nothing changed yet' : 'See the difference, then save';
-      return s;
-    };
-    const ta = h('textarea#docs-editor.docs-editor', { spellcheck: false, 'aria-label': 'Document JSON',
-      oninput: (e) => { st.edit.text = e.target.value; paint(); } });
-    ta.value = st.edit.text;
-    review.addEventListener('click', () => { const s = paint(); if (s.ok && s.changes) reviewAndSave(hit, s.value); });
-    paint();
-    return h('div.docs-edit',
-      ta, status,
-      h('div.docs-edit-acts',
-        h('button.btn.sm', { type: 'button', onclick: () => { st.edit = null; drawDetail(); } }, 'Cancel'),
-        review));
-  }
-
-  async function reviewAndSave(hit, value) {
-    const diff = D.lineDiff(D.pretty(hit._source || {}), D.pretty(value));
-    const path = D.docPath(hit);
-    const saved = await modal('Review and save', `${hit._index} / ${hit._id} on ${cluster.name}`, [
-      h('pre#docs-diff.docs-diff', ...diff.map((l) => h(`span.diff-${l.kind}`, l.text))),
-      h('div', h('div.muted', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.05em' } }, 'Request'),
-        h('div#docs-req.docs-req', `PUT ${path}`),
-        h('div.muted', { style: { fontSize: '11.5px', marginTop: '2px' } }, 'The version you read is named in the request: a document changed since is refused, not overwritten.')),
-    ], (ctx) => [
-      h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
-        h('button.btn', { type: 'button', onclick: () => ctx.done(false) }, 'Cancel'),
-        h('button#docs-save.btn.primary', { type: 'button', onclick: async (e) => {
-          const btn = e.currentTarget; const label = btn.textContent;
-          btn.disabled = true; btn.textContent = 'Saving…'; ctx.msg(null);
-          try {
-            await cl().json('PUT', path, value, { allowWrites: true, timeoutMs: 30000 });
-            ctx.done(true);
-          } catch (err) {
-            // A 409 is the point of if_seq_no: say it, keep the text, let them reload and look.
-            ctx.msg(D.writeOutcome(err).message);
-            btn.disabled = false; btn.textContent = label;
-          }
-        } }, 'Save')),
-    ], { width: '760px' });
-    if (saved !== true) return;
-    toast(`Saved ${hit._id}`, 'ok');
-    st.edit = null;
-    await search();
-  }
-
-  async function deleteDoc(hit) {
-    if (!(await ensureWrites())) return;
-    const path = D.docPath(hit);
-    const input = h('input#docs-del-echo', { type: 'text', spellcheck: false, autocomplete: 'off', placeholder: hit._id, style: { fontFamily: 'var(--mono)' } });
-    const done = await modal(`Delete ${hit._id}?`, `${hit._index} on ${cluster.name}`, [
-      h('div.banner.err', { style: { margin: 0 } }, h('div', h('div.ttl', 'This cannot be undone'), h('div', 'The document is removed from the index. A snapshot taken before now still holds it.'))),
-      h('label.field', 'Type the whole document id to confirm', input),
-      h('div.docs-req.muted', `DELETE ${path}`),
-    ], (ctx) => {
-      const del = h('button#docs-delete.btn.danger', { type: 'button', disabled: true, title: 'Type the whole id first', onclick: async (e) => {
-        const btn = e.currentTarget; const label = btn.textContent;
-        btn.disabled = true; btn.textContent = 'Deleting…'; ctx.msg(null);
-        try {
-          await cl().json('DELETE', path, null, { allowWrites: true, timeoutMs: 30000 });
-          ctx.done(true);
-        } catch (err) {
-          ctx.msg(D.writeOutcome(err).message);
-          btn.disabled = input.value.trim() !== hit._id; btn.textContent = label;
-        }
-      } }, 'Delete');
-      input.addEventListener('input', () => { del.disabled = input.value.trim() !== hit._id; del.title = del.disabled ? 'Type the whole id first' : `Delete ${hit._id}`; });
-      return [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
-        h('button.btn', { type: 'button', onclick: () => ctx.done(false) }, 'Cancel'), del)];
-    }, { width: '560px' });
-    if (done !== true) return;
-    toast(`Deleted ${hit._id}`, 'ok');
-    if (st.selected && st.selected._id === hit._id && st.selected._index === hit._index) { st.selected = null; st.edit = null; drawDetail(); }
-    await search();
   }
 
   async function copyText(text) {

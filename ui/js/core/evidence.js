@@ -98,7 +98,7 @@ export function createHeldNotices({ max = 500 } = {}) {
       const worst = items.some((x) => x.kind === 'err') ? 'err' : 'warn';
       const n = items.length;
       notify(`Held ${n} notice${n === 1 ? '' : 's'} while on an evidence page`, worst, 8000,
-        { key: 'evidence-held', detail: ['Each one is in the bell.'] });
+        { key: 'evidence-held', detail: ['Each one is in the bell, on the Clusters page.'] });
       return n;
     },
   };

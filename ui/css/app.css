@@ -233,6 +233,12 @@
 }
 .split-handle:hover, .split-handle:active { background: var(--accent-soft); border-left-color: var(--accent); }
 @media (max-width: 900px) { .split-handle { display: none; } }
+/* The Results box reaches the footer (console.js fitColumns) and the answer fills it, scrolling
+   inside itself both ways (its scrollbars stay in view), rather than stopping at the 62vh every
+   other pre.json is capped at. */
+#c-columns { height: calc(100vh - var(--c-fit, 0px)); height: calc(100dvh - var(--c-fit, 0px)); }
+#c-response > .card > .body { display: flex; flex-direction: column; }
+#c-response > .card > .body > pre.json { flex: 1 1 auto; min-height: 0; max-height: none; }
 
 /* Search matches in the REST console. Every hit is marked; the one you are on is marked
    differently, because "which of these am I on" must be answerable without scrolling. */
@@ -2521,6 +2527,8 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
   font-size: 12.5px; cursor: pointer; }
 .ys-seg button:last-child { border-right: 0; }
 .ys-seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.ys-line { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px; }
+.ys-seg button { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; padding: 0 8px; font-size: 15px; }
 .ys-foot { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-top: 1px solid var(--grid); background: var(--surface-0);
   font-size: 11.5px; color: var(--text-secondary); }
 .ys-foot .btn { margin-left: auto; }
@@ -2568,8 +2576,32 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
   html[data-menu="left"][data-rail="on"] #nav.nav .nav-rail-btn { align-self: center; }
   html[data-menu="left"][data-rail="on"] .nav-me .me-btn { justify-content: center; padding: 0; }
   html[data-menu="left"][data-rail="on"] .nav-me .me-name { display: none; }
+  /* The second « beside the brand (0.3.72): at the top of the menu, not pushed to its foot. */
+  html[data-menu="left"] #nav.nav .nav-brand .nav-rail-top { margin: 0 0 0 auto; align-self: center; }
+  html[data-menu="left"][data-rail="on"] .nav-brand { flex-direction: column; gap: 8px; }
+  html[data-menu="left"][data-rail="on"] #nav.nav .nav-brand .nav-rail-top { margin: 0; }
+  /* Folded by itself after three idle minutes: the full menu shows OVER the page while the mouse is
+     on it (app.js wireRailPeek); the page keeps its width. Folded by hand never peeks. */
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav { width: 200px; padding: 14px 10px 44px; box-shadow: 6px 0 22px rgba(0, 0, 0, .35); }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav button[data-page] { justify-content: flex-start; padding: 0 10px; gap: 7px; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav button[data-page] .ico { font-size: inherit; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav .nav-label { position: static; width: auto; height: auto; overflow: visible; clip: auto; clip-path: none; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav button.nav-sub { display: inline-flex; padding-left: 22px; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav button[data-page] > .pill { position: static; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] .nav-brand { flex-direction: row; justify-content: flex-start; padding: 0 8px 12px; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] .nav-brand b { display: inline; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] #nav.nav .nav-brand .nav-rail-top { margin: 0 0 0 auto; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] .nav-me .me-btn { justify-content: flex-start; padding: 0 10px; }
+  html[data-menu="left"][data-rail="on"][data-peek="on"] .nav-me .me-name { display: inline; }
 }
 .nav-rail-btn { display: none; }
+/* The top menu (0.3.72, the owner): the cluster chooser first, right after the brand (app.js
+   placeChooser); Jobs and Config-Management as icons with their names in the tooltip, and the
+   account as its initials — so the row fits without scrolling. */
+html[data-menu="top"] #nav .cluster-pick { align-self: center; margin: 0 10px 0 2px; flex: none; }
+html[data-menu="top"] #nav button[data-page="jobs"] .nav-label,
+html[data-menu="top"] #nav button[data-page="settings"] .nav-label { display: none; }
+html[data-menu="top"] .topbar .me-btn .me-name { display: none; }
 
 /* Zabbix › roles from user groups, and Zabbix users (ui/zabbix-roles.js) */
 .zr-card .tbl-wrap { border: 0; border-radius: 0; }
@@ -3193,18 +3225,6 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
 .docs-detail-h { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 12px; min-height: 32px; }
 .docs-detail-h .docs-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
 .docs-detail pre.json { margin: 0; padding: 10px; max-height: 62vh; overflow: auto; font-size: 11.5px; }
-.docs-edit { padding: 10px; display: grid; gap: 8px; }
-.docs-editor { width: 100%; min-height: 320px; font-family: var(--mono); font-size: 11.5px; resize: vertical; box-sizing: border-box; }
-.docs-edit-status { font-size: 12px; }
-.docs-edit-status.bad { color: var(--critical-ink); }
-.docs-edit-status.good { color: var(--good-ink); }
-.docs-edit-acts { display: flex; gap: 6px; justify-content: flex-end; }
-pre.docs-diff { margin: 0 0 10px; max-height: 50vh; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.45;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; }
-pre.docs-diff span { display: block; white-space: pre; min-height: 1.45em; }
-pre.docs-diff .diff-del { background: var(--critical-bg); color: var(--critical-ink); }
-pre.docs-diff .diff-add { background: var(--good-bg); color: var(--good-ink); }
-.docs-req { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
 @media (max-width: 1100px) {
   .docs-body, .docs-body.with-detail { grid-template-columns: 1fr; }
   .docs-fields { max-height: 32vh; }

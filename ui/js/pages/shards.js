@@ -28,6 +28,7 @@ import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortN
          unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
+import { withFreshReads } from '../core/es.js';
 
 let host = null;
 /**
@@ -227,7 +228,9 @@ async function loadAllocation(c, force = false) {
   if (!cl || (e && (e.inflight || (!force && Date.now() - e.at < ALLOC_MAX_AGE_MS)))) return;
   alloc.set(c.id, { setting: e ? e.setting : null, at: e ? e.at : 0, inflight: true, error: e ? e.error : null });
   let setting = null, error = null;
-  try { setting = allocationSetting(await cl.allocationEnable()); if (!setting) error = 'the answer carries no cluster.routing.allocation.enable'; }
+  // A forced read (after the switch was pressed) asks the cluster itself: the core's short read
+  // cache could still hold the value from before the write, and the switch would seem not to move.
+  try { setting = allocationSetting(await (force ? withFreshReads(() => cl.allocationEnable()) : cl.allocationEnable())); if (!setting) error = 'the answer carries no cluster.routing.allocation.enable'; }
   catch (err) { error = err.message || String(err); }
   alloc.set(c.id, { setting, at: Date.now(), inflight: false, error });
   draw();
