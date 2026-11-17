@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.74
+
+- **Inside Zabbix the menu stays across the top.** 0.3.72 made the left menu the default, which inside Zabbix's frame drew a second sidebar beside Zabbix's own menu. With `?embed=1` the menu is always across the top (as before 0.3.72) and Your settings offers no menu position there. Found while checking the Zabbix modules against 0.3.68–0.3.73: every page the modules open still lands (`#/volume` → Reports, `#/logs` → Log Delay › Live logs); no module or template change is needed, and the core is unchanged since 0.3.67.
+- **The left menu really is the default for a new person.** The shell defaulted to left, but the settings rules (`core/prefs-rules.js` DEFAULTS, the one definition) still said top and won, so only someone who had chosen left saw it. The default is now left in that one place.
+
 ## 0.3.73
 
 - **Indices › Summary: a range with no recorded day says so.** When none of the days shown (15d by default) is in the daily record, the chart drew an empty axis whose labels read "3 undefined" (the scale stepped in fractions of a byte, which have no name). It now says "No day in the last 15 days is recorded" and names the newest recorded day, so a longer range can be chosen; the scale never steps below one byte.

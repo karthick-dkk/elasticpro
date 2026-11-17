@@ -58,4 +58,9 @@ test('the panel saves what was picked, icons only, and says where it is kept', (
   assert.match(older.title, /Kept in this browser/);
   assert.equal(older.querySelector('#ys-theme'), null, 'a theme is offered where Zabbix owns it');
   Y.closeYourSettings();
+  // Inside Zabbix the menu is always across the top: no position is offered (0.3.74).
+  const framed = Y.openYourSettings(anchor, { prefs: { menu: 'top', theme: 'system', opensOn: '' }, supported: true, themes: null, menus: false, who: null, onChange: () => {}, onSignOut: null });
+  assert.equal(framed.querySelector('button[data-menu]'), null, 'a menu position is offered inside Zabbix');
+  assert.ok(framed.querySelector('#ys-open'), 'Opens on is missing inside Zabbix');
+  Y.closeYourSettings();
 });

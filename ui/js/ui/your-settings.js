@@ -40,11 +40,12 @@ export function closeYourSettings() {
  *   prefs     {menu, theme, opensOn}   opensOn '' = not chosen
  *   supported whether the core keeps them with the account (else this browser only)
  *   themes    [{id, label}] (app.js THEMES); null hides the theme (inside Zabbix it is Zabbix's)
+ *   menus     false hides the menu position (inside Zabbix the menu is always across the top)
  *   who       {name, role} or null (no accounts)
  *   onChange  (key, value) => void — applied at once by the shell
  *   onSignOut () => void, or null where signing out is not this app's (inside Zabbix, no accounts)
  */
-export function openYourSettings(anchor, { prefs, supported = false, themes, who, onChange, onSignOut }) {
+export function openYourSettings(anchor, { prefs, supported = false, themes, menus = true, who, onChange, onSignOut }) {
   if (open) { const same = open.anchor === anchor; closeYourSettings(); if (same) return; }
   // Icons only (the owner, 0.3.72): every choice is a picture with its name in title and aria-label.
   const pick = (group, key, value) => (e) => {
@@ -71,7 +72,7 @@ export function openYourSettings(anchor, { prefs, supported = false, themes, who
   const el = h('section.ys-pop', { role: 'dialog', 'aria-labelledby': 'ys-h', title: supported ? 'Kept with your account' : 'Kept in this browser' },
     h('div.ys-head', h('h2#ys-h', 'Your settings'), h('span.muted', who ? `${who.name} · ${who.role}` : '')),
     h('div.ys-body',
-      h('div.ys-row.ys-line', seg, theme),
+      menus || theme ? h('div.ys-row.ys-line', menus ? seg : null, theme) : null,
       h('label.ys-row', opensOn)),
     onSignOut ? h('div.ys-foot', h('button.btn.sm', { type: 'button', title: 'Sign out', onclick: () => { closeYourSettings(); onSignOut(); } }, '⏻ Sign out')) : null);
   document.body.append(el);

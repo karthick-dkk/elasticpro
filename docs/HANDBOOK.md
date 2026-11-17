@@ -650,6 +650,10 @@ the message, so nobody reads or sets anyone else's. A display link can send neit
 `PLAY_READS`). These are not writes to a cluster: no `WRITE_UNLOCK`, no read-only guard.
 Without a session on an edition with accounts they answer `unauthenticated`.
 
+The shipped default is the **left** menu (since 0.3.72; `ui/js/core/prefs-rules.js` DEFAULTS, the
+one definition). Inside Zabbix (`?embed=1`) the menu is always across the top — Zabbix has its own
+menu down the left — and Your settings offers no menu position there (0.3.74).
+
 | Message | Role | Answer |
 |---|---|---|
 | `PREFS_GET` | guest | `{ok, user, prefs: {menu, theme, opensOn}, updatedAt, choices}`. Each value is a string from `choices`, or `null` when this person never set it — the UI then keeps what the browser had, then the shipped default; a store that was never asked does not answer "system". `choices` = `{menu: ["top","left"], theme: ["system","light","dark","dark-blue","warm"], opensOn: ["last","all"]}`; `updatedAt` ms, 0 = never. |

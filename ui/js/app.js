@@ -155,7 +155,9 @@ let menuPosition = 'left';
 // Drawn on the left from the first paint; the saved choice (initTheme, loadPrefs) replaces it.
 document.documentElement.dataset.menu = menuPosition;
 function applyMenuPosition(v) {
-  menuPosition = normaliseMenuPosition(v);
+  // Inside Zabbix the menu stays across the top: Zabbix has its own menu down the left, and a
+  // second one beside it would take the width twice (the default became left in 0.3.72).
+  menuPosition = embedded ? 'top' : normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
 }
 /**
@@ -335,6 +337,8 @@ function yourSettings(anchor) {
     // Inside Zabbix the theme follows the Zabbix user's; a choice here would be one that the
     // next page load undoes.
     themes: embedded ? null : THEMES,
+    // Inside Zabbix the menu is always across the top, so there is no position to choose.
+    menus: !embedded,
     who: me ? { name: me.name, role: me.role } : null,
     onChange: (key, value) => {
       if (key === 'theme') { setTheme(value); return; }
@@ -1320,6 +1324,7 @@ function takeFrameShape() {
   embedded = launch.embed;
   if (!embedded) return false;
   document.documentElement.classList.add('embedded');
+  applyMenuPosition('top');
   const t = themeFor(launch.zabbixTheme);
   rememberEmbedTheme(t);
   if (t) applyTheme(t);
