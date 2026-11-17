@@ -842,7 +842,6 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 
 | File | Holds | Owner / mode | Made by |
 |---|---|---|---|
-| `deploy/secrets/db_password` | ElasticPro's Postgres password | container-readable | `deploy/README.md` step 4 |
 | `deploy/secrets/redis/redis_password` | optional Redis cache auth | container-readable | README.md, "Scaling to a large fleet" |
 | `deploy/secrets/zabbix_sso_secret` | HMAC key, Zabbix module ↔ core | 0640 | step 8, by hand |
 | `deploy/secrets/zabbix_api_token` | ElasticPro's read-only Zabbix API token | 0640 | `zbx_api_user.py` (step 5) |

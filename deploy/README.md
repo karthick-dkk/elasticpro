@@ -202,7 +202,17 @@ deploy/deploy.sh --upgrade=0.3.54
 
 Releases up to 0.3.76 ran a PostgreSQL container, `db`, that nothing in ElasticPro ever
 connected to; the stack no longer has it and `elasticpro-postgres` is no longer published.
-On an install whose `docker-compose.yml` still has the `db` service, `--upgrade`:
+**Fetch the 0.3.77 `deploy.sh` first.** `--upgrade` runs the installed release's script, and
+one from 0.3.76 or older still pulls `elasticpro-postgres:<version>`: it stops with "… is not
+published — nothing changed" (nothing is changed, but the reason is this, not a missing release):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/v0.3.77/deploy/deploy.sh -o deploy/deploy.sh
+chmod +x deploy/deploy.sh
+deploy/deploy.sh --upgrade=0.3.77
+```
+
+On an install whose `docker-compose.yml` still has the `db` service, the new `--upgrade`:
 
 - brings in the release's compose file by the same rule as above — only a file exactly as a
   release shipped it, or any file with `--replace-compose`; the old one is kept as

@@ -59,8 +59,9 @@ export function createGraph() {
     for (let i = 0; i < RUN_PAGES; i++) {
       const res = await jobsList({ limit: 200, ...(before ? { before } : {}) });
       if (!res || !res.ok) { st.runsErr = J.refusalText(res) || 'the core did not answer'; return; }
-      out.push(...(res.runs || []));
-      const last = (res.runs || [])[res.runs.length - 1];
+      const runs = res.runs || [];
+      out.push(...runs);
+      const last = runs[runs.length - 1];
       if (!res.next || !last || (last.createdAt || 0) < from) break;
       before = res.next;
       if (i === RUN_PAGES - 1) cut = true;
@@ -79,7 +80,8 @@ export function createGraph() {
         const res = await healthHistory(range);
         if (res && res.ok) { st.hist = res; st.histRange = range; st.histErr = null; }
         else if (res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) { st.hist = null; st.histRange = range; st.histErr = 'this server keeps no health history yet (HEALTH_HISTORY needs a newer ElasticPro)'; }
-        else { st.histRange = range; st.histErr = J.refusalText(res) || 'the core did not answer'; }
+        // No points for this range: the last range's would be drawn on the wrong span.
+        else { st.hist = null; st.histRange = range; st.histErr = J.refusalText(res) || 'the core did not answer'; }
       });
     }
     if (admin && now - st.sysAt > SYSTEM_EVERY_MS) {

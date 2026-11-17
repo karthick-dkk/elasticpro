@@ -105,8 +105,11 @@ impl Core {
         self.health.set_level(health::overall(&checks));
         self.health.held.write().checks = checks;
         // The Jobs page's health lines (docs/HEALTH.md "History"): this minute's point, kept 7 days.
-        let refused = (minute.overloaded + minute.queue_timeout) as f64;
-        self.health_history_push(n, now, &worker, &poller, own_p95, refused);
+        // Each line sits beside its check's tile, so it stores the tile's own figure — the 5-minute
+        // refused count and the 5-minute message p95 — not the day ring's per-minute ones.
+        let w5 = self.health.times.lock().window(5, now).own.p95_ms;
+        let r5 = self.gate.window(crate::gate::STATS_WINDOW_MS);
+        self.health_history_push(n, now, &worker, &poller, w5, (r5.overloaded + r5.queue_timeout) as f64);
     }
 
     /// One point of the 7-day history: the figures the Jobs page's Health and ElasticPro health
