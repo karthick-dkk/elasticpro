@@ -361,7 +361,7 @@ function bulkBar(c, rows) {
       { sep: true },
       { label: `Delete ${num(names.length)} indices…`, icon: ICON.delete, danger: true,
         onClick: () => deleteIndices(c, names, refresh) },
-    ], { label: '⋮ Actions', title: 'Actions for the selection' }),
+    ], { label: '⋮ Actions', title: 'Actions for the selection', hover: true }),
     h('button.btn.sm.ghost', { onclick: () => { selected.clear(); redrawTable(); } }, 'Clear selection'));
 }
 
