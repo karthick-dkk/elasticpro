@@ -658,7 +658,9 @@ function renderNav() {
         h('span.ico', { 'aria-hidden': 'true' }, p.icon), h('span.nav-label', p.label)));
       // Clusters › Overview, the menu's one sub-item (the owner, 2026-11-14: "cluster └ overview"):
       // one cluster on one screen. The address names the section; go() draws it.
-      if (p.id === 'overview') {
+      // Only in the left menu (the owner, 0.3.72): across the top the Clusters page's own List ·
+      // Overview tabs are enough, and the row has no room for it.
+      if (p.id === 'overview' && menuPosition === 'left') {
         nav.append(h('button.nav-sub', { dataset: { page: p.id, section: OVERVIEW }, title: 'One cluster on one screen',
           onclick: () => { location.hash = overviewHash(); go(p.id); } },
         h('span.ico', '└'), h('span', 'Overview')));

@@ -8055,6 +8055,7 @@ await settleFor(300);
     ok(!!brand && !!brand.nextElementSibling && brand.nextElementSibling.classList.contains('cluster-pick') && !!brand.nextElementSibling.querySelector('#cluster-select'),
       'top menu: the cluster chooser is not first after the brand');
     ok(doc.querySelectorAll('.cluster-pick').length === 1, `top menu: ${doc.querySelectorAll('.cluster-pick').length} cluster choosers drawn`);
+    ok(!doc.querySelector('#nav button.nav-sub'), 'top menu: the "└ Overview" sub-item is still drawn (it belongs to the left menu only)');
     for (const id of ['jobs', 'settings']) {
       const b = doc.querySelector(`#nav button[data-page="${id}"]`);
       ok(!b || (b.title && b.getAttribute('aria-label') && b.querySelector('.nav-label')), `top menu: ${id} has no name for its icon`);

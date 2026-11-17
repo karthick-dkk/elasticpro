@@ -8,7 +8,7 @@
 - **Left menu: « at the top too, and it folds itself after 3 idle minutes.** A second « sits beside the brand at the top of the menu (the one at its foot stays). With no mouse, key, wheel or touch anywhere in the app for 3 minutes the menu folds to icons by itself; while the mouse is on it the full menu shows over the page, and » keeps it open. Folded by hand it stays icons only and never opens on hover, remembered per browser as before.
 - **The left menu is the default.** A person who chose the top menu keeps it (with their account, else in this browser); a choice never made, or one not understood, means the left menu.
 - **Your settings: icons only.** The menu position is two pictures (left bar, top bar) and the theme five symbols, each name in its tooltip and label; Opens on has short choices; the explanation lines are gone (where the settings are kept is the panel's tooltip). Sign out stays.
-- **The top menu fits on one row:** the cluster chooser comes first, right after the brand; Jobs and Config-Management are icons (names in the tooltip); the account button shows the initials only.
+- **The top menu fits on one row:** the cluster chooser comes first, right after the brand; Jobs and Config-Management are icons (names in the tooltip); the account button shows the initials only. "└ Overview" is not in the top menu: the Clusters page's List · Overview tabs reach it, and Clusters stays marked there.
 - Two Log Delay behaviour checks no longer fail in the first hour after midnight: the default 1 h window then rightly covers two local days, and the "last run" note rightly names yesterday's date.
 
 ## 0.3.71
