@@ -157,9 +157,12 @@ test('the y axis climbs in four round steps of the unit the top reads in', () =>
   assert.deepEqual(X.niceScale(3.53 * TB), { max: 4 * TB, step: TB });
   assert.deepEqual(X.niceScale(838 * GB), { max: 1000 * GB, step: 250 * GB });
   assert.deepEqual(X.niceScale(1.2 * TB), { max: 2 * TB, step: 0.5 * TB });
+  // An empty or tiny range: whole bytes only (a fraction of a byte drew as "undefined").
+  assert.deepEqual(X.niceScale(1), { max: 4, step: 1 });
+  assert.deepEqual(X.niceScale(0), { max: 4, step: 1 });
   for (const top of [1, 999, 5e6, 7.7e11, 3.1e15]) {
     const s = X.niceScale(top);
-    assert.ok(s.max >= top && s.max === s.step * 4 && s.max < top * 3, `${top}: ${JSON.stringify(s)}`);
+    assert.ok(s.max >= top && s.max === s.step * 4 && s.max < Math.max(top * 3, 5), `${top}: ${JSON.stringify(s)}`);
   }
   assert.equal(X.niceScale(null).max >= 1, true);
 });

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.73
+
+- **Indices › Summary: a range with no recorded day says so.** When none of the days shown (15d by default) is in the daily record, the chart drew an empty axis whose labels read "3 undefined" (the scale stepped in fractions of a byte, which have no name). It now says "No day in the last 15 days is recorded" and names the newest recorded day, so a longer range can be chosen; the scale never steps below one byte.
+- The Log Delay device-page check no longer fails between 00:00 and 03:00: the fixture's open delay started 3 h before now, i.e. on yesterday while the page shows today; it now starts within today at any hour.
+
 ## 0.3.72
 
 - **REST: the Query and Results boxes reach the footer.** Their height is the window's less where they start (measured, so it holds with the menu on top or at the left and with one to ten tabs) and the footer; a long answer scrolls inside Results, and the request body fills Query.

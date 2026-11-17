@@ -345,7 +345,13 @@ function chartCard(c, reply, days, series, basis, ranked, rk, today) {
   const byDay = new Map(series.map((p) => [p.day, p]));
   const shown = days.map((d) => byDay.get(d) || { day: d, value: null, row: null, pending: false });
   const avgOf = (d) => avgPerDay(series, LINE_AVG_DAYS, { today, before: d }).value;
-  const body = chartDir() === 'rows' ? rowsChart(shown, today, avgOf) : columnsChart(shown, today, avgOf);
+  // No day of the window recorded: said in words, never an empty axis (unknown is not zero).
+  const none = !shown.some((p) => p.value !== null || p.pending);
+  const newest = [...series].reverse().find((p) => p.value !== null);
+  const body = none
+    ? h('div.isum-none', h('b', `No day in the last ${shown.length} days is recorded.`),
+        h('span.muted', newest ? ` The newest recorded day is ${dayMonth(newest.day)} ${newest.day.slice(0, 4)}: a longer range shows it.` : ' Nothing is recorded yet for this cluster.'))
+    : chartDir() === 'rows' ? rowsChart(shown, today, avgOf) : columnsChart(shown, today, avgOf);
   return h('section.card.isum-chart',
     h('header', h('h2', title), dirButtons(), h('span.isum-gap'), ...chips(ranked, rk, field)),
     h('div.body', body));
