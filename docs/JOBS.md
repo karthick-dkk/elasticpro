@@ -539,32 +539,54 @@ tab: runs name clusters and carry their errors). Everybody reads; only an admini
 and every press goes through the write unlock the other admin pages use (`ensureWrites`, read-only
 by default) before its `JOB_*` message.
 
-- **The strip**: worker and core CPU and memory (`process`; a worker not deployed says it runs in
-  the core), requests per second to the clusters (`REQUEST_STATS`, as the Clusters page), jobs
-  running and queued, busy clusters with their reason and since when (`busy`), and the governor's
-  "in use of total" when `governor` is present — nothing for it when it is not (`null`: before the
-  governor, or the worker's heartbeat late). Its hover has jobs at once, the last change with its
-  reason in words (`people_waiting` is "people waiting") and the signals, each "not known" when
-  `null`, never 0. A job's `state.allocation` reason is put in words the same way.
-- **Jobs** (`#/jobs`): *Running now* — every open run (the page's open runs and each job's
-  `state.current`), the clusters it is on, a bar and percent from `progress` ("counting…" and no
-  bar when it is null), records, start, live duration, the job's requests (`state.allocation` once
-  the governor reports it, else the registry's range) and Stop (`JOB_CANCEL`, asked first); a
-  `stale` run is marked. Under it, *Just ran* — the five newest finished runs of the page of runs
-  (`core/jobs.js justRan`): most runs last well under a second (a backup or housekeeping a few
-  ms, a collection or a report run a few hundred), far shorter than a read's interval, so the
-  open-run list is nearly always empty and this is where they are seen. *Up next* — the
-  automatic jobs by `nextRunAt`, then the paused or off ones with their note; Run now and
-  Pause / Resume. *All jobs* — one table that fits the page at 1280 px with the menu on the
-  left: Name · Type · Status (a *paused* chip beside a running job's status) · Progress · Ran
-  (start and duration of the open run, else the last) · Next run · Last run (short relative
-  times, the full time on hover; the last result's pill) · Priority · requests; records and the
-  last error a line under the row only when there is one, the error cut short there and whole
-  when the row is opened. Every column sorts by core/sort.js (unknown last both ways). A row
-  menu of Run now, Pause / Resume, Stop, Retry (the last run, when failed, deferred or
-  cancelled), Settings and, for a created schedule, Delete (`JOB_DELETE`, asked first). *Created
-  schedules* lists those alone. The top of the tab is kept (an empty, hidden slot) for a
-  graphical view under review.
+- **The strip** (History and Settings; on the Jobs tab the Now and Health cards say it): worker
+  and core CPU and memory (`process`; a worker not deployed says it runs in the core), requests
+  per second to the clusters (`REQUEST_STATS`, as the Clusters page), jobs running and queued,
+  busy clusters with their reason and since when (`busy`), and the governor's "in use of total"
+  when `governor` is present — nothing for it when it is not (`null`: before the governor, or the
+  worker's heartbeat late). Its hover has jobs at once, the last change with its reason in words
+  (`people_waiting` is "people waiting") and the signals, each "not known" when `null`, never 0. A
+  job's `state.allocation` reason is put in words the same way.
+- **Jobs** (`#/jobs`) — the approved graphical view (0.3.77, `pages/jobs-graph.js`, pure half
+  `core/jobs-graph.js`), then the tables:
+  - *Now*: four tiles — Running, Queued, Slots in use (the governor's in use of its total, with a
+    bar; "not reporting" when `governor` is null), Last 24 hours (the success rate of the runs
+    that ended in the last 24 h: ok = completed, with warnings = deferred / skipped / cancelled,
+    failed; from the runs paged below; "kept" and a hover naming the job when one ran more than
+    the 50 runs a job keeps). Then every open run (the page's open runs and each job's
+    `state.current`): its clusters, a bar and percent from `progress` ("counting…" and no bar when
+    it is null), records, how long it has run and, once it is 5 % in and 10 s old, *about* how
+    long is left (linear from `progress`; never without it), the job's requests and Stop
+    (`JOB_CANCEL`, asked first); a queued run says why it waits (a free slot, the governor's
+    figures, its priority) and offers Run now when the job runs on demand; a `stale` run is
+    marked. Then *Just ran*: the six newest finished runs as chips (✓ / ⚠ / ✗, the job, the
+    time, a short note; the rest on hover) — most runs last well under a second (a backup or
+    housekeeping a few ms, a collection or a report run a few hundred), far inside a read's
+    interval, so this is where they are seen.
+  - *Health*: Worker CPU, Core CPU, Memory, Requests/s, Busy clusters — the value now (the
+    strip's) and a line over 1h · 6h · 24h · 7d (24h by default, remembered in the browser) from
+    `HEALTH_HISTORY` (docs/HEALTH.md "History", kept 7 days on the server). A caller limited to
+    some clusters gets no line for the fleet-wide counts, and is told why.
+  - *ElasticPro health* (administrators: `SYSTEM_HEALTH` is theirs): the service pills (Core,
+    Report worker, Redis, Zabbix sync, Mail, History store) and a tile per check (core and worker
+    memory, message p95, requests turned away, poller late datasets, data volume free): the
+    value, the limits (`thresholds`), ok / watch / over (the check's own level) and its line over
+    the same switch. Jobs › Requests › ElasticPro health keeps the full table.
+  - *Runs, last 24h* (6h · 24h · 7d): one lane per job, a bar per run coloured by its result
+    (green ok, orange with warnings, red failed, blue running — never red and yellow together),
+    the next run dashed at the right edge, a "now" line; a bar's hover has the job, its clusters,
+    start, duration, result and error. From `JOBS_LIST` paged 200 at a time (at most six pages)
+    back to the window's start — the run log the core already keeps; nothing new is recorded.
+  - *All jobs* — one table that fits the page at 1280 px with the menu on the left: Name · Type ·
+    Status (a *paused* chip beside a running job's status) · Progress · Ran (start and duration of
+    the open run, else the last) · Next run · Last run (short relative times, the full time on
+    hover; the last result's pill) · Priority · requests; records and the last error a line under
+    the row only when there is one, the error cut short there and whole when the row is opened.
+    Every column sorts by core/sort.js (unknown last both ways). A row menu of Run now, Pause /
+    Resume, Stop, Retry (the last run, when failed, deferred or cancelled), Settings and, for a
+    created schedule, Delete (`JOB_DELETE`, asked first). *Up next* — the automatic jobs by
+    `nextRunAt`, then the paused or off ones with their note; Run now and Pause / Resume.
+    *Created schedules* lists those alone.
 - **History** (`#/jobs/history`): `JOBS_LIST {limit: 50, before, jobId}` a page at a time (Older /
   Newer walk `next`), by job; the result filter applies to the page on screen. Retry on a failed,
   deferred or cancelled run.
@@ -581,8 +603,10 @@ by default) before its `JOB_*` message.
   `name_taken`, the worker's own; anything else is the core's message.
 - **Times**: absolute in the server's zone when `JOBS_LIST` names one (`tz`), else said to be the
   reader's own; relative beside it.
-- **Reads**: every 2 s while a run is open or queued; otherwise every 5 s on the Jobs tab and
-  every 15 s on History and Settings (`core/jobs.js pollDelay`); at once when the Jobs tab is
-  opened again; none while the browser tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
+- **Reads**: `JOBS_LIST` every 3 s while a run is open or queued; otherwise every 5 s on the Jobs
+  tab and every 15 s on History and Settings (`core/jobs.js pollDelay`); at once when the Jobs tab
+  is opened again. On the Jobs tab also `HEALTH_HISTORY` every minute (or on a new range),
+  `SYSTEM_HEALTH` every 30 s (administrators) and the runs for the lanes every minute. None while
+  the browser tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
   (lib/keyed.js): the Stop under a pointer is the same button while its run moves
   (`tools/flicker-check.mjs`, strict).

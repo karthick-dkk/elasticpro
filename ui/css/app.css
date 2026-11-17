@@ -2927,7 +2927,7 @@ tr.jb-has-sub td { border-bottom-color: transparent; }
 /* Long names and lists end in an ellipsis inside their cell, the whole of it on hover: a created
    schedule's name (up to 80 characters), a run's clusters, a schedule's sentence */
 /* max-width 0 + a share: the column takes what the others leave and never widens the table */
-.jb-page table.tbl td.jb-nm { max-width: 0; width: 28%; }
+.jb-page table.tbl td.jb-nm { max-width: 0; width: 28%; overflow: hidden; }
 td.jb-nm .jb-name { max-width: 100%; }
 td.jb-nm .jb-name b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 td.jb-nm .jb-cr, td.jb-nm .jb-x { flex: none; }
@@ -2942,6 +2942,59 @@ td.jb-nm .jb-cr, td.jb-nm .jb-x { flex: none; }
 .jb-just { border-top: 1px solid var(--border); }
 .jb-page table.tbl td.jb-why { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 .jb-page table.tbl td.jb-why.jb-err { max-width: 420px; }
+.jb-page table.tbl td.jb-why { max-width: 0; width: 30%; }
+/* The Jobs tab's graphical view (approved canvas, 0.3.77): Now, Health, ElasticPro health, Runs.
+   Existing tokens only; result colours are the chart status ones (never red and yellow together). */
+.jg-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; padding: 8px 12px; }
+.jg-tile { display: flex; flex-direction: column; gap: 1px; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px 5px; background: var(--surface); }
+.jg-tile .k { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jg-tile .v { font-size: 17px; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jg-tile .d { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 15px; }
+.jg-now .v { font-size: 20px; }
+.jg-bar { display: flex; height: 6px; margin-top: 4px; border-radius: 3px; overflow: hidden; background: var(--surface-3); }
+.jg-bar i { display: block; height: 100%; }
+.jg-line { display: block; width: 100%; height: 34px; margin-top: 3px; }
+.jg-noline { font-size: 11px; height: 34px; display: flex; align-items: flex-end; margin-top: 3px; }
+.jg-sp { flex: 1 1 auto; }
+.jg-card > header { display: flex; align-items: center; gap: 10px; }
+.jg-card > header .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jg-switch { display: inline-flex; border: 1px solid var(--border-strong, var(--border)); border-radius: 6px; overflow: hidden; flex: none; }
+.jg-switch button { border: 0; background: var(--surface); color: var(--text-secondary); font: inherit; font-size: 11.5px; height: 24px; padding: 0 9px; cursor: pointer; }
+.jg-switch button + button { border-left: 1px solid var(--border); }
+.jg-switch button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.jg-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.jg-lv { text-transform: none; letter-spacing: 0; font-weight: 600; }
+.jg-lv.green { color: var(--good-ink); } .jg-lv.yellow { color: var(--warning-ink); } .jg-lv.red { color: var(--critical-ink); } .jg-lv.grey { color: var(--text-muted); }
+.jg-tile .dot, .jg-part .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-muted); }
+.jg-tile .dot.green, .jg-part.green .dot { background: var(--good-ink); } .jg-tile .dot.yellow, .jg-part.yellow .dot { background: var(--warning-ink); }
+.jg-tile .dot.red, .jg-part.red .dot { background: var(--critical-ink); }
+.jg-check.lv-warn { border-color: color-mix(in srgb, var(--warning-ink) 45%, var(--border)); }
+.jg-check.lv-bad { border-color: color-mix(in srgb, var(--critical-ink) 45%, var(--border)); }
+.jg-parts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+.jg-part { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--surface-2); }
+.jg-part > span { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.jg-part.green { background: var(--good-bg); } .jg-part.yellow { background: var(--warning-bg); } .jg-part.red { background: var(--critical-bg); }
+.jg-just { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--surface-2); min-width: 0; }
+.jg-just > .k { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; flex: none; }
+.jg-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.jg-chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px; font-size: 11.5px; line-height: 20px; max-width: 100%; min-width: 0; white-space: nowrap; }
+.jg-chip > span { overflow: hidden; text-overflow: ellipsis; }
+.jg-chip.ok { background: var(--good-bg); } .jg-chip.ok b { color: var(--good-ink); }
+.jg-chip.warn { background: var(--serious-bg); } .jg-chip.warn b { color: var(--serious-ink); }
+.jg-chip.bad { background: var(--critical-bg); } .jg-chip.bad b { color: var(--critical-ink); }
+.jg-chip-n { color: var(--text-primary); }
+.jg-chart { padding: 4px 8px 0; }
+.jg-runs { display: block; width: 100%; height: auto; }
+.jg-runs .jg-grid { stroke: var(--grid); }
+.jg-runs .jg-tick { font-size: 10px; fill: var(--text-muted); }
+.jg-runs .jg-lane { font-size: 11px; fill: var(--text-primary); }
+.jg-runs .jg-now { stroke: var(--accent); stroke-width: 1.5; }
+.jg-runs .jg-now-t { font-size: 10px; font-weight: 700; fill: var(--accent); }
+.jg-runs .jg-next { fill: none; stroke: var(--text-muted); stroke-dasharray: 2 2; }
+.jg-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 12px 8px; font-size: 11.5px; color: var(--text-secondary); }
+.jg-key { display: inline-flex; align-items: center; gap: 5px; }
+.jg-key i { width: 12px; height: 9px; border-radius: 2px; }
+.jg-key i.dash { border: 1.5px dashed var(--text-muted); box-sizing: border-box; }
 td.jb-acts { text-align: right; width: 1%; }
 .jb-btns { display: inline-flex; gap: 4px; }
 tr.jb-stale td { background: var(--warning-bg); }

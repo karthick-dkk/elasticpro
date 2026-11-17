@@ -164,7 +164,11 @@ for (const name of PAGES) {
       // Jobs: the tab bar marks the tab shown, the strip is there, and the Jobs tab lists every job.
       const cur = view.querySelector('nav.jb-tabs button[aria-current="page"]');
       if (!cur || cur.dataset.tab !== (section || 'jobs')) errors.push(`${name}: the tab bar does not mark ${section || 'jobs'}`);
-      if (!view.querySelector('.jb-strip .jb-chip[data-chip="runs"]')) errors.push(`${name}: no load strip`);
+      // The strip on History and Settings; on the Jobs tab the graphical view (0.3.77) says it: Now, Health, Runs.
+      if (section && !view.querySelector('.jb-strip .jb-chip[data-chip="runs"]')) errors.push(`${name}: no load strip`);
+      if (!section && !(view.querySelector('[data-tile="running"]') && view.querySelector('[data-card="health"]') && view.querySelector('[data-card="runs"]'))) {
+        errors.push(`${name}: the graphical view (Now, Health, Runs) is not drawn`);
+      }
       if (!section && view.querySelectorAll('tr[data-job]').length < 10) errors.push(`${name}: All jobs lists ${view.querySelectorAll('tr[data-job]').length} rows (the registry has 13 jobs)`);
     } else if (page === 'settings' && section) {
       // Config-Management: the menu marks the page, the tab row (when there is one) the tab.

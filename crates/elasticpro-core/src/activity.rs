@@ -59,6 +59,8 @@ const POLLS: &[&str] = &[
     "SYSTEM_HEALTH",
     // The Jobs page reads the registry and the run log on a timer (a read), and the settings.
     "JOBS_LIST", "JOB_SETTINGS_GET",
+    // The Jobs page's health lines, read with it (a read).
+    "HEALTH_HISTORY",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.

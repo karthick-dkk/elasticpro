@@ -127,8 +127,8 @@ test('open runs: from the page and from each job, once each, newest first', () =
   const list = { runs: [a, b, run({ id: 'done', status: 'completed' })], jobs: [job({}, { current: a }), job({ id: 'hosts.collect' }, { current: old })] };
   assert.deepEqual(J.openRuns(list).map((r) => r.id), ['b', 'a', 'old']);
   assert.deepEqual(J.runCounts(list), { running: 2, queued: 1 });
-  assert.equal(J.pollDelay(list), 2000);
-  assert.equal(J.pollDelay(list, { jobsTab: true }), 2000, 'a run open: 2 s on any tab');
+  assert.equal(J.pollDelay(list), 3000);
+  assert.equal(J.pollDelay(list, { jobsTab: true }), 3000, 'a run open: 3 s on any tab');
   assert.equal(J.pollDelay({ runs: [], jobs: [job()] }), 15000);
   assert.equal(J.pollDelay({ runs: [], jobs: [job()] }, { jobsTab: true }), 5000, 'the Jobs tab, nothing open: 5 s');
   assert.equal(J.pollDelay(null), 15000);

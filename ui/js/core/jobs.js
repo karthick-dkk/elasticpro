@@ -311,10 +311,11 @@ export function justRan(list, n = JUST_RAN) {
 }
 
 /**
- * How often the page reads JOBS_LIST: every 2 s while anything runs or waits; on the Jobs tab
- * (Running now, Just ran) every 5 s otherwise; else (History, Settings) every 15 s.
+ * How often the page reads JOBS_LIST: every 3 s while anything runs or waits (the approved
+ * graphical view); on the Jobs tab (Now, Just ran) every 5 s otherwise; else (History,
+ * Settings) every 15 s.
  */
-export const FAST_POLL_MS = 2000;
+export const FAST_POLL_MS = 3000;
 export const IDLE_JOBS_POLL_MS = 5000;
 export const SLOW_POLL_MS = 15000;
 export function pollDelay(list, { jobsTab = false } = {}) {

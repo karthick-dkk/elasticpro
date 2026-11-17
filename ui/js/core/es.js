@@ -40,6 +40,8 @@ export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params
 
 /** ElasticPro's own health (docs/HEALTH.md): the core's and the worker's, never a cluster's. Admins only. */
 export const systemHealth = () => send({ type: 'SYSTEM_HEALTH' });
+/** The Jobs page's health lines, kept 7 days on the server (docs/HEALTH.md "History"). User and up. */
+export const healthHistory = (range) => send({ type: 'HEALTH_HISTORY', range });
 
 /** Every job, its state and a page of runs (docs/JOBS.md `JOBS_LIST {before?, limit?, jobId?}`). User and up. */
 export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });

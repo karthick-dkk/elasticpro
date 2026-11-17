@@ -32,8 +32,8 @@ async fn an_admin_reads_the_snapshot_and_no_cluster_is_asked() {
     assert_eq!(r["worker"]["state"], json!("not_deployed"), "{}", r["worker"]);
     assert!(r["worker"]["text"].as_str().unwrap().starts_with("not deployed — role all"));
     let parts: Vec<&str> = r["parts"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-    assert_eq!(parts, ["core", "worker", "redis", "database", "zabbix", "mail", "history"]);
-    assert_eq!(r["parts"][3]["level"], json!("unknown"), "the database cannot report and says so, never green");
+    // No Database part: ElasticPro does not use the db container (0.3.77).
+    assert_eq!(parts, ["core", "worker", "redis", "zabbix", "mail", "history"]);
     let ids: Vec<&str> = r["checks"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
     for want in ["core.memory", "core.cpu", "messages.p95", "gate.refused", "poller.late", "worker.heartbeat", "disk.free"] {
         assert!(ids.contains(&want), "no {want} in {ids:?}");
@@ -69,4 +69,57 @@ async fn nobody_below_admin_reads_it() {
     }
     let r = c.handle(json!({ "type": "SYSTEM_HEALTH" })).await;
     assert_eq!(r["kind"], json!("unauthenticated"), "{r}");
+}
+
+/// HEALTH_HISTORY (docs/HEALTH.md "History", 0.3.77): the Jobs page's health lines, kept 7 days on
+/// the server. A user reads the strip's figures; the ElasticPro health figures are an
+/// administrator's; a caller limited to some clusters does not read the fleet-wide counts.
+#[tokio::test]
+async fn health_history_is_kept_and_narrowed_by_who_reads() {
+    let dir = TempDir::new("health-history");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    for _ in 0..10 {
+        c.health_sample().await;
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    }
+    assert!(dir.0.join("health").join("history-all.json").exists(), "the week's history is not written to the data directory");
+
+    let admin = c.handle_as(json!({ "type": "HEALTH_HISTORY", "range": "24h" }), Some(who(Role::Admin))).await;
+    assert_eq!(admin["ok"], json!(true), "{admin}");
+    assert_eq!(admin["stepMs"], json!(60_000));
+    let fields: Vec<&str> = admin["fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert_eq!(fields[0], "t");
+    for f in ["coreCpu", "workerCpu", "rps", "busy", "coreRss", "p95Ms", "refused", "latePct", "diskFreePct"] {
+        assert!(fields.contains(&f), "an administrator does not read {f}: {fields:?}");
+    }
+    let points = admin["points"].as_array().unwrap();
+    assert!(!points.is_empty() && points.len() <= 10, "{}", points.len());
+    assert!(points.iter().all(|p| p.as_array().unwrap().len() == fields.len()));
+    // Role all: no worker, so its CPU is not known (null), never 0.
+    let wi = fields.iter().position(|f| *f == "workerCpu").unwrap();
+    assert!(points.iter().all(|p| p[wi].is_null()), "a worker that is not deployed has a CPU figure");
+
+    let user = c.handle_as(json!({ "type": "HEALTH_HISTORY", "range": "1h" }), Some(who(Role::User))).await;
+    assert_eq!(user["ok"], json!(true), "{user}");
+    let uf: Vec<&str> = user["fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert!(uf.contains(&"coreCpu") && uf.contains(&"rps") && !uf.contains(&"p95Ms") && !uf.contains(&"diskFreePct"), "{uf:?}");
+
+    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]), play: None };
+    let l = c.handle_as(json!({ "type": "HEALTH_HISTORY", "range": "7d" }), Some(limited)).await;
+    assert_eq!(l["ok"], json!(true), "{l}");
+    assert_eq!(l["stepMs"], json!(600_000));
+    assert_eq!(l["limited"], json!(true));
+    let lf: Vec<&str> = l["fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert!(!lf.contains(&"rps") && !lf.contains(&"busy"), "a limited caller reads the fleet-wide counts: {lf:?}");
+
+    let bad = c.handle_as(json!({ "type": "HEALTH_HISTORY", "range": "2h" }), Some(who(Role::Admin))).await;
+    assert_eq!(bad["kind"], json!("bad_request"));
+    let guest = c.handle_as(json!({ "type": "HEALTH_HISTORY" }), Some(who(Role::Guest))).await;
+    assert_eq!(guest["ok"], json!(false), "a guest reads the health history: {guest}");
+
+    // A restart keeps the week (the file is read back).
+    drop(c);
+    let again = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let r = again.handle_as(json!({ "type": "HEALTH_HISTORY", "range": "24h" }), Some(who(Role::Admin))).await;
+    assert!(!r["points"].as_array().unwrap().is_empty(), "the history did not survive a restart: {r}");
 }

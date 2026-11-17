@@ -10,7 +10,7 @@
  * only an administrator presses anything, and every press goes through the write unlock the
  * other admin pages use (core/writes.js ensureWrites) and says a refusal as a sentence.
  *
- * It reads JOBS_LIST every 2 s while a run is open, every 5 s on the Jobs tab otherwise and
+ * It reads JOBS_LIST every 3 s while a run is open, every 5 s on the Jobs tab otherwise and
  * every 15 s on History and Settings (core/jobs.js pollDelay), not at all while
  * the tab is hidden, and stops when the page is left. Nothing is sent to a cluster. Each row and
  * cell is the one already on screen unless what it shows changed (lib/keyed.js): the row under
@@ -31,6 +31,8 @@ import { openCreateJob, createdToast } from '../ui/job-create.js';
 import { keptCard, keptTable } from './common.js';
 import { canOpenPage } from '../core/intent.js';
 import * as J from '../core/jobs.js';
+import * as GR from '../core/jobs-graph.js';
+import { createGraph } from './jobs-graph.js';
 
 /** The tabs, in order. */
 export const JOB_TABS = Object.freeze([
@@ -75,6 +77,8 @@ const hist = { jobId: '', result: '', before: null, stack: [], answer: null, err
 const sett = { res: null, error: null, loading: false, draft: null, saving: false };
 
 const built = nodeCache();
+/** The graphical view's cards and their reads (pages/jobs-graph.js). */
+const graph = createGraph();
 const SORTS = {
   all: tableSort('jobs.all', { onChange: () => draw() }),
   history: tableSort('jobs.history', { onChange: () => draw() }),
@@ -153,6 +157,8 @@ async function load() {
   // Requests per second to the clusters: REQUEST_STATS, as the Clusters page reads it — not every tick.
   if (Date.now() - loadAt > 10_000) { loadAt = Date.now(); await refreshRequestLoad(); }
   if (host && tab === 'history' && !hist.before) await loadHistory({ quiet: true });
+  // The graphical view's own reads (health lines, ElasticPro health, the runs): each at its own pace.
+  if (host && tab === 'jobs' && list) graph.refresh({ admin: isAdmin(), onDone: () => { if (host && tab === 'jobs') draw(); } });
   if (host) draw();
 }
 
@@ -184,7 +190,8 @@ function pageKids() {
     listError ? built.same('err', h('div.banner.err', `The jobs could not be read: ${listError}`)) : null,
     list && Array.isArray(list.problems) && list.problems.length
       ? built.same('problems', h('div.banner.warn', `Some runs are missing from this list — a run log could not be read: ${list.problems.join('; ')}`)) : null,
-    strip(now),
+    // On the Jobs tab the Now and Health cards say what the strip says, with their lines.
+    tab === 'jobs' ? null : strip(now),
     ...(tab === 'history' ? historyKids(now) : tab === 'settings' ? settingsKids() : jobsKids(now)),
   ].filter(Boolean);
 }
@@ -327,10 +334,50 @@ const tz = () => (list && (list.tz || list.serverTz)) || null;
 
 function jobsKids(now) {
   if (!list) return [built.same('loading', h('div.tbl-empty', unsupported ? '' : 'Reading the jobs…'))];
-  // The top of the tab is kept for the graphical jobs view (a design under the owner's review):
-  // an empty, hidden slot — no band on screen until it is built.
-  const slot = built.get('graph-slot', 'div', () => h('div.jb-graph-slot', { hidden: true, dataset: { slot: 'jobs-graph' } }));
-  return [slot, runningCard(now), upNextCard(now), allJobsCard(now), createdCard(now)].filter(Boolean);
+  // The approved graphical view (0.3.77): Now, Health, ElasticPro health (an administrator's),
+  // Runs — then the tables.
+  return [nowCard(now), healthCard(now), isAdmin() ? appHealthCard() : null, runsCard(now),
+    allJobsCard(now), upNextCard(now), createdCard(now)].filter(Boolean);
+}
+
+/**
+ * The graph's cards, kept between reads while what they show is the same (a card rebuilt every
+ * 3 s would take the hover from under the pointer): a signature of what each one draws.
+ */
+function healthValues(now) {
+  const p = J.processFigures(list && list.process);
+  const busy = (list && Array.isArray(list.busy)) ? list.busy : null;
+  const seen = new Set(clusters().map((x) => x.id));
+  const rps = requestLoad.at ? Object.entries(requestLoad.clusters || {}).filter(([id]) => !seen.size || seen.has(id))
+    .reduce((s, [, v]) => s + (Number(v && v.perSecond) || 0), 0) : null;
+  const busyLines = busy ? busy.map((b) => J.busyText(b, nameOfCluster, now)) : [];
+  return {
+    'worker-cpu': { text: p.inCore ? 'in core' : J.pctText(p.workerCpu), sub: p.inCore ? 'role all: the core runs the worker\'s jobs' : (p.workerText || 'the report worker · last minute'), title: p.workerText || null },
+    'core-cpu': { text: J.pctText(p.coreCpu), sub: 'the core · last minute' },
+    memory: { text: `${J.pctText(p.coreMem)}${p.inCore ? '' : ` · ${J.pctText(p.workerMem)}`}`, sub: p.inCore ? 'core, of its limit · the line is the core' : 'core · worker, of their limits · the line is the core' },
+    rps: { text: rps === null ? '—' : rps < 10 ? rps.toFixed(1) : String(Math.round(rps)), sub: `to the clusters · last ${Math.round((requestLoad.windowSec || 300) / 60)} min` },
+    busy: { text: busy === null ? '—' : String(busy.length), sub: busyLines.length ? J.truncate(busyLines[0], 40) + (busyLines.length > 1 ? ` +${busyLines.length - 1}` : '') : 'slow · pool · 429', title: busyLines.join('\n') || 'no cluster is holding background work back' },
+  };
+}
+
+function healthCard(now) {
+  const v = healthValues(now);
+  const st = graph.state;
+  const sig = JSON.stringify([v, st.range, st.histRange, st.hist && st.hist.at, st.histErr]);
+  return built.get('g:health', sig, () => graph.healthCard(v));
+}
+
+function appHealthCard() {
+  const st = graph.state;
+  return built.get('g:apphealth', JSON.stringify([st.sys && st.sys.at, st.sysErr, st.range, st.histRange, st.hist && st.hist.at]), () => graph.appHealthCard());
+}
+
+function runsCard(now) {
+  const st = graph.state;
+  const open = J.openRuns(list).map((r) => `${r.id}:${r.status}`).join(',');
+  const last = ((list && list.jobs) || []).map((j) => (j.state && j.state.lastRun ? j.state.lastRun.id : '')).join(',');
+  const sig = [st.runsAt, st.runsErr, st.runRange, open, last, Math.floor(now / 60_000)].join('|');
+  return built.get('g:runs', sig, () => graph.runsCard(list, nameOfCluster));
 }
 
 function clustersText(r) {
@@ -353,65 +400,110 @@ function progressCell(key, r) {
   return td(key, kids.filter(Boolean), { cls: 'jb-prog', title: p.detail ? `${p.detail} done` : null });
 }
 
-function runningCard(now) {
+/**
+ * Now (the approved graphical view, 0.3.77): four tiles — Running, Queued, Slots in use (the
+ * governor's), Last 24 hours (success rate of the runs kept) — then one row per open run (its
+ * clusters, progress, how long it has run and, when the core counts it, about how long is left;
+ * Stop, and for a queued run why it waits) and the "Just ran" chips: most runs end within a
+ * second, far inside a read's interval, so the newest finished ones are shown here too.
+ */
+function nowCard(now) {
   const runs = J.openRuns(list);
   const admin = isAdmin();
   const c = J.runCounts(list);
+  const gov = list && list.governor && typeof list.governor === 'object' ? list.governor : null;
+  const g = J.governorText(gov);
   const rows = runs.map((r) => {
     const k = `run:${r.id}`;
     const job = jobById(r.jobId);
     const on = clustersText(r);
     const day = r.day ? ` · ${r.day}` : '';
     const req = job ? J.requestsText(job) : { text: '—', title: '' };
+    const queued = r.status === 'queued' || r.status === 'pending';
     const stop = admin
-      ? h('button.btn.sm.jb-stop', { type: 'button', disabled: !J.canCancel(r), title: r.cancelAsked ? 'asked to stop: it stops at its next safe point' : 'Stop this run at its next safe point', onclick: () => cancelRun(r.id) },
+      ? h('button.btn.sm.jb-stop', { type: 'button', disabled: !J.canCancel(r), title: r.cancelAsked ? 'asked to stop: it stops at its next safe point' : queued ? 'Cancel this queued run' : 'Stop this run at its next safe point', onclick: () => cancelRun(r.id) },
         r.cancelAsked ? 'Stopping…' : 'Stop')
       : null;
+    const run = admin && queued && job && J.canRunNow(job) ? h('button.btn.sm', { type: 'button', onclick: () => runNow(job.id) }, 'Run now') : null;
+    const why = queued ? `waits for a free slot${g ? ` · ${g.text}` : ''} · priority ${J.priorityText(job && job.priority)}` : null;
     return tr(k, [
       td(`${k}:job`, h('span.jb-name', h('b', job ? job.name : r.jobId), h('span.muted.jb-by', ` ${J.triggerText(r.trigger)}`),
         r.stale ? pill('stale', 'yellow', 'the worker\'s heartbeat is late: this run may have ended with the worker. It is not ended here.') : null,
-        r.status === 'queued' ? pill('queued', 'grey') : null)),
+        queued ? pill('queued', 'orange') : null)),
       td(`${k}:on`, `${on.text}${day}`, { cls: 'jb-on', title: on.title }),
-      progressCell(`${k}:prog`, r),
+      queued ? td(`${k}:prog`, why, { cls: 'muted.jb-why', title: why }) : progressCell(`${k}:prog`, r),
       td(`${k}:rec`, r.records === null || r.records === undefined ? '—' : fmtNum(r.records), { num: true }),
-      td(`${k}:start`, r.startedAt ? J.absoluteText(r.startedAt, { tz: tz(), now }).text : '—', { title: r.startedAt ? dt(r.startedAt) : 'not started yet' }),
-      td(`${k}:dur`, J.durationText(J.durationMs(r, now)), { num: true }),
+      td(`${k}:dur`, GR.elapsedText(r, now), { title: r.startedAt ? `started ${dt(r.startedAt)}` : (r.createdAt ? `asked for ${dt(r.createdAt)}` : null) }),
       td(`${k}:req`, req.text, { title: req.title }),
-      admin ? td(`${k}:act`, stop, { cls: 'jb-acts' }) : null,
+      admin ? td(`${k}:act`, h('span.jb-btns', run, stop), { cls: 'jb-acts' }) : null,
     ].filter(Boolean), { cls: r.stale ? 'jb-stale' : '', data: { run: r.id, status: r.status } });
   });
-  const headers = ['Job', 'On', 'Progress', { label: 'Records', num: true }, 'Started', { label: 'Duration', num: true }, 'Requests', ...(admin ? [''] : [])];
-  const just = justRanBlock(now);
+  const headers = ['Job', 'On', 'Progress', { label: 'Records', num: true }, 'Running', 'Requests', ...(admin ? [''] : [])];
   const body = runs.length ? keptTable(built, 'run', headers, rows)
-    : built.same('run:none', h('div.jb-none.muted', just
-      ? 'Nothing running or queued right now. Most runs end within a second or two, so the newest are listed below.'
-      : 'Nothing running or queued.'));
+    : built.same('run:none', h('div.jb-none.muted', 'Nothing running or queued right now.'));
   const every = Math.round(J.pollDelay(list, { jobsTab: true }) / 1000);
-  return keptCard(built, 'run', 'Running now', `${c.running} running · ${c.queued} queued · read every ${every} s`, [body, just]);
+  return keptCard(built, 'run', 'Now', `read every ${every} s${runs.length ? ' while something runs' : ''}`, [nowTiles(c, gov, g), body, justRanChips(now)]);
 }
 
-/**
- * "Just ran": the newest finished runs (J.justRan) — what Running now would have shown, had a
- * read landed while they ran. Result, how long ago it ended, how long it took, what it did.
- */
-function justRanBlock(now) {
-  const runs = J.justRan(list);
+/** A tile kept under `key`: label, value, a line under it and an optional bar, written in place. */
+function tile(key, label, value, sub, { title = null, bar = null } = {}) {
+  const el = built.get(`tile:${key}`, 'div', () => h('div.jg-tile.jg-now', { dataset: { tile: key } }, h('span.k'), h('b.v'), h('span.d')));
+  const [k, v, d] = el.children;
+  if (k.textContent !== label) k.textContent = label;
+  if (v.textContent !== String(value)) v.textContent = String(value);
+  if (d.textContent !== (sub || '')) d.textContent = sub || '';
+  if ((el.getAttribute('title') || '') !== (title || '')) { if (title) el.setAttribute('title', title); else el.removeAttribute('title'); }
+  // The bar: segments [share 0..100, colour], kept in place (its widths set, never rebuilt).
+  let b = el.querySelector('.jg-bar');
+  if (bar) {
+    if (!b || b.children.length !== bar.length) { if (b) b.remove(); b = h('span.jg-bar', ...bar.map(() => h('i'))); el.append(b); }
+    bar.forEach(([w, colour], i) => {
+      const s = b.children[i].style;
+      const ww = `${Math.max(0, Math.min(100, w))}%`;
+      if (s.width !== ww) s.width = ww;
+      if (s.background !== colour) s.background = colour;
+    });
+  } else if (b) b.remove();
+  return el;
+}
+
+function nowTiles(c, gov, g) {
+  const day = graph.day(list);
+  const inUse = gov && Number.isFinite(gov.inUse) ? gov.inUse : null;
+  const total = gov && Number.isFinite(gov.total) ? gov.total : null;
+  const dayText = !day ? 'Loading…' : day.total ? `${day.ok} ok · ${day.warn} with warnings · ${day.bad} failed of ${day.total}${day.partial ? ' kept' : ''}` : 'no run ended in the last 24 hours';
+  const box = built.get('tiles:now', 'div', () => h('div.jg-tiles.jg-now-tiles'));
+  reconcile(box, [
+    tile('running', 'Running', c.running, 'jobs working now'),
+    tile('queued', 'Queued', c.queued, c.queued ? 'waiting for a slot' : 'nothing waiting'),
+    tile('slots', 'Slots in use', inUse !== null && total !== null ? `${inUse} / ${total}` : '—',
+      g ? `governor · ${g.auto || 'requests at Elasticsearch'}` : 'the governor is not reporting',
+      { title: g ? ['the adaptive concurrency governor: requests the worker\'s jobs have at Elasticsearch', g.jobs, g.change, g.signals].filter(Boolean).join('\n')
+        : 'no governor figures: role core without a worker heartbeat, or an older core — never a 0 it did not measure',
+        bar: inUse !== null && total ? [[(inUse * 100) / total, 'var(--chart-info)']] : null }),
+    tile('day', 'Last 24 hours', day && day.total ? GR.pctWord(day.pct) : '—', dayText, {
+      title: day && day.partial ? `The run log keeps the newest ${GR.KEPT_PER_JOB} runs of a job: ${day.partialJobs.map(jobName).join(', ')} ran more often, so its older runs of the day are not counted.`
+        : 'finished runs that ended in the last 24 hours: ok = completed; with warnings = deferred, skipped or cancelled; failed',
+      bar: day && day.total ? [[(day.ok * 100) / day.total, 'var(--chart-good)'], [(day.warn * 100) / day.total, 'var(--chart-warn)'], [(day.bad * 100) / day.total, 'var(--chart-bad)']] : null }),
+  ]);
+  return box;
+}
+
+/** "Just ran": the newest finished runs (J.justRan) as chips — ✓ / ⚠ / ✗, the job, when, a short note. */
+function justRanChips(now) {
+  const runs = J.justRan(list, 6);
   if (!runs.length) return null;
-  const rows = runs.map((r) => {
-    const k = `just:${r.id}`;
+  const chips = runs.map((r) => {
+    const res = GR.resultOf(r) || 'warn';
     const why = r.error || r.note || '';
-    return tr(k, [
-      td(`${k}:job`, h('span.jb-name', h('b', jobName(r.jobId)), h('span.muted.jb-by', ` ${J.triggerText(r.trigger)}`)), { title: `run ${r.id}` }),
-      td(`${k}:res`, pill(J.statusWord(r.status), J.statusTone(r.status))),
-      td(`${k}:end`, J.shortRelative(r.endedAt, now), { title: dt(r.endedAt) }),
-      td(`${k}:dur`, J.durationText(J.durationMs(r, now)), { num: true }),
-      td(`${k}:rec`, r.records === null || r.records === undefined ? '—' : fmtNum(r.records), { num: true }),
-      td(`${k}:why`, why ? J.truncate(why, 60) : '—', { cls: r.error ? 'jb-err.jb-why' : 'muted.jb-why', title: why || null }),
-    ], { data: { just: r.id, status: r.status } });
+    const at = J.absoluteText(r.endedAt, { tz: tz(), now }).text;
+    const rec = r.records !== null && r.records !== undefined ? ` · ${fmtNum(r.records)} records` : '';
+    return built.same(`just:${r.id}`, h(`span.jg-chip.${res}`, { dataset: { just: r.id, status: r.status },
+      title: `${jobName(r.jobId)} · ${J.statusWord(r.status)} · ${J.triggerText(r.trigger)}\nended ${dt(r.endedAt)} · took ${J.durationText(J.durationMs(r, now))}${rec}${why ? `\n${why}` : ''}` },
+      h('b', GR.resultMark(res)), h('span.jg-chip-n', jobName(r.jobId)), h('span.muted', `${at}${why ? ` · ${J.truncate(why, 28)}` : ''}`)));
   });
-  const tbl = keptTable(built, 'just', ['Just ran', 'Result', 'Ended', { label: 'Took', num: true }, { label: 'Records', num: true }, 'Error or note'], rows);
-  const box = built.get('just:box', 'div', () => h('div.jb-just'));
-  if (box.firstChild !== tbl || box.childNodes.length !== 1) mount(box, tbl);
+  const box = built.get('just:box', 'div', () => h('div.jg-just', h('span.k', 'Just ran'), h('span.jg-chips')));
+  reconcile(box.lastChild, chips);
   return box;
 }
 
