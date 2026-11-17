@@ -19,7 +19,7 @@ import { navigateTo } from '../core/intent.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { utcDay, volumeMonthlyAll, monthlyAllEventCsvRows, reportDailyCsvRows, REPORT_DAILY_CSV, toMs } from '../core/volume-daily.js';
 import { reportScheduleGet, reportSendNow, lastSentText, failText, failLevel, refreshReports } from '../core/reports.js';
-import { reportJobsMount, reportPanel, setReportPanelOpen, isAdmin } from '../ui/report-jobs.js';
+import { reportJobsMount, reportPanel, reportJobsTable, isAdmin } from '../ui/report-jobs.js';
 import { recordOf, RATE_DAYS } from './record.js';
 import { exportOverviewCsv, exportOverviewXlsx } from './overview.js';
 import { storagePlanCsv, reportsOf, exportWide, exportTall, SHEET_VIEWS } from './capacity.js';
@@ -27,12 +27,10 @@ import { amber, tag } from './cells.js';
 import { reportKindsCard, kindsReset } from './report-kinds.js';
 
 const sched = { state: 'idle', reply: null, error: '' };
-let openedOnce = false;
 let redraw = () => {};
 
 export function exportsReset() {
   Object.assign(sched, { state: 'idle', reply: null, error: '' });
-  openedOnce = false;
   kindsReset();
 }
 
@@ -144,22 +142,23 @@ function mailed() {
 }
 
 /**
- * The panel and its button are kept for the session (ui/report-jobs.js) and redraw their own
- * insides; so is the card that holds them. Built into a fresh card on every redraw, they were
- * taken out of the page and put back on each push from the core — the job rows and their Stop
- * buttons with them.
+ * Generated reports: the table of report files the core keeps (always shown, full width, newest
+ * first) under the Generate report form, which opens only from its button. The form, the table
+ * and the card are kept for the session (ui/report-jobs.js) and redraw their own insides: built
+ * into a fresh card on every redraw, they were taken out of the page and put back on each push
+ * from the core — the job rows and their Stop buttons with them.
  */
 let generatedCard = null;
 function generated(ctx) {
-  // The panel opens on the first visit: the list of jobs is what this card is for.
-  if (!openedOnce) { openedOnce = true; setReportPanelOpen(true); }
   // The cluster shown first is ticked; More clients… lists the rest (ui/report-jobs.js).
   const panel = reportPanel(ctx.clusters[0] || null);
   const button = reportJobsMount();
+  const jobs = reportJobsTable();
   // Every job and run (report jobs among them) is on the Jobs page; this card keeps the files.
   if (!generatedCard) {
     const all = h('button#rp-all-jobs.btn.sm.ghost', { type: 'button', title: 'Every background job and run, with its progress and history', onclick: () => navigateTo('jobs') }, 'All jobs →');
-    generatedCard = card('Generated reports', 'larger reports built on the server; kept 7 days', panel, [all, button]);
+    generatedCard = card('Generated reports', 'report files built on the server; kept 7 days', [panel, jobs], [all, button]);
+    generatedCard.id = 'rp-generated';
   }
   return generatedCard;
 }

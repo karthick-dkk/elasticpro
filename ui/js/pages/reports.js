@@ -10,7 +10,7 @@
 
 import { h, mount } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
-import { activeClusters, bus } from '../core/state.js';
+import { activeClusters } from '../core/state.js';
 import { intent } from '../core/intent.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { empty } from './common.js';
@@ -25,7 +25,6 @@ import { hostsSection, hostsReset } from '../reports/hosts.js';
 import { planningSection } from '../reports/planning.js';
 import { volumeSummary, resetVolumeSummary, setSummaryMode } from '../reports/daily.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
-import { setReportPanelOpen } from '../ui/report-jobs.js';
 
 let host = null;
 let visiting = false;
@@ -46,7 +45,6 @@ onLayouts(() => { if (alive()) draw(); });
 export function render(el) {
   host = el;
   el.classList.add('dense', 'rp-page');
-  const arriving = !visiting;
   if (!visiting) {
     // Each visit reads the record and the shared layouts as they are now.
     visiting = true;
@@ -72,11 +70,10 @@ export function render(el) {
   // From a field-volume alert: that field's volume, on Daily & monthly.
   const f = takeFocus('reports');
   if (f && f.field) { focusField = f.field; focusRevealed = false; setVolumeAnalysisField(f.field); ui.section = 'daily'; }
-  // From the top-bar Reports pill: the report jobs. From a playbook: the section it names.
-  if (f && f.reports) { ui.section = 'exports'; setReportPanelOpen(true); }
+  // From the top-bar Reports pill: the report jobs (Generated reports lists them, the form stays shut). From a playbook: the section it names.
+  if (f && f.reports) ui.section = 'exports';
   if (f && f.section && REPORT_SECTIONS.some((s) => s.id === f.section)) ui.section = f.section;
-  // Arriving on Overview shows every cluster, unless the link that brought you named one.
-  if (arriving && ui.section === 'overview' && !(asked && asked.cluster)) bus.emit('fleet-view');
+  // The cluster chosen stays chosen (the owner, 2026-11-17): Overview no longer puts "All clusters" back.
   syncHash();
   lastHash = location.hash;
   draw();
@@ -89,7 +86,6 @@ export function onLeave() { visiting = false; stopFollowing(); }
 export function onRoute() {
   const s = sectionOfHash(location.hash);
   const moved = s !== ui.section;
-  if (s === 'overview' && ui.section !== 'overview') bus.emit('fleet-view');
   ui.section = s;
   syncHash();                   // #/volume/… reads as #/reports/… from here on
   lastHash = location.hash;
@@ -108,7 +104,6 @@ function syncHash() {
 
 function goSection(id) {
   if (!REPORT_SECTIONS.some((s) => s.id === id)) return;
-  if (id === 'overview' && ui.section !== 'overview') bus.emit('fleet-view');
   ui.section = id;
   syncHash();
   draw();

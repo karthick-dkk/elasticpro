@@ -25,6 +25,8 @@ export const VOLUME_DEFAULTS = {
   topValues: 25,
   keepMonths: 13,
   collectAt: '06:00',
+  backfillDays: 30,
+  backfillPerRun: 7,
 };
 
 /** The rows with a list of fields, in table order. `ecs` is the hint column. */
@@ -60,13 +62,16 @@ export const VOLUME_KEYS = [
   { path: 'topValues',    managed: 'volumeTopValues',    env: 'UI_VOLUME_TOP_VALUES',       kind: 'int' },
   { path: 'keepMonths',   managed: 'volumeKeepMonths',   env: 'UI_VOLUME_KEEP_MONTHS',      kind: 'int' },
   { path: 'collectAt',    managed: 'volumeCollectAt',    env: 'UI_VOLUME_COLLECT_AT',       kind: 'text' },
+  // Missing days refilled a few a run while the cluster is calm (docs/VOLUME.md "Backfill").
+  { path: 'backfillDays',   managed: 'volumeBackfillDays',   env: 'UI_VOLUME_BACKFILL_DAYS',    kind: 'int' },
+  { path: 'backfillPerRun', managed: 'volumeBackfillPerRun', env: 'UI_VOLUME_BACKFILL_PER_RUN', kind: 'int' },
 ];
 
 export const SIZE_BASES = ['primary', 'total', 'eventSize'];
 export const DAY_FROM = ['name', 'time'];
 /** One or more comma-separated index patterns: letters, digits and _ . - * only, no date part needed. */
 const PATTERN_RE = /^[A-Za-z0-9_.*-]+$/;
-export const BOUNDS = { topValues: [5, 100], keepMonths: [1, 36] };
+export const BOUNDS = { topValues: [5, 100], keepMonths: [1, 36], backfillDays: [0, 366], backfillPerRun: [1, 31] };
 
 /** A field name: what Elasticsearch accepts in practice, no spaces, no commas. */
 const FIELD_RE = /^[A-Za-z0-9_.@-]+$/;
@@ -290,7 +295,8 @@ export function validateVolume(v, { partial = false } = {}) {
   if (!partial && !String(ex.name || '').trim()) bad.push('Extra field: give it a name.');
   if (!partial || (ex.fields && toList(ex.fields).length)) fields('Extra field', ex.fields);
   if (has(v.sizeBasis) && !SIZE_BASES.includes(v.sizeBasis)) bad.push('Size that counts as volume: pick one of the three.');
-  for (const [key, label] of [['topValues', 'Top values kept per field'], ['keepMonths', 'Keep the daily record for']]) {
+  for (const [key, label] of [['topValues', 'Top values kept per field'], ['keepMonths', 'Keep the daily record for'],
+    ['backfillDays', 'Fill missing days of the last'], ['backfillPerRun', 'Missing days filled per run']]) {
     if (!has(v[key]) && partial) continue;
     const n = Number(v[key]); const [lo, hi] = BOUNDS[key];
     if (!Number.isInteger(n) || n < lo || n > hi) bad.push(`${label}: a whole number from ${lo} to ${hi}.`);
@@ -373,6 +379,8 @@ export function yamlBlock(v) {
     `    topValues:   ${v.topValues}`,
     `    keepMonths:  ${v.keepMonths}`,
     `    collectAt:   "${v.collectAt}"`,
+    `    backfillDays:   ${v.backfillDays}`,
+    `    backfillPerRun: ${v.backfillPerRun}`,
   ].join('\n');
 }
 

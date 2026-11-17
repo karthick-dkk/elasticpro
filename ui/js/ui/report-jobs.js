@@ -1,6 +1,9 @@
 /**
- * Reports › Exports & schedules › Generate report, and the list of report jobs (0.3.45; under
- * Indices › Summary › Monthly until 0.3.53).
+ * Reports › Exports & schedules › Generated reports: the report files the core keeps (7 days) as
+ * one full-width table, newest first, always shown — and the Generate report form above it, open
+ * only while its button is pressed (0.3.45; under Indices › Summary › Monthly until 0.3.53; the
+ * table since the owner's 2026-11-17 request: the old half-width list cut the file names off and
+ * vanished with the form).
  *
  * One job per client (a client is a cluster). The core queues them, runs a few at once and
  * keeps the files; this panel picks what to ask for and shows what the core says about each
@@ -15,7 +18,7 @@
 
 import { h, mount, reconcile } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
-import { downloadBytes } from '../lib/fmt.js';
+import { downloadBytes, bytes, dt } from '../lib/fmt.js';
 import { clusters, state } from '../core/state.js';
 import { toast } from './menu.js';
 import { confirmDialog } from './modal.js';
@@ -24,7 +27,7 @@ import {
   reportConcurrencySet, reportScheduleGet, periodPresets, periodLabel, jobStatusText, jobPct, jobClient,
   countsText, sortJobs, isActive, isFinished, base64ToBytes, isWorkerDown, failLevel,
 } from '../core/reports.js';
-import { jobClusterLines, clusterLineText } from '../core/report-types.js';
+import { jobClusterLines, clusterLineText, kindOf } from '../core/report-types.js';
 
 const CONCURRENCY = [3, 4, 5];
 
@@ -45,6 +48,7 @@ let open = false;
 let mountEl = null;
 let panelEl = null;
 let formEl = null;
+let jobsEl = null;
 let listEl = null;
 let headEl = null;
 let concEl = null;
@@ -110,30 +114,44 @@ export function reportPanel(c) {
 
 function build() {
   formEl = h('div.rj-form');
+  statusEl = h('div#rj-status.rj-status', { role: 'status', hidden: true });
+  panelEl = h('section#rj-panel.card.rj-panel', { hidden: true },
+    h('header', h('h2', 'Generate report'), h('span.sub', 'one job per client'),
+      h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
+        h('button.btn.sm', { type: 'button', title: 'Close the form; jobs keep running', onclick: () => setReportPanelOpen(false) }, 'Close'))),
+    h('div.body.rj-body', formEl, statusEl));
+  buildJobs();
+}
+
+/**
+ * The report files as a table (`#rj-jobs`), kept for the session like the panel: placed under the
+ * form on the Generated reports card and drawn whether the form is open or not.
+ */
+export function reportJobsTable() {
+  if (!panelEl) build();
+  startReportsPoll();
+  return jobsEl;
+}
+
+function buildJobs() {
+  if (jobsEl) return;
   concEl = h('select#rj-concurrency', {
     'aria-label': 'Jobs run at once',
     onchange: (e) => setConcurrency(e.target.value),
   }, ...CONCURRENCY.map((n) => h('option', { value: String(n) }, String(n))));
   headEl = h('span.rj-counts.muted');
-  listEl = h('div.rj-list', { role: 'list' });
+  listEl = h('tbody');
   footEl = h('div.rj-foot.muted');
-  statusEl = h('div#rj-status.rj-status', { role: 'status', hidden: true });
-  panelEl = h('section#rj-panel.card.rj-panel', { hidden: true },
-    h('header', h('h2', 'Generate report'), h('span.sub', 'one job per client'),
-      h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
-        h('button.btn.sm', { type: 'button', title: 'Close the panel; jobs keep running', onclick: () => setReportPanelOpen(false) }, 'Close'))),
-    h('div.body.rj-body',
-      formEl,
-      statusEl,
-      h('div.rj-jobs',
-        h('div.rj-jobs-head',
-          h('b', 'Report jobs'), headEl,
-          h('label.rj-conc', 'Run at once', concEl)),
-        listEl,
-        h('div.rj-acts',
-          h('button#rj-stop-all.btn.sm', { type: 'button', onclick: stopAll }, 'Stop all'),
-          h('button#rj-clear.btn.sm', { type: 'button', onclick: clearFinished }, 'Clear finished')),
-        footEl)));
+  jobsEl = h('div#rj-jobs.rj-jobs',
+    h('div.rj-jobs-head',
+      headEl,
+      h('label.rj-conc', 'Run at once', concEl),
+      h('button#rj-stop-all.btn.sm', { type: 'button', onclick: stopAll }, 'Stop all'),
+      h('button#rj-clear.btn.sm', { type: 'button', onclick: clearFinished }, 'Clear finished')),
+    h('div.tbl-wrap', h('table.tbl.rj-table#rj-table',
+      h('thead', h('tr', ...JOB_COLS.map(([label, num]) => h(num ? 'th.num' : 'th', label)))),
+      listEl)),
+    footEl);
   onReports(renderJobs);
   renderJobs();
 }
@@ -269,6 +287,10 @@ async function run() {
 
 /* ----------------------------------- the jobs ----------------------------------- */
 
+/** The table's columns: Cluster(s) · Report kind · Period · Format · Size · Created · Status · the file's action. */
+const JOB_COLS = [['Cluster(s)'], ['Report kind'], ['Period'], ['Format'], ['Size', true], ['Created'], ['Status'], ['Download']];
+const FORMAT_LABEL = { xlsx: '.xlsx', csvzip: '.csv (zip)', csv: '.csv' };
+
 function renderJobs() {
   if (!listEl) return;
   const admin = isAdmin();
@@ -278,40 +300,73 @@ function renderJobs() {
   if (document.activeElement !== concEl) concEl.value = String(reports.concurrency || 3);
   concEl.disabled = !admin;
   concEl.title = admin ? 'How many report jobs run at the same time' : 'Only an admin changes this';
-  const stopAllBtn = panelEl.querySelector('#rj-stop-all');
+  const stopAllBtn = jobsEl.querySelector('#rj-stop-all');
   stopAllBtn.hidden = !admin;
   stopAllBtn.disabled = !jobs.some(isActive);
-  panelEl.querySelector('#rj-clear').disabled = !jobs.some(isFinished);
-  footEl.textContent = `At most ${reports.concurrency || 3} run together; the rest wait in the queue and start as slots free up. Only an admin can stop a job.`;
-  if (!jobs.length) { jobsBuilt.clear(); mount(listEl, h('div.muted.rj-empty', 'No report jobs yet.')); return; }
+  jobsEl.querySelector('#rj-clear').disabled = !jobs.some(isFinished);
+  footEl.textContent = `Files are kept on the server for 7 days. At most ${reports.concurrency || 3} run together; the rest wait in the queue and start as slots free up. Only an admin can stop a job.`;
+  if (!jobs.length) {
+    jobsBuilt.clear();
+    const none = reports.supported === false
+      ? 'This server does not build report files.'
+      : ['No report built in the last 7 days · ', h('button.linkish#rj-empty-open', { type: 'button', onclick: () => setReportPanelOpen(true) }, 'Generate report')];
+    mount(listEl, h('tr', h('td.rj-empty', { colspan: JOB_COLS.length }, none)));
+    return;
+  }
   jobsBuilt.begin();
-  mount(listEl, ...jobs.map((j) => jobRow(j, jobs, admin)));
+  mount(listEl, ...jobs.flatMap((j) => jobRows(j, jobs, admin)));
   jobsBuilt.end();
 }
 
 /**
- * Each job's row, kept for as long as the job is listed (lib/keyed.js). The list is read every
- * 2 s while a job runs and its progress moves each time: only the parts that changed — the
- * status line, the bar, the per-cluster lines — are put back, so the Stop button under the
- * mouse is the same button from one read to the next (a press that landed between the old
- * button's down and the new one's up used to do nothing) and its hover does not blink.
+ * Each job's row (and the line under it for a multi-cluster job, a warning or a mail error), kept
+ * for as long as the job is listed (lib/keyed.js). The list is read every 2 s while a job runs and
+ * its progress moves each time: only the cells that changed are put back, so the Stop button under
+ * the mouse is the same button from one read to the next and its hover does not blink.
  */
 const jobsBuilt = nodeCache();
 
-function jobRow(j, all, admin) {
-  const parts = jobParts(j, all, admin);
+function jobRows(j, all, admin) {
   const key = `job:${j.id}`;
-  const row = jobsBuilt.get(key, '', () => h('div.rj-job', { role: 'listitem', dataset: { job: String(j.id) } }));
+  const row = jobsBuilt.get(key, '', () => h('tr.rj-job', { dataset: { job: String(j.id) } }));
   if (row.dataset.status !== String(j.status)) row.dataset.status = String(j.status);
-  reconcile(row, jobsBuilt.sameAll(key, parts));
-  return row;
+  // The full file name is the row's title: the Status cell may ellipsize it.
+  const title = j.file && j.file.name ? j.file.name : jobClient(j);
+  if (row.title !== title) row.title = title;
+  reconcile(row, jobsBuilt.sameAll(key, jobCells(j, all, admin)));
+  const sub = [clusterProgress(j),
+    j.warning ? h('div.rj-sub.rj-warn', String(j.warning)) : null,
+    j.mailError ? h('div.rj-sub.rj-warn', `Not mailed: ${j.mailError}`) : null].filter(Boolean);
+  if (!sub.length) return [row];
+  const subRow = jobsBuilt.get(`${key}:sub`, '', () => h('tr.rj-subrow', { dataset: { job: String(j.id) } }, h('td', { colspan: JOB_COLS.length })));
+  reconcile(subRow.firstChild, jobsBuilt.sameAll(`${key}:sub`, sub));
+  return [row, subRow];
 }
 
-function jobParts(j, all, admin) {
+/** The clusters a job covers, by name: its one cluster, or a mailed / multi-cluster job's list. */
+function jobClusters(j) {
+  const ids = Array.isArray(j.clusterIds) && j.clusterIds.length > 1 ? j.clusterIds : null;
+  return ids ? ids.map(clusterName).join(', ') : (j.clusterName || clusterName(j.clusterId) || '—');
+}
+
+/** The report kind in words (core/report-types.js KINDS); a mailed one says so. */
+function jobKind(j) {
+  const label = kindOf(j.reportKind || j.report || 'volume').label;
+  return j.kind === 'mailed' || j.clusterId === '*' ? `Mailed · ${label}` : label;
+}
+
+/** createdAt as ms (the core sends ms; an ISO string is read too); null when not given. */
+const createdMs = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Date.parse(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+function jobCells(j, all, admin) {
   const pct = jobPct(j);
   const status = jobStatusText(j, all);
   const cls = j.status === 'failed' ? '.rj-bad' : j.status === 'done' ? '.rj-ok' : '';
-  // Why a job failed, or who stopped it, is read in full; a file name may ellipsize (it is on hover).
+  // Why a job failed, or who stopped it, is read in full; a file name may ellipsize (it is the row's title).
   const wrap = j.status === 'failed' || j.status === 'stopped' ? '.rj-wrap' : '';
   const mine = admin || !j.by || j.by === callerName();
   let act = null;
@@ -326,19 +381,23 @@ function jobParts(j, all, admin) {
       onclick: (e) => download(j, e.currentTarget),
     }, 'Download');
   }
+  const who = jobClusters(j);
+  const created = createdMs(j.createdAt);
+  const size = j.file && j.file.bytes !== null && j.file.bytes !== undefined && Number.isFinite(Number(j.file.bytes)) ? bytes(j.file.bytes) : '—';
   return [
-    h('span.rj-client-name', { title: jobClient(j) }, jobClient(j)),
-    h('span.rj-period.muted', { title: periodLabel(j.period) }, periodLabel(j.period)),
-    h(`span.rj-status${wrap}`,
+    h('td.rj-client-name', { title: who }, who),
+    h('td.rj-kind', jobKind(j)),
+    h('td.rj-period', { title: periodLabel(j.period) }, periodLabel(j.period)),
+    h('td.rj-format', FORMAT_LABEL[j.format] || (j.format ? String(j.format) : '—')),
+    h('td.num.rj-size', size),
+    h('td.rj-created', created ? dt(created) : '—'),
+    h(`td.rj-status${wrap}`,
       h(`span.rj-status-t${cls}`, { title: status }, status),
       j.status === 'running' && pct !== null
         ? h('span.rj-bar', { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(pct) },
           h('i', { style: { width: `${pct}%` } }))
         : null),
-    h('span.rj-act', act),
-    clusterProgress(j),
-    j.warning ? h('div.rj-sub.rj-warn', String(j.warning)) : null,
-    j.mailError ? h('div.rj-sub.rj-warn', `Not mailed: ${j.mailError}`) : null];
+    h('td.rj-act', act || h('span.muted', '—'))];
 }
 
 const clusterName = (id) => (clusters().find((x) => x.id === id) || {}).name || id;

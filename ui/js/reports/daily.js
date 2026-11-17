@@ -30,7 +30,7 @@ import { configErrorOf,
   lastMonths, breakdownPeriods, breakdownLabel, breakdownCsvRows, BREAKDOWN_CSV, shortDay,
   addDays, eventBytesOf, perDayEventBytes, eventVsAvgPct, eventYesterday, eventMonthSoFar, eventPeak,
   monthEventPeak, monthVsPrevious, daysInMonth, dayStatus, breakdownEventShares,
-  reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV, recordEmptyWhy,
+  reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV, recordEmptyWhy, backfillLine,
 } from '../core/volume-daily.js';
 import { forgetRecords } from './record.js';
 import { collectNow, collecting, collectOf, adopt, reportStatus, endText, dismiss, onCollect, FOLLOW_LIMIT_MS } from './collect.js';
@@ -414,6 +414,9 @@ function dailyView(c, picker) {
     out.push(h('div.banner.warn', h('div', h('div.ttl', 'The last collection did not finish'), h('div.mono', String(st.lastError)))));
   }
   if (ent && ent.error) out.push(h('div.banner.err', h('div', h('div.ttl', 'Could not read the daily record'), h('div.mono', ent.error))));
+  // Why a gap may remain (docs/VOLUME.md "Backfill"): one line, only when there is something to say.
+  const bf = backfillLine(st);
+  if (bf) out.push(h('div.muted.vs-backfill', { role: 'status', title: bf.title }, bf.text));
   if (why) return [...out, emptyWhy(c, why)];
   out.push(dailyCards(reply), dailyChart(reply), dailyTable(c, reply));
   return out;

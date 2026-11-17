@@ -35,7 +35,71 @@ test('routes: each view round-trips, names with slashes and spaces included', ()
   assert.equal(R.ldHash('devices', 'c 1', null, { tz: 'none' }), '#/log-delay/devices/c%201?tz=none');
   assert.equal(R.ldHash('cluster', 'c1', null, { tz: 330 }), '#/log-delay/cluster/c1?tz=330');
   assert.equal(R.ldHash('fleet', null, null, { tz: null }), '#/log-delay', 'no filter, no query');
-  assert.deepEqual(['fleet', 'cluster', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'devices', 'devices', 'devices', 'watch', 'live']);
+  assert.deepEqual(['fleet', 'cluster', 'summary', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'summary', 'devices', 'devices', 'devices', 'watch', 'live']);
+  // Summary (the fleet view of Reports › Log delay before 0.3.60), second in the tabs; one cluster too.
+  assert.deepEqual(R.ldRoute(R.ldHash('summary')), { view: 'summary', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('summary', 'c 1')), { view: 'summary', clusterId: 'c 1', device: null, tz: null });
+  assert.equal(R.ldHash('summary'), '#/log-delay/summary');
+  assert.equal(R.ldHash('summary', 'c1', null, { tz: 480 }), '#/log-delay/summary/c1?tz=480');
+  assert.equal(R.LD_VIEWS.indexOf('summary'), R.LD_VIEWS.indexOf('cluster') + 1);
+});
+
+test('summary: the late split, Delay reduced, the rings worst first and their arcs — unknown is not zero', () => {
+  const b = R.bands({ delayFrom: 30, criticalOver: 60 });
+  assert.equal(R.lateSplitText({ delay: 116, critical: 440 }, b), '116 at 30–60 min, 440 above 60 min');
+  assert.equal(R.lateSplitText({ delay: null, critical: 3 }, b), '— at 30–60 min, 3 above 60 min');
+  const red = R.reducedBars([{ hours: 2, n: 4 }, { hours: 4, n: 0 }, { hours: 24, n: 23 }], 44);
+  assert.deepEqual(red.map((r) => r.label), ['2 h', '4 h', '6 h', '12 h', '24 h']);
+  assert.deepEqual(red.map((r) => r.n), [4, 0, null, null, 23], 'an hour the core did not send is unknown, not 0');
+  assert.equal(red[4].px, 44); assert.equal(red[1].px, 0); assert.equal(red[2].px, 0);
+  assert.ok(red[0].px >= 3);
+  const order = R.ringsOrder([
+    { id: 'a', name: 'a', latePct: 3.4, lateNow: 14, lastRunAt: 1 },
+    { id: 'n', name: 'n', latePct: null, lateNow: 0, lastRunAt: null },
+    { id: 'b', name: 'b', latePct: 24.0, lateNow: 3, lastRunAt: 1 },
+    { id: 'c', name: 'c', latePct: 3.4, lateNow: 20, lastRunAt: 1 },
+  ]).map((c) => c.id);
+  assert.deepEqual(order, ['b', 'c', 'a', 'n'], 'worst share first, then most late; never measured last');
+  assert.equal(R.ringArcs(1, 1, 0), null, 'no device: no share, never 0 %');
+  assert.equal(R.ringArcs(null, 2, 10), null, 'a figure missing: unknown');
+  assert.deepEqual(R.ringArcs(0, 0, 10), [], 'measured, nothing late: no arc');
+  const arcs = R.ringArcs(2, 1, 10);
+  assert.deepEqual(arcs.map((x) => x.kind), ['critical', 'delay']);
+  assert.equal(arcs[0].dash, '10.00 90.00'); assert.equal(arcs[1].dash, '20.00 80.00'); assert.equal(arcs[1].offset, '-10.00', 'the delay band starts where the critical arc ends');
+  assert.equal(R.ringArcs(0, 1, 100000)[0].dash, '1.50 98.50', 'one late device still shows');
+  assert.deepEqual(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 30, criticalOver: 60 } }]), { delayFrom: 30, criticalOver: 60 });
+  assert.equal(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 20, criticalOver: 60 } }]), null);
+  assert.equal(R.sharedLevels([]), null);
+});
+
+test('summary day by day: a day without totals is a gap, every tick its own date', () => {
+  const day = (d, o = {}) => ({ day: d, devices: 10, onTimeAll: 6, delayed: 2, critical: 1, otherTz: 0, silent: 1, unmeasured: 0, ...o });
+  const bars = R.dayBars([day('2026-11-09'), { day: '2026-11-10', devices: 0 }, day('2026-11-11', { onTimeAll: 1, delayed: 0, critical: 0, silent: 0 })], 100);
+  assert.equal(bars[1].gap, true); assert.equal(bars[1].ok + bars[1].delay + bars[1].critical + bars[1].unk, 0);
+  assert.deepEqual([bars[0].ok, bars[0].delay, bars[0].critical, bars[0].unk], [60, 20, 10, 10]);
+  assert.equal(bars[2].ok, 10);
+  assert.match(R.dayTitle({ day: '2026-11-10', devices: 0 }), /10 Nov · no measurement/);
+  assert.match(R.dayTitle(day('2026-11-09'), R.bands({ delayFrom: 30, criticalOver: 60 })), /6 on time, 2 at 30–60 min, 1 above 60 min, 1 silent/);
+  // The old board's ticks read "10 Nov" five times over a short period; each is its own day now.
+  assert.deepEqual(R.dayTicks([day('2026-11-10')]), ['10 Nov']);
+  assert.deepEqual(R.dayTicks([day('2026-11-16'), day('2026-11-17')]), ['16 Nov', '17']);
+  const month = Array.from({ length: 30 }, (_, i) => day(new Date(Date.UTC(2026, 9, 19 + i)).toISOString().slice(0, 10)));
+  const ticks = R.dayTicks(month).filter(Boolean);
+  assert.equal(ticks.length, 6);
+  assert.equal(new Set(ticks).size, ticks.length, 'no date twice');
+  assert.deepEqual(ticks, ['19 Oct', '24', '29', '3 Nov', '8', '13'], 'the month once, and again where it changes');
+});
+
+test('summary day by day covers at least the last 7 days: a short range widens, a long one is its own days', () => {
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-17', to: '2026-11-17' }, '2026-11-17'), { from: '2026-11-11', to: '2026-11-17', days: 7, widened: true });
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-16', to: '2026-11-17' }, '2026-11-17'), { from: '2026-11-11', to: '2026-11-17', days: 7, widened: true }, 'a 1 h window past midnight is still short');
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-01', to: '2026-11-10' }, '2026-11-17'), { from: '2026-11-01', to: '2026-11-10', days: 10, widened: false }, 'a 10-day custom range is its own days');
+  assert.deepEqual(R.dayChartDays({ from: '2026-11-11', to: '2026-11-17' }, '2026-11-17').widened, false, 'exactly 7 days is not widened');
+  assert.deepEqual(R.dayChartDays({ from: '2026-12-03', to: '2026-12-03' }, '2026-12-03'), { from: '2026-11-27', to: '2026-12-03', days: 7, widened: true }, 'across a month boundary');
+  assert.deepEqual(R.dayChartDays({ from: '2027-01-02', to: '2027-01-02' }, '2027-01-02').from, '2026-12-27', 'across a year boundary');
+  assert.deepEqual(R.dayChartDays(null, '2026-11-17').from, '2026-11-11', 'no window: the last 7 days');
+  assert.equal(R.dayChartWords(R.dayChartDays({ from: '2026-11-17', to: '2026-11-17' }, '2026-11-17')), 'Last 7 days · 11 Nov – 17 Nov');
+  assert.equal(R.dayChartWords({ from: '2026-10-19', to: '2026-11-17', days: 30, widened: false }), '30 days · 19 Oct – 17 Nov');
 });
 
 test('the old addresses open the matching view of the Log Delay page', () => {

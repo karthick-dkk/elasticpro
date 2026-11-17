@@ -2354,6 +2354,8 @@ function readVolumeForm() {
   put('topValues', n('vf-top'));
   put('keepMonths', n('vf-keep'));
   put('collectAt', g('vf-at'));
+  put('backfillDays', n('vf-backfill'));
+  put('backfillPerRun', n('vf-backfill-run'));
   return out;
 }
 
@@ -2372,6 +2374,8 @@ function fillVolumeForm(v) {
   set('vf-top', v.topValues);
   set('vf-keep', v.keepMonths);
   set('vf-at', v.collectAt);
+  set('vf-backfill', v.backfillDays);
+  set('vf-backfill-run', v.backfillPerRun);
 }
 
 /** Defaults: the built-in values. An override: everything blank, which is "inherit". */
@@ -2417,6 +2421,7 @@ const LOCKED_LABEL = {
   indexFormat: 'Index name', tag: 'Tag', forwarder: 'Forwarder tag', sourceHost: 'Source host', sourceIp: 'Source IP',
   eventSize: 'Event size', subSize: 'Sub size', 'extra.name': 'Extra field', 'extra.fields': 'Extra field',
   sizeBasis: 'Size that counts', topValues: 'Top values', keepMonths: 'Keep the daily', collectAt: 'Collect once',
+  backfillDays: 'Fill missing days', backfillPerRun: 'Missing days filled',
 };
 
 /** Fill one cell of the check column in place, so what was typed is not redrawn away. */
@@ -2617,7 +2622,11 @@ function volumeCard() {
     cell('Top values kept per field', num('vf-top', 'topValues', VOLUME_BOUNDS.topValues[0], VOLUME_BOUNDS.topValues[1]), 'topValues'),
     cell('Keep the daily record for (months)', num('vf-keep', 'keepMonths', VOLUME_BOUNDS.keepMonths[0], VOLUME_BOUNDS.keepMonths[1]), 'keepMonths'),
     cell('Collect once a day at (server time)', lock('collectAt', h('input.mono', { id: 'vf-at', type: 'time', value: String(start('collectAt')) })), 'collectAt',
-      'Every 24 h. "Collect now" on Reports › Daily & monthly runs it at once.'));
+      'Every 24 h. "Collect now" on Reports › Daily & monthly runs it at once.'),
+    cell('Fill missing days of the last (days)', num('vf-backfill', 'backfillDays', VOLUME_BOUNDS.backfillDays[0], VOLUME_BOUNDS.backfillDays[1]), 'backfillDays',
+      '0 = off. Days the record lacks while the cluster still has their indices, refilled after the day\'s run.'),
+    cell('Missing days filled per run', num('vf-backfill-run', 'backfillPerRun', VOLUME_BOUNDS.backfillPerRun[0], VOLUME_BOUNDS.backfillPerRun[1]), 'backfillPerRun',
+      'Oldest first, and only while the cluster is not under query pressure.'));
 
   const name = (list.find((c) => c.id === vol.clusterId) || {}).name || 'a cluster';
   return card('Volume fields',

@@ -57,6 +57,10 @@ pub struct ClusterState {
     pub time_split: u64,
     #[serde(default)]
     pub months: BTreeMap<String, MonthSummary>,
+    /// What the last daily run's backfill found and did (docs/VOLUME.md "Backfill"); absent
+    /// while it is off, and on a record no run has backfilled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<super::backfill::Status>,
 }
 
 pub struct Store {

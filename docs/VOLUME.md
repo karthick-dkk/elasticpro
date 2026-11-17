@@ -76,6 +76,8 @@ defaults:
     topValues:   25             # 5..100, values kept per field per day
     keepMonths:  13             # 1..36
     collectAt:   "06:00"        # HH:MM, server local time (TZ of the core process)
+    backfillDays:   30          # 0..366, 0 = off: how far back a run fills missing days ("Backfill")
+    backfillPerRun: 7           # 1..31: the most such days one run fills for one cluster
     overrides:                  # per cluster, by cluster id; any subset of the keys above
       prod-eu: { forwarder: [ fwdtag ] }
 ```
@@ -130,6 +132,8 @@ defaults:
 | `UI_VOLUME_TOP_VALUES` | int 5..100 | `volumeTopValues` |
 | `UI_VOLUME_KEEP_MONTHS` | int 1..36 | `volumeKeepMonths` |
 | `UI_VOLUME_COLLECT_AT` | text HH:MM | `volumeCollectAt` |
+| `UI_VOLUME_BACKFILL_DAYS` | int 0..366 (0 = off) | `volumeBackfillDays` |
+| `UI_VOLUME_BACKFILL_PER_RUN` | int 1..31 | `volumeBackfillPerRun` |
 
 ## Collection (core, `volume_daily`)
 
@@ -192,7 +196,10 @@ defaults:
      Otherwise `GET /<expr>/_field_caps?fields=…&ignore_unavailable=true` when a day is to be
      searched, to resolve each row.
   3. For each day within `keepMonths` that is live with an open dated index or time-split
-     documents, and is not yet aggregated as final (plus today, every run), one search.
+     documents, and is not yet aggregated as final (plus today, every run), one search — except
+     the days before yesterday within `backfillDays`, which are the backfill's (below, "Backfill"):
+     at most `backfillPerRun` of them a run, after the run's own days, each only while the
+     cluster is not under query pressure.
      Legacy format, `dayFrom: name`:
      `POST /<indexFormat with the date>/_search?ignore_unavailable=true&allow_no_indices=true`.
      Otherwise `POST /<expr>/_search?ignore_unavailable=true&allow_no_indices=true` with the
@@ -228,7 +235,8 @@ defaults:
      desktop message's, or built-in on a hosted core with no config file. A desktop request
      that carried no settings never prunes.
 - **A past day that stays `final: false`** is asked again on every later run while it is
-  live with an open index, and its `error` says why it is not final:
+  live with an open index (within `backfillDays`: by the backfill, a few a run and only while
+  the cluster is calm), and its `error` says why it is not final:
   - the search failed → "the search failed: …; asked again on the next run";
   - the answer had failed shards or timed out → figures kept, "N of M shards failed (…):
     figures may be short; asked again on the next run" (such an answer is never final);
@@ -250,6 +258,57 @@ defaults:
   under the same rule as a dated one: its first whole answer after the day is over.
 - **`listedAt`** is set only by a run whose time split is known for every time-split index
   (none closed, none unknown): a day with no record may otherwise still have documents.
+
+### Backfill (0.3.75)
+
+A day the timer did not collect — the run failed, the cluster was busy or unreachable, the core
+was down — is a gap in Reports › Daily & monthly although the cluster may still hold that day's
+indices. The backfill fills such days on later runs, gently.
+
+- **Which days** (`volume::backfill`, one definition): every day of the **window** — from
+  `backfillDays` days before today (UTC) to the day before yesterday, none before the first day
+  `keepMonths` keeps — that the record does not hold as **final and measured** (`final: true`
+  with a document count). After step 1 of the run every day that has an index on the cluster has
+  a record, so each day of the window is one of:
+  - *done* — final and measured: never asked again;
+  - *fillable* — not final (never searched, the search failed, "N of M shards failed", the time
+    split not counted …) or final without a document count, **and** it has an open index dated
+    on it or time-split documents on it now (the collector's own day mapping: `Listing`, `Split`);
+  - *gone* — not final, and its indices went (`live: false`): kept as last measured, not asked
+    again ("indices no longer on the cluster"), never shown as 0;
+  - *no index* — no record: the cluster has no index on it, so there is nothing to fill it from;
+  - *waiting* — its indices are there but all closed, or the time split is not known this run.
+  Today and yesterday are the run's own days and are collected as before, whatever the pressure.
+  Days older than the window keep the rule above (asked every run while not final).
+- **When**: in the daily run (the timer) and in Collect now (`VOLUME_RUN`), after the run's own
+  days: the oldest fillable days first, at most `backfillPerRun` per cluster per run, so a long
+  gap fills over a few runs instead of in one burst. A report job (`REPORT_RUN`) collects its own
+  period as before and does no backfill.
+- **Only while the cluster is calm**: before each backfill day, one
+  `GET /_cat/thread_pool/search?format=json&h=node_name,active,queue,queue_size,rejected`
+  (Background class, the run's origin, 30 s). The cluster is **under query pressure** when that
+  reading finds a node's search queue over half full or more rejections than the reading before
+  (`report::control::pool_pressure`, the hosts collection's rule), or when the one busy definition
+  (docs/JOBS.md "Busy clusters") has a `pool` or `429` line for it. `slow` (answers over 8 s) does
+  not count here: a day's aggregation over a big day takes that long by itself (it has 110 s), and
+  counting it would pause the backfill on its own first search. A reading that fails says nothing.
+  Under pressure the backfill stops for that cluster for this run — the run's own days are
+  already collected — and its status says `paused`; the next run tries again. Pressure is not an
+  error: the run ends `completed`.
+- **Status**: the run writes `backfill` to `state.json`, and `status.backfill` in `VOLUME_DAILY`
+  / `VOLUME_MONTHLY` carries it (`null` while the backfill is off or before its first run):
+  `{at, from, to, missing, fillable, searched, filled, queued, gone, noIndex, waiting, paused}` —
+  `missing` = days of the window not final and measured when the run began (`fillable + gone +
+  noIndex + waiting`); `searched` / `filled` = backfill days asked this run / final and measured
+  afterwards; `queued` = fillable days still not filled (the next runs' work); `paused` = why it
+  stopped for pressure, else `null`. Reports › Daily & monthly and Indices › Summary show it in
+  one line ("Backfill: N days queued · N with no index on the cluster · paused (query pressure)").
+- **Run log**: the run's `note` says it ("backfilled 3 of 10 missing days", "backfill paused:
+  cluster under query pressure (…)"); a run over several clusters sums them ("…; 12 days
+  backfilled, 1 backfills paused for query pressure"). `records` counts every day searched,
+  backfill included.
+- **Requests per run, per cluster**, on top of the ones above: at most `backfillPerRun` searches
+  and as many thread-pool readings. `backfillDays: 0` is exactly the collection before 0.3.75.
 
 ### Store
 
@@ -366,7 +425,8 @@ config file cannot be read, the read-only replies (`VOLUME_SETTINGS`, `VOLUME_DA
 | `VOLUME_LAYOUT_GET` | Guest | `{}` | `{layouts:{daily, monthly, capacity, overview}}` |
 | `VOLUME_LAYOUT_SET` | Operator | `{table:"daily"\|"monthly"\|"capacity"\|"overview", layout:{order:[keys], hidden:[keys], labels:{key:label}}}` | `{layouts}`; any other table, an unknown key, `cluster` hidden or not first (capacity, overview) → `bad_request` |
 
-`status = {lastRunAt|null, nextRunAt|null, running, progress:{done,total}|null, lastError|null, collectAt}`
+`status = {lastRunAt|null, nextRunAt|null, running, progress:{done,total}|null, lastError|null, collectAt, backfill|null}`
+(`backfill`: "Backfill" above)
 
 `DailyRow = Day totals + {basis, avg, changeVsAvgPct, top:{tag,forwarder,sourceHost,sourceIp,extra: {value, share}|null}}`
 

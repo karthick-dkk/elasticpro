@@ -18,6 +18,7 @@ use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
 use elasticpro_core::auth::Edition;
 use elasticpro_core::Core;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use support::{GaugedServer, TempDir, TestServer};
 
@@ -44,7 +45,17 @@ async fn cluster(listing: Listing, with_event: bool) -> TestServer {
 /// Searches come as the legacy format sends them (the day in the path) or as an index
 /// pattern does (the indices, and the time-split ones' day, in the query).
 async fn cluster_split(listing: Listing, with_event: bool, split: Vec<(String, String, u64)>) -> TestServer {
+    cluster_with(listing, with_event, split, None).await
+}
+
+/// As `cluster_split`, answering `_cat/thread_pool/search` too: one node, its search queue 900
+/// of 1000 while `pressed`, else empty.
+async fn cluster_with(listing: Listing, with_event: bool, split: Vec<(String, String, u64)>, pressed: Option<Arc<AtomicBool>>) -> TestServer {
     TestServer::with(move |hit| {
+        if let (Some(p), true) = (&pressed, hit.path.starts_with("/_cat/thread_pool/search")) {
+            let queue = if p.load(Ordering::SeqCst) { 900 } else { 0 };
+            return (200, json!([{ "node_name": "n1", "active": "0", "queue": queue.to_string(), "queue_size": "1000", "rejected": "0" }]).to_string());
+        }
         let all = listing.lock().unwrap().clone();
         if hit.path.starts_with("/_cat/indices/") {
             let rows: Vec<Value> = all.iter().map(|(n, pri)| json!({
@@ -691,4 +702,119 @@ async fn desktop_messages_about_several_clusters_use_each_ones_override() {
     let own = c.handle(json!({ "type": "VOLUME_MONTHLY", "clusterId": "b",
                                "volume": { "defaults": { "topValues": 30 }, "cluster": { "topValues": 99 } } })).await;
     assert_eq!(own["settings"]["topValues"], 99, "about one cluster with nothing keyed: `cluster` is its override");
+}
+
+/// The last run of the daily job, once it has ended, from the run log the Jobs page reads.
+async fn last_daily_run(c: &Arc<Core>) -> Value {
+    for _ in 0..400 {
+        let l = c.handle(json!({ "type": "JOBS_LIST" })).await;
+        let j = l["jobs"].as_array().unwrap().iter().find(|j| j["id"] == json!("volume.daily")).cloned().unwrap_or(Value::Null);
+        if j["state"]["current"].is_null() && !j["state"]["lastRun"].is_null() {
+            return j["state"]["lastRun"].clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the daily job's run did not end");
+}
+
+/// Backfill (docs/VOLUME.md "Backfill"): days before yesterday that the record does not hold
+/// as final and measured, while the cluster still has their indices, are filled a few a run,
+/// oldest first, and only while the cluster is not under query pressure. Today and yesterday
+/// are the run's own and are collected whatever the pressure; a day whose indices went is not
+/// asked again and is counted, never shown as 0; a day with no index anywhere is counted apart.
+#[tokio::test]
+async fn missing_days_are_backfilled_a_few_a_run_oldest_first_while_the_cluster_is_calm() {
+    let t = today();
+    let day = |n: i64| t - Duration::days(n);
+    // Today and the eleven days before it have an index; nothing older (d12..d30 have none).
+    let listing: Listing = Arc::new(Mutex::new((0..=11).map(|n| (format!("logstash-linux-{}", dot(day(n))), 100)).collect()));
+    let pressed = Arc::new(AtomicBool::new(false));
+    let srv = cluster_with(listing.clone(), true, vec![], Some(pressed.clone())).await;
+    let dir = TempDir::new("volume-backfill");
+    let c = portable(&dir, &srv.url()).await;
+
+    // Run 1, Collect now, three a run (the desktop message's settings): today and yesterday,
+    // then d11, d10, d9 — the oldest three of the ten missing.
+    let volume = json!({ "defaults": { "backfillPerRun": 3 } });
+    let r = c.handle(json!({ "type": "VOLUME_RUN", "volume": volume })).await;
+    assert_eq!(r["started"], json!(["prod"]), "{r}");
+    let daily = settle(&c, "prod").await;
+    for n in [0, 1, 9, 10, 11] {
+        assert_eq!(searches_for(&srv, day(n)), 1, "d{n} searched on the first run");
+    }
+    for n in 2..=8 {
+        assert_eq!(searches_for(&srv, day(n)), 0, "d{n} waits for a later run");
+    }
+    let pool = srv.hits().iter().filter(|h| h.path.starts_with("/_cat/thread_pool/search")).count();
+    assert_eq!(pool, 3, "one thread-pool reading before each backfill day");
+    let bf = &daily["status"]["backfill"];
+    assert_eq!((bf["from"].as_str(), bf["to"].as_str()), (Some(dash(day(30)).as_str()), Some(dash(day(2)).as_str())), "{bf}");
+    assert_eq!((bf["fillable"].as_u64(), bf["searched"].as_u64(), bf["filled"].as_u64(), bf["queued"].as_u64()),
+               (Some(10), Some(3), Some(3), Some(7)), "{bf}");
+    assert_eq!((bf["noIndex"].as_u64(), bf["gone"].as_u64(), bf["missing"].as_u64(), bf["paused"].clone()),
+               (Some(19), Some(0), Some(29), Value::Null), "{bf}");
+    assert_eq!(daily["status"]["lastError"], Value::Null, "{daily}");
+    let run = last_daily_run(&c).await;
+    assert_eq!(run["status"], json!("completed"), "{run}");
+    assert_eq!(run["note"], json!("backfilled 3 of 10 missing days"), "the run log says it: {run}");
+    // The days not yet backfilled have a record (sizes from _cat) but no figures: not 0.
+    assert_eq!((row(&daily, day(5))["final"].clone(), row(&daily, day(5))["docs"].clone()), (json!(false), Value::Null));
+
+    // Run 2, the timer, under query pressure: the run's own days still go; the backfill stops
+    // before its first day and says why. The run is not a failure.
+    pressed.store(true, Ordering::SeqCst);
+    assert_eq!(c.volume_tick_at(local(t, "06:00")).await, vec!["prod".to_string()]);
+    let daily = settle(&c, "prod").await;
+    assert_eq!(searches_for(&srv, t), 2, "today, whatever the pressure");
+    for n in 2..=8 {
+        assert_eq!(searches_for(&srv, day(n)), 0, "d{n}: not under pressure");
+    }
+    let bf = &daily["status"]["backfill"];
+    let paused = bf["paused"].as_str().unwrap_or_else(|| panic!("{bf}"));
+    assert!(paused.contains("query pressure") && paused.contains("search queue is 900 of 1000"), "{paused}");
+    assert_eq!((bf["searched"].as_u64(), bf["queued"].as_u64()), (Some(0), Some(7)), "{bf}");
+    assert_eq!(daily["status"]["lastError"], Value::Null, "pressure is not an error: {daily}");
+    let run = last_daily_run(&c).await;
+    assert_eq!(run["status"], json!("completed"), "{run}");
+    assert!(run["note"].as_str().unwrap_or("").contains("backfill paused: cluster under query pressure"), "{run}");
+
+    // Run 3, calm again, the built-in seven a run: d2's index went meanwhile (retention), so
+    // it is not asked and is counted as gone; d3..d8 are filled.
+    pressed.store(false, Ordering::SeqCst);
+    c.load_clear_for_tests("prod");
+    listing.lock().unwrap().retain(|(n, _)| !n.ends_with(&dot(day(2))));
+    assert_eq!(c.volume_tick_at(local(t + Duration::days(1), "06:00")).await, vec!["prod".to_string()]);
+    let daily = settle(&c, "prod").await;
+    for n in 3..=8 {
+        assert_eq!(searches_for(&srv, day(n)), 1, "d{n} filled on the third run");
+    }
+    for n in [9, 10, 11] {
+        assert_eq!(searches_for(&srv, day(n)), 1, "d{n} was final: never asked again");
+    }
+    assert_eq!(searches_for(&srv, day(2)), 0, "d2's indices are gone: not asked");
+    let bf = &daily["status"]["backfill"];
+    assert_eq!((bf["fillable"].as_u64(), bf["searched"].as_u64(), bf["filled"].as_u64(), bf["queued"].as_u64(), bf["gone"].as_u64()),
+               (Some(6), Some(6), Some(6), Some(0), Some(1)), "{bf}");
+    let gone = row(&daily, day(2));
+    assert_eq!((gone["live"].clone(), gone["docs"].clone()), (json!(false), Value::Null), "kept, never 0: {gone}");
+    assert_eq!(row(&daily, day(5))["final"], json!(true));
+    assert_eq!(row(&daily, day(5))["eventBytes"], json!(300));
+}
+
+/// Backfill off (`backfillDays: 0`): every unfinished day is asked every run, as before.
+#[tokio::test]
+async fn backfill_off_asks_every_unfinished_day_at_once() {
+    let t = today();
+    let listing: Listing = Arc::new(Mutex::new((1..=12).map(|n| (format!("logstash-linux-{}", dot(t - Duration::days(n))), 10)).collect()));
+    let srv = cluster_with(listing, true, vec![], Some(Arc::new(AtomicBool::new(true)))).await;
+    let dir = TempDir::new("volume-backfill-off");
+    let c = portable(&dir, &srv.url()).await;
+    let r = c.handle(json!({ "type": "VOLUME_RUN", "volume": { "defaults": { "backfillDays": 0 } } })).await;
+    assert_eq!(r["started"], json!(["prod"]), "{r}");
+    let daily = settle(&c, "prod").await;
+    for n in 1..=12 {
+        assert_eq!(searches_for(&srv, t - Duration::days(n)), 1, "d{n} in the one run");
+    }
+    assert!(!srv.hits().iter().any(|h| h.path.starts_with("/_cat/thread_pool")), "no pressure reading without a backfill");
+    assert_eq!(daily["status"]["backfill"], Value::Null, "off: no backfill status");
 }

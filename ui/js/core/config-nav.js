@@ -225,6 +225,8 @@ export const SETTING_INDEX = Object.freeze([
   ['reports', 'fields', 'Top values kept per field', 'vf-top', 'volume'],
   ['reports', 'fields', 'Keep the daily record for (months)', 'vf-keep', 'volume retention'],
   ['reports', 'fields', 'Collect once a day at', 'vf-at', 'volume time'],
+  ['reports', 'fields', 'Fill missing days of the last', 'vf-backfill', 'volume backfill gaps'],
+  ['reports', 'fields', 'Missing days filled per run', 'vf-backfill-run', 'volume backfill pressure'],
   ['reports', 'fields', 'Volume by host and Indices report', '', 'config.txt hosts client id'],
   ['reports', 'mail', 'Volume report by mail', 'rm-enabled', 'xlsx schedule'],
   ['reports', 'mail', 'Send to', 'rm-to', 'mail recipients cc bcc'],

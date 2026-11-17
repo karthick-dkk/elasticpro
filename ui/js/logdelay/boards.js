@@ -6,6 +6,8 @@
  *              state bar, three chart panels over the period (the delay band, above the critical
  *              line, resolved delays — one y scale), By cluster with an "i" per cluster, the
  *              cluster × time heat map (Hourly Delay Status); the same for one cluster
+ *   Summary    the fleet view of Reports › Log delay before 0.3.60: four tiles, Delay reduced, Day
+ *              by day, a ring per cluster (drawn by logdelay/summary.js from the same answer)
  *   Devices    every device, searched and filtered by level, zone and tag1, each row with its
  *              fix ("i") and its logs; one device's board beside the list
  *
@@ -40,12 +42,13 @@ import {
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands,
+  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
 import { fetchNowPress } from './fetch-now.js';
+import { summaryCards } from './summary.js';
 import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText } from '../core/log-range.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
@@ -65,6 +68,10 @@ const S = {
   clAll: false, clPage: 0,   // By cluster: every cluster (30 a page) instead of the 5 most delayed
   devFilter: '', devAll: false, devState: 'all', devZone: '', devTag: '',
   cdFilter: '', cdAll: false,
+  // Which devices a list holds (the owner, 2026-11-17: "by default only delayed"): 'delayed' — the
+  // delay band and above the critical line (delay-levels.js isLate) — or 'all'. Never remembered:
+  // each visit starts on the delayed devices (boardsReset).
+  devSet: 'delayed', cdSet: 'delayed',
   q: { name: '', field: '', value: '', cluster: '', from: '', to: '' },
   qFor: '',
   range: null,           // {from, to} the device page was narrowed to by Show
@@ -86,6 +93,7 @@ export function boardsReset() {
   boardsLeave();
   S.cache.clear(); S.search = null; S.range = null; S.devFilter = ''; S.cdFilter = '';
   S.devAll = false; S.cdAll = false; S.devState = 'all'; S.devZone = ''; S.devTag = '';
+  S.devSet = 'delayed'; S.cdSet = 'delayed';
   for (const el of inputs.values()) el.value = '';
   B.clear();
 }
@@ -148,7 +156,7 @@ const lastRunOf = (byCluster) => (byCluster || []).reduce((m, c) => (finite(c.la
 /** The one cluster a route or the pick names; null for every cluster. */
 export function boardsScopeId(r) {
   if (r && (r.view === 'cluster' || r.view === 'device') && r.clusterId) return r.clusterId;
-  if (r && r.view === 'devices' && r.clusterId) return r.clusterId;
+  if (r && (r.view === 'devices' || r.view === 'summary') && r.clusterId) return r.clusterId;
   return pickId();
 }
 
@@ -267,6 +275,37 @@ function filterBox(id, get, set, placeholder = 'Filter devices') {
   return el;
 }
 
+/**
+ * Open Devices on a level (a tile, a chart bar): that level's devices are what was asked for, so a
+ * level that is not delayed (below the line, another time zone, silent) shows every device's set.
+ */
+const LATE_FILTERS = ['late', 'delay', 'critical'];
+function openDevicesOn(filter, scopeId) {
+  S.devState = filter; S.devAll = false;
+  if (!LATE_FILTERS.includes(filter)) S.devSet = 'all';
+  location.hash = ldHash('devices', scopeId, null, { tz: S.tz });
+}
+/** Whether a row is in the set a list holds: every device, or the delayed ones only. */
+const inSet = (set) => (r) => set === 'all' || rowLate(r);
+/** The button that swaps a list's set: "Show all devices N" ⇄ "Show delayed only". Its words are set in place each draw. */
+function setButton(id, onPress) {
+  return h(`button.btn.sm.ld-set-btn#${id}`, { type: 'button', onclick: onPress }, h('span'), ' ', h('b'));
+}
+function setButtonWords(btn, set, total) {
+  if (!btn) return;
+  const words = set === 'all' ? 'Show delayed only' : 'Show all devices';
+  const n = set === 'all' ? '' : countText(total);
+  if (btn.firstChild.textContent !== words) btn.firstChild.textContent = words;
+  if (btn.lastChild.textContent !== n) btn.lastChild.textContent = n;
+  btn.setAttribute('aria-pressed', String(set === 'all'));
+  btn.title = set === 'all' ? 'List the delayed devices only (30–60 min and above 60 min by the configured levels)' : 'List every device, on time, silent and in another time zone too';
+}
+/** What an empty list says while it holds the delayed devices only: none is delayed, or none matches; and the way to every device. */
+function delayedEmpty(anyDelayed, narrowed, showAll) {
+  return [anyDelayed || narrowed ? 'No delayed device matches. Clear the search or pick another level' : 'No delayed devices', ' · ',
+    h('button.linkish.ld-show-all', { type: 'button', onclick: showAll }, 'Show all devices')];
+}
+
 function problem(ent, what) {
   if (ent.state === 'loading') return h('div.tbl-empty.ld-loading', h('span.spin'), ` Reading ${what}…`);
   const r = ent.res || {};
@@ -277,14 +316,16 @@ function problem(ent, what) {
 }
 
 // The band names ("Below 30 min", "30–60 min", "Above 60 min") are core/logdelay-report.js bands(): the
-// Clusters › Overview card reads the same names.
+// Clusters › Overview card reads the same names. The levels a summary's clusters share: sharedLevels() there.
 
-/** The levels every cluster in a summary shares, or null when they differ (then each cluster's own). */
-function sharedLevels(byCluster) {
-  const ls = (byCluster || []).map((c) => c.levels).filter(Boolean);
-  if (!ls.length) return null;
-  const k = (l) => `${l.delayFrom}|${l.criticalOver}`;
-  return ls.every((l) => k(l) === k(ls[0])) ? ls[0] : null;
+/** Above the figures of a summary: the scheduled measurement is not run here, or is switched off. */
+function scheduleNotice(res) {
+  return !res.schedule || res.schedule.supported === false
+    ? h('div.banner.warn', LD_NO_SCHEDULER)
+    : res.schedule.enabled === false
+      ? h('div.banner.warn', `${LD_SCHEDULE_OFF} `,
+        h('button.linkish', { type: 'button', onclick: () => navigateTo('settings', { section: 'schedule' }) }, 'Config-Management › Data › Scheduled log delay'))
+      : null;
 }
 
 /** "Build report" and "Send now" cover the period shown, or the whole hour before now (docs/LOGDELAY.md `lastHour`). */
@@ -383,7 +424,7 @@ function clusterFixItems(c) {
 function tiles(t, b, scopeId, keyPrefix) {
   const tile = (k, filter, label, value, colour, detail) => h('button.ld-kpi.ld-kpi-btn', {
     type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
-    onclick: () => { S.devState = filter; S.devAll = false; location.hash = ldHash('devices', scopeId, null, { tz: S.tz }); },
+    onclick: () => openDevicesOn(filter, scopeId),
   }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail));
   return h(`div.ld-kpis.ld-5#${keyPrefix}-tiles`,
     tile('below', 'ok', b.below, countText(t.onTime), C.ok, 'devices under the delay line'),
@@ -428,7 +469,7 @@ function chartPanels(res, period, b, scopeId) {
       const x = L + i * slot + (slot - bw) / 2;
       const val = d.gap ? null : value(d);
       const unknown = val === null || val === undefined;
-      const g = svg('g', { class: `ld-bar${unknown ? ' ld-bar-gap' : ''}`, role: unknown ? null : 'link', onclick: unknown ? null : () => { S.devState = filter; S.devAll = false; location.hash = ldHash('devices', scopeId, null, { tz: S.tz }); } });
+      const g = svg('g', { class: `ld-bar${unknown ? ' ld-bar-gap' : ''}`, role: unknown ? null : 'link', onclick: unknown ? null : () => openDevicesOn(filter, scopeId) });
       g.append(svg('title', {}, unknown ? `${d.label} · ${d.gap ? 'no measurement' : 'not counted by this core'}` : `${d.label} · ${countText(val)} device${val === 1 ? '' : 's'}${d.complete ? '' : ' · not over'} · opens Devices`));
       if (unknown) g.append(svg('rect', { x, y: T, width: bw, height: H - T - Bm, class: 'ld-gap-fill' }));
       else if (val > 0) {
@@ -536,12 +577,7 @@ function fleetView() {
   // (the core's totals are for every zone), and the charts, which are the core's day totals, say so.
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
 
-  const notice = B.get('fleet:notice', rid, () => (!res.schedule || res.schedule.supported === false
-    ? h('div.banner.warn', LD_NO_SCHEDULER)
-    : res.schedule.enabled === false
-      ? h('div.banner.warn', `${LD_SCHEDULE_OFF} `,
-        h('button.linkish', { type: 'button', onclick: () => navigateTo('settings', { section: 'schedule' }) }, 'Config-Management › Data › Scheduled log delay'))
-      : null));
+  const notice = B.get('fleet:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
@@ -646,6 +682,37 @@ function fleetView() {
   return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, readCard, neverNote];
 }
 
+/* ------------------------------------ the summary ------------------------------------ */
+
+/**
+ * The Summary tab (logdelay/summary.js draws it): the LOGDELAY_SUMMARY answer the Dashboard and
+ * Devices read for the same clusters and days (one cache key), so moving between the tabs asks
+ * nothing again. Its figures are the core's totals for every time zone: with the time-zone filter
+ * in the address, a note says so instead of counting the rows again.
+ */
+function summaryView(clusterId) {
+  const ids = clusterId ? [clusterId] : [];
+  const q = winQuery();
+  const ent = need(`sum|${S.pk}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
+  const res = ent.state === 'ok' ? ent.res : null;
+  if (!res) return [B.get('sum:problem', entSig(ent), () => problem(ent, 'The log delay summary'))];
+  const rid = objId(res);
+  const notice = B.get('sum:notice', rid, () => scheduleNotice(res));
+  const readNote = B.get('sum:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  const winNote = B.get('sum:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
+  const tzNote = B.get('sum:tz', `${S.tz}`, () => (S.tz === null ? null
+    : h('div.muted.ld-note#ld-sum-tz-note', `Summary counts every time zone (the core’s totals): the time-zone filter — ${tzWords()} — applies to Dashboard and Devices.`)));
+  // Day by day covers at least the last 7 days (dayChartDays): a shorter range asks for those days
+  // once more, its own question (no device rows), and only that card reads it.
+  const win = dayChartDays(S.win, ymdIn(Date.now(), S.zone));
+  const own = !win.widened && win.from === S.win.from && win.to === S.win.to;
+  const dent = own ? ent : need(`sumdays|${win.from}..${win.to}|${ids.join(',')}`, (signal) => ldSummary({ from: win.from, to: win.to, clusterIds: ids, maxDevices: 1, signal }));
+  const daysRes = dent.state === 'ok' ? dent.res : null;
+  const cards = B.get('sum:cards', `${rid}|${clusterId}|${win.from}..${win.to}|${entSig(dent)}`, () => summaryCards(res, {
+    clusterId, nameOf, daysRes, win, daysPending: daysRes ? null : problem(dent, 'The days of the last week') }));
+  return [notice, readNote, winNote, tzNote, ...cards];
+}
+
 /* ------------------------------------ one cluster ------------------------------------ */
 
 function clusterKey(id, q) { return `cl|${id}|${JSON.stringify(q)}`; }
@@ -691,19 +758,26 @@ function clusterView(id) {
   const event = (Array.isArray(f.eventTime) && f.eventTime[0]) || 'event time';
   const xc = extraCols(extras);
   const keys = ['device', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
-  const ordered = sorts.clusterDevices.apply(byTimeLate(filterRows(inView || res.devices, S.cdFilter)), sortCols(keys, xc));
+  // Delayed devices only until "Show all devices" (the owner, 2026-11-17).
+  const cdRows = inView || res.devices || [];
+  const cdLate = cdRows.filter(rowLate).length;
+  const ordered = sorts.clusterDevices.apply(byTimeLate(filterRows(cdRows, S.cdFilter).filter(inSet(S.cdSet))), sortCols(keys, xc));
   const shown = S.cdAll ? ordered : ordered.slice(0, PAGE_ROWS);
-  const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${S.tz}|${sortSig(sorts.clusterDevices)}`, () => [
+  const cdShowAll = () => { S.cdSet = 'all'; S.cdAll = false; repaint(); };
+  const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${S.cdSet}|${S.tz}|${sortSig(sorts.clusterDevices)}`, () => [
     deviceTable({ id: 'ld-cluster-devices', sort: sorts.clusterDevices, rows: shown.map((r) => ({ ...r, cluster: r.cluster || id })), keys, extra: xc,
-      labels: { arrival, event }, ctx: { now: res.now }, emptyText: S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
+      labels: { arrival, event }, ctx: { now: res.now },
+      emptyText: S.cdSet === 'delayed' ? delayedEmpty(cdLate > 0, !!S.cdFilter, cdShowAll) : S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
     footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `${event} (event time)`].join(', ')} · delay = ${arrival} − ${event}`
       + (res.timeZone && res.timeZone.mode !== 'none' ? ` − time zone (${res.timeZone.offset || offsetLabel(res.timeZone.offsetMinutes)})` : '')
       + (f.device ? ` · device field ${f.device}` : '') + (f.pattern ? ` · indices ${f.pattern}` : ''),
-      ` · Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
+      ` · Showing ${countText(shown.length)} of ${countText(ordered.length)}${S.cdSet === 'delayed' ? ' delayed' : ''}`,
       ordered.length > shown.length ? [' · ', h('button.linkish#ld-cd-all', { type: 'button', onclick: () => { S.cdAll = true; repaint(); } }, 'Show all')] : null)]);
+  const cdBtn = B.get('cl:dev:set', '', () => setButton('ld-cd-showall', () => { S.cdSet = S.cdSet === 'all' ? 'delayed' : 'all'; S.cdAll = false; repaint(); }));
+  setButtonWords(cdBtn, S.cdSet, cdRows.length);
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
-    `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
-    body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
+    `${S.cdSet === 'delayed' ? `${countText(cdLate)} delayed of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
+    body, [cdBtn, filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
   const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
   return [head, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard, tzNote];
 }
@@ -716,9 +790,9 @@ const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'rawGap
 /** The distinct values of a context field over the rows, for the Zone and tag1 selects. */
 const valuesOf = (rows, name) => [...new Set((rows || []).map((r) => extraOf(r, name)).filter((v) => v !== null).map(String))].sort();
 
-/** Every filter the Devices tab applies: the search box, the level chip, zone and tag1. */
+/** Every filter the Devices tab applies: the set (delayed only, or every device), the search box, the level chip, zone and tag1. */
 function devicesFiltered(rows) {
-  return filterRows(rows, S.devFilter).filter((r) => matchesFilter(r, S.devState)
+  return filterRows(rows, S.devFilter).filter((r) => inSet(S.devSet)(r) && matchesFilter(r, S.devState)
     && (!S.devZone || String(extraOf(r, 'zone')) === S.devZone) && (!S.devTag || String(extraOf(r, 'tag1')) === S.devTag));
 }
 
@@ -736,11 +810,12 @@ function exportDevicesCsv(rows) {
 }
 
 /**
- * The Devices tab: the fleet's (or one cluster's) devices from the summary, searched, filtered by
- * level (the chips carry counts), zone and tag1; each row with its "i" and its logs (rows.js).
- * `narrow` draws the short list beside an open device board.
+ * The Devices tab: the fleet's (or one cluster's) devices from the summary — the delayed ones until
+ * "Show all devices" — searched, filtered by level (the chips carry counts over every device),
+ * zone and tag1; each row with its "i" and its logs (rows.js). `narrow` draws the short list
+ * beside an open device board; `openDevice` is that device, listed even when it is not delayed.
  */
-function devicesView(clusterId, narrow = false) {
+function devicesView(clusterId, narrow = false, openDevice = null) {
   const ids = clusterId ? [clusterId] : [];
   const q = winQuery();
   const ent = need(`sum|${S.pk}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
@@ -749,7 +824,7 @@ function devicesView(clusterId, narrow = false) {
   const head = narrow ? null : B.get('dev:head', `${clusterId}|${S.pk}|${entSig(ent)}`, () => h('div.ld-head',
     h('div.ld-title',
       h('h2', clusterId ? `Devices · ${nameOf(clusterId)}` : 'Devices'),
-      h('p.sub', `Every device measured in the period, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
+      h('p.sub', `The delayed devices of the period until Show all devices, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
     h('div.ld-actions',
       h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'),
       h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, ids, res) }, 'Build report (.xlsx)'))));
@@ -757,7 +832,8 @@ function devicesView(clusterId, narrow = false) {
   const rid = objId(res);
   const rows = (res.devices || []).filter((r) => matchesZone(r, S.tz));
   const counts = filterCounts(filterRows(rows, S.devFilter));
-  const chipLabel = { all: 'All', late: b.lateShort, critical: b.high, delay: b.mid, ok: b.below, tz: 'Other time zone', silent: 'Silent' };
+  const chipLabel = { late: b.lateShort, critical: b.high, delay: b.mid, ok: b.below, tz: 'Other time zone', silent: 'Silent' };
+  const devShowAll = () => { S.devSet = 'all'; S.devAll = false; repaint(); };
   const zones = valuesOf(rows, 'zone'); const tags = valuesOf(rows, 'tag1');
   // The bar is one element for the visit (its counts, the pressed chip and the selects change in
   // place): the search box inside it is never moved, so typing never loses the focus or the caret.
@@ -767,11 +843,14 @@ function devicesView(clusterId, narrow = false) {
         h('option', { value: '' }, `All ${label.toLowerCase()}s`), ...vals.map((v) => h('option', { value: v }, v)));
       return h('label.field.ld-tool', label, s);
     };
+    // No "All" chip: the set button says which devices are listed, a chip narrows them, and a
+    // pressed chip pressed again lets go. A level that is not delayed shows every device's set.
     return h('div.toolbar.ld-dev-bar',
       filterBox('ld-dev-filter', () => S.devFilter, (v) => { S.devFilter = v; S.devAll = false; }, 'Search device, cluster, zone or tag1'),
-      h('div.ld-chips#ld-dev-chips', ...DEVICE_FILTERS.map((f) => h('button.ld-chip.ld-chip-btn', {
+      setButton('ld-dev-showall', () => { S.devSet = S.devSet === 'all' ? 'delayed' : 'all'; S.devAll = false; if (S.devSet === 'delayed' && !LATE_FILTERS.includes(S.devState)) S.devState = 'all'; repaint(); }),
+      h('div.ld-chips#ld-dev-chips', ...DEVICE_FILTERS.filter((f) => f !== 'all').map((f) => h('button.ld-chip.ld-chip-btn', {
         type: 'button', dataset: { filter: f }, 'aria-pressed': 'false',
-        onclick: () => { S.devState = f; S.devAll = false; repaint(); },
+        onclick: () => { S.devState = S.devState === f ? 'all' : f; S.devAll = false; if (S.devState !== 'all' && !LATE_FILTERS.includes(S.devState)) S.devSet = 'all'; repaint(); },
       }, chipLabel[f], ' ', h('b')))),
       narrow ? null : sel('ld-dev-zone', 'Zone', zones, (v) => { S.devZone = v; }),
       narrow ? null : sel('ld-dev-tag', 'tag1', tags, (v) => { S.devTag = v; }));
@@ -781,20 +860,31 @@ function devicesView(clusterId, narrow = false) {
     if (n.textContent !== txt) n.textContent = txt;
     if (btn.getAttribute('aria-pressed') !== on) btn.setAttribute('aria-pressed', on);
   }
+  setButtonWords(bar.querySelector('#ld-dev-showall'), S.devSet, counts.all);
   for (const [id, cur, vals] of [['#ld-dev-zone', S.devZone, zones], ['#ld-dev-tag', S.devTag, tags]]) {
     const el = bar.querySelector(id); const want = vals.includes(cur) ? cur : '';
     if (el && el.value !== want) el.value = want;
   }
   const ordered = sorts.devices.apply(byTimeLate(devicesFiltered(rows)), sortCols(FLEET_COLS));
-  const shown = S.devAll ? ordered : ordered.slice(0, PAGE_ROWS);
+  let shown = S.devAll ? ordered : ordered.slice(0, PAGE_ROWS);
+  // A device opened by a link (an alert, a device name) is listed beside its board even when it is not delayed.
+  const pinned = narrow && openDevice && !shown.some((r) => r.device === openDevice && r.cluster === clusterId)
+    ? rows.find((r) => r.device === openDevice && r.cluster === clusterId) : null;
+  if (pinned) shown = [pinned, ...shown];
   const keys = narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS;
-  const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.tz}|${sortSig(sorts.devices)}|${narrow}`, () => [
+  const narrowed = !!(S.devFilter || S.devState !== 'all' || S.devZone || S.devTag);
+  const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.devSet}|${S.tz}|${sortSig(sorts.devices)}|${narrow}|${pinned ? openDevice : ''}`, () => [
     deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys, ctx: { now: res.now },
-      emptyText: S.devFilter || S.devState !== 'all' || S.devZone || S.devTag ? 'No device matches. Clear the search or pick another level.' : 'No device measured in this period.' }),
-    footer(`Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
+      emptyText: S.devSet === 'delayed' ? delayedEmpty(counts.late > 0, narrowed, devShowAll)
+        : narrowed ? 'No device matches. Clear the search or pick another level.' : 'No device measured in this period.' }),
+    pinned ? h('div.muted.ld-note#ld-dev-pinned', `${pinned.device} is listed because it is open; it is not delayed. The list holds the delayed devices only.`) : null,
+    footer(`Showing ${countText(shown.length - (pinned ? 1 : 0))} of ${countText(ordered.length)}${S.devSet === 'delayed' ? ' delayed' : ''}`,
       ordered.length > shown.length ? [' · ', h('button.linkish#ld-dev-all', { type: 'button', onclick: () => { S.devAll = true; repaint(); } }, 'Show all')] : null,
       res.devicesTruncated ? ` · the server sent the first ${countText(rows.length)} of ${countText(res.devicesTotal)}` : null)]);
-  const list = keptCard(B, 'dev:list', narrow ? 'Devices' : `${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`,
+  const lateN = rows.filter(rowLate).length;
+  const list = keptCard(B, 'dev:list', narrow ? (S.devSet === 'delayed' ? 'Delayed devices' : 'Devices')
+    : S.devSet === 'delayed' ? `${countText(lateN)} delayed of ${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`
+      : `${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`,
     `${sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late'}${S.tz === null ? '' : ` · ${tzWords()}`}`, [bar, body]);
   const winNote = narrow ? null : B.get('dev:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   return [head, winNote, list].filter(Boolean);
@@ -1035,15 +1125,16 @@ export function boardsNode(r, ctx) {
     const wrap = B.get(`wrap:${r.view}`, r.view, () => h('div.rp-section.ld', { dataset: { ld: r.view } }));
     if (r.view === 'device') {
       const split = B.get('split', '', () => h('div.ld-split', h('div.ld-split-list'), h('div.ld-split-board')));
-      mount(split.firstChild, ...devicesView(r.clusterId, true).flat().filter(Boolean));
+      mount(split.firstChild, ...devicesView(r.clusterId, true, r.device).flat().filter(Boolean));
       mount(split.lastChild, ...deviceView(r.clusterId, r.device).flat().filter(Boolean));
       for (const tr of split.firstChild.querySelectorAll('tr[data-device]')) tr.classList.toggle('ld-sel', tr.dataset.device === r.device && tr.dataset.cluster === r.clusterId);
       mount(wrap, split);
       return wrap;
     }
     const kids = r.view === 'cluster' ? clusterView(r.clusterId)
-      : r.view === 'devices' ? devicesView(r.clusterId)
-        : fleetView();
+      : r.view === 'summary' ? summaryView(r.clusterId)
+        : r.view === 'devices' ? devicesView(r.clusterId)
+          : fleetView();
     mount(wrap, ...kids.flat().filter(Boolean));
     return wrap;
   } finally { B.end(); }

@@ -316,6 +316,9 @@ export async function setConfig(config, handle) {
   for (const m of [state.data, state.indices, state.shards, fleet.raw]) {
     for (const id of [...m.keys()]) if (!live.has(id)) m.delete(id);
   }
+  // The cluster chosen stays chosen across pages (app.js resolveSelection), so a config that no
+  // longer names it must let go of it here: a choice of nothing would show nothing and ask nothing.
+  if (state.selected && state.selected !== 'all' && !live.has(state.selected)) state.selected = 'all';
   clearFieldVolume();   // field analysis is tied to the config that produced it
   await reprime();
   bus.emit('config', config);

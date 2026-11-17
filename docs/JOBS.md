@@ -104,7 +104,7 @@ if any was, else `cancelled`, else `completed`; its `note` counts each.
 | `records` | what it processed: days collected, documents written, items removed, devices measured; null when the job does not count them |
 | `error` | why it failed, deferred or was skipped |
 | `clusters` | the clusters it read from or wrote to |
-| `note` | anything else (a backup's file and size, housekeeping's bytes, a report's warning) |
+| `note` | anything else (a backup's file and size, housekeeping's bytes, a report's warning, what the volume backfill did — "Volume backfill" below) |
 | `cancelAsked` | `JOB_CANCEL` asked it to stop (it stops at its next safe point) |
 | `retryOf`, `attempt` | the run this one tries again, and which try (1 = the first retry); null / 0 otherwise |
 | `deferred` | a busy cluster's wait: `{cluster, signal, reason, since}`; null otherwise |
@@ -360,6 +360,16 @@ same person (a report job's starter) or for nobody. Only reads (GET, HEAD, a sea
 write, a request with a credential of its own, another address or the history store; never with a
 person's request (their own keys: a person never waits behind the background class), and never
 cached — in flight only (`inflight::background_key`).
+
+### Volume backfill
+
+The daily volume run (and Collect now) fills days of the last `backfillDays` that the record does
+not hold as final and measured, a few a run, oldest first, and only while the cluster is not under
+query pressure (docs/VOLUME.md "Backfill"). Its run record says what it did: a one-cluster run's
+`note` is that cluster's ("backfilled 3 of 10 missing days", "backfill paused: cluster under query
+pressure (…); tried again on the next run"); a run over several clusters adds the sums to its
+counts ("5 clusters: 5 completed; 12 days backfilled, 1 backfills paused for query pressure").
+Pressure pauses the backfill only — the run's own days are collected — and is not a failure.
 
 ### Busy clusters
 

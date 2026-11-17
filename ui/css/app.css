@@ -1677,6 +1677,7 @@ button.pill.cl-pillbtn:focus-visible { outline: 2px solid var(--accent); outline
 .vs-avg .btn { padding: 1px 6px; font-size: 10.5px; line-height: 16px; }
 .vs-high { color: var(--critical-ink); font-weight: 600; }
 .vs-notm { color: var(--warning-ink); white-space: nowrap; }
+.vs-backfill { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 button.vs-notm { font-size: inherit; font-weight: inherit; }
 .vs-top { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .vs-note { margin-top: 6px; font-size: 11.5px; color: var(--warning-ink); }
@@ -1753,24 +1754,27 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .rj-counts { font-size: 11.5px; }
 .rj-conc { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-muted); }
 .rj-conc select { height: 24px; font-size: 12px; padding: 0 4px; }
-.rj-list { display: grid; border-top: 1px solid var(--border); max-height: 320px; overflow-y: auto; }
-.rj-empty { padding: 7px 0; font-size: 12px; }
-.rj-job { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr) minmax(0, 1.6fr) auto; align-items: center;
-  gap: 2px 8px; min-height: 32px; padding: 2px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
-.rj-job > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Generated reports: the report files as one full-width table (ui/report-jobs.js), 32 px rows; a long
+   file name or cluster list wraps inside its cell rather than widening the table (the full name is
+   also the row's title). */
+.rj-empty { padding: 7px 4px; font-size: 12px; }
+.rj-table { width: 100%; }
+.rj-table td { height: 32px; vertical-align: middle; }
+.rj-table td.rj-client-name, .rj-table td.rj-status, .rj-table td.rj-period { overflow-wrap: anywhere; }
+.rj-table td.rj-created, .rj-table td.rj-format, .rj-table td.rj-size, .rj-table td.rj-kind { white-space: nowrap; }
 .rj-client-name { font-weight: 600; }
 .rj-period { font-size: 11.5px; }
-.rj-status { display: flex; align-items: center; gap: 6px; }
-.rj-status-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.rj-table td.rj-status { min-width: 160px; }
+.rj-status-t { overflow-wrap: anywhere; }
 .rj-status-t.rj-ok { color: var(--good-ink); }
 .rj-status-t.rj-bad { color: var(--critical-ink); }
-.rj-job > span.rj-status.rj-wrap, .rj-wrap .rj-status-t { white-space: normal; overflow-wrap: anywhere; }
-.rj-bar { flex: 1 0 50px; max-width: 110px; height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; display: block; }
+.rj-bar { display: inline-block; vertical-align: middle; width: 90px; height: 6px; margin-left: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
 .rj-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
-.rj-act { justify-self: end; }
+.rj-subrow > td { padding-top: 0; border-top: 0; }
+.rj-act { text-align: right; white-space: nowrap; }
 .rj-act .btn { padding: 1px 8px; }
 .rj-adm { font-size: 11px; }
-.rj-sub { grid-column: 1 / -1; font-size: 11.5px; overflow-wrap: anywhere; padding-bottom: 2px; }
+.rj-sub { font-size: 11.5px; overflow-wrap: anywhere; padding-bottom: 2px; }
 .rj-warn { color: var(--warning-ink); }
 /* An indices / hosts job's clusters (0.3.54): one dense line each, under the job's row. */
 .rj-clusters { display: grid; gap: 0; padding-left: 10px; color: var(--text-muted); }
@@ -2712,6 +2716,16 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-ring-mid b { font-size: 17px; }
 .ld-ring-mid span, .ld-ring-sub { font-size: 11px; color: var(--text-secondary); }
 .ld-ring-name { font-weight: 650; font-size: 12.5px; color: var(--accent); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Log Delay › Summary (logdelay/summary.js): each tick sits under its own bar (one slot per day, the
+   bars' gap and width), a short period's few bars stay bar-wide and centred, the rings a size smaller. */
+.ld[data-ld="summary"] .ld-sum-days .ld-days, .ld[data-ld="summary"] .ld-sum-days .ld-ticks { justify-content: center; gap: 3px; }
+.ld[data-ld="summary"] .ld-sum-days .ld-day, .ld[data-ld="summary"] .ld-sum-days .ld-ticks span { flex: 1 1 0; min-width: 0; max-width: 72px; }
+.ld[data-ld="summary"] .ld-sum-days .ld-ticks span { text-align: center; white-space: nowrap; overflow: visible; font-variant-numeric: tabular-nums; }
+.ld[data-ld="summary"] .ld-rings { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 6px; }
+.ld[data-ld="summary"] .ld-ring { padding: 6px 4px; gap: 2px; }
+.ld[data-ld="summary"] .ld-ring-pic { width: 84px; height: 84px; }
+.ld[data-ld="summary"] .ld-ring-mid b { font-size: 15px; }
+.ld[data-ld="summary"] .ld-ring[data-known="false"] .ld-ring-mid b { color: var(--text-muted); }
 .ld-spark { display: inline-block; line-height: 0; }
 .ld-foot { padding: 7px 2px 0; font-size: 12px; color: var(--text-secondary); }
 .ld-note { font-size: 12px; }
@@ -3003,7 +3017,11 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
 /* Devices: the search, the level chips with counts, zone and tag1. */
 .ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
-.ld .ld-dev-bar input[type="search"] { min-width: 230px; height: 28px; }
+.ld .ld-dev-bar input[type="search"] { min-width: 190px; height: 28px; }
+/* "Show all devices N" ⇄ "Show delayed only": which set a device list holds (the delayed ones by default). */
+.ld .ld-set-btn { height: 28px; padding: 0 9px; white-space: nowrap; }
+.ld .ld-set-btn b { font-variant-numeric: tabular-nums; }
+.ld .ld-set-btn[aria-pressed="true"] { border-color: var(--accent); }
 .ld .ld-chip-btn { cursor: pointer; font: inherit; border-radius: 999px; height: 24px; }
 .ld .ld-chip-btn b { font-weight: 650; color: var(--text-primary); }
 .ld .ld-chip-btn[aria-pressed="true"] { background: var(--surface-3); color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }

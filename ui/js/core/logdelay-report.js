@@ -6,6 +6,8 @@
  *
  *   #/log-delay                           Dashboard: the fleet (Main board)
  *   #/log-delay/cluster/<id>              one cluster (Cluster board), under the Dashboard tab
+ *   #/log-delay/summary[/<cluster>]       Summary: the fleet view of Reports › Log delay before 0.3.60
+ *                                         (tiles, delay reduced, day by day, a ring per cluster)
  *   #/log-delay/devices[/<cluster>]       Devices: every device, searched and filtered by state
  *   #/log-delay/device/<cluster>/<dev>    one device (Device board), under the Devices tab
  *   #/log-delay/watch                     Live Watch: every cluster measured now, from the browser
@@ -102,7 +104,7 @@ export const ldSendNow = () => send({ type: 'REPORT_SEND_NOW', kind: LD_KIND });
 /* ---------------------------------- the routes ---------------------------------- */
 
 /** The page's views, in the order its tabs show them; the boards' views are below. */
-export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'devices', 'device', 'watch', 'live']);
+export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'summary', 'devices', 'device', 'watch', 'live']);
 
 /**
  * Which view of the Log Delay page a hash names: `{view, clusterId, device}`. Anything else
@@ -118,6 +120,7 @@ export function ldRoute(hash) {
   const [kind, a, ...more] = rest ? rest.split('/') : [];
   if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null, tz };
   if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')), tz };
+  if (kind === 'summary') return { view: 'summary', clusterId: a ? dec(a) : null, device: null, tz };
   // `fixes` is the old Recommended fixes address: its devices, with their fixes, are on Devices.
   if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null, tz };
   if (kind === 'watch') return { view: 'watch', clusterId: null, device: null, tz };
@@ -147,15 +150,16 @@ export function ldHash(view, clusterId, device, o) {
   const q = o && o.tz !== null && o.tz !== undefined ? `?tz=${enc(String(o.tz))}` : '';
   if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}${q}`;
   if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;
+  if (view === 'summary') return `${clusterId ? `${base}/summary/${enc(clusterId)}` : `${base}/summary`}${q}`;
   if (view === 'devices' || view === 'fixes') return `${clusterId ? `${base}/devices/${enc(clusterId)}` : `${base}/devices`}${q}`;
   if (view === 'watch') return `${base}/watch${q}`;
   if (view === 'live') return `${clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`}${q}`;
   return `${base}${q}`;
 }
 
-/** The tab a view is shown under: Dashboard (the fleet, a cluster), Devices (the list, one device), Live Watch, Live logs. */
+/** The tab a view is shown under: Dashboard (the fleet, a cluster), Summary, Devices (the list, one device), Live Watch, Live logs. */
 export function ldTab(view) {
-  if (view === 'watch' || view === 'live') return view;
+  if (view === 'watch' || view === 'live' || view === 'summary') return view;
   if (view === 'devices' || view === 'device' || view === 'fixes') return 'devices';
   return 'fleet';
 }
@@ -305,6 +309,14 @@ export function periodDays(from, to) {
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
+/** The levels every cluster in a summary shares, or null when they differ (then each cluster's own). */
+export function sharedLevels(byCluster) {
+  const ls = (byCluster || []).map((c) => c && c.levels).filter(Boolean);
+  if (!ls.length) return null;
+  const k = (l) => `${l.delayFrom}|${l.criticalOver}`;
+  return ls.every((l) => k(l) === k(ls[0])) ? ls[0] : null;
+}
+
 /** "94 min", "3.8 min" under 10; null → the `unknown` text. Never 0 for unknown. */
 export function minutesText(m, unknown = '—') {
   if (!finite(m)) return unknown;
@@ -429,6 +441,130 @@ export function matchesFilter(row, filter) {
 /** How many rows each filter would keep: the chips' counts. */
 export function filterCounts(rows) {
   return Object.fromEntries(DEVICE_FILTERS.map((f) => [f, (rows || []).filter((r) => matchesFilter(r, f)).length]));
+}
+
+/* ------------------------------------ the Summary tab ------------------------------------ */
+
+/**
+ * The Summary tab (the fleet view of Reports › Log delay before 0.3.60, back on the owner's word):
+ * four tiles, Delay reduced, Day by day and a ring per cluster — all the core's LOGDELAY_SUMMARY
+ * figures (`totals`, `reduced`, `days`, `byCluster`), nothing counted here.
+ */
+
+/** "116 at 30–60 min, 440 above 60 min": the late now of `totals`, on the levels' own names (bands). */
+export function lateSplitText(t, b = bands(null)) {
+  if (!t) return '';
+  return `${countText(t.delay)} at ${b.mid}, ${countText(t.critical)} ${b.high.toLowerCase()}`;
+}
+
+/** The "Delay reduced" bars, 2 h to 24 h: `{hours, n, label, px}`. An entry the core did not send is unknown (n null, no bar), not 0. */
+export function reducedBars(reduced, height = 44) {
+  const list = Array.isArray(reduced) ? reduced : [];
+  const max = Math.max(1, ...list.map((r) => (r && finite(r.n) ? r.n : 0)));
+  return [2, 4, 6, 12, 24].map((hours) => {
+    const r = list.find((x) => x && x.hours === hours);
+    const n = r && finite(r.n) ? r.n : null;
+    return { hours, n, label: `${hours} h`, px: n === null ? 0 : n === 0 ? 0 : Math.max(3, Math.round((n / max) * height)) };
+  });
+}
+
+const never = (c) => !c || c.lastRunAt === null || c.lastRunAt === undefined;
+
+/**
+ * The rings, worst first: the highest late share (`latePct`, the core's), then the most late now,
+ * then the name. A cluster never measured, or with no late share, has no place in the order: last.
+ */
+export function ringsOrder(byCluster) {
+  const unknown = (c) => never(c) || !finite(c.latePct);
+  return [...(byCluster || [])].filter(Boolean).sort((a, b) => {
+    const ua = unknown(a); const ub = unknown(b);
+    if (ua !== ub) return ua ? 1 : -1;
+    return (ua ? 0 : b.latePct - a.latePct) || (b.lateNow || 0) - (a.lateNow || 0) || String(a.name || a.id).localeCompare(String(b.name || b.id));
+  });
+}
+
+/**
+ * A ring's two arcs on a circumference of 100 — above the critical line first, then the delay band
+ * after it: `[{kind, dash, offset}]`, a sliver at least for a count above 0. Null when the share is
+ * not known (no device, a figure missing): drawn as an empty ring with "—", never 0 %.
+ */
+export function ringArcs(delay, critical, devices) {
+  if (!finite(devices) || devices <= 0 || !finite(delay) || !finite(critical)) return null;
+  const len = (n) => (n > 0 ? Math.max((n / devices) * 100, 1.5) : 0);
+  const c = Math.min(100, len(critical)); const d = Math.min(100 - c, len(delay));
+  const arc = (kind, l, at) => ({ kind, dash: `${l.toFixed(2)} ${(100 - l).toFixed(2)}`, offset: (-at).toFixed(2) });
+  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null].filter(Boolean);
+}
+
+/**
+ * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz, unk}`
+ * in pixels — on time (`onTimeAll`: under the delay line), the delay band, above the critical line,
+ * another time zone, silent + can't measure. A day without totals is a gap (drawn hatched,
+ * "no measurement"), never 0.
+ */
+export function dayBars(days, height) {
+  const list = days || [];
+  const gap = (d) => !d || !finite(d.devices) || d.devices <= 0;
+  const n = (v) => (finite(v) ? v : 0);
+  const total = (d) => n(d.onTimeAll) + n(d.delayed) + n(d.critical) + n(d.otherTz) + n(d.silent) + n(d.unmeasured);
+  const max = Math.max(1, ...list.filter((d) => !gap(d)).map(total));
+  const px = (v) => (finite(v) && v > 0 ? Math.max(1, Math.round((v / max) * height)) : 0);
+  return list.map((d) => (gap(d)
+    ? { day: d && d.day, gap: true, ok: 0, delay: 0, critical: 0, tz: 0, unk: 0 }
+    : { day: d.day, gap: false, ok: px(d.onTimeAll), delay: px(d.delayed), critical: px(d.critical), tz: px(d.otherTz), unk: px(n(d.silent) + n(d.unmeasured)) }));
+}
+
+/** One day's bar in words, for its title, on the levels' own names. */
+export function dayTitle(d, b = bands(null)) {
+  if (!d || !finite(d.devices) || d.devices <= 0) return `${dayText(d && d.day)} · no measurement`;
+  const unk = (finite(d.silent) ? d.silent : 0) + (finite(d.unmeasured) ? d.unmeasured : 0);
+  return `${dayText(d.day)} · ${countText(d.onTimeAll)} on time, ${countText(d.delayed)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}`
+    + (finite(d.otherTz) && d.otherTz ? `, ${countText(d.otherTz)} in another time zone` : '')
+    + (unk ? `, ${countText(unk)} silent or can't measure` : '') + (d.complete === false ? ' · day not over' : '');
+}
+
+/**
+ * The x labels under Day by day, one per bar ('' where none is written): each its own day — the
+ * old board wrote five ticks picked by rounding, so a short period read "10 Nov" five times. As
+ * many as labelEvery allows; the month once, then again only where it changes ("30 Oct", "31",
+ * "1 Nov", "2").
+ */
+export function dayTicks(days) {
+  const list = days || [];
+  const every = labelEvery(list.length);
+  let month = '';
+  return list.map((d, i) => {
+    if (i % every) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String((d && d.day) || ''));
+    if (!m) return '';
+    const mo = `${m[1]}-${m[2]}`;
+    const text = mo === month ? String(Number(m[3])) : dayText(d.day);
+    month = mo;
+    return text;
+  });
+}
+
+/** The fewest days Day by day covers (the owner's screenshot is the old board at "Last 7 days"). */
+export const DAY_CHART_MIN_DAYS = 7;
+
+/**
+ * The days Summary's Day by day covers — the one definition: the page window's own local days
+ * (`{from, to}` YYYY-MM-DD) when they are at least DAY_CHART_MIN_DAYS, else the last
+ * DAY_CHART_MIN_DAYS days ending `today` (YYYY-MM-DD in the page's zone). Only this card widens;
+ * the tiles and the rings stay on the page's window. `{from, to, days, widened}`.
+ */
+export function dayChartDays(win, today, min = DAY_CHART_MIN_DAYS) {
+  const n = periodDays(win && win.from, win && win.to);
+  if (n !== null && n >= min) return { from: win.from, to: win.to, days: n, widened: false };
+  const t = Date.parse(`${today}T00:00:00Z`);
+  return { from: new Date(t - (min - 1) * 86400000).toISOString().slice(0, 10), to: today, days: min, widened: true };
+}
+
+/** Day by day's header: "Last 7 days · 11 Nov – 17 Nov", or a longer range's "30 days · 19 Oct – 17 Nov". */
+export function dayChartWords(w) {
+  if (!w) return '';
+  const span = w.from === w.to ? dayText(w.from) : `${dayText(w.from)} – ${dayText(w.to)}`;
+  return `${w.widened ? `Last ${w.days} days` : `${w.days} day${w.days === 1 ? '' : 's'}`} · ${span}`;
 }
 
 /* ------------------------------------ the dashboard's charts ------------------------------------ */

@@ -20,6 +20,8 @@
 //!                                      ├── date_histogram          days of the time-split indices
 //!                                      │                           (only when some index has no date)
 //!                                      ├── _search × unfinished    docs, sums, terms
+//!                                      ├── backfill × ≤ perRun     older missing days, oldest first,
+//!                                      │                           each after a calm thread-pool reading
 //!                                      └── month files + state.json, then prune
 //! ```
 //!
@@ -27,6 +29,7 @@
 //! requests. Each message reads the month files it needs and lets them go; the all-cluster
 //! Monthly view reads only `state.json`, where the month summaries are kept.
 
+pub mod backfill;
 pub mod collect;
 pub mod derive;
 pub mod schedule;
