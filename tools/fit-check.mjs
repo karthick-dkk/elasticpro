@@ -892,11 +892,14 @@ async function run(browserName, [vw, vh, framed]) {
     await sleep(500);
     const t = await F.evaluate(panelFit, '.toast-wrap, .toast');
     check('panels', 'notices', t.seen > 0 && !t.issues.length, t.seen ? t.issues.join('; ') : 'no notice was drawn');
+    // The bell is drawn on Clusters only (2026-11-17); the notices raised here are in it there.
+    await goPage('overview');
     await F.evaluate(() => document.querySelector('button.bell')?.click());
     await sleep(500);
     const bell = await F.evaluate(panelFit, '.pop');
     check('panels', 'bell', bell.seen > 0 && !bell.issues.length, bell.seen ? bell.issues.join('; ') : 'the bell did not open');
     await closeAll();
+    await goPage('alerts');
 
     // the notes popover, on the first and the last alert row
     for (const which of ['first', 'last']) {
