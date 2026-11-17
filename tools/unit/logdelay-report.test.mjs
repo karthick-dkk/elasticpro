@@ -14,7 +14,11 @@ const ST = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/logdelay-setti
 
 test('routes: each view round-trips, names with slashes and spaces included', () => {
   assert.deepEqual(R.ldRoute('#/log-delay'), { view: 'fleet', clusterId: null, device: null, tz: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('watch')), { view: 'watch', clusterId: null, device: null, tz: null });
+  // Live Watch and Live logs are one tab, Live: the old Live Watch address opens it.
+  assert.equal(R.ldHash('watch'), '#/log-delay/live');
+  assert.deepEqual(R.ldRoute('#/log-delay/watch'), { view: 'live', clusterId: null, device: null, tz: null });
+  assert.equal(R.ldTab('watch'), 'live');
+  assert.equal(R.ldTab('live'), 'live');
   assert.deepEqual(R.ldRoute(R.ldHash('live')), { view: 'live', clusterId: null, device: null, tz: null });
   assert.deepEqual(R.ldRoute(R.ldHash('live', 'c 1', 'fw/dc1 07')), { view: 'live', clusterId: 'c 1', device: 'fw/dc1 07', tz: null });
   assert.deepEqual(R.ldRoute(R.ldHash('live', 'c1')), { view: 'live', clusterId: 'c1', device: null, tz: null });
@@ -35,7 +39,7 @@ test('routes: each view round-trips, names with slashes and spaces included', ()
   assert.equal(R.ldHash('devices', 'c 1', null, { tz: 'none' }), '#/log-delay/devices/c%201?tz=none');
   assert.equal(R.ldHash('cluster', 'c1', null, { tz: 330 }), '#/log-delay/cluster/c1?tz=330');
   assert.equal(R.ldHash('fleet', null, null, { tz: null }), '#/log-delay', 'no filter, no query');
-  assert.deepEqual(['fleet', 'cluster', 'summary', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'summary', 'devices', 'devices', 'devices', 'watch', 'live']);
+  assert.deepEqual(['fleet', 'cluster', 'summary', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'summary', 'devices', 'devices', 'devices', 'live', 'live']);
   // Summary (the fleet view of Reports › Log delay before 0.3.60), second in the tabs; one cluster too.
   assert.deepEqual(R.ldRoute(R.ldHash('summary')), { view: 'summary', clusterId: null, device: null, tz: null });
   assert.deepEqual(R.ldRoute(R.ldHash('summary', 'c 1')), { view: 'summary', clusterId: 'c 1', device: null, tz: null });
@@ -349,4 +353,17 @@ test('settings: Download now covers what the schedule would', () => {
   assert.equal(ST.runPeriodFor('monthly', 'cadence', now), 'previousMonth');
   assert.deepEqual(ST.runPeriodFor('daily', 'monthSoFar', now), { from: '2026-11-01', to: '2026-11-06' });
   assert.equal(ST.runPeriodFor('daily', 'monthSoFar', new Date(2026, 10, 1, 9).getTime()), 'previousMonth');
+});
+
+test('Live: a device silent in the range is a silent row, its last arrival kept; the schedule as an answer says it', () => {
+  const r = R.silentDeviceRow('old-sw-09', 1762000000000, { id: 'c1', name: 'one' });
+  assert.equal(r.state, 'silent');
+  assert.equal(r.nowMinutes, null, 'no delay figure: unknown, never 0');
+  assert.equal(r.silentSince, 1762000000000);
+  assert.equal(r.cluster, 'c1');
+  assert.deepEqual(R.scheduleOf({ schedule: { supported: true, enabled: true, everyHours: 3, lastRunAt: 5, state: { nextDueAt: 9 } } }),
+    { supported: true, enabled: true, everyHours: 3, lastRunAt: 5, nextDueAt: 9 });
+  assert.deepEqual(R.scheduleOf({ byCluster: [{ lastRunAt: 4 }, { lastRunAt: 7 }] }),
+    { supported: false, enabled: null, everyHours: null, lastRunAt: 7, nextDueAt: null }, 'no schedule in the answer: not run here; the newest cluster run');
+  assert.deepEqual(R.scheduleOf(null), { supported: null, enabled: null, everyHours: null, lastRunAt: null, nextDueAt: null }, 'no answer: nothing known');
 });

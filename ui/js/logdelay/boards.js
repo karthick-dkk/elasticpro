@@ -42,14 +42,14 @@ import {
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
+  scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
 import { fetchNowPress } from './fetch-now.js';
 import { summaryCards } from './summary.js';
-import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText } from '../core/log-range.js';
+import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText, BOARD_RANGES } from '../core/log-range.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
 const PAGE_ROWS = 50;
@@ -62,7 +62,7 @@ const S = {
   period: 'span',        // 'today' when the window is inside one local day (by measurement window), else 'span' (by day)
   win: { from: '', to: '' },   // the window's local days, as the messages take them
   pk: '',                // `${win.from}..${win.to}`: in every cache key
-  rng: normaliseRange(null), zone: '',
+  rng: normaliseRange(null, BOARD_RANGES), zone: '',
   reportPeriod: 'shown',
   tz: null,             // the time-zone filter of the address (`?tz=`): an offset, 'none', or null
   clAll: false, clPage: 0,   // By cluster: every cluster (30 a page) instead of the 5 most delayed
@@ -129,13 +129,14 @@ export function boardsLoading() {
 export const pickId = () => (state.selected && state.selected !== 'all' && clusters().some((c) => c.id === state.selected) ? state.selected : null);
 const ymdIn = (ms, tz) => { const p = zonedParts(ms, tz); return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`; };
 /**
- * The window every board reads is the page's one time range (core/log-range.js): the store holds
- * whole local days, so the summary is asked for the days the window touches (an incomplete custom
- * range asks for today). Where the window holds no scheduled run, windowNote says so.
+ * The window every board reads is the page's boards range (core/log-range.js BOARD_RANGES; Live
+ * keeps its own): the store holds whole local days, so the summary is asked
+ * for the days the window touches — a day range is exactly its days, 7d the 7 ending today (an
+ * incomplete custom range asks for today). Where the window holds no scheduled run, windowNote says so.
  */
 export function boardsSetWindow(range, tz, now = Date.now()) {
-  const rng = normaliseRange(range);
-  const b = rangeBounds(rng, now) || { from: now, to: now };
+  const rng = normaliseRange(range, BOARD_RANGES);
+  const b = rangeBounds(rng, now, tz) || { from: now, to: now };
   const win = { from: ymdIn(b.from, tz), to: ymdIn(b.to, tz) };
   const pk = `${win.from}..${win.to}`;
   if (pk !== S.pk) S.range = null;
@@ -145,7 +146,7 @@ const winQuery = () => ({ from: S.win.from, to: S.win.to });
 
 /** "No scheduled measurement in the last 30 minutes — last run 11:40": said where the window is after the last run, never zeros. */
 function windowNote(lastRunAt, nowMs) {
-  const b = rangeBounds(S.rng, nowMs);
+  const b = rangeBounds(S.rng, nowMs, S.zone);
   if (!b || (finite(lastRunAt) && lastRunAt >= b.from)) return null;
   const when = !finite(lastRunAt) ? 'no run yet'
     : (ymdIn(lastRunAt, S.zone) === ymdIn(nowMs, S.zone) ? zonedText(lastRunAt, S.zone, { seconds: false }).slice(11) : zonedText(lastRunAt, S.zone, { seconds: false }));
@@ -176,11 +177,12 @@ export function boardsInfo() {
   for (const [k, e] of S.cache) if (k.startsWith('sum|') && e.state === 'ok' && e.res) res = e.res;
   const lv = res ? sharedLevels(res.byCluster) : null;
   const sch = (res && res.schedule) || null;
-  const st = (sch && sch.state) || {};
+  const o = scheduleOf(res);
   return {
     schedule: sch, levels: lv, delayFrom: lv ? lv.delayFrom : null,
-    everyHours: sch && finite(sch.everyHours) ? sch.everyHours : res && finite(res.everyHours) ? res.everyHours : null,
-    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : null, nextDueAt: finite(st.nextDueAt) ? st.nextDueAt : null,
+    everyHours: o.everyHours,
+    // The schedule's own last run only (not the clusters'), as this note always read it.
+    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : null, nextDueAt: o.nextDueAt,
     sig: res ? `${objId(res)}` : '-',
   };
 }

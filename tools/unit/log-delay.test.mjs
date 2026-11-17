@@ -378,3 +378,29 @@ test('the trend reads oldest to newest, not the order the query returned', () =>
   ], R, T), T);
   assert.equal(rising.trend, 'WORSENING', `a climbing delay read as ${rising.trend}`);
 });
+
+/* ---- Log Delay › Live: the Logs filters and "Fetch all devices in cluster" ---- */
+
+test('Live filters: the fields come from the cluster’s configured log fields', () => {
+  assert.deepEqual(ld.logFilterFields({}), { host: 'src_hostname', ip: 'src_ip', tag1: 'tag1' }, 'nothing configured: the defaults');
+  assert.deepEqual(ld.logFilterFields({ delayFields: { device: 'host.name.keyword', metadata: ['client.addr', 'Tag1', 'zone'] } }),
+    { host: 'host.name', ip: 'client.addr', tag1: 'Tag1' }, 'the device field, the address-like context field, tag1 as configured');
+});
+
+test('Live filters: one exact value, a pattern, an address range', () => {
+  assert.equal(ld.logFilterClause('src_hostname', '  '), null, 'an empty filter is no clause');
+  assert.equal(ld.logFilterClause(null, 'x'), null, 'no field, no clause');
+  assert.deepEqual(ld.logFilterClause('src_hostname', 'fw-core-02'),
+    { query_string: { query: '"fw-core-02"', analyze_wildcard: true, lenient: true, fields: ['src_hostname', 'src_hostname.keyword'] } });
+  assert.equal(ld.logFilterClause('src_hostname', 'fw-core-*').query_string.query, 'fw-core-*', 'a wildcard is a pattern, unquoted');
+  assert.equal(ld.logFilterClause('tag1', 'a"b').query_string.query, '"a\\"b"', 'a quote inside is escaped');
+  assert.deepEqual(ld.logFilterClause('src_ip', '10.4.0.0/16'), { term: { src_ip: '10.4.0.0/16' } }, 'a CIDR is a term an ip field reads as a range');
+});
+
+test('Fetch all devices in cluster: the lookback asks names and newest arrivals only', () => {
+  const b = ld.buildSeenSearchBody({ device: 'src_hostname.keyword', arrival: '@timestamp' }, { from: ld.SEEN_LOOKBACK, to: 'now-60m' });
+  assert.equal(b.size, 0, 'no documents');
+  assert.deepEqual(b.query.bool.filter[0].range['@timestamp'], { gte: 'now-7d', lte: 'now-60m', format: 'strict_date_optional_time' });
+  assert.deepEqual(b.aggs.devices.terms, { field: 'src_hostname.keyword', size: ld.LATE_MAX, order: { last: 'desc' } });
+  assert.deepEqual(b.aggs.devices.aggs, { last: { max: { field: '@timestamp' } } });
+});
