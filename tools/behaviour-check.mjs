@@ -196,6 +196,15 @@ await go('console');
     const st = doc.getElementById('c-status');
     ok(st && st.isConnected && /^HTTP 200/.test(st.textContent.trim()), `console: after a run the status reads "${st && st.textContent.trim()}", expected HTTP 200 first`);
     ok(st && !!st.querySelector('.pill.green'), 'console: a 200 is not a green pill');
+    // The Query and Results boxes reach the footer (fitColumns: --c-fit, the height above and
+    // below them) and the answer scrolls inside Results, never capped at a fixed height. The
+    // pixels themselves are the real-browser pass's to measure; jsdom has no layout.
+    const cols = doc.getElementById('c-columns');
+    ok(!!cols && /^\d+px$/.test(cols.style.getPropertyValue('--c-fit')), `console: the boxes' height is not fitted to the window (--c-fit "${cols && cols.style.getPropertyValue('--c-fit')}")`);
+    const rbody = doc.querySelector('#c-response .card > .body');
+    ok(!!rbody && !rbody.style.maxHeight && rbody.style.overflow === 'auto' && ['0', '0px'].includes(rbody.style.minHeight), `console: the Results body is capped or does not scroll inside itself (${rbody && rbody.getAttribute('style')})`);
+    const ta = doc.getElementById('c-body');
+    ok(!!ta && ta.style.height === '100%' && ta.style.resize === 'none', 'console: the request body does not fill the Query box');
     ok(st && /\d+ ms/.test(st.textContent) && /\d+(\.\d+)? ?k?B/.test(st.textContent), `console: the status does not carry the time and size: "${st && st.textContent.trim()}"`);
     ok(st.parentElement === doc.getElementById('c-run').parentElement && st === st.parentElement.lastElementChild, 'console: after a run the status left the end of the Run row');
     const resultsHead = doc.querySelector('#c-response section.card > header');
@@ -3192,7 +3201,8 @@ if (config.clusters.length >= 2 && viaFleet) {
   await goOne('snapshots');
   { const o = doc.querySelector('tr[data-repo="daily"] button[data-act="open-repo"]'); if (o) { o.click(); await settleFor(200); } }
   const list = () => [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Snapshots in daily');
-  const rowIds = () => [...(list() ? list().querySelectorAll('tbody tr') : [])].map((tr) => tr.querySelector('td').textContent.trim());
+  // The first cell is the tick (an admin's, td.sel); the name is the first cell after it.
+  const rowIds = () => [...(list() ? list().querySelectorAll('tbody tr') : [])].map((tr) => tr.querySelector('td:not(.sel)').textContent.trim());
   const pagerBtn = (label) => [...(list() ? list().querySelectorAll('.pager button') : [])].find((b) => b.textContent.trim() === label);
   ok(!!list(), 'snapshot paging: no "Snapshots in daily" card');
   ok(rowIds().length === 10 && rowIds()[0] === 'snap-22', `snapshot paging: page 1 should be the newest ten, got ${rowIds().join(',')}`);
@@ -3251,7 +3261,8 @@ if (config.clusters.length >= 2 && viaFleet) {
   const colsBtn = doc.querySelector('.toolbar button.menu-trigger');
   const colsLabel = () => (colsBtn && colsBtn.getAttribute('aria-label')) || '';
   ok(!!colsBtn && colsBtn.textContent === '⋮' && /9 of 9 columns shown/.test(colsLabel()), `snapshot columns: no ⋮ trigger, or it miscounts (${colsLabel()})`);
-  const ths = () => (list() ? [...list().querySelectorAll('thead th')].map((th) => th.textContent.replace(/ [▲▼]$/, '')) : []);
+  // Without the select-all tick's column, which is not one of the chooser's.
+  const ths = () => (list() ? [...list().querySelectorAll('thead th')].filter((th) => !th.querySelector('input.snap-all')).map((th) => th.textContent.replace(/ [▲▼]$/, '')) : []);
   if (colsBtn) {
     colsBtn.click(); await settleFor(50);
     const pop = doc.querySelector('.pop');
@@ -3265,7 +3276,7 @@ if (config.clusters.length >= 2 && viaFleet) {
       if (ended) {
         ended.checked = false; ended.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50);
         ok(!ths().includes('Ended') && ths().length === 9, `snapshot columns: unticking Ended should drop its column, headers now ${ths().join('|')}`);
-        ok(list().querySelector('tbody tr').children.length === 9, 'snapshot columns: the rows should lose the cell too');
+        ok([...list().querySelector('tbody tr').children].filter((td) => !td.classList.contains('sel')).length === 9, 'snapshot columns: the rows should lose the cell too');
         ok(/8 of 9 columns shown/.test(colsLabel()), `snapshot columns: the trigger should count 8 of 9, says ${colsLabel()}`);
         ok(/8 of 9 shown/.test(pop.textContent), 'snapshot columns: the menu should say 8 of 9 shown');
         ok(rowIds().length === 10 && rowIds()[0] === 'snap-22', 'snapshot columns: hiding a column changed the rows');
@@ -3320,6 +3331,191 @@ if (config.clusters.length >= 2 && viaFleet) {
       await settleFor(30);
     }
   } else ok(false, 'evidence: no opener on a snapshot row');
+
+  /* ---- ticks and bulk Delete in a repository; SLM Edit… and Delete… (admins only) ---- */
+  // A real EsClient whose request() records instead of sending: what it would put on the wire —
+  // method, path, body and allowWrites — is what es.js and core/snapshot-admin.js build.
+  {
+    const { EsClient } = await load('core/es.js');
+    const W = await load('core/writes.js');
+    const callerBefore = st.state.caller;
+    const wire = [];
+    const POLICY = { nightly: { version: 2, policy: {
+      name: '<daily-{now/d}>', schedule: '0 30 1 * * ?', repository: 'daily',
+      config: { indices: ['logstash-*'], include_global_state: false, ignore_unavailable: true, partial: true,
+        feature_states: ['kibana'], metadata: { owner: 'ops' } },
+      retention: { expire_after: '30d', min_count: 7, max_count: 60 } } } };
+    // Long names, so sixty of them need more than one DELETE (each path ≤ 3000 characters);
+    // the oldest is still being taken and cannot be ticked.
+    const LONG = Array.from({ length: 60 }, (_, i) => ({
+      ...snap(`nightly-snapshot-of-the-production-logging-cluster-with-a-long-name-${String(i).padStart(3, '0')}`, i === 0 ? 'IN_PROGRESS' : 'SUCCESS', 60 - i),
+      indices: 1, indexNames: ['logstash-2026.09.23'], successful: 1, total: 1, duration: 1000 }));
+    const arm = (role) => {
+      setup([{ name: 'daily', type: 'fs', error: null }], { daily: LONG });
+      st.state.data.get('c1').slm = [{ id: 'nightly', policy: POLICY.nightly.policy }];
+      const cl = new EsClient(st.state.config.clusters[0], st.state.defaults, null);
+      cl.state = 'online';
+      cl.request = async (method, path, body, opts = {}) => {
+        wire.push({ method, path, body: body == null ? null : typeof body === 'string' ? body : JSON.stringify(body), allowWrites: opts.allowWrites === true });
+        if (method === 'GET' && path === '/_slm/policy/nightly') return { ok: true, status: 200, json: POLICY };
+        if (method === 'GET') return { ok: false, status: 0, kind: 'stub', message: 'not answered here' };
+        return { ok: true, status: 200, json: { acknowledged: true } };
+      };
+      st.state.clients = new Map([['c1', cl]]);
+      st.state.caller = role ? { name: role, role } : null;
+    };
+    const L = () => [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Snapshots in daily');
+    const toRepos = async () => { const back = doc.querySelector('button[data-act="back-to-repos"]'); if (back) { back.click(); await settleFor(150); } };
+    const openDaily = async () => {
+      await goOne('snapshots');
+      await toRepos();
+      const o = doc.querySelector('tr[data-repo="daily"] button[data-act="open-repo"]');
+      if (o) { o.click(); await settleFor(200); }
+    };
+    const searchFor = async (t) => { const sb = doc.querySelector('input[aria-label="Search snapshots"]'); if (sb) { sb.value = t; sb.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60); } };
+    const head = () => L() && L().querySelector('input.snap-all');
+    const bar = () => doc.querySelector('.snap-bulk');
+    const barText = () => (bar() && !bar().hidden ? bar().textContent : '');
+    const lastModal = () => [...doc.querySelectorAll('.modal')].pop();
+    const itemLabel = (b) => { const sp = b.querySelector('span:not(.ico):not(.mi-note)'); return (sp ? sp.textContent : b.textContent).trim(); };
+    const slmMenu = () => [...doc.querySelectorAll('button.menu-trigger')].find((b) => b.title === 'Actions for nightly');
+    const pressItem = (label) => { const b = [...doc.querySelectorAll('.menu-pop button')].find((x) => itemLabel(x) === label); if (b) b.click(); return !!b; };
+    const rows = () => (L() ? [...L().querySelectorAll('tbody tr')] : []);
+    try {
+      // Not an admin: no ticks, no bar, no Edit or Delete.
+      arm('user');
+      await openDaily();
+      ok(!!L(), 'snapshot ticks: the "Snapshots in daily" card did not open');
+      ok(!head() && !(L() && L().querySelector('td.sel')), 'snapshot ticks: a user (not an admin) is shown ticks');
+      await toRepos();
+      ok(!!panel('Policies (SLM)') && !slmMenu(), 'SLM: a user (not an admin) is shown the Edit / Delete menu');
+
+      // An admin, writes locked (the gate asks first).
+      arm(null);
+      if (W.writesUnlocked()) await W.setWritesUnlocked(false, { confirmFirst: false });
+      await openDaily();
+      ok(!!head(), 'snapshot ticks: an admin has no select-all tick');
+      ok(rows().length === 10 && rows().every((tr) => tr.querySelector('td.sel input[type="checkbox"]')), 'snapshot ticks: not every row has a tick');
+      ok(!barText(), 'snapshot ticks: the bar shows with nothing ticked');
+      // One ticked by hand: the bar says so.
+      const box0 = rows()[0] && rows()[0].querySelector('td.sel input');
+      if (box0) { box0.checked = true; box0.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(40); }
+      ok(/1 selected/.test(barText()) && /Delete…/.test(barText()) && /Clear/.test(barText()), `snapshot ticks: one tick did not bring "1 selected · Delete… · Clear" (${barText()})`);
+      ok(head() && head().indeterminate, 'snapshot ticks: the head tick is not half-ticked with one of 59 ticked');
+      // The one still being taken cannot be ticked, and says why.
+      await searchFor('long-name-000');
+      const running = rows()[0] && rows()[0].querySelector('td.sel input');
+      ok(!!running && running.disabled && /Still being taken/.test(running.title), 'snapshot ticks: a snapshot IN_PROGRESS can be ticked, or does not say why not');
+      // The head tick with a search: every match, on every page — here 000…009 less the running one.
+      await searchFor('long-name-00');
+      if (head()) { head().checked = true; head().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(60); }
+      ok(/10 selected/.test(barText()), `snapshot ticks: select-all on "long-name-00" should add 001–009 to the one ticked (10 selected), says "${barText()}"`);
+      const clear = bar() && bar().querySelector('button[data-act="bulk-clear"]');
+      if (clear) { clear.click(); await settleFor(40); }
+      ok(!barText(), 'snapshot ticks: Clear did not clear the selection');
+      // No search: the head tick takes every snapshot on all six pages.
+      await searchFor('');
+      if (head()) { head().checked = true; head().dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(60); }
+      ok(/59 selected/.test(barText()), `snapshot ticks: select-all should tick all 59 that can be (6 pages), says "${barText()}"`);
+      ok(rows().filter((tr) => tr.querySelector('td.sel input').checked).length === 10, 'snapshot ticks: the rows on screen are not shown ticked');
+      const pager3 = L() && [...L().querySelectorAll('.pager button')].find((b) => b.textContent.trim() === '3');
+      if (pager3) { pager3.click(); await settleFor(50); }
+      ok(rows().length === 10 && rows().every((tr) => tr.querySelector('td.sel input').checked), 'snapshot ticks: page 3 is not ticked after select-all');
+
+      // Bulk Delete: the gate first, then one confirmation, then batched DELETEs with allowWrites.
+      const n0 = wire.length;
+      const del = bar() && bar().querySelector('button[data-act="bulk-delete"]');
+      ok(!!del, 'snapshot bulk: the bar has no Delete…');
+      if (del) {
+        del.click(); await settleFor(250);
+        let m = lastModal();
+        if (m && /Allow writes to this cluster\?/.test(m.textContent)) {
+          const allow = [...m.querySelectorAll('.modal-foot button')].find((b) => /^allow writes$/i.test(b.textContent.trim()));
+          if (allow) { allow.click(); await settleFor(400); }
+          m = lastModal();
+        } else ok(false, `snapshot bulk: a locked session was not asked "Allow writes to this cluster?" (${m ? m.textContent.slice(0, 80) : 'no dialog'})`);
+        ok(!wire.slice(n0).some((w) => w.method === 'DELETE'), 'snapshot bulk: a DELETE went out before the confirmation');
+        const names = m && m.querySelector('#snap-bulk-names');
+        ok(!!names && names.children.length === 59 && names.style.overflow === 'auto', `snapshot bulk: the confirmation does not list all 59 names in a scrolling box (${names ? names.children.length : 'none'})`);
+        const echo = m && m.querySelector('#snap-bulk-echo');
+        const yes = m && [...m.querySelectorAll('.modal-foot button')].find((b) => /^Delete 59 snapshots$/.test(b.textContent.trim()));
+        ok(!!echo && !!yes, 'snapshot bulk: no box to type into, or no "Delete 59 snapshots" button');
+        if (echo && yes) {
+          echo.value = '58'; yes.click(); await settleFor(80);
+          ok(!!lastModal() && !wire.slice(n0).some((w) => w.method === 'DELETE'), 'snapshot bulk: the wrong count was accepted');
+          echo.value = 'delete'; yes.click(); await settleFor(500);
+          const dels = wire.slice(n0).filter((w) => w.method === 'DELETE');
+          const sentNames = dels.flatMap((w) => w.path.replace('/_snapshot/daily/', '').split(',').map(decodeURIComponent));
+          ok(dels.length >= 2 && dels.every((w) => w.allowWrites && w.path.startsWith('/_snapshot/daily/') && w.path.length <= 3000),
+            `snapshot bulk: expected batched DELETE /_snapshot/daily/… (each ≤ 3000 characters) with allowWrites, saw ${dels.map((w) => `${w.path.length}:${w.allowWrites}`).join(' ')}`);
+          ok(sentNames.length === 59 && new Set(sentNames).size === 59 && !sentNames.some((x) => /long-name-000$/.test(x)),
+            `snapshot bulk: the DELETEs named ${sentNames.length} snapshots, expected the 59 ticked`);
+          ok(!barText(), 'snapshot bulk: the selection was not cleared after the delete');
+        }
+      }
+
+      // SLM Edit…: read fresh, prefilled, the PUT shown before Save, untouched keys kept.
+      arm(null);
+      await goOne('snapshots'); await toRepos();
+      ok(!!slmMenu(), 'SLM: an admin has no ⋯ menu on the policy row');
+      if (slmMenu()) {
+        slmMenu().click(); await settleFor(40);
+        const items = [...doc.querySelectorAll('.menu-pop button')].map(itemLabel);
+        ok(items.includes('Edit…') && items.includes('Delete…'), `SLM: the policy menu offers ${items.join(' | ')}`);
+        const n1 = wire.length;
+        pressItem('Edit…'); await settleFor(300);
+        const m = lastModal();
+        ok(!!m && /Edit SLM policy nightly/.test(m.textContent), 'SLM: Edit… opened no dialog');
+        ok(wire.slice(n1).some((w) => w.method === 'GET' && w.path === '/_slm/policy/nightly'), 'SLM: Edit… did not read the policy fresh');
+        const sched = m && m.querySelector('#slm-schedule');
+        const prev = () => (m && m.querySelector('#slm-preview') ? m.querySelector('#slm-preview').textContent : '');
+        ok(!!sched && sched.value === '0 30 1 * * ?' && m.querySelector('#slm-repo').value === 'daily' && m.querySelector('#slm-indices').value === 'logstash-*'
+          && m.querySelector('#slm-expire').value === '30d' && m.querySelector('#slm-min').value === '7' && m.querySelector('#slm-max').value === '60',
+          'SLM: the dialog is not prefilled from the policy');
+        ok(/^PUT \/_slm\/policy\/nightly\n/.test(prev()), `SLM: the request is not shown before Save (${prev().slice(0, 40)})`);
+        const save = m && m.querySelector('#slm-save');
+        if (sched && save) {
+          sched.value = '0 0 2 * *'; sched.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(30);
+          ok(/6 or 7/.test((m.querySelector('#slm-problems') || {}).textContent || ''), 'SLM: a five-field cron is not called out');
+          save.click(); await settleFor(150);
+          ok(!wire.slice(n1).some((w) => w.method === 'PUT'), 'SLM: a five-field cron was sent');
+          sched.value = '0 0 2 * * ?'; sched.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(30);
+          ok(/"schedule": "0 0 2 \* \* \?"/.test(prev()), 'SLM: the shown request did not follow the edit');
+          save.click(); await settleFor(300);
+          const puts = wire.slice(n1).filter((w) => w.method === 'PUT');
+          const body = puts[0] ? JSON.parse(puts[0].body) : {};
+          ok(puts.length === 1 && puts[0].path === '/_slm/policy/nightly' && puts[0].allowWrites === true, `SLM: expected one PUT /_slm/policy/nightly with allowWrites, saw ${JSON.stringify(puts.map((p) => [p.path, p.allowWrites]))}`);
+          ok(body.schedule === '0 0 2 * * ?' && body.repository === 'daily' && body.name === '<daily-{now/d}>', `SLM: the PUT body's edited fields are wrong: ${puts[0] && puts[0].body}`);
+          ok(JSON.stringify(body.config) === JSON.stringify(POLICY.nightly.policy.config) && JSON.stringify(body.retention) === JSON.stringify(POLICY.nightly.policy.retention),
+            `SLM: the PUT did not keep the untouched keys as read: ${puts[0] && puts[0].body}`);
+          ok(!doc.querySelector('.modal #slm-save'), 'SLM: the dialog stayed open after a successful Save');
+        }
+      }
+      // SLM Delete…: the id typed, then DELETE with allowWrites; the snapshots are said to be kept.
+      await goOne('snapshots'); await toRepos();
+      if (slmMenu()) {
+        slmMenu().click(); await settleFor(40);
+        const n2 = wire.length;
+        pressItem('Delete…'); await settleFor(200);
+        const m = lastModal();
+        ok(!!m && /snapshots it already took are kept/.test(m.textContent), 'SLM: Delete… does not say the snapshots are kept');
+        const echo = m && m.querySelector('#confirm-echo');
+        const yes = m && [...m.querySelectorAll('.modal-foot button')].find((b) => /^Delete policy$/.test(b.textContent.trim()));
+        ok(!!echo && !!yes, 'SLM: Delete… has no box for the id, or no Delete policy button');
+        if (echo && yes) {
+          echo.value = 'nightl'; yes.click(); await settleFor(60);
+          ok(!wire.slice(n2).some((w) => w.method === 'DELETE'), 'SLM: Delete went out without the id typed');
+          echo.value = 'nightly'; yes.click(); await settleFor(300);
+          const dels = wire.slice(n2).filter((w) => w.method === 'DELETE');
+          ok(dels.length === 1 && dels[0].path === '/_slm/policy/nightly' && dels[0].allowWrites === true, `SLM: expected DELETE /_slm/policy/nightly with allowWrites, saw ${JSON.stringify(dels)}`);
+        }
+      } else ok(false, 'SLM: no ⋯ menu on the policy row for Delete…');
+    } finally {
+      st.state.caller = callerBefore;
+      await W.setWritesUnlocked(false, { confirmFirst: false });
+      for (const o of doc.querySelectorAll('.modal-overlay')) o.remove();
+    }
+  }
   await backToFleet();
 }
 
@@ -4747,6 +4943,44 @@ restoreConsole();
   await go('overview');
 }
 
+// The top bar (the owner, 2026-11-17): the bell on Clusters and Clusters › Overview only, no
+// "1 green · 1 yellow" pill on any page, and a notice raised elsewhere still reaches the bell.
+{
+  const menu = await load('ui/menu.js');
+  const st = await load('core/state.js');
+  const bell = () => doc.querySelector('#topbar .bell');
+  const fleetPill = () => [...doc.querySelectorAll('#topbar .pill')].map((p) => p.textContent.trim())
+    .find((t) => /\d+\s+(green|yellow|red|unreachable|loading)\b/.test(t) || / · (green|yellow|red|unreachable|loading)$/.test(t)) || '';
+  st.state.selected = 'all';
+  await go('overview');
+  ok(!!bell(), 'top bar: no bell on Clusters');
+  ok(!fleetPill(), `top bar: the fleet health pill is on Clusters ("${fleetPill()}")`);
+  ok(!!doc.querySelector('#topbar [aria-label^="Fleet health"], #topbar [aria-label^="Cluster health"]'), 'top bar: the health dot on the chooser is gone');
+  const first = st.clusters()[0];
+  if (first) {
+    location.hash = `#/clusters/overview/${first.id}`; await settleFor(600);
+    ok(/^#\/clusters\/overview/.test(location.hash) && !!bell(), `top bar: no bell on Clusters › Overview (${location.hash})`);
+    ok(!fleetPill(), `top bar: the fleet health pill is on Clusters › Overview ("${fleetPill()}")`);
+  }
+  for (const p of ['indices', 'console', 'snapshots', 'shards', 'log-delay', 'reports', 'jobs', 'alerts']) {
+    await go(p);
+    ok(!bell(), `top bar: the bell is drawn on ${p}`);
+    ok(!fleetPill(), `top bar: the fleet health pill is on ${p} ("${fleetPill()}")`);
+  }
+  // A notice that goes "to the bell" while no bell is drawn is kept, and the bell on Clusters lists it.
+  await go('indices');
+  menu.toast('top-bar check: a bell-only notice', 'warn', 0, { bellOnly: true });
+  ok(menu.notifications().some((n) => n.message === 'top-bar check: a bell-only notice'), 'top bar: a bell-only notice raised off Clusters was lost');
+  st.state.selected = 'all';
+  await go('overview');
+  const b = bell();
+  if (b) {
+    b.click(); await settleFor(100);
+    ok([...doc.querySelectorAll('.notif')].some((n) => /top-bar check: a bell-only notice/.test(n.textContent)), 'top bar: the bell on Clusters does not list the notice raised on Indices');
+    menu.closePopover(); await settleFor(30);
+  }
+}
+
 // Request policy: Config → Requests asks the core once per visit, stays quiet under fleet
 // events, and saves what the presets decide; the Request Centre's emergency stop has an end.
 {
@@ -5813,8 +6047,11 @@ consolePanels: {
     d.ilm = { operation_mode: 'RUNNING' }; d.ilmErrors = { 'logstash-x-1': {} };
     st.invalidateAlerts();
     notify.announceNewAlerts();
+    // The bell is drawn on Clusters (and Clusters › Overview) only (2026-11-17); the notices
+    // raised on Alerts are in it there.
+    await go('overview'); await settleFor(120);
     const bell = doc.querySelector('button.bell');
-    ok(!!bell, 'alerts: the shell has no bell');
+    ok(!!bell, 'alerts: the Clusters page has no bell');
     if (bell) {
       bell.click(); await settleFor(80);
       const entries = [...doc.querySelectorAll('.notif')].filter((n) => /quiet-lab: \d+ new alert/.test(n.textContent));
@@ -5975,6 +6212,7 @@ if (viaFleet) {
     ok(!/\d+\s+(green|yellow|red|unreachable|loading)\b/.test(bar.textContent), `evidence ${where}: a fleet status chip is in the top bar: "${bar.textContent}"`);
     ok(![...bar.querySelectorAll('button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), `evidence ${where}: the alerts chip is in the top bar`);
     ok(!bar.querySelector('.bell'), `evidence ${where}: the bell is in the top bar`);
+    ok(!bar.querySelector('[aria-label^="Fleet health"]'), `evidence ${where}: the picker's dot is the fleet's, not this cluster's`);
     const pickEl = bar.querySelector('#cluster-select');
     ok(!!pickEl, `evidence ${where}: no cluster chooser in the top bar`);
     ok(!bar.querySelector('#cluster-finder, .cl-find'), `evidence ${where}: the find-box is in the top bar`);
@@ -5995,7 +6233,9 @@ if (viaFleet) {
   await go('overview'); await settleFor(300);
   {
     const bar = doc.getElementById('topbar').textContent;
-    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
+    // The fleet's health is the picker's dot since the "1 green · 1 yellow" pill went (2026-11-17).
+    const fdot = doc.querySelector('#topbar [aria-label^="Fleet health"]');
+    ok(!!fdot && /\d+\s+(green|yellow|red|unreachable)/.test(fdot.getAttribute('aria-label')), `evidence control: Clusters has no fleet health dot, so the absence checks prove nothing: "${fdot ? fdot.getAttribute('aria-label') : bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
     ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
     await go('alerts'); ok(!doc.getElementById('side-foot'), 'evidence control: Alerts has a status strip again'); await go('overview');
@@ -6112,7 +6352,7 @@ if (viaFleet) {
     { const sel = doc.getElementById('cluster-select'); ok(!!sel, 'evidence: the picker did not come back on Clusters');
       if (sel) { sel.value = 'all'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(400); } }
     const bar = doc.getElementById('topbar').textContent;
-    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence: the fleet chip did not come back on Clusters: "${bar}"`);
+    ok(!!doc.querySelector('#topbar [aria-label^="Fleet health"]'), `evidence: the fleet health dot did not come back on Clusters: "${bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence: the bell did not come back on Clusters');
     ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
     // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.

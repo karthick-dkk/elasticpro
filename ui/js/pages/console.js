@@ -393,23 +393,24 @@ function draw() {
   // ---- Query | Results
   // A whole request pasted here ("POST _x\n{…}", or a curl line) is split the same way: the
   // method and path go up to the request line, the body stays here. A body alone is a body.
+  // It fills its box, and the box reaches the footer (fitColumns): nothing to drag.
   const bodyArea = h('textarea#c-body', { spellcheck: false,
-    style: { width: '100%', height: '100%', minHeight: '340px', fontFamily: 'var(--mono)', fontSize: '12px', resize: 'vertical', boxSizing: 'border-box' },
+    style: { width: '100%', height: '100%', minHeight: '0', fontFamily: 'var(--mono)', fontSize: '12px', resize: 'none', boxSizing: 'border-box' },
     onpaste: (e) => { if (recognise(pasted(e), { fromBody: true })) e.preventDefault(); },
     oninput: (e) => { ui.body = e.target.value; scheduleSave(); },
     onkeydown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } } }, ui.body);
 
-  const query = h('section.card', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
+  const query = h('section.card', { style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 } },
     h('header', h('h2', 'Query'), h('span.sub', 'request body'),
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
         h('button.btn.sm', { onclick: format }, 'Format JSON'),
         h('button.btn.sm', { onclick: () => { ui.body = ''; $('#c-body').value = ''; scheduleSave(); } }, 'Clear'),
         h('button.btn.sm', { onclick: () => askSave(), title: 'Save this query by name — on the server, privately or shared with the team' }, '💾 Save query'),
         h('button.btn.sm.ghost', { onclick: () => saveFav(), title: 'Mark this request as a favourite in this browser\'s history' }, '★ Favourite'))),
-    h('div.body', { style: { padding: '10px', flex: '1', display: 'flex' } }, bodyArea));
+    h('div.body', { style: { padding: '10px', flex: '1', display: 'flex', minHeight: '0' } }, bodyArea));
 
   // A column, so a flash() line sits above the results card rather than beside it.
-  const results = h('div#c-response', { style: { minWidth: 0, display: 'flex', flexDirection: 'column' } }, responseCard());
+  const results = h('div#c-response', { style: { minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' } }, responseCard());
 
   // 35/65. A request body is usually a few lines and a response is usually hundreds, so
   // an even split gave half the window to whitespace and made the half that matters
@@ -420,9 +421,11 @@ function draw() {
     ondblclick: () => setSplit(DEFAULT_SPLIT),
     onpointerdown: startDrag,
   });
+  // As tall as the window leaves below where it starts (fitColumns), at least 300 px; one row,
+  // so both boxes take that height and a long answer scrolls inside Results.
   const columns = h('div#c-columns', {
     style: { display: 'grid', gridTemplateColumns: `minmax(0,${ui.split}fr) 6px minmax(0,${100 - ui.split}fr)`,
-             gap: '8px', alignItems: 'stretch' },
+             gridTemplateRows: 'minmax(0, 1fr)', gap: '8px', alignItems: 'stretch', minHeight: `${MIN_COLUMNS}px` },
   }, query, split, results);
 
   if (ui.full) {
@@ -434,7 +437,34 @@ function draw() {
     return;
   }
   mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns));
+  fitColumns();
+  // Once more after the browser has laid the page out (the top bar and the strip settle late).
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fitColumns);
 }
+
+/** Below this the boxes stop shrinking and the page scrolls instead: a box of three lines is no box. */
+const MIN_COLUMNS = 300;
+
+/**
+ * The Query and Results boxes reach down to just above the footer (the owner, 2026-11-17).
+ * Their height is the window's less where they start and what lies under them — the footer and
+ * the page's bottom padding — measured rather than guessed, because the tab strip wraps (one to
+ * ten tabs), the request line wraps on a narrow window and the menu sits on top or at the left.
+ * A long answer scrolls inside Results; the page itself does not grow.
+ */
+function fitColumns() {
+  const cols = $('#c-columns');
+  if (!cols || !cols.isConnected) return;
+  const top = cols.getBoundingClientRect().top + (window.scrollY || 0);
+  const foot = document.getElementById('app-foot');
+  const footH = foot ? foot.getBoundingClientRect().height : 0;
+  const page = cols.closest('.page');
+  const pad = page ? parseFloat(getComputedStyle(page).paddingBottom) || 0 : 0;
+  // app.css: #c-columns { height: calc(100dvh - var(--c-fit)) }.
+  cols.style.setProperty('--c-fit', `${Math.round(top + footH + pad)}px`);
+}
+// A resize moves where the boxes start (the strip and the request line wrap) as well as the window.
+window.addEventListener('resize', () => { if (host && host.isConnected && !ui.full) fitColumns(); });
 
 /* ------------------------- a request pasted or typed whole ------------------------- */
 
@@ -779,8 +809,8 @@ function responseCard() {
   const head = (sub, actions) => h('header', h('h2', 'Results'), sub || null,
     actions ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }, ...actions) : null);
   if (!r) {
-    return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column' } }, head(h('span.sub', 'nothing run yet')),
-      h('div.body', { style: { flex: '1' } }, empty('Run a request — the response appears here, next to the query.')));
+    return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minHeight: 0 } }, head(h('span.sub', 'nothing run yet')),
+      h('div.body', { style: { flex: '1', minHeight: '0', overflow: 'auto' } }, empty('Run a request — the response appears here, next to the query.')));
   }
   const bodyText = r.json !== null && r.json !== undefined ? JSON.stringify(r.json, null, 2) : (r.text || '');
 
@@ -806,7 +836,7 @@ function responseCard() {
 
   // The status, time and size are beside Run (statusLine), not here; the request itself is in
   // the inputs. The header is the title and the tools; the body is the answer alone.
-  return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minWidth: 0 } },
+  return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 } },
     head(null, [
       findBox(bodyText),
       h('button.btn.sm', { onclick: () => { ui.raw = !ui.raw; mount($('#c-response'), responseCard()); } }, ui.raw ? 'Highlighted' : 'Raw'),
@@ -817,13 +847,13 @@ function responseCard() {
         title: ui.full ? 'Leave full screen (Esc)' : 'Fill the window with the response',
         onclick: () => { ui.full = !ui.full; draw(); },
       }, ui.full ? '\u2715 Close' : '\u26F6 Full screen')]),
-    // Beside the query pane the body is capped so the history stays reachable. In full
-    // screen there is nothing else on the page, so it takes the window — the whole point
-    // of pressing the button was to stop reading a response through a letterbox.
+    // Beside the query pane the body fills the box down to the footer (fitColumns) and scrolls
+    // inside it. In full screen there is nothing else on the page, so it takes the window — the
+    // whole point of pressing the button was to stop reading a response through a letterbox.
     h('div.body', {
       style: ui.full
         ? { padding: '10px', flex: '1', minHeight: '0', height: 'calc(100vh - 150px)', overflow: 'auto' }
-        : { padding: '10px', flex: '1', minHeight: '340px', maxHeight: '64vh', overflow: 'auto' },
+        : { padding: '10px', flex: '1', minHeight: '0', overflow: 'auto' },
     }, body));
 }
 

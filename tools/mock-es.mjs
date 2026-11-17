@@ -47,8 +47,8 @@
  * with both, a device with one); Zone dc1–dc4 and tag1 firewall/proxy/switch on each.
  *
  * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
- * except snapshot deletes, index-template PUT/DELETE and the shard-allocation cluster setting,
- * which are honoured in memory.
+ * except snapshot deletes (one or several, `a,b`), SLM policy PUT/DELETE, index-template PUT/DELETE
+ * and the shard-allocation cluster setting, which are honoured in memory.
  */
 
 import http from 'node:http';
@@ -249,6 +249,23 @@ function putClusterSettings(body) {
 }
 const deletedSnapshots = new Set();
 const snapshotsLeft = (list) => list.filter((s) => !deletedSnapshots.has(s.snapshot));
+
+// SLM policies, held in memory so the Snapshots page's Edit… and Delete… are seen to take:
+// GET /_slm/policy[/<id>] reads them, PUT /_slm/policy/<id> replaces one, DELETE removes it.
+// The run statistics are worked out at answer time, as they always were.
+const slmPolicies = new Map([['nightly', { version: 1, policy: {
+  name: '<daily-{now/d}>', schedule: '0 30 1 * * ?', repository: 'daily',
+  config: { indices: ['logstash-*'] }, retention: { expire_after: '30d', min_count: 7, max_count: 60 } } }]]);
+function slmAnswer(id) {
+  const out = {};
+  for (const [k, v] of slmPolicies) {
+    if (id && k !== id) continue;
+    out[k] = { ...(v.version > 1 ? { version: v.version } : {}), policy: v.policy,
+      ...(k === 'nightly' ? { last_success: { time: Date.now() - 7200000, snapshot_name: 'daily-1' } } : {}),
+      next_execution_millis: Date.now() + 3600000 };
+  }
+  return out;
+}
 
 /* ------------------------- documents (Indices › Documents) -------------------------
  * What an open index holds, for the documents view (ui/js/ui/documents-view.js): 60 documents
@@ -451,7 +468,7 @@ const routes = [
       'unassigned.reason': 'NODE_LEFT', node: null, store: '0' },
     // A hidden (".") index: left out of the shard table until asked for, and counted as hidden.
     { index: '.kibana_1', shard: '0', prirep: 'p', state: 'STARTED', node: 'node-3', store: '120000', docs: '41' }])],
-  [(u) => u.startsWith('/_cat/snapshots'), () => SNAPSHOTS],
+  [(u) => u.startsWith('/_cat/snapshots'), () => SNAPSHOTS.filter((s) => !deletedSnapshots.has(s.id))],
   [(u) => u.startsWith('/_cat/aliases'), () => ([{ alias: 'logstash', index: 'logstash-acme-2026.09.09', is_write_index: 'true' }])],
   [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: snapshotsLeft([
     // A good copy of every logstash index — but NOT of metrics-2026.09, which is therefore
@@ -475,11 +492,12 @@ const routes = [
     daily: { type: 'fs', settings: { location: '/mnt/backups', compress: true } } })],
   [(u) => u.startsWith('/_slm/status'), () => ({ operation_mode: 'RUNNING' })],
   [(u) => u.startsWith('/_slm/stats'), () => ({ retention_runs: 3, retention_failed: 0 })],
-  [(u) => u.startsWith('/_slm/policy'), () => ({ nightly: {
-    policy: { name: '<daily-{now/d}>', schedule: '0 30 1 * * ?', repository: 'daily',
-      config: { indices: ['logstash-*'] }, retention: { expire_after: '30d', min_count: 7, max_count: 60 } },
-    last_success: { time: Date.now() - 7200000, snapshot_name: 'daily-1' },
-    next_execution_millis: Date.now() + 3600000 } })],
+  [(u) => u.startsWith('/_slm/policy'), ({ url }) => {
+    const id = /^\/_slm\/policy\/([^/?]+)/.exec(url);
+    const name = id ? decodeURIComponent(id[1]) : null;
+    if (name && !slmPolicies.has(name)) return { error: { type: 'resource_not_found_exception', reason: `snapshot lifecycle policy or policies [${name}] not found` }, status: 404 };
+    return slmAnswer(name);
+  }],
   [(u) => u.startsWith('/_ilm/status'), () => ({ operation_mode: 'RUNNING' })],
   [(u) => u.startsWith('/_ilm/policy'), () => ({
     'logs-retention': {
@@ -949,14 +967,16 @@ if (SCALE) {
     phase_execution: { policy: 'logs-acme', version: 3, modified_date_in_millis: Date.now() - 30 * DAY } }]));
   routes.unshift(
     [(u) => u.startsWith('/_cat/shards'), ({ url }) => catProject(url, shards)],
-    [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: verbose, total: verbose.length, remaining: 0 })],
+    [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => { const left = snapshotsLeft(verbose); return { snapshots: left, total: left.length, remaining: 0 }; }],
     [(u) => u.startsWith('/_ilm/policy'), () => policies],
     [(u) => u.includes('_ilm/explain'), () => ({ indices: errors })],
   );
 }
 // Scaled bodies are the same every time, and big: serialised once each.
 const memo = new Map();
-const memoable = (u) => SCALE && u !== '/' && !u.startsWith('/_tasks') && !u.startsWith('/_cluster/settings') && !u.includes('_template') && !u.includes('_search') && !u.includes('_bulk');
+const memoable = (u) => SCALE && u !== '/' && !u.startsWith('/_tasks') && !u.startsWith('/_cluster/settings') && !u.includes('_template') && !u.includes('_search') && !u.includes('_bulk')
+  // Answers a write can change are worked out each time: the SLM policies, and the snapshot listings once one was deleted.
+  && !u.startsWith('/_slm/policy') && !(deletedSnapshots.size && (u.startsWith('/_cat/snapshots') || u.startsWith('/_snapshot/')));
 // The native realm, as Elasticsearch answers it: a map of username → user. (Without this the
 // fixture's generic acknowledgement stood in for it, which is not a shape a cluster sends.)
 routes.unshift([(u) => u.split('?')[0] === '/_security/user', () => ({
@@ -1115,10 +1135,32 @@ function handle(req, res, url, body, port) {
         indexTemplates.delete(name);
         return res.end(JSON.stringify({ acknowledged: true }));
       }
-      const del = req.method === 'DELETE' && /^\/_snapshot\/[^/]+\/[^/?]+/.exec(url.split('?')[0]);
+      // An SLM policy: PUT replaces it (a body with a schedule and a repository), DELETE removes it.
+      const slm = /^\/_slm\/policy\/([^/_][^/]*)$/.exec(bare);
+      if (slm && (req.method === 'PUT' || req.method === 'DELETE')) {
+        const id = decodeURIComponent(slm[1]);
+        if (req.method === 'DELETE') {
+          if (!slmPolicies.has(id)) {
+            res.statusCode = 404;
+            return res.end(JSON.stringify({ error: { type: 'resource_not_found_exception', reason: `snapshot lifecycle policy not found: ${id}` }, status: 404 }));
+          }
+          slmPolicies.delete(id);
+          return res.end(JSON.stringify({ acknowledged: true }));
+        }
+        let parsed = null;
+        try { parsed = JSON.parse(body || 'null'); } catch { /* answered below */ }
+        if (!parsed || typeof parsed !== 'object' || !parsed.schedule || !parsed.repository) {
+          res.statusCode = 400;
+          return res.end(JSON.stringify({ error: { type: 'action_request_validation_exception', reason: 'Validation Failed: schedule and repository are required' }, status: 400 }));
+        }
+        slmPolicies.set(id, { version: ((slmPolicies.get(id) || {}).version || 0) + 1, policy: parsed });
+        return res.end(JSON.stringify({ acknowledged: true }));
+      }
+      // Several at once (`a,b,c`, or `a%2Cb`), as Elasticsearch takes them.
+      const del = req.method === 'DELETE' && /^\/_snapshot\/[^/]+\/[^/?]+/.exec(bare);
       if (del) {
-        for (const name of del[0].split('/')[3].split(',')) {
-          if (name && name !== '_all') { deletedSnapshots.add(decodeURIComponent(name)); }
+        for (const name of decodeURIComponent(del[0].split('/')[3]).split(',')) {
+          if (name && name !== '_all') { deletedSnapshots.add(name); }
         }
       }
       return res.end(JSON.stringify({ acknowledged: true }));   // fixture: other writes are no-ops

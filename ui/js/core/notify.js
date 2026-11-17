@@ -177,7 +177,7 @@ export function announceNewAlerts({ notify = toast, now = Date.now(), list = nul
     const crit = notices.reduce((s2, n) => s2 + n.critical, 0);
     notify(`${total} new alerts on ${notices.length} clusters${crit ? `, ${crit} critical` : ''}`,
       crit ? 'err' : 'warn', MS_CRITICAL, { key: 'alerts-batch', noHistory: true,
-        detail: ['Each cluster has its own entry in the bell.'] });
+        detail: ['Each cluster has its own entry in the bell, on the Clusters page.'] });
   }
   return fresh;
 }

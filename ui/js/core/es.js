@@ -4,6 +4,7 @@
 import { bridge } from './transport.js';
 import { setManaged } from './managed.js';
 import { NOT_THE_CLUSTER } from './error-codes.js';
+import { slmPolicyPath, snapshotsDeletePath } from './snapshot-admin.js';
 
 const send = (msg, o) => bridge(msg, o);
 
@@ -569,8 +570,12 @@ export class EsClient {
   }
 
   deleteSnapshot(repo, name) {
-    return this.json('DELETE', `/_snapshot/${encodeURIComponent(repo)}/${encodeURIComponent(name)}`,
-      null, { allowWrites: true, timeoutMs: 120000 });
+    return this.json('DELETE', snapshotsDeletePath(repo, [name]), null, { allowWrites: true, timeoutMs: 120000 });
+  }
+
+  /** Several snapshots in one request — one batch of core/snapshot-admin.js snapshotDeleteBatches. */
+  deleteSnapshots(repo, names) {
+    return this.json('DELETE', snapshotsDeletePath(repo, names), null, { allowWrites: true, timeoutMs: 300000 });
   }
 
   restoreSnapshot(repo, name, body) {
@@ -603,7 +608,20 @@ export class EsClient {
   /* ----------------------------------- SLM ----------------------------------- */
 
   executeSlmPolicy(id) {
-    return this.json('POST', `/_slm/policy/${encodeURIComponent(id)}/_execute`, null, { allowWrites: true });
+    return this.json('POST', `${slmPolicyPath(id)}/_execute`, null, { allowWrites: true });
+  }
+
+  /** One policy as it is now — what the Edit dialog starts from (a read). */
+  slmPolicy(id) { return this.json('GET', slmPolicyPath(id)); }
+
+  /** Replace a policy with `body` (core/snapshot-admin.js slmPolicyBody). */
+  putSlmPolicy(id, body) {
+    return this.json('PUT', slmPolicyPath(id), body, { allowWrites: true, timeoutMs: 30000 });
+  }
+
+  /** Remove a policy. The snapshots it took stay in their repository. */
+  deleteSlmPolicy(id) {
+    return this.json('DELETE', slmPolicyPath(id), null, { allowWrites: true, timeoutMs: 30000 });
   }
 
   /* ---------------------------- index management -----------------------------
