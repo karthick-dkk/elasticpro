@@ -7934,7 +7934,7 @@ await settleFor(300);
     await waitFor(() => location.hash === '#/log-delay?tz=480' && g('ld-tz-filter-note'), `log delay: picking a zone did not filter the address (${location.hash})`);
     ok(tzChipText() === 'Time zone +08:00 · only these devices', `log delay: the filtered chip reads "${tzChipText()}"`);
     ok(view().querySelector('[data-kpi="tz"] b').textContent === '1' && view().querySelector('[data-kpi="critical"] b').textContent === '0', 'log delay: the tiles do not count the devices in the zone');
-    ok(g('ld-by-cluster') && [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 9 && tr.cells[9].textContent.trim() === '1').length >= 1, 'log delay: By cluster does not count the devices in the zone');
+    ok(g('ld-by-cluster') && [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 8 && tr.cells[8].textContent.trim() === '1').length >= 1, 'log delay: By cluster does not count the devices in the zone');
     ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === '#/log-delay/devices?tz=480', 'log delay: the tabs drop the time-zone filter');
     press(doc.querySelector('.ld-tabs a[data-tab="devices"]'));
     await waitFor(() => ldView() === 'devices' && g('ld-devices'), 'log delay: the Devices tab did not open with the zone filter');

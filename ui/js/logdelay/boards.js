@@ -639,8 +639,8 @@ function fleetView() {
     const pages = Math.max(1, Math.ceil(total / CLUSTER_PAGE));
     const page = Math.min(S.clPage, pages - 1);
     const shown = S.clAll ? sortedAll.slice(page * CLUSTER_PAGE, (page + 1) * CLUSTER_PAGE) : sortedAll.slice(0, CLUSTER_TOP);
-    // The two time-zone columns only when some cluster has a zone set or detected: otherwise every
-    // cell reads "not detected" / "—" and the table no longer fits (owner's window, 0.3.77).
+    // Other time zone only when some cluster has a zone set or detected: otherwise every cell reads
+    // "—" and the table no longer fits (owner's window, 0.3.77). Time zone always stays: it says why.
     const anyZone = sortedAll.some((c) => c.timeZone && c.timeZone.mode && c.timeZone.mode !== 'none');
     const cl = shown.map((c) => {
       const cb = bands(c.levels);
@@ -648,8 +648,9 @@ function fleetView() {
       const devs = devsOf(c.id);
       return h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
-        anyZone ? h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
-          : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)) : null,
+        // Always drawn: "not detected · 40 % agree" is the reason, not a blank (unknown is not zero).
+        h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
+          : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
         neverRun ? h('td', { colspan: anyZone ? 8 : 7 }, h('span.muted', LD_NEVER_MEASURED))
@@ -677,9 +678,9 @@ function fleetView() {
         h('button.linkish#ld-cl-top', { type: 'button', onclick: () => { S.clAll = false; S.clPage = 0; repaint(); } }, `Show the top ${CLUSTER_TOP} only`));
     return card('By cluster', '',
       [h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], anyZone ? ['timeZone', 'Time zone'] : null, ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', `${b.lateShort} · share`, 1],
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', `${b.lateShort} · share`, 1],
           ['critical', b.high, 1], anyZone ? ['otherTz', 'Other time zone', 1] : null, ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']].filter(Boolean)),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 12 : 10 }, empty('No cluster you can see is measured.')))])))), foot]);
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 12 : 11 }, empty('No cluster you can see is measured.')))])))), foot]);
   });
   const tzNote = B.get('fleet:tznote', rid, () => tzSinceNote((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), tz: c.timeZone }))));
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', '',
