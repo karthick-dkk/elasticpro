@@ -17,6 +17,7 @@ import { client, parseIndexName, coveredDays } from '../core/state.js';
 import { evidenceRows, evidenceHeader, evidenceCsv, evidenceText, coverLine, NO_DATE,
          EVIDENCE_SORTS, DEFAULT_EVIDENCE_SORT, sortEvidenceRows } from '../core/snapshot-evidence.js';
 import { cycleSort, sortCaption } from '../lib/sort-order.js';
+import { slmForm, slmFormErrors, slmPolicyBody, slmPolicyPath, snapshotDeleteBatches, bulkDeleteConfirmed } from '../core/snapshot-admin.js';
 
 /** `manual-2026.09.09-141530` — sortable, and obviously not an SLM snapshot. */
 export function suggestedSnapshotName(prefix = 'manual') {
@@ -318,6 +319,144 @@ export async function restoreIndicesDialog(cluster, items, { onChanged } = {}) {
 
   if (res && onChanged) await onChanged();
   return !!res;
+}
+
+/* --------------------------- many snapshots at once --------------------------- */
+
+/**
+ * Delete every ticked snapshot of one repository (the snapshot list's bulk bar). One
+ * confirmation that lists them all and wants "delete" (or their number) typed, then
+ * `DELETE /_snapshot/<repo>/<a>,<b>,…` in batches short enough for the request line
+ * (core/snapshot-admin.js), one after another; each batch's outcome is reported.
+ * @returns {Promise<false | {deleted: string[], failed: {names: string[], message: string}[]}>}
+ */
+export async function deleteSnapshotsDialog(cluster, repo, names, { onChanged } = {}) {
+  if (!names.length || !(await ensureWrites())) return false;
+  const n = names.length;
+  const echo = text('snap-bulk-echo', '', { mono: true, placeholder: 'delete' });
+  const yes = await modal(`Delete ${num(n)} snapshot${n === 1 ? '' : 's'}?`, `From repository "${repo}" on ${cluster.name}`, [
+    h('div', { style: { fontSize: '13px', lineHeight: '1.55' } },
+      `The snapshot${n === 1 ? '' : 's'} below, and the data only ${n === 1 ? 'it holds' : 'they hold'}, are removed from the repository. ` +
+      'Indices in the cluster are not touched. This cannot be undone.'),
+    h('div.mono#snap-bulk-names', { style: { fontSize: '11.5px', maxHeight: '220px', overflow: 'auto', border: '1px solid var(--border)',
+      borderRadius: '6px', padding: '7px' } }, ...names.map((x) => h('div', x))),
+    field(`Type delete (or ${n}) to confirm`, echo),
+  ], (ctx) => [
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(false) }, 'Cancel'),
+      h('button.btn.danger', { onclick: () => {
+        if (!bulkDeleteConfirmed(echo.value, n)) return ctx.msg(`Type delete (or ${n}) to confirm.`);
+        ctx.done(true);
+      } }, `Delete ${num(n)} snapshot${n === 1 ? '' : 's'}`)),
+  ], { width: '560px' });
+  if (yes !== true) return false;
+
+  const cl = client(cluster.id);
+  const batches = snapshotDeleteBatches(repo, names);
+  const deleted = [], failed = [];
+  for (const b of batches) {
+    try { await cl.deleteSnapshots(repo, b.names); deleted.push(...b.names); }
+    catch (e) { failed.push({ names: b.names, message: e && e.message ? e.message : String(e) }); }
+  }
+  const per = batches.length > 1 ? `${batches.length} requests` : '1 request';
+  if (!failed.length) {
+    toast(`${num(deleted.length)} snapshot${deleted.length === 1 ? '' : 's'} deleted`, 'ok', 8000,
+      { meta: cluster.name, detail: [`${repo} · ${per}, every one succeeded`] });
+  } else {
+    toast(`${num(deleted.length)} of ${num(n)} snapshots deleted — ${failed.length} of ${per} failed`, 'err', 15000, {
+      meta: cluster.name,
+      detail: failed.map((f) => `${f.names.length} snapshot${f.names.length === 1 ? '' : 's'} (${f.names[0]}${f.names.length > 1 ? ' …' : ''}): ${f.message}`),
+    });
+  }
+  if (onChanged) await onChanged();
+  return { deleted, failed };
+}
+
+/* ------------------------------- SLM policies ------------------------------- */
+
+/**
+ * Change one SLM policy: its name pattern, schedule, repository, indices and retention,
+ * read fresh from the cluster (`GET _slm/policy/<id>`). Everything else in the policy is
+ * kept exactly as read, and the request about to be sent is shown in full before Save.
+ * True when the policy was saved.
+ */
+export async function editSlmPolicyDialog(cluster, id, repoNames = []) {
+  if (!(await ensureWrites())) return false;
+  const cl = client(cluster.id);
+  let entry;
+  try {
+    const j = await cl.slmPolicy(id);
+    entry = j && j[id];
+    if (!entry || !entry.policy) throw new Error(`the cluster has no policy named ${id}`);
+  } catch (e) {
+    toast(`Could not read SLM policy ${id}`, 'err', 10000, { meta: cluster.name, detail: [e.message] });
+    return false;
+  }
+  const f0 = slmForm(entry);
+  // The repository the policy names stays in the list even when it no longer exists, so the
+  // check below says so instead of the select quietly changing it.
+  const repoOpts = [...new Set([...repoNames, ...(f0.repository ? [f0.repository] : [])])]
+    .map((r) => [r, repoNames.includes(r) ? r : `${r} (not on this cluster)`]);
+  const inputs = {
+    name: text('slm-name', f0.name, { mono: true, placeholder: '<daily-{now/d}>' }),
+    schedule: text('slm-schedule', f0.schedule, { mono: true, placeholder: '0 30 1 * * ?' }),
+    repository: select('slm-repo', f0.repository, repoOpts),
+    indices: text('slm-indices', f0.indices, { mono: true, placeholder: 'every index' }),
+    expireAfter: text('slm-expire', f0.expireAfter, { mono: true, placeholder: '30d' }),
+    minCount: text('slm-min', f0.minCount, { mono: true, placeholder: '–' }),
+    maxCount: text('slm-max', f0.maxCount, { mono: true, placeholder: '–' }),
+  };
+  const form = () => Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+  const preview = h('pre.json#slm-preview', { style: { margin: 0, maxHeight: '220px', fontSize: '11.5px' }, 'aria-label': 'The request Save sends' });
+  const problems = h('div#slm-problems');
+  const paint = () => {
+    preview.textContent = `PUT ${slmPolicyPath(id)}\n${JSON.stringify(slmPolicyBody(entry, form()), null, 2)}`;
+    const errs = slmFormErrors(form(), repoNames);
+    mount(problems, errs.length ? h('div.banner.warn', { style: { margin: 0 } }, h('div', ...errs.map((e) => h('div', e)))) : null);
+  };
+  for (const el of Object.values(inputs)) { el.addEventListener('input', paint); el.addEventListener('change', paint); }
+  paint();
+
+  const row = (...kids) => h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${kids.length}, minmax(0, 1fr))`, gap: '10px' } }, ...kids);
+  const saved = await modal(`Edit SLM policy ${id}`, `On ${cluster.name}`, [
+    row(field('Snapshot name', inputs.name, 'Date math allowed, e.g. <daily-{now/d}>'),
+      field('Schedule (cron)', inputs.schedule, 'sec min hour day month weekday [year]')),
+    row(field('Repository', inputs.repository), field('Indices', inputs.indices, 'Comma list; empty = every index')),
+    row(field('Expire after', inputs.expireAfter), field('Min count', inputs.minCount), field('Max count', inputs.maxCount)),
+    h('div.muted', { style: { fontSize: '11.5px' } },
+      'Everything else in the policy (global state, partial, feature states, metadata…) is kept as it is.'),
+    h('div', { style: { display: 'grid', gap: '4px' } }, h('div.muted', { style: { fontSize: '11.5px' } }, 'What Save sends'), preview),
+    problems,
+  ], (ctx) => [
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(false) }, 'Cancel'),
+      h('button.btn.primary#slm-save', { onclick: (e) => ctx.run(e.currentTarget, async () => {
+        const errs = slmFormErrors(form(), repoNames);
+        if (errs.length) throw new Error(errs.join(' '));
+        await cl.putSlmPolicy(id, slmPolicyBody(entry, form()));
+        ctx.done(true);
+      }) }, 'Save')),
+  ], { width: '680px' });
+  if (saved === true) toast(`SLM policy ${id} saved`, 'ok', 6000, { meta: cluster.name });
+  return saved === true;
+}
+
+/** Remove one SLM policy, its id typed to confirm. The snapshots it took are kept. */
+export async function deleteSlmPolicyDialog(cluster, id) {
+  if (!(await ensureWrites())) return false;
+  const ok = await confirmDialog(`Delete SLM policy ${id}?`,
+    `On ${cluster.name}.\n\nThe policy stops: no more scheduled snapshots and no more retention runs for it. ` +
+    'The snapshots it already took are kept in their repository — delete those separately if you mean to.',
+    { yes: 'delete policy', danger: true, typeToConfirm: id });
+  if (!ok) return false;
+  try {
+    await client(cluster.id).deleteSlmPolicy(id);
+    toast(`SLM policy ${id} deleted`, 'ok', 7000, { meta: cluster.name, detail: ['Its snapshots are kept'] });
+    return true;
+  } catch (e) {
+    toast(`SLM policy ${id} was not deleted`, 'err', 12000, { meta: cluster.name, detail: [e.message] });
+    return false;
+  }
 }
 
 /* ----------------------------- delete snapshot ----------------------------- */

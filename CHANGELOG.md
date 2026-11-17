@@ -3,6 +3,9 @@
 ## Unreleased
 
 - **REST: the Query and Results boxes reach the footer.** Their height is the window's less where they start (measured, so it holds with the menu on top or at the left and with one to ten tabs) and the footer; a long answer scrolls inside Results, and the request body fills Query.
+- **Snapshots › Policies (SLM): Edit… and Delete… on each policy** (⋯ row menu, admins only, through the write gate). Edit reads the policy fresh and changes the name pattern, schedule (cron, 6–7 fields), repository (one that exists), indices and retention; every other key of the policy (global state, partial, feature states, metadata…) is kept exactly as read, and the `PUT _slm/policy/<id>` body is shown before Save. Delete wants the policy id typed and says the snapshots it took are kept.
+- **Snapshots, inside a repository: tick snapshots and delete them together.** A tick per row and a head tick that takes every snapshot the search matches, on every page (as on Indices); a bar "N selected · Delete… · Clear". Delete… lists every name, wants `delete` (or the number) typed, and sends `DELETE /_snapshot/<repo>/<a>,<b>,…` in batches of at most 3000 characters, reporting each batch. A snapshot still being taken cannot be ticked. Admins only; nobody else sees the ticks.
+- The request shapes and checks are in `ui/js/core/snapshot-admin.js` (unit tests in `tools/unit/snapshot-admin.test.mjs`). The mock cluster now holds SLM policies in memory (GET/PUT/DELETE `_slm/policy/<id>`) and honours several snapshots in one DELETE, in the `_cat` listing as well.
 - **The alerts bell is on Clusters and Clusters › Overview only.** Other pages no longer draw it; notices raised there are still kept and are in the bell the next time it is opened.
 - **No "1 green · 1 yellow" health pill in the top bar on any page.** The dot on the cluster chooser still shows health (the worst of the fleet when several clusters are chosen).
 

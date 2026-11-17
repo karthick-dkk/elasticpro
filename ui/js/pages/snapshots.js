@@ -11,14 +11,15 @@ import { coverageStrip } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, empty } from './common.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { confirmDialog } from '../ui/modal.js';
-import { writesAllowed, syncWrites, ensureWrites } from '../core/writes.js';
+import { writesAllowed, syncWrites, ensureWrites, roleMayWrite } from '../core/writes.js';
 import { rowMenu, ICON, toast, popover } from '../ui/menu.js';
 import { trackTask, snapshotPoll } from '../ui/tasks.js';
 import {
   createSnapshotDialog, snapshotDetailsDialog, restoreSnapshotDialog, deleteSnapshot,
   deleteIndicesDialog, createRepositoryDialog, deleteRepository, verifyRepository, cleanupRepository,
-  snapshotIndicesDialog,
+  snapshotIndicesDialog, deleteSnapshotsDialog, editSlmPolicyDialog, deleteSlmPolicyDialog,
 } from '../ui/snapshot-dialogs.js';
+import { snapshotSelectable, NOT_SELECTABLE_WHY } from '../core/snapshot-admin.js';
 import { pagerBar } from '../lib/pager.js';
 import { lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
 import { slmExempt, ulmLabel, ULM_WHY, clusterKindRev } from '../core/cluster-kind.js';
@@ -39,6 +40,17 @@ let host = null;
 const ui = { open: {}, days: 60, page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0], sort: {}, hiddenCols: new Set() };
 /** The snapshot list's remembered order (lib/table-sort.js); its Sort select and headers set it. */
 const SNAP_SORT = tableSort('snapshots', { initial: DEFAULT_SNAPSHOT_SORT });
+
+/**
+ * The ticked snapshots, per cluster and repository, by name — kept while the tab is open, like
+ * the Indices page's selection. Only an admin ticks anything (core/writes.js roleMayWrite).
+ */
+const picked = new Map();
+function selectionOf(clusterId, repo) {
+  const k = `${clusterId}\u0001${repo}`;
+  if (!picked.has(k)) picked.set(k, new Set());
+  return picked.get(k);
+}
 
 /** Which section an alert's link wants open and in view (core/focus.js): repos | policies. */
 let focusSection = null;
@@ -98,7 +110,7 @@ function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
   // table under them (see snapshotsCard), and a rebuild reads them from `ui` anyway.
   return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.open[c.id] || '', ui.days,
-    ui.perPage, writesAllowed(), fleetMode(), folded(), focusSection, minute(), clusterKindRev()].join('|');
+    ui.perPage, writesAllowed(), roleMayWrite(), fleetMode(), folded(), focusSection, minute(), clusterKindRev()].join('|');
 }
 
 /**
@@ -216,6 +228,43 @@ function repoSelect(c, repos, selected) {
 function snapshotsView(c, repos, selected, snaps) {
   const holder = h('div');
   const sub = h('span', '');
+  // Ticks and the bar they bring (admins only). The head tick means every snapshot the search
+  // matches, on every page — as on the Indices page — and the bar acts on every ticked one.
+  const sel = roleMayWrite() ? selectionOf(c.id, selected) : null;
+  const bulk = h('div.snap-bulk', { hidden: true });
+  const matching = () => snapshotPage(snaps, { text: ui.q[c.id] || '', page: 0, perPage: ui.perPage, sort: sortOf() }).rows;
+  const paintSel = () => {
+    if (!sel) return;
+    const rows = matching().filter(snapshotSelectable);
+    const box = holder.querySelector('input.snap-all');
+    if (box) {
+      const all = rows.length > 0 && rows.every((s) => sel.has(s.id));
+      box.checked = all;
+      box.indeterminate = !all && rows.some((s) => sel.has(s.id));
+      box.disabled = !rows.length;
+      box.title = all ? 'Clear the selection' : `Select every snapshot the search matches (${num(rows.length)}, on every page)`;
+    }
+    bulk.hidden = !sel.size;
+    mount(bulk, sel.size ? bulkBar() : null);
+  };
+  const bulkBar = () => {
+    // In the order the list is sorted, so the confirmation reads like the list.
+    const names = sortSnapshots(snaps, sortOf()).filter((s) => sel.has(s.id)).map((s) => s.id);
+    return h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', padding: '0 0 8px' } },
+      h('span', { style: { fontWeight: 640, fontSize: '12px' } }, `${num(names.length)} selected`),
+      h('button.btn.sm.danger', { type: 'button', 'data-act': 'bulk-delete',
+        title: `Delete the ${num(names.length)} ticked snapshot${names.length === 1 ? '' : 's'}` + (writesAllowed() ? '' : ' (asks to allow writes first)'),
+        onclick: () => deleteSnapshotsDialog(c, selected, names, {
+          onChanged: async () => { sel.clear(); repaint(); await reload(c); } }) }, 'Delete…'),
+      h('button.btn.sm.ghost', { type: 'button', 'data-act': 'bulk-clear', onclick: () => { sel.clear(); repaint(); } }, 'Clear'));
+  };
+  const selection = () => (sel ? {
+    has: (id) => sel.has(id),
+    toggle: (s, on) => { if (on) sel.add(s.id); else sel.delete(s.id); paintSel(); },
+    head: h('input.snap-all', { type: 'checkbox', style: { cursor: 'pointer' }, 'aria-label': 'Select every snapshot the search matches',
+      // Read the matching set at the click, not at the draw.
+      onchange: (e) => { for (const s of matching().filter(snapshotSelectable)) { if (e.target.checked) sel.add(s.id); else sel.delete(s.id); } repaint(); } }),
+  } : null);
   // The last order chosen on any cluster is remembered per browser (lib/table-sort.js) and is
   // where a cluster not sorted yet this session opens.
   const sortOf = () => ui.sort[c.id] || SNAP_SORT.sort || DEFAULT_SNAPSHOT_SORT;
@@ -231,8 +280,11 @@ function snapshotsView(c, repos, selected, snaps) {
     sub.textContent = !snaps.length ? '' : q
       ? `${num(rows.length)} of ${num(snaps.length)} match · ${order}`
       : `${num(snaps.length)} total · ${order}`;
+    // A snapshot deleted since it was ticked is no longer ticked.
+    if (sel) { const ids = new Set(snaps.map((s) => s.id)); for (const id of [...sel]) if (!ids.has(id)) sel.delete(id); }
     mount(holder,
-      snapTable(c, selected, slice.rows, { searching: !!q, sort, onSort: setSort, hidden: ui.hiddenCols }),
+      bulk,
+      snapTable(c, selected, slice.rows, { searching: !!q, sort, onSort: setSort, hidden: ui.hiddenCols, select: selection() }),
       snaps.length ? pagerBar(slice, (p) => { ui.page[c.id] = p; repaint(); }, {
         label: 'snapshots', numbers: true,
         sizes: SNAPSHOT_PAGE_SIZES, perPage: ui.perPage,
@@ -241,6 +293,7 @@ function snapshotsView(c, repos, selected, snaps) {
     const shown = `${shownColumns(ui.hiddenCols).length} of ${SNAPSHOT_COLUMNS.length} columns shown`;
     colsBtn.setAttribute('aria-label', `More: choose columns (${shown})`);
     colsBtn.title = `Choose which columns the list shows · ${shown} · Export CSV keeps them all`;
+    paintSel();
   };
 
   // The Sort select and the column headers are one control: either changes `ui.sort`,
@@ -323,7 +376,7 @@ function repositoriesView(c, d, repos) {
     h('div', { style: { marginTop: '10px' } },
       focusable('policies', card('Policies (SLM)',
         policies.length ? `${policies.length} configured` : read ? 'none configured' : 'not read yet',
-        policies.length ? slmTable(c, policies)
+        policies.length ? slmTable(c, policies, repos)
           : empty(!read ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster'
             : slmExempt(c) ? `No SLM policies configured — none expected: ${ulmLabel(c)}` : 'No SLM policies configured')))));
 }
@@ -437,7 +490,10 @@ function coverage(snaps, days) {
 
 /* -------------------------------------- SLM ------------------------------------- */
 
-function slmTable(c, policies) {
+function slmTable(c, policies, repos) {
+  // Edit and Delete are an admin's (core/writes.js roleMayWrite); nobody else sees them.
+  const admin = roleMayWrite();
+  const changed = () => reload(c);
   const trs = policies.map((p) => {
     const pol = p.policy || {};
     const ls = p.last_success, lf = p.last_failure;
@@ -460,7 +516,15 @@ function slmTable(c, policies) {
               : lf ? h('div.muted', { style: { fontSize: '11px' }, title: String(lf.details || '') }, `older: ${ago(lf.time)}`)
               : h('span.muted', 'none')),
       h('td.nowrap', { style: { fontSize: '11.5px' } }, p.next_execution_millis ? dt(p.next_execution_millis) : '–'),
-      h('td', h('button.btn.sm', { onclick: () => execute(c, p.id, pol.repository) }, 'Run now')));
+      h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
+        h('button.btn.sm', { onclick: () => execute(c, p.id, pol.repository) }, 'Run now'),
+        admin ? rowMenu([
+          { label: 'Edit…', icon: ICON.edit, title: 'Change the schedule, repository, indices or retention' + (writesAllowed() ? '' : ' (asks to allow writes first)'),
+            onClick: async () => { if (await editSlmPolicyDialog(c, p.id, repos.map((r) => r.name))) await changed(); } },
+          { sep: true },
+          { label: 'Delete…', icon: ICON.delete, danger: true, title: 'Remove this policy — the snapshots it took are kept',
+            onClick: async () => { if (await deleteSlmPolicyDialog(c, p.id)) await changed(); } },
+        ], { title: `Actions for ${p.id}` }) : null)));
   });
   return table(['Policy', 'Schedule', 'Repository', 'Indices', 'Retention', 'Last success', 'Last failure', 'Next run', ''], trs);
 }
@@ -486,7 +550,7 @@ async function execute(c, id, repo) {
 
 /* ----------------------------------- snapshots ---------------------------------- */
 
-function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_SORT, onSort = null, hidden = null } = {}) {
+function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_SORT, onSort = null, hidden = null, select = null } = {}) {
   const refresh = { onChanged: () => reload(c) };
   const cols = shownColumns(hidden);
   const trs = snaps.map((s) => {
@@ -519,7 +583,12 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
       shards: () => h('td.num', `${num(s.successful)}/${num(s.total)}`),
       failed: () => h('td.num', s.failed ? h('span.pill.red', h('i.dot'), num(s.failed)) : h('span.muted', '0')),
     };
+    const pickable = snapshotSelectable(s);
     return h('tr',
+      select ? h('td.sel', h('input', { type: 'checkbox', checked: pickable && select.has(s.id), disabled: !pickable,
+        style: { cursor: pickable ? 'pointer' : 'not-allowed' }, 'aria-label': `Select ${s.id}`,
+        title: pickable ? `Select ${s.id}` : NOT_SELECTABLE_WHY,
+        onchange: (e) => select.toggle(s, e.target.checked) })) : null,
       ...cols.map((col) => cell[col.key]()),
       h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
         h('button.btn.sm', { title: 'Indices, shards and failures in this snapshot',
@@ -538,7 +607,8 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
         ], { title: `Actions for ${s.id}` }))));
   });
   // A header whose column has an order sorts on click; `table()` draws the arrow and aria-sort.
-  const headers = [...cols.map((col) => ({ label: col.label, sort: col.sort, num: col.num })), ''];
+  const headers = [...(select ? [{ label: select.head, width: '28px' }] : []),
+    ...cols.map((col) => ({ label: col.label, sort: col.sort, num: col.num })), ''];
   return table(headers, trs,
     { sort: onSort ? { id: 'snapshots', key: sort.key, dir: sort.dir, on: (key) => onSort(cycleSort(sort, key, SNAPSHOT_SORTS)) } : null,
       emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
