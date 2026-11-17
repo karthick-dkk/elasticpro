@@ -637,7 +637,7 @@ The hosted ElasticPro stack (`deploy/docker-compose.yml`) and the Zabbix stack
 | 8200 | Vault | `127.0.0.1` only |
 | 8025 | jump-sim mail catcher (tests) | `127.0.0.1` only |
 
-Nothing else is published — the core, both Postgres instances, Redis and the web service
+Nothing else is published — the core, Zabbix's Postgres, Redis and the web service
 stay on their compose networks. The networks: `deploy_internal` (the hosted stack),
 `zabbix_zbx` (the Zabbix stack; the plan scraper and jump-sim join it), `ep_sso` (Zabbix
 frontend ↔ core), `vault_net` (Vault ↔ core ↔ Zabbix server). `stack/setup.sh` creates the

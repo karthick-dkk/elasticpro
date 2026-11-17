@@ -2599,6 +2599,8 @@ details.pol-fine.card > .pol-fine-body { padding: 0 14px 12px; }
   html[data-menu="left"][data-rail="on"][data-peek="on"] .nav-me .me-name { display: inline; }
 }
 .nav-rail-btn { display: none; }
+/* Log Delay › By cluster: a long worst-device name is cut, the whole name in its title (0.3.77). */
+#ld-by-cluster td.ld-worst { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .isum-none { padding: 28px 16px; text-align: center; font-size: 13px; }
 /* The top menu (0.3.72, the owner): the cluster chooser first, right after the brand (app.js
    placeChooser); Jobs and Config-Management as icons with their names in the tooltip, and the

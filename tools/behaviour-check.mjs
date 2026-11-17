@@ -7877,12 +7877,12 @@ await settleFor(300);
     ok(heat && /never measured/.test(heat.textContent), 'log delay: the heat map does not say a cluster was never measured');
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
-    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min|Late share|Above 60 min|Other time zone|Devices|In last run|Worst device|',
+    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min · share|Above 60 min|Other time zone|Devices|In last run|Worst device|',
       `log delay: the By cluster columns read ${heads.join(' · ')}`);
     // Every column sorts (aria-sort on the heads); the most delayed clusters come first by default, the 5 most delayed only, the footer offers the rest.
-    ok(g('ld-by-cluster').querySelectorAll('thead th[aria-sort]').length >= 11, 'log delay: not every By cluster column sorts');
+    ok(g('ld-by-cluster').querySelectorAll('thead th[aria-sort]').length >= 10, 'log delay: not every By cluster column sorts');
     {
-      const lateCol = [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 6).map((tr) => Number(tr.cells[5].textContent.replace(/,/g, '')));
+      const lateCol = [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 6).map((tr) => Number(tr.cells[5].textContent.split('·')[0].replace(/[,\s]/g, '')));
       ok(lateCol.length >= 1 && lateCol.every((v, i) => i === 0 || v <= lateCol[i - 1]), `log delay: By cluster is not most delayed first (${lateCol.join(', ')})`);
       // The footer always says what is shown; "Show all · 30 per page" only once there are more than 5 clusters.
       ok(/Showing the \d+ most delayed of \d+ cluster/.test(view().textContent) && (!g('ld-cl-all') || /30 per page/.test(view().textContent)), 'log delay: By cluster has no "most delayed of N" footer');
