@@ -25,7 +25,7 @@ import { empty, unreadable, configErrorBanner } from '../pages/common.js';
 import { toast } from './menu.js';
 import {
   volumeDaily, volumeBreakdown, configErrorOf, recordEmptyWhy, utcDay, addDays, hhmm,
-  basisOf, dayBasis, BASIS_LABEL, NEEDS_VERSION,
+  basisOf, dayBasis, BASIS_LABEL, NEEDS_VERSION, backfillLine,
 } from '../core/volume-daily.js';
 import {
   DAY_CHOICES, DEFAULT_DAYS, AVG_TILES, LINE_AVG_DAYS, TOP_VALUES, RECORD_DAYS, SUMMARY_CSV,
@@ -352,9 +352,11 @@ function chartCard(c, reply, days, series, basis, ranked, rk, today) {
     ? h('div.isum-none', h('b', `No day in the last ${shown.length} days is recorded.`),
         h('span.muted', newest ? ` The newest recorded day is ${dayMonth(newest.day)} ${newest.day.slice(0, 4)}: a longer range shows it.` : ' Nothing is recorded yet for this cluster.'))
     : chartDir() === 'rows' ? rowsChart(shown, today, avgOf) : columnsChart(shown, today, avgOf);
+  // Why a day of the range may be missing (docs/VOLUME.md "Backfill"), in one line under the chart.
+  const bf = backfillLine(reply && reply.status);
   return h('section.card.isum-chart',
     h('header', h('h2', title), dirButtons(), h('span.isum-gap'), ...chips(ranked, rk, field)),
-    h('div.body', body));
+    h('div.body', body, bf ? h('div.muted.vs-backfill', { role: 'status', title: bf.title }, bf.text) : null));
 }
 
 /** The tooltip of one day, the same in Columns and Rows. */

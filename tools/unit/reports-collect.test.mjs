@@ -106,3 +106,18 @@ test('why a record is empty: running, a source with no index, never collected, f
   assert.equal(V.recordEmptyWhy(reply()).reason, 'Nothing recorded yet for this cluster.');
   assert.equal(V.recordEmptyWhy(null), null);
 });
+
+/* ---------------------------------- backfillLine ---------------------------------- */
+
+test('the backfill says in one line why a gap remains: queued, no index left, paused for pressure', () => {
+  const st = (b) => ({ running: false, backfill: b });
+  assert.equal(V.backfillLine(st(null)), null, 'off, or no run yet');
+  assert.equal(V.backfillLine(null), null);
+  assert.equal(V.backfillLine(st({ from: '2026-10-18', to: '2026-11-15', queued: 0, filled: 0, gone: 0, noIndex: 0, waiting: 0, paused: null })), null,
+    'nothing missing: nothing said');
+  const l = V.backfillLine(st({ from: '2026-10-18', to: '2026-11-15', queued: 7, filled: 3, gone: 2, noIndex: 10, waiting: 1, paused: null }));
+  assert.equal(l.text, 'Backfill (2026-10-18 – 2026-11-15): 7 days queued · 3 filled on the last run · 12 days with no index left on the cluster (cannot be filled) · 1 day waiting for closed indices');
+  const p = V.backfillLine(st({ queued: 1, filled: 0, gone: 0, noIndex: 0, waiting: 0, paused: 'cluster under query pressure (n1\'s search queue is 900 of 1000); tried again on the next run' }));
+  assert.equal(p.text, 'Backfill: 1 day queued · paused: cluster under query pressure');
+  assert.match(p.title, /search queue is 900 of 1000/, 'the signal in the tooltip');
+});

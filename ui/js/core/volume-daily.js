@@ -416,6 +416,29 @@ export function recordEmptyWhy(reply, { source = '', event = false } = {}) {
 }
 
 /**
+ * Why a gap in the days may remain, from the core's backfill status (`status.backfill` of
+ * VOLUME_DAILY, docs/VOLUME.md "Backfill"), in one line: `{text, title}`, or null when the
+ * backfill is off, has not run yet, or has nothing left to say. A day with no index on the
+ * cluster (its indices went, or it never had one) cannot be filled and is said so — never a 0.
+ */
+export function backfillLine(status) {
+  const b = status && status.backfill;
+  if (!b || typeof b !== 'object') return null;
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  const days = (k) => `${k} ${k === 1 ? 'day' : 'days'}`;
+  const parts = [];
+  if (n(b.queued)) parts.push(`${days(n(b.queued))} queued`);
+  if (n(b.filled)) parts.push(`${n(b.filled)} filled on the last run`);
+  const noIndex = n(b.gone) + n(b.noIndex);
+  if (noIndex) parts.push(`${days(noIndex)} with no index left on the cluster (cannot be filled)`);
+  if (n(b.waiting)) parts.push(`${days(n(b.waiting))} waiting for closed indices`);
+  if (b.paused) parts.push('paused: cluster under query pressure');
+  if (!parts.length) return null;
+  const span = b.from && b.to ? ` (${b.from} – ${b.to})` : '';
+  return { text: `Backfill${span}: ${parts.join(' · ')}`, title: b.paused ? String(b.paused) : 'Missing days are filled a few a run, oldest first, while the cluster is not under query pressure.' };
+}
+
+/**
  * The `days` calendar days before `before` (default: today, UTC), and the mean event_logsize
  * of those that measured it. `{value|null, measured, of, from, to}`: `measured` of `of` days
  * carried a figure. Today is never counted (it is still filling up).
