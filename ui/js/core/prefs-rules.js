@@ -17,7 +17,7 @@ export const OPENS_ON = ['last', 'all'];
 export const KEYS = ['menu', 'theme', 'opensOn'];
 
 /** What a person who never chose anything gets. */
-export const DEFAULTS = { menu: 'top', theme: 'system', opensOn: 'last' };
+export const DEFAULTS = { menu: 'left', theme: 'system', opensOn: 'last' };
 
 const CHOICES = { menu: MENUS, theme: THEMES, opensOn: OPENS_ON };
 
