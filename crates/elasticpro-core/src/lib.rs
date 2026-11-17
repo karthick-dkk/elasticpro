@@ -25,6 +25,7 @@ pub mod gate;
 pub mod guard;
 pub mod hcvault;
 pub mod health;
+pub mod health_history;
 pub mod history_store;
 pub mod housekeeping;
 pub mod http;

@@ -131,6 +131,29 @@ export function relativeText(at, now = Date.now()) {
 }
 
 /**
+ * relativeText() cut to fit a table cell: "in 5m", "12m ago", "in 3h", "2d ago", "in <1m",
+ * "<1m ago". The full time goes in the cell's title. Null is "—".
+ */
+export function shortRelative(at, now = Date.now()) {
+  const t = num(at);
+  if (t === null) return '—';
+  const d = t - now;
+  const a = Math.abs(d);
+  const mins = Math.round(a / 60_000);
+  const span = a < 45_000 ? '<1m' : mins < 90 ? `${mins}m` : mins < 48 * 60 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
+  return d >= 0 ? `in ${span}` : `${span} ago`;
+}
+
+/**
+ * All jobs' "Ran" cell — when the run (open, else the last) started and how long it took or has
+ * taken: "12m ago · 3 s", "<1m ago · 4 s". Null when the job never started a run here.
+ */
+export function ranText(run, now = Date.now()) {
+  if (!run || num(run.startedAt) === null) return null;
+  return `${shortRelative(run.startedAt, now)} · ${durationText(durationMs(run, now))}`;
+}
+
+/**
  * An absolute time, in the server's time zone when the core names it (`tz`, IANA), else in
  * this browser's — and `zone` says which, so a reader never takes one for the other.
  */
@@ -272,12 +295,33 @@ export function runCounts(list) {
   return { running: open.filter((r) => r.status === 'running').length, queued: open.filter((r) => r.status !== 'running').length };
 }
 
-/** How often the page reads JOBS_LIST: every 2 s while anything runs or waits, else every 15 s. */
-export const FAST_POLL_MS = 2000;
+/**
+ * The newest finished runs, newest end first — "Just ran" under Running now. Most of the
+ * product's runs last well under a second (the minute's Zabbix push and history mirror,
+ * housekeeping, a backup), far less than a read's interval, so the open-run list alone is
+ * nearly always empty: this is where they are seen. From the page of runs JOBS_LIST answers
+ * (newest first, already only those the caller may read).
+ */
+export const JUST_RAN = 5;
+export function justRan(list, n = JUST_RAN) {
+  const runs = list && Array.isArray(list.runs) ? list.runs : [];
+  return runs.filter((r) => r && !isOpen(r) && num(r.endedAt) !== null)
+    .sort((a, b) => num(b.endedAt) - num(a.endedAt) || String(b.id).localeCompare(String(a.id)))
+    .slice(0, Math.max(0, n));
+}
+
+/**
+ * How often the page reads JOBS_LIST: every 3 s while anything runs or waits (the approved
+ * graphical view); on the Jobs tab (Now, Just ran) every 5 s otherwise; else (History,
+ * Settings) every 15 s.
+ */
+export const FAST_POLL_MS = 3000;
+export const IDLE_JOBS_POLL_MS = 5000;
 export const SLOW_POLL_MS = 15000;
-export function pollDelay(list) {
+export function pollDelay(list, { jobsTab = false } = {}) {
   const c = runCounts(list);
-  return c.running + c.queued > 0 ? FAST_POLL_MS : SLOW_POLL_MS;
+  if (c.running + c.queued > 0) return FAST_POLL_MS;
+  return jobsTab ? IDLE_JOBS_POLL_MS : SLOW_POLL_MS;
 }
 
 /**

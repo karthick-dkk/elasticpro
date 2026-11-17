@@ -17,7 +17,7 @@ dot in the Request Centre nav entry turns amber/red when any check below is ambe
 ## What it shows
 
 1. **Status strip** — one chip each: Core (version, uptime), Report worker (up / heartbeat age
-   / version match, or *not deployed — role all* per docs/WORKER.md), Redis, Database, Zabbix
+   / version match, or *not deployed — role all* per docs/WORKER.md), Redis, Zabbix
    sync (last result), Mail (last send result), History store (armed / last write). A part
    that cannot report says *not known*, never green.
 2. **Memory** — core and worker: resident memory against the container limit (bar with %),
@@ -116,9 +116,9 @@ Decisions made while building, within the contract:
   due time, on a cluster that answers, is not held back (budget/back-off) and while the poller is
   not idle; one being fetched counts as not due. Late % is of those tracked. The emergency stop
   makes the check *off*, not red. Cycle time is how long a poller pass (`fleet_tick`) took.
-- **Database** is always *not known*: the core has no database (the unused `db` container has
-  left the stack). **Redis** is the write-through store's last success / last failure, no extra
-  round trip.
+- **No Database part** (since 0.3.77): ElasticPro has no database — the Postgres container it
+  never used has left the stack — so the always-*not known* chip is gone. **Redis** is the
+  write-through store's last success / last failure, no extra round trip.
 - **Reports share** of the memory budget is `budget.reports = {budgetBytes, usedBytes, pageMaxBytes,
   holder}` from `memory.rs` (L/8, at least 64 MiB): `usedBytes` is `null` — what the share holds is
   not counted, so it is *not known*, never a zero; `holder` is `worker` in role `core` (the reports
@@ -144,7 +144,7 @@ Decisions made while building, within the contract:
 { ok, at, role: "all"|"core"|"worker", level: "ok"|"warn"|"bad",
   thresholds: [{id, check, amber, red}],
   checks: [{id, threshold, label, level: "ok"|"warn"|"bad"|"unknown"|"off", value, text, fix|null}],
-  parts:  [{id: core|worker|redis|database|zabbix|mail|history, label, level, text, at|null}],
+  parts:  [{id: core|worker|redis|zabbix|mail|history, label, level, text, at|null}],
   core: { version, startedAt, uptimeSec,
           memory: MemoryFigures, cpu: CpuFigures,
           budget: {limitSource, warning, cache, inflight, readCache: {budgetBytes, usedBytes}, reports: null},
@@ -188,3 +188,43 @@ a `health::SelfMonitor` read once a minute (`read`, `sample`, `push`, persisted 
 running job gives `jobs`. A heartbeat 30 s old is amber, 90 s red; a `version` other than the core's
 is red. The amber line is `health::heartbeat_late`, and it is also where the core stops forwarding
 actions to the worker and answers `worker_unavailable` at once (docs/WORKER.md).
+
+## History (0.3.77): the Jobs page's health lines
+
+The Jobs tab's *Health* and *ElasticPro health* cards (docs/JOBS.md "Jobs page") draw a line
+over 1h · 6h · 24h · 7d under each figure. The core keeps them for **7 days**:
+`crates/elasticpro-core/src/health_history.rs` (pure, tested), pushed by the minute task
+(`bridge/system_health.rs` `health_history_push`).
+
+- **Two tiers**: one point a minute for the last 24 h (at most 1 450), and one every 10 minutes
+  back to 7 days (at most 1 010) — the mean of that bucket's minutes. About 2 450 small rows.
+  A figure not known in a minute is `null` there, left out of the 10-minute mean, and a bucket
+  that never knew it is `null` — never 0. A point not after the last one (a clock stepped back)
+  is dropped.
+- **Kept across a restart**: `<data>/health/history-<role>.json`, written atomically (temp file
+  and rename) every 10 minutes, read back at start; what is in the future or older than its tier
+  is dropped, a file that does not parse is an empty history, a file whose `fields` are in
+  another order starts again.
+- **The figures** (`health_history::FIELDS`), each read where its card reads it now: `workerCpu`,
+  `coreCpu`, `coreMem`, `workerMem` (`process`, as `JOBS_LIST` and the strip — CPU % of one CPU
+  over the minute, resident memory % of the limit; the worker's while its heartbeat is up or late,
+  else `null`), `rps` (requests sent to the clusters per second over the last 5 minutes,
+  `REQUEST_STATS`'s count), `busy` (the busy clusters, `jobs::load::busy`), `coreRss`,
+  `workerRss` (bytes), `p95Ms` (the minute's own-message p95, as the ring), `refused` (the
+  minute's gate `overloaded + queue_timeout`), `latePct` (the poller's late datasets, %),
+  `diskFreePct` (the data volume's free space, %).
+
+### `HEALTH_HISTORY {range: "1h"|"6h"|"24h"|"7d"}` (user and up)
+
+```
+{ ok, range, at, from, stepMs: 60000 | 600000, keptDays: 7, limited,
+  fields: ["t", …], points: [[t, v, …], …] }        // oldest first; v null where not known
+```
+
+A user's, as `JOBS_LIST` (the strip's figures are). The ElasticPro health figures (`coreRss`,
+`workerRss`, `p95Ms`, `refused`, `latePct`, `diskFreePct`) are an administrator's, as
+`SYSTEM_HEALTH` is: anybody else's `fields` leave them out. The fleet-wide counts (`rps`, `busy`)
+are left out for a caller limited to some clusters (`limited: true`): they count clusters the
+caller does not see. 1h / 6h / 24h are minute points, 7d the 10-minute means (the bucket being
+filled as its mean so far). Any other range is `bad_request`. A read (in the activity log's poll
+list); it never sends a cluster anything.

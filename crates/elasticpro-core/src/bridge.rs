@@ -1686,6 +1686,7 @@ impl Core {
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
             "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
             "SYSTEM_HEALTH" => self.system_health(caller.as_ref()).await,
+            "HEALTH_HISTORY" => self.health_history(&msg, caller.as_ref()),
             // Jobs (docs/JOBS.md): the registry, each job's state and the run log.
             "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
             // The job controls (docs/JOBS.md): run now, pause, resume, cancel, retry, create, settings.

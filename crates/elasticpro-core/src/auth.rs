@@ -564,6 +564,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // whose page is cluster health only: runs name clusters and carry their errors. A
         // caller limited to some clusters reads only the runs about theirs (the handler).
         "JOBS_LIST" => Some(Role::User),
+        // The Jobs page's health lines (docs/HEALTH.md "History"): a user's, as the strip it draws
+        // from; the ElasticPro health figures and the fleet-wide counts are narrowed in the handler.
+        "HEALTH_HISTORY" => Some(Role::User),
         // The job controls: starting, pausing, cancelling and retrying fleet-wide work, and the
         // limits it runs under. An administrator's; the handler refuses one limited to some
         // clusters (every change but JOB_SETTINGS_GET).

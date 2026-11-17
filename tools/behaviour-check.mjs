@@ -4123,7 +4123,7 @@ restoreConsole();
     parts: [
       { id: 'core', label: 'Core', level: 'bad', text: '0.3.54 · up 3 h', at: now - 3 * 3600e3 },
       { id: 'worker', label: 'Report worker', level: 'off', text: 'not deployed — role all: this container runs reports and collection itself', at: null },
-      { id: 'database', label: 'Database', level: 'unknown', text: 'not known — the core does not connect to it', at: null },
+      { id: 'redis', label: 'Redis', level: 'unknown', text: 'not known — nothing written to it yet', at: null },
     ],
     core: {
       version: '0.3.54', uptimeSec: 10800,
@@ -4163,8 +4163,10 @@ restoreConsole();
       const fix = doc.querySelector('tr[data-check="core.memory"] .hl-fix');
       ok(fix && /CORE_MEM_LIMIT/.test(fix.textContent), `health: the red memory line carries no fix: ${fix && fix.textContent}`);
       ok(doc.querySelector('tr[data-check="gate.refused"].hl-row-warn .hl-fix'), 'health: the amber gate line is not marked or has no fix');
-      const db = doc.querySelector('.hl-chip[data-part="database"]');
-      ok(db && /not known/.test(db.textContent) && !db.querySelector('.hl-dot.green'), `health: a part that cannot report is not "not known": ${db && db.textContent}`);
+      const unk = doc.querySelector('.hl-chip[data-part="redis"]');
+      ok(unk && /not known/.test(unk.textContent) && !unk.querySelector('.hl-dot.green'), `health: a part that cannot report is not "not known": ${unk && unk.textContent}`);
+      ok(!doc.querySelector('.hl-chip[data-part="database"]') && !/Database/.test(doc.querySelector('.hl-chips, .hl-strip, main, #view').textContent),
+        'health: a Database part is shown (ElasticPro does not use the db container)');
       const wk = doc.querySelector('.hl-chip[data-part="worker"]');
       ok(wk && /not deployed — role all/.test(wk.textContent), 'health: no worker chip saying not deployed');
       ok(/not known — this core has no reports share/.test(doc.body.textContent), 'health: the reports share is not said to be not known');
@@ -8472,13 +8474,28 @@ await settleFor(300);
         signals: { cpuPct: 41.2, memoryPct: null, peopleWaiting: 2, queue: 0, avgPageMs: 840 } } : null,
       process: { core: { role: 'core', cpuPct: 3.1, memoryPct: 19.7, gate: { running: 2, queued: 0 } }, worker: { state: 'up', cpuPct: 41, memoryPct: 23.8 } }, problems: [] };
   };
+  // The graphical view's reads (0.3.77): the health lines (HEALTH_HISTORY) and ElasticPro health (SYSTEM_HEALTH).
+  const HF = ['t', 'workerCpu', 'coreCpu', 'coreMem', 'workerMem', 'rps', 'busy', 'coreRss', 'workerRss', 'p95Ms', 'refused', 'latePct', 'diskFreePct'];
+  const historyAnswer = (body) => ({ ok: true, range: body.range || '24h', at: now, stepMs: 60e3, fields: HF, limited: false,
+    points: Array.from({ length: 30 }, (_, i) => [now - (30 - i) * 60e3, 30 + i, 3 + (i % 4), 40, 20, 0.4, i === 12 ? 1 : 0, 4e8, 2e8, 25, 0, 0, 20]) });
+  const sysAnswer = { ok: true, at: now, role: 'core', level: 'warn',
+    thresholds: [{ id: 'memory', check: 'Resident memory', amber: '≥ 80%', red: '≥ 90%' }, { id: 'disk', check: 'Data volume free', amber: '≤ 15%', red: '≤ 5%' }],
+    checks: [
+      { id: 'core.memory', threshold: 'memory', label: 'Core memory', level: 'ok', value: '41%', text: 'fine', fix: null },
+      { id: 'messages.p95', threshold: 'messages', label: 'Message p95 (5 min)', level: 'ok', value: '25 ms', text: 'fine', fix: null },
+      { id: 'disk.free', threshold: 'disk', label: 'Data volume free', level: 'warn', value: '12%', text: 'the data volume is filling', fix: 'free some space' },
+    ],
+    parts: [{ id: 'core', label: 'Core', level: 'ok', text: '0.3.77 · up 4 h', at: now }, { id: 'worker', label: 'Report worker', level: 'ok', text: 'heartbeat 6 s ago', at: now },
+      { id: 'redis', label: 'Redis', level: 'ok', text: 'connected', at: now }, { id: 'mail', label: 'Mail', level: 'off', text: 'not configured', at: null }] };
   const settings = { ok: true, overall: { mostAtOnce: 4, workerTotal: 16, cpuPct: 85, memoryPct: 85, retryLimit: 3, retryWaitMinutes: 5 },
     jobs: jobs().map((j) => ({ jobId: j.id, enabled: true, paused: !!j.state.paused, pausedBy: j.state.pausedBy, auto: true, requests: { ...j.requests }, priority: j.priority,
       defaults: { requests: { ...j.requests }, priority: j.priority } })) };
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
-    if (body.type === 'JOBS_LIST' || /^JOB_/.test(body.type || '')) jsent.push(body);
+    if (['JOBS_LIST', 'HEALTH_HISTORY', 'SYSTEM_HEALTH'].includes(body.type) || /^JOB_/.test(body.type || '')) jsent.push(body);
     if (body.type === 'JOBS_LIST') return stubReply(listAnswer(body));
+    if (body.type === 'HEALTH_HISTORY') return stubReply(historyAnswer(body));
+    if (body.type === 'SYSTEM_HEALTH') return stubReply(sysAnswer);
     if (body.type === 'JOB_SETTINGS_GET') return stubReply(settings);
     if (body.type === 'JOB_RETRY') return stubReply({ ok: false, kind: 'retry_wait', retryAt: Date.now() + 4 * 60e3, message: 'tries are 5 minute(s) apart' });
     if (body.type === 'JOB_CREATE') return stubReply({ ok: true, jobId: 'report.schedule.0a1b2c3d4e5f', job: null });
@@ -8498,33 +8515,63 @@ await settleFor(300);
     ok(window.location.hash === '#/jobs', `jobs: the page is at ${window.location.hash}`);
     ok(!!doc.querySelector('#nav button[data-page="jobs"]'), 'jobs: no Jobs tab in the page menu');
     ok(count('JOBS_LIST') >= 1, 'jobs: opening the page did not read JOBS_LIST');
-    // The strip: the core's figures, the busy cluster, and no governor when the core reports none.
-    ok(chip('worker-cpu') && /41 %/.test(chip('worker-cpu').textContent), `jobs: worker CPU reads "${chip('worker-cpu') && chip('worker-cpu').textContent}"`);
-    ok(chip('runs') && /3 running · 0 queued/.test(chip('runs').textContent), `jobs: the strip counts "${chip('runs') && chip('runs').textContent}"`);
-    ok(chip('busy') && /^1$/.test(chip('busy').querySelector('.v').textContent) && /429/.test(chip('busy').title), 'jobs: the busy cluster is not shown with its reason');
-    ok(!chip('governor'), 'jobs: a governor is drawn though the core reports none');
+    // Now and Health (the graphical view, 0.3.77, in place of the strip on this tab): the core's
+    // figures, the busy cluster, and no governor figure when the core reports none.
+    await settleFor(400);
+    ok(!chip('worker-cpu'), 'jobs: the strip is drawn on the Jobs tab beside the Health card');
+    const tileOf = (k) => doc.querySelector(`[data-tile="${k}"]`);
+    const tv = (k) => (tileOf(k) && tileOf(k).querySelector('.v') ? tileOf(k).querySelector('.v').textContent : null);
+    ok(/41 %/.test(tv('worker-cpu') || ''), `jobs: worker CPU reads "${tv('worker-cpu')}"`);
+    ok(tv('running') === '3' && tv('queued') === '0', `jobs: Now counts ${tv('running')} running · ${tv('queued')} queued`);
+    ok(tv('busy') === '1' && /429/.test(tileOf('busy').title), 'jobs: the busy cluster is not shown with its reason');
+    ok(tv('slots') === '—' && /not reporting/.test(tileOf('slots').textContent), `jobs: a governor figure is drawn though the core reports none: "${tileOf('slots') && tileOf('slots').textContent}"`);
+    // The 24-hour tile: from the runs read (here 10 history runs, 3 failed, and the failed backup 2 h ago).
+    ok(/%/.test(tv('day') || '') && /failed of \d+/.test(tileOf('day').textContent), `jobs: Last 24 hours reads "${tileOf('day') && tileOf('day').textContent}"`);
+    // Health lines from HEALTH_HISTORY, a range switch that asks again.
+    ok(count('HEALTH_HISTORY', (m) => m.range === '24h') >= 1, 'jobs: the Health card did not read HEALTH_HISTORY for 24 h');
+    const hc = doc.querySelector('[data-card="health"]');
+    ok(hc && hc.querySelectorAll('[data-tile]').length === 5 && hc.querySelectorAll('svg.jg-line polyline').length === 5, `jobs: the Health card has ${hc && hc.querySelectorAll('svg.jg-line polyline').length} lines`);
+    const r7 = hc && hc.querySelector('[data-range="7d"]');
+    if (r7) { r7.click(); await settleFor(300); }
+    ok(count('HEALTH_HISTORY', (m) => m.range === '7d') >= 1, 'jobs: choosing 7d did not ask HEALTH_HISTORY for 7 days');
+    ok(doc.querySelector('[data-card="health"] [data-range="7d"][aria-pressed="true"]'), 'jobs: the 7d switch is not marked chosen');
+    doc.querySelector('[data-card="health"] [data-range="24h"]').click(); await settleFor(200);
+    // ElasticPro health (an administrator's): the parts, no Database, a tile per check with its level and limit.
+    const ah = doc.querySelector('[data-card="apphealth"]');
+    ok(ah && ah.querySelector('[data-part="core"]') && !ah.querySelector('[data-part="database"]') && !/Database/.test(ah.textContent), 'jobs: ElasticPro health has no Core pill, or a Database one');
+    const dk = ah && ah.querySelector('[data-check="disk.free"]');
+    ok(dk && /watch/.test(dk.textContent) && /12%/.test(dk.textContent) && /watch ≤ 15% · over ≤ 5%/.test(dk.textContent) && dk.querySelector('svg.jg-line'),
+      `jobs: the disk check tile reads "${dk && dk.textContent}"`);
+    ok(ah && !ah.querySelector('[data-check="worker.memory"]'), 'jobs: a check the core did not send has a tile');
+    // Runs: a lane per job, a bar per run coloured by its result, the next run dashed, a now line.
+    const rc = doc.querySelector('[data-card="runs"]');
+    ok(rc && rc.querySelectorAll('svg.jg-runs rect[data-run]').length >= 10, `jobs: the runs chart has ${rc && rc.querySelectorAll('rect[data-run]').length} bars`);
+    ok(rc && rc.querySelector('rect[data-run="run-fail"][data-result="bad"]') && rc.querySelector('rect[data-run="run-vol"][data-result="run"]'), 'jobs: a failed or running run is not coloured by its result');
+    ok(rc && rc.querySelectorAll('rect.jg-next').length >= 3 && rc.querySelector('line.jg-now'), 'jobs: no next runs dashed or no now line');
+    ok(rc && /Settings backup/.test(rc.querySelector('rect[data-run="run-fail"] title').textContent) && /took/.test(rc.querySelector('rect[data-run="run-fail"] title').textContent), 'jobs: a bar\'s hover does not name the job and how long it took');
     // Running now: a known progress has a bar, an unknown one says counting… and has none; stale is marked.
     const vol = runRow('run-vol');
     ok(vol && vol.querySelector('.jb-bar') && /20 %/.test(vol.textContent) && /1 of 5/.test(vol.textContent), `jobs: the running collection reads "${vol && vol.textContent}"`);
     const hk = runRow('run-hk');
     ok(hk && !hk.querySelector('.jb-bar') && /counting…/.test(hk.textContent), 'jobs: a run whose progress is not known has a bar or no "counting…"');
     ok(runRow('run-stale') && runRow('run-stale').classList.contains('jb-stale') && /stale/.test(runRow('run-stale').textContent), 'jobs: a stale run is not marked');
-    // Read again within 2 s while runs are open: the row, its Stop and its bar are the same elements.
+    // Read again within 3 s while runs are open: the row, its Stop and its bar are the same elements.
     const stopBtn = vol && vol.querySelector('.jb-stop');
     const barEl = vol && vol.querySelector('.jb-bar');
     const reads = count('JOBS_LIST');
     progress = 60;
-    await settleFor(2600);
-    ok(count('JOBS_LIST') > reads, 'jobs: not read again within 2.5 s while a run is open');
+    await settleFor(3600);
+    ok(count('JOBS_LIST') > reads, 'jobs: not read again within 3.5 s while a run is open');
     ok(runRow('run-vol') === vol && vol.isConnected && vol.querySelector('.jb-stop') === stopBtn && vol.querySelector('.jb-bar') === barEl,
       'jobs: a re-read replaced the running row, its Stop button or its bar');
     ok(vol && /60 %/.test(vol.textContent) && barEl && barEl.firstChild.style.width === '60%', `jobs: the bar did not move to 60 % (${barEl && barEl.firstChild.style.width})`);
     // The governor once the core reports it (JOBS_LIST.governor, state.allocation): drawn, its codes in words, nothing replaced.
     withGov = true;
-    await settleFor(2600);
-    const gchip = chip('governor');
-    ok(gchip && /3 of 8 in use/.test(gchip.textContent) && /16 → 8: people waiting/.test(gchip.title) && /memory not known/.test(gchip.title) && !/people_waiting/.test(gchip.title),
-      `jobs: the governor chip reads "${gchip && gchip.textContent}" / "${gchip && gchip.title}"`);
+    await settleFor(3600);
+    const gchip = doc.querySelector('[data-tile="slots"]');
+    ok(gchip && /3 \/ 8/.test(gchip.textContent) && /16 → 8: people waiting/.test(gchip.title) && /memory not known/.test(gchip.title) && !/people_waiting/.test(gchip.title)
+      && gchip.querySelector('.jg-bar i') && gchip.querySelector('.jg-bar i').style.width === '37.5%',
+      `jobs: the Slots in use tile reads "${gchip && gchip.textContent}" / "${gchip && gchip.title}"`);
     const volJob = panel('All jobs') && panel('All jobs').querySelector('tbody tr[data-job="volume.daily"]');
     ok(volJob && /2 of 1–4 · auto/.test(volJob.textContent), `jobs: All jobs does not show the allocation: "${volJob && volJob.textContent}"`);
     ok(runRow('run-vol') === vol && vol.querySelector('.jb-stop') === stopBtn, 'jobs: the governor\'s arrival replaced the running row or its Stop');
@@ -8543,10 +8590,27 @@ await settleFor(300);
     ok(asc[0] === 'logdelay.measure' && unknown.every((id) => asc.indexOf(id) >= asc.length - 3), `jobs: next run ascending is ${asc.join(', ')}`);
     ok(desc[0] === 'settings.backup' && unknown.every((id) => desc.indexOf(id) >= desc.length - 3), `jobs: next run descending is ${desc.join(', ')} — unknown must stay last`);
     th('next').click(); await settleFor(150);   // back to the registry's order (the table has no default column)
-    // An error is cut short in the row and read in full when the row is opened.
+    // An error is a line under its row (no Error column), cut short with the whole of it on hover,
+    // and read in full when the row is opened; a job with neither records nor an error has no line.
     const backup = panel('All jobs').querySelector('tbody tr[data-job="settings.backup"]');
-    const errCell = backup && backup.querySelector('td.jb-err');
-    ok(errCell && errCell.textContent.length < 40 && errCell.title === longError, 'jobs: the error is not cut short with the whole of it on hover');
+    const errCell = panel('All jobs').querySelector('tbody tr[data-sub="settings.backup"] .jb-err');
+    ok(errCell && errCell.textContent.length < 130 && errCell.textContent.length < longError.length && errCell.title === longError,
+      'jobs: the error is not a line under its row, cut short with the whole of it on hover');
+    ok(backup && !backup.querySelector('td.jb-err') && backup.nextElementSibling && backup.nextElementSibling.dataset.sub === 'settings.backup',
+      'jobs: the error line does not follow its own row');
+    ok(!panel('All jobs').querySelector('tbody tr[data-sub="zabbix.sync"]'), 'jobs: a job with no records and no error has a line under it');
+    const volSub = panel('All jobs').querySelector('tbody tr[data-sub="volume.daily"]');
+    ok(volSub && /12 records/.test(volSub.textContent), `jobs: the running collection's records are not under its row: "${volSub && volSub.textContent}"`);
+    // Fewer, merged columns (no sideways scroll at 1280 px — tools/fit-check.mjs measures the width).
+    const heads = [...panel('All jobs').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[▲▼↑↓⇅]/g, '').trim());
+    ok(heads.length === 9 && heads.includes('Ran') && heads.includes('Priority · requests') && !heads.includes('Paused') && !heads.includes('Error') && !heads.includes('Records'),
+      `jobs: All jobs has the columns ${heads.join(' | ')}`);
+    ok(/\d+[mhd] ago · /.test((backup.querySelector('td:nth-child(5)') || {}).textContent || ''), `jobs: Ran reads "${(backup.querySelector('td:nth-child(5)') || {}).textContent}"`);
+    const zbx = panel('All jobs').querySelector('tbody tr[data-job="zabbix.sync"]');
+    ok(zbx && /Paused/.test(zbx.querySelector('td:nth-child(3)').textContent), 'jobs: a paused job does not say so in Status');
+    // Just ran: the newest finished runs, newest end first, under the open ones.
+    const justIds = [...doc.querySelectorAll('[data-just]')].map((t) => t.dataset.just);
+    ok(justIds.length === 6 && justIds[0] === 'h1' && justIds[1] === 'h2' && !justIds.includes('run-vol'), `jobs: Just ran lists ${justIds.join(', ')}`);
     backup.querySelector('.jb-x').click(); await settleFor(150);
     const detail = panel('All jobs').querySelector('tr[data-detail="settings.backup"]');
     ok(detail && detail.textContent.includes(longError), 'jobs: opening the row does not show the whole error');
@@ -8623,6 +8687,11 @@ await settleFor(300);
     ok(!doc.querySelector('.jb-page input, .jb-page select:not(#jb-h-job):not(#jb-h-result)'), 'jobs: a user is offered fields to change');
     ok(!doc.getElementById('jb-create') && /administrator/.test(doc.querySelector('.jb-page').textContent), 'jobs: a user is offered Create job, or not told the settings are an administrator\'s');
     ok(panel('Per job') && panel('Per job').querySelectorAll('tbody tr[data-job]').length === 7, 'jobs: a user does not see the per-job settings read-only');
+    // A user reads Now, Health and Runs; ElasticPro health (SYSTEM_HEALTH) is an administrator's.
+    const sysReads = count('SYSTEM_HEALTH');
+    window.location.hash = '#/jobs'; await settleFor(600);
+    ok(doc.querySelector('[data-card="health"]') && doc.querySelector('[data-card="runs"]') && !doc.querySelector('[data-card="apphealth"]'), 'jobs: a user is shown ElasticPro health, or not Health and Runs');
+    ok(count('SYSTEM_HEALTH') === sysReads, 'jobs: a user\'s page read SYSTEM_HEALTH');
     // A guest has no Jobs tab: the page is offered from user up (the shell's own role check, app.js may()).
     const entry = app.PAGES.find((p) => p.id === 'jobs');
     ok(entry && entry.minRole === 'user' && !entry.noTab, `jobs: the page is offered to ${entry && entry.minRole}, not from user up`);
@@ -8630,9 +8699,10 @@ await settleFor(300);
     // Leaving stops the reads.
     await go('jobs'); await settleFor(300);
     await go('overview');
-    const left = count('JOBS_LIST');
-    await settleFor(2600);
+    const left = count('JOBS_LIST'), leftH = count('HEALTH_HISTORY') + count('SYSTEM_HEALTH');
+    await settleFor(3600);
     ok(count('JOBS_LIST') === left, 'jobs: JOBS_LIST is still read after leaving the page');
+    ok(count('HEALTH_HISTORY') + count('SYSTEM_HEALTH') === leftH, 'jobs: the health lines are still read after leaving the page');
   } finally {
     st.state.caller = was;
     st.state.defaults.readOnly = ro;
