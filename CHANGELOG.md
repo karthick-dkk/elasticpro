@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.72
+
+- **Documents can no longer be edited or deleted** (the owner, 2026-11-17: "completely remove this feature"). The documents view inside Indices is read-only for every role: the row's ⋯ menu has Copy JSON and Open in REST only. The JSON editor, the Review and save dialog with its diff, the Delete dialog and the conditional `PUT`/`DELETE <index>/_doc/<id>` they sent are gone, and so are their helpers (`docPath`, `editStatus`, `lineDiff`, `writeOutcome`) and CSS. The search no longer asks Elasticsearch for `_seq_no` / `_primary_term`. Changing a document is still possible through the REST console, behind the same write gate as before.
+- **Nodes & shards: the Allocation switch shows what it was switched to.** After a switch the page reads the setting again, but that read could be answered from the core's short read cache (up to a minute) and show the old value. The read after a switch now always asks the cluster. (On the test VM's `vm-mock`, the fixture also ignored the write; `tools/mock-es.mjs` now remembers `cluster.routing.allocation.enable`.)
+- **Menu: Clusters › Overview marks only "└ Overview".** Both it and Clusters were highlighted; the page's own button now steps back while its sub-item is on screen (with the menu folded to icons the Clusters icon stays marked, as the sub-item is hidden).
+- **Left menu: « at the top too, and it folds itself after 3 idle minutes.** A second « sits beside the brand at the top of the menu (the one at its foot stays). With no mouse, key, wheel or touch anywhere in the app for 3 minutes the menu folds to icons by itself; while the mouse is on it the full menu shows over the page, and » keeps it open. Folded by hand it stays icons only and never opens on hover, remembered per browser as before.
+- Two Log Delay behaviour checks no longer fail in the first hour after midnight: the default 1 h window then rightly covers two local days, and the "last run" note rightly names yesterday's date.
+
 ## 0.3.71
 
 - **Clusters › Overview: the top-bar chooser switches the board.** Picking another cluster used to snap back to the one the address named; now the board shows the cluster picked and the address follows (`#/clusters/overview/<id>`).

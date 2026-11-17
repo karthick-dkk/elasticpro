@@ -7414,12 +7414,18 @@ await settleFor(300);
     ok(/Log Delay/.test((doc.querySelector('#nav button[aria-current="page"]') || {}).textContent || '') && /Log Delay/.test((doc.querySelector('#topbar h1') || {}).textContent || ''), 'log delay: the page is not called Log Delay');
     ok(!doc.querySelector('#view h1'), 'log delay: the page repeats its name in a heading');
     const fleet = view();
-    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.from === m.to), 'log delay: the default 1 h window did not ask LOGDELAY_SUMMARY for one local day');
+    // The default 1 h window asks for the local days it covers: one day, or two in the first hour after midnight.
+    {
+      const day = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+      const now = Date.now(), want = [day(now - 3600000), day(now)];
+      ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from === want[0] && m.to === want[1]),
+        `log delay: the default 1 h window did not ask LOGDELAY_SUMMARY for its local days (${want[0]} → ${want[1]})`);
+    }
     // One time range on every tab: 5m 10m 30m 1h 3h 12h Custom, 1h pressed; no Period select, no description lines.
     ok([...g('ld-range').querySelectorAll('button')].map((b) => b.textContent).join(',') === '5m,10m,30m,1h,3h,12h,Custom' && !g('ld-period'), 'log delay: the Dashboard time range is not the one button group');
     ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '1h', 'log delay: the default range is not 1h');
     // The window holds no scheduled run: said in words, never zeros.
-    ok(g('ld-window-note') && /No scheduled measurement in the last 1 hour — last run \d\d:\d\d/.test(g('ld-window-note').textContent), `log delay: no note for a window without a run (${(g('ld-window-note') || {}).textContent})`);
+    ok(g('ld-window-note') && /No scheduled measurement in the last 1 hour — last run (\d{4}-\d\d-\d\d )?\d\d:\d\d/.test(g('ld-window-note').textContent), `log delay: no note for a window without a run (${(g('ld-window-note') || {}).textContent})`);
     ldKnobs.lastRunAgoMs = 4 * 60000;
     for (const gone of [/Every device that sends logs/, /last run = /, /in range = /, /most delayed first \(/, /pages asked, whether the list is complete/]) ok(!gone.test(fleet.textContent), `log delay: the description ${gone} is still on the Dashboard`);
     ok(!g('ld-fleet-counts'), 'log delay: the counts line under the state bar is still drawn');
@@ -8030,7 +8036,7 @@ await settleFor(300);
   ok(!!doc.querySelector('#view .ov-board') || true, '');
 }
 
-/* ------- The left menu folds to an icon rail (0.3.71): « / », remembered per browser; the top menu has none ------- */
+/* ------- The left menu folds to an icon rail (0.3.71/0.3.72): « at the top and the foot; by hand (remembered, no hover) or by itself after idle minutes (hover shows it); the top menu has none ------- */
 {
   await go('alerts');
   ok(!doc.querySelector('#nav .nav-rail-btn'), 'rail: the top menu offers the fold button');
@@ -8041,26 +8047,50 @@ await settleFor(300);
     if (b) { b.click(); await settleFor(300); }
     return !!b;
   };
+  // The idle fold is shortened for the check (app.js armRailIdle reads __EP_RAIL_IDLE_MS); nothing here moves the mouse.
+  window.__EP_RAIL_IDLE_MS = 60 * 60 * 1000;
   if (await pickMenu('left')) {
     const html = doc.documentElement;
-    let fold = doc.querySelector('#nav .nav-rail-btn');
+    const foot = () => doc.querySelector('#nav .nav-rail-foot');
+    const top = () => doc.querySelector('#nav .nav-brand .nav-rail-top');
+    let fold = foot();
     ok(html.dataset.menu === 'left' && !!fold && fold.getAttribute('aria-expanded') === 'true' && fold.textContent === '«', `rail: the left menu has no « at its foot (${fold && fold.textContent})`);
+    ok(!!top() && top().textContent === '«', 'rail: no « at the top of the menu, beside the brand');
     ok(!!fold && !!fold.nextElementSibling && fold.nextElementSibling.classList.contains('nav-me') || !doc.querySelector('#nav .nav-me'), 'rail: « is not just above the account button');
     const pages = [...doc.querySelectorAll('#nav button[data-page]:not(.nav-sub)')];
     ok(pages.length > 3 && pages.every((b) => b.title && b.getAttribute('aria-label') && b.querySelector('.nav-label')), 'rail: a menu button has no page name as tooltip and label');
-    if (fold) { fold.click(); await settleFor(200); }
-    fold = doc.querySelector('#nav .nav-rail-btn');
+    // Folded by hand from the TOP button: icons only, remembered, and it never opens on hover.
+    if (top()) { top().click(); await settleFor(200); }
+    fold = foot();
     ok(html.dataset.rail === 'on' && !!fold && fold.textContent === '»' && fold.getAttribute('aria-expanded') === 'false', `rail: « did not fold the menu (${html.dataset.rail}, ${fold && fold.textContent})`);
     ok(window.localStorage.getItem('elasticpro.menu.rail') === '1', 'rail: the folded menu is not remembered');
     ok(!!doc.querySelector('#nav button[data-page][aria-current="page"]'), 'rail: the page on screen is not marked in the rail');
     const al = doc.querySelector('#nav button[data-page="alerts"]');
     if (al && al.querySelector('.pill')) ok(/^Alerts, \d+ open/.test(al.getAttribute('aria-label')), `rail: the Alerts icon does not say its count (${al.getAttribute('aria-label')})`);
+    doc.getElementById('nav').dispatchEvent(new window.MouseEvent('mouseenter'));
+    ok(html.dataset.peek !== 'on', 'rail: folded by hand, the menu still opens on hover');
+    doc.getElementById('nav').dispatchEvent(new window.MouseEvent('mouseleave'));
     if (fold) { fold.click(); await settleFor(200); }
     ok(!html.dataset.rail && window.localStorage.getItem('elasticpro.menu.rail') === '0', 'rail: » did not open the menu again');
+    // Folded by itself after the idle time: not remembered, and the full menu shows over the page while the mouse is on it.
+    window.__EP_RAIL_IDLE_MS = 300;
+    if (foot()) { foot().click(); await settleFor(150); }   // fold by hand …
+    if (foot()) { foot().click(); await settleFor(100); }   // … and open again: the idle count starts from here
+    await settleFor(700);
+    ok(html.dataset.rail === 'on' && window.localStorage.getItem('elasticpro.menu.rail') === '0', `rail: the menu did not fold itself after the idle time (rail=${html.dataset.rail})`);
+    ok(!!foot() && foot().title === 'Keep the menu open', `rail: the folded-by-itself menu's button reads "${foot() && foot().title}"`);
+    doc.getElementById('nav').dispatchEvent(new window.MouseEvent('mouseenter'));
+    ok(html.dataset.peek === 'on', 'rail: folded by itself, the menu does not open while the mouse is on it');
+    doc.getElementById('nav').dispatchEvent(new window.MouseEvent('mouseleave'));
+    ok(html.dataset.peek !== 'on', 'rail: the menu stays open after the mouse left it');
+    window.__EP_RAIL_IDLE_MS = 60 * 60 * 1000;
+    if (foot()) { foot().click(); await settleFor(200); }
+    ok(!html.dataset.rail, 'rail: » did not open the self-folded menu');
     await pickMenu('top');
     ok(html.dataset.menu === 'top' && !doc.querySelector('#nav .nav-rail-btn'), 'rail: back on top, the fold button is still there');
   } else ok(false, 'rail: Your settings has no Page menu: Left');
   window.localStorage.removeItem('elasticpro.menu.rail');
+  delete window.__EP_RAIL_IDLE_MS;
 }
 
 /* ------- No page carries a write toggle (0.3.71): an admin's write action asks to allow writes when pressed ------- */
@@ -8091,6 +8121,11 @@ for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
     ok(location.hash === `#/clusters/overview/${encodeURIComponent(st.state.selected)}`, `overview: the address (${location.hash}) does not name the cluster shown (${st.state.selected})`);
     ok(sub.getAttribute('aria-current') === 'page' && (doc.querySelector('#nav button[data-page="overview"]:not(.nav-sub)') || {}).getAttribute('aria-current') === 'page', 'overview: the menu does not mark Clusters and its Overview sub-item');
     ok(!!view().querySelector('.cl-tabs a[data-section="overview"][aria-current="page"]'), 'overview: the Overview tab is not marked');
+    // The menu marks the sub-item alone: "└ Overview", not Clusters as well (0.3.72).
+    {
+      const marked = [...doc.querySelectorAll('#nav button[aria-current="page"]')].map((b) => (b.classList.contains('nav-sub') ? 'sub:' : '') + b.dataset.page);
+      ok(marked.length === 1 && marked[0] === 'sub:overview', `overview: the menu marks ${marked.join(', ') || 'nothing'}, not the Overview sub-item alone`);
+    }
     // The chooser offers one cluster at a time here: no "All clusters".
     const sel = doc.getElementById('cluster-select');
     ok(!!sel && ![...sel.options].some((o) => o.value === 'all'), 'overview: the chooser still offers "All clusters" on a one-cluster board');
@@ -8261,12 +8296,11 @@ async function backToList() {
   }
 }
 
-/* -------- Indices › Documents: the list's paging choice, the name link, the view, the fields, the admin-only ⋯ menu -------- */
+/* -------- Indices › Documents: the list's paging choice, the name link, the view, the fields, the read-only ⋯ menu -------- */
 // Clock-independent: the fixture's documents sit within the last three hours of the mock's start,
 // so the view's default range (24h) holds them all at any hour; nothing here reads 15m.
 {
   const st = await load('core/state.js');
-  const W = await load('core/writes.js');
   const { closeMenus } = await load('ui/menu.js');
   const view = () => doc.getElementById('view');
   const change = (el, v) => { el.value = v; el.dispatchEvent(new window.Event('change', { bubbles: true })); };
@@ -8276,7 +8310,6 @@ async function backToList() {
   // A menu item's label, without its icon span.
   const itemLabel = (b) => { const s = b.querySelector('span:not(.ico):not(.mi-note)'); return (s ? s.textContent : b.textContent).trim(); };
   const menuItems = () => [...doc.querySelectorAll('.menu-pop button')].map(itemLabel);
-  const menuPress = (label) => { const b = [...doc.querySelectorAll('.menu-pop button')].find((x) => itemLabel(x) === label); if (b) b.click(); return !!b; };
   const callerBefore = st.state.caller;
   try { for (const k of ['elasticpro.indices.perPage', 'elasticpro.docs.perPage', 'elasticpro.docs.range']) window.localStorage.removeItem(k); } catch (_) { /* no storage */ }
   // On the fixture's first cluster (earlier sections leave an unreachable one selected), with its list read.
@@ -8412,127 +8445,21 @@ async function backToList() {
     }
   }
 
-  // 5. A row opens the document on the right; the ⋯ menu of a non-admin has no Edit or Delete.
-  let row = docRows()[0];
+  // 5. A row opens the document on the right; the ⋯ menu is read-only for every role (Edit and Delete
+  //    were removed in 0.3.72 at the owner's request): Copy JSON and Open in REST, nothing that writes.
+  const row = docRows()[0];
   if (row) { row.click(); await settleFor(150); }
   ok(!!view().querySelector('.docs-detail:not([hidden]) pre.json'), 'documents: a row click did not open the document on the right');
   ok(!!row && view().querySelector('.docs-detail .docs-id') && view().querySelector('.docs-detail .docs-id').textContent.includes(row.dataset.id), 'documents: the detail does not name the _id');
-  st.state.caller = { name: 'op', role: 'operator' };
-  if (row) { row.querySelector('.menu-trigger').click(); await settleFor(100); }
-  {
+  for (const role of ['operator', 'admin']) {
+    st.state.caller = { name: role, role };
+    if (row) { row.querySelector('.menu-trigger').click(); await settleFor(100); }
     const items = menuItems();
-    ok(items.includes('Copy JSON') && items.includes('Open in REST'), `documents: an operator's ⋯ menu lacks Copy JSON / Open in REST (${items.join(', ')})`);
-    ok(!items.some((t) => /Edit|Delete/.test(t)), `documents: an operator's ⋯ menu offers ${items.filter((t) => /Edit|Delete/.test(t)).join(', ')}`);
+    ok(items.includes('Copy JSON') && items.includes('Open in REST'), `documents: an ${role}'s ⋯ menu lacks Copy JSON / Open in REST (${items.join(', ')})`);
+    ok(!items.some((t) => /Edit|Delete/.test(t)), `documents: an ${role}'s ⋯ menu offers ${items.filter((t) => /Edit|Delete/.test(t)).join(', ')}`);
     closeMenus();
   }
-
-  // 6. An admin: Edit → valid-as-you-type → Review and save (diff, request line) → Save sends the conditional PUT with allowWrites.
-  st.state.caller = { name: 'admin', role: 'admin' };
-  const unlocked = await W.setWritesUnlocked(true, { confirmFirst: false });
-  ok(unlocked, 'documents: could not unlock writes for the admin case');
-  row = docRows()[0];
-  const editedId = row && row.dataset.id;
-  if (row && unlocked) {
-    row.querySelector('.menu-trigger').click(); await settleFor(100);
-    const items = menuItems();
-    ok(items.includes('Edit…') && items.includes('Delete…'), `documents: the admin's ⋯ menu lacks Edit… / Delete… (${items.join(', ')})`);
-    menuPress('Edit…'); await settleFor(300);
-    const ta = view().querySelector('#docs-editor');
-    const status = view().querySelector('#docs-edit-status');
-    const review = view().querySelector('#docs-review');
-    ok(!!ta && !!status && !!review, 'documents: Edit… did not open the editor');
-    if (ta && status && review) {
-      ok(status.textContent === '✓ Valid JSON · 0 changes' && review.disabled, `documents: a fresh editor reads "${status.textContent}" (review ${review.disabled ? 'disabled' : 'enabled'})`);
-      const text0 = ta.value;
-      typeIn(ta, '{ "a": '); await settleFor(50);
-      ok(/^✕ /.test(status.textContent) && review.disabled, `documents: broken JSON reads "${status.textContent}"`);
-      const src = JSON.parse(text0 || '{}');
-      src.message = `${src.message} (edited by behaviour-check)`;
-      typeIn(ta, JSON.stringify(src, null, 2)); await settleFor(50);
-      ok(status.textContent === '✓ Valid JSON · 2 changes' && !review.disabled, `documents: one changed line reads "${status.textContent}" (review ${review.disabled ? 'disabled' : 'enabled'})`);
-      review.click(); await settleFor(250);
-      const dlg = doc.querySelector('.modal-overlay .modal');
-      ok(!!dlg && /Review and save/.test(dlg.textContent), 'documents: Review and save… opened no dialog');
-      if (dlg) {
-        const del = dlg.querySelector('#docs-diff .diff-del'), add = dlg.querySelector('#docs-diff .diff-add');
-        ok(!!del && /"message"/.test(del.textContent) && !!add && /edited by behaviour-check/.test(add.textContent), 'documents: the diff does not show the removed and the added line');
-        ok(dlg.querySelectorAll('#docs-diff .diff-del, #docs-diff .diff-add').length === 2, 'documents: the diff marks more than the one changed line');
-        const req = (dlg.querySelector('#docs-req') || {}).textContent || '';
-        ok(new RegExp(`^PUT /${linked.replace(/\./g, '\\.')}/_doc/${editedId}\\?if_seq_no=\\d+&if_primary_term=\\d+$`).test(req), `documents: the request line reads "${req}"`);
-        const before = sent.length;
-        dlg.querySelector('#docs-save').click();
-        await waitFor(() => (!doc.querySelector('.modal-overlay') ? true : null), 'documents: the Save dialog closed', 8000);
-        const put = sent.slice(before).find((m) => m.type === 'ES' && m.method === 'PUT');
-        ok(!!put && /\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+/.test(put.path) && put.allowWrites === true, `documents: Save sent ${put ? `${put.method} ${put.path} allowWrites=${put.allowWrites}` : 'no PUT'}`);
-        ok(!!put && JSON.parse(put.body).message === src.message, 'documents: the PUT body is not the edited document');
-        await waitFor(() => ((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('edited by behaviour-check') ? true : null, 'documents: the re-read document shows the edit', 8000);
-        ok(!view().querySelector('#docs-editor'), 'documents: the editor is still open after a save');
-        ok(metaCount() !== null, 'documents: the search was not re-run after the save');
-
-        // 7. A 409: the document changed behind the editor's back (written straight to the fixture, no
-        //    if_seq_no) — Save says so, overwrites nothing, and the text stays.
-        row = docRows().find((tr) => tr.dataset.id === editedId) || docRows()[0];
-        row.querySelector('.menu-trigger').click(); await settleFor(100);
-        menuPress('Edit…'); await settleFor(300);
-        const ta2 = view().querySelector('#docs-editor');
-        if (ta2) {
-          const opened = ta2.value;
-          // A field the search does not filter on, so the document stays on this page after the reload.
-          const behind = JSON.parse(opened);
-          behind.src_hostname = 'changed-behind-your-back';
-          const r = await fetch(`${c.url.replace(/\/+$/, '')}/${encodeURIComponent(linked)}/_doc/${encodeURIComponent(row.dataset.id)}`,
-            { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(behind) });
-          ok(r.ok, `documents: the fixture refused the out-of-band write (HTTP ${r.status})`);
-          const mine = JSON.parse(opened); mine.message = `${mine.message} (second edit)`;
-          typeIn(ta2, JSON.stringify(mine, null, 2)); await settleFor(50);
-          view().querySelector('#docs-review').click(); await settleFor(250);
-          const dlg2 = doc.querySelector('.modal-overlay .modal');
-          if (dlg2) {
-            const before2 = sent.length;
-            dlg2.querySelector('#docs-save').click();
-            const said = await waitFor(() => dlg2.querySelector('.banner.err'), 'documents: the 409 message in the dialog', 8000);
-            ok(!!said && said.textContent === 'Someone changed this document since you opened it — nothing was overwritten. Reload it.', `documents: the 409 reads "${said && said.textContent}"`);
-            ok(sent.slice(before2).some((m) => m.type === 'ES' && m.method === 'PUT'), 'documents: nothing was sent for the second save');
-            ok(doc.querySelector('.modal-overlay') && !dlg2.querySelector('#docs-save').disabled, 'documents: after a 409 the dialog closed or Save stayed disabled');
-            [...dlg2.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Cancel').click(); await settleFor(150);
-            const ta3 = view().querySelector('#docs-editor');
-            ok(!!ta3 && ta3.value === JSON.stringify(mine, null, 2), 'documents: the text typed was lost after the 409');
-            // Reload shows the other writer's version, not ours.
-            [...view().querySelectorAll('.docs-edit-acts button')].find((b) => b.textContent.trim() === 'Cancel').click(); await settleFor(100);
-            view().querySelector('#docs-refresh').click();
-            await waitFor(() => ((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('changed-behind-your-back') ? true : null, 'documents: reload shows the version written behind the editor', 8000);
-            ok(!((view().querySelector('.docs-detail pre.json') || {}).textContent || '').includes('second edit'), 'documents: the 409 overwrote the document anyway');
-          }
-        }
-
-        // 8. Delete: the button stays disabled until the whole id is typed; then the conditional DELETE goes with allowWrites.
-        row = docRows().find((tr) => tr.dataset.id === editedId) || docRows()[0];
-        const delId = row.dataset.id;
-        const countBefore = metaCount();
-        row.querySelector('.menu-trigger').click(); await settleFor(100);
-        menuPress('Delete…'); await settleFor(300);
-        const ddlg = doc.querySelector('.modal-overlay .modal');
-        const dbtn = ddlg && ddlg.querySelector('#docs-delete');
-        const echo = ddlg && ddlg.querySelector('#docs-del-echo');
-        ok(!!dbtn && !!echo && dbtn.disabled, 'documents: the Delete dialog did not open with Delete disabled');
-        if (dbtn && echo) {
-          typeIn(echo, delId.slice(0, -1)); await settleFor(30);
-          ok(dbtn.disabled, 'documents: Delete is enabled on a partial id');
-          typeIn(echo, delId); await settleFor(30);
-          ok(!dbtn.disabled, 'documents: Delete stays disabled with the whole id typed');
-          ok(/^DELETE \/.+\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+$/.test((ddlg.querySelector('.docs-req') || {}).textContent || ''), 'documents: the Delete dialog does not show the conditional request');
-          const before3 = sent.length;
-          dbtn.click();
-          await waitFor(() => (!doc.querySelector('.modal-overlay') ? true : null), 'documents: the Delete dialog closed', 8000);
-          const dm = sent.slice(before3).find((m) => m.type === 'ES' && m.method === 'DELETE');
-          ok(!!dm && /\/_doc\/.+\?if_seq_no=\d+&if_primary_term=\d+/.test(dm.path) && dm.allowWrites === true, `documents: Delete sent ${dm ? `${dm.method} ${dm.path} allowWrites=${dm.allowWrites}` : 'no DELETE'}`);
-          await waitFor(() => (metaCount() === countBefore - 1 ? true : null), `documents: the count fell to ${countBefore - 1} after the delete`, 8000);
-          ok(!docRows().some((tr) => tr.dataset.id === delId), 'documents: the deleted document is still listed');
-        }
-      }
-    }
-  }
-  await W.setWritesUnlocked(false, { confirmFirst: false });
+  ok(!view().querySelector('#docs-editor, #docs-review, #docs-save, #docs-delete'), 'documents: an edit or delete control is still drawn');
   st.state.caller = callerBefore;
 
   // 9. ‹ Indices goes back to the list with the search kept.

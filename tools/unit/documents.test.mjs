@@ -55,14 +55,14 @@ test('paths carry the three flags, and the hash round-trips the target', () => {
   assert.equal(D.docsTargetOf('#/indices/docs/'), null);
 });
 
-test('search body: query_string or match_all, the window on the time field, newest first, exact total, seq_no', () => {
+test('search body: query_string or match_all, the window on the time field, newest first, the total capped', () => {
   const b = D.searchBody({ query: 'level:error', timeField: '@timestamp', window: { from: 1000, to: 2000 }, from: 10, size: 5 });
   assert.deepEqual(b.query.bool.filter[0], { query_string: { query: 'level:error', default_operator: 'AND' } });
   assert.deepEqual(b.query.bool.filter[1], { range: { '@timestamp': { format: 'epoch_millis', gte: 1000, lte: 2000 } } });
   assert.deepEqual(b.sort, [{ '@timestamp': 'desc' }]);
   assert.equal(b.from, 10); assert.equal(b.size, 5);
   assert.equal(b.track_total_hits, D.MAX_RESULT_WINDOW);
-  assert.equal(b.seq_no_primary_term, true);
+  assert.equal(b.seq_no_primary_term, undefined, 'a read-only view asks for no version numbers');
   const plain = D.searchBody({ query: '  ', timeField: null, window: { from: 1, to: 2 } });
   assert.deepEqual(plain.query.bool.filter, [{ match_all: {} }], 'no time field: no range, whatever the window');
   assert.deepEqual(plain.sort, ['_doc']);
@@ -155,38 +155,6 @@ test('addTerm: field:"value", AND-ed, quotes escaped, not twice', () => {
   assert.equal(D.addTerm('', 'msg', 'say "hi"'), 'msg:"say \\"hi\\""');
 });
 
-test('doc paths: the version read, the routing when there is one, encoded', () => {
-  const hit = { _index: 'logstash-a', _id: 'id/1', _seq_no: 7, _primary_term: 2 };
-  assert.equal(D.docPath(hit), '/logstash-a/_doc/id%2F1?if_seq_no=7&if_primary_term=2');
-  assert.equal(D.docPath({ ...hit, _routing: 'r 1' }), '/logstash-a/_doc/id%2F1?if_seq_no=7&if_primary_term=2&routing=r%201');
-  assert.equal(D.docGetPath(hit), '/logstash-a/_doc/id%2F1');
-});
-
-test('line diff: unchanged, removed and added lines in order', () => {
-  const d = D.lineDiff('a\nb\nc', 'a\nx\nc\nd');
-  assert.deepEqual(d, [{ kind: 'same', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'x' }, { kind: 'same', text: 'c' }, { kind: 'add', text: 'd' }]);
-  assert.deepEqual(D.lineDiff('same', 'same'), [{ kind: 'same', text: 'same' }]);
-  assert.deepEqual(D.lineDiff('', 'new'), [{ kind: 'del', text: '' }, { kind: 'add', text: 'new' }]);
-});
-
-test('edit status: valid with a change count, the parse error otherwise, an object only', () => {
-  const orig = { a: 1, b: 'two' };
-  const same = D.editStatus(D.pretty(orig), orig);
-  assert.equal(same.ok, true); assert.equal(same.changes, 0);
-  const changed = D.editStatus(D.pretty({ a: 1, b: 'three' }), orig);
-  assert.equal(changed.ok, true); assert.equal(changed.changes, 2, 'one line removed, one added');
-  assert.deepEqual(changed.value, { a: 1, b: 'three' });
-  const bad = D.editStatus('{ "a": 1, ', orig);
-  assert.equal(bad.ok, false); assert.ok(bad.error.length > 0); assert.equal(bad.changes, 0);
-  assert.equal(D.editStatus('[1]', orig).ok, false);
-  assert.equal(D.editStatus('null', orig).ok, false);
-});
-
-test('write outcome: a 409 is the conflict sentence; anything else is the cluster\'s reason', () => {
-  const c = D.writeOutcome(Object.assign(new Error('HTTP 409'), { res: { status: 409 } }));
-  assert.equal(c.conflict, true);
-  assert.equal(c.message, 'Someone changed this document since you opened it — nothing was overwritten. Reload it.');
-  const o = D.writeOutcome(Object.assign(new Error('blocked by read-only mode'), { res: { status: 403 } }));
-  assert.deepEqual(o, { conflict: false, message: 'blocked by read-only mode' });
-  assert.equal(D.writeOutcome(null).conflict, false);
+test('doc path: the GET the REST console opens, encoded', () => {
+  assert.equal(D.docGetPath({ _index: 'logstash-a', _id: 'id/1' }), '/logstash-a/_doc/id%2F1');
 });

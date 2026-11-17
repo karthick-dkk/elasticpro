@@ -156,26 +156,64 @@ function applyMenuPosition(v) {
   document.documentElement.dataset.menu = menuPosition;
 }
 /**
- * The left menu folded to an icon rail (the owner, 0.3.71): « at the foot of the menu, above the
- * account button, folds it to ~56 px of icons — each with its page name as tooltip and label, the
- * open-alert count a badge on Alerts — and » opens it again; the page takes the width it frees
- * (app.css html[data-rail="on"]). Kept per browser; the top menu has no rail.
+ * The left menu folded to an icon rail (the owner, 0.3.71/0.3.72): « at the top of the menu (beside
+ * the brand) and at its foot folds it to ~56 px of icons — each with its page name as tooltip and
+ * label, the open-alert count a badge on Alerts — and » opens it again; the page takes the width
+ * it frees (app.css html[data-rail="on"]). Two ways to be folded:
+ *  - by hand (« pressed): kept per browser, icons only, the menu never opens on hover;
+ *  - by itself after RAIL_IDLE_MS with no mouse, key, wheel or touch anywhere in the app: this visit
+ *    only, and the full menu shows over the page while the mouse is on it (html[data-peek]).
+ * » (or any rail button) opens it for good again. The top menu has no rail.
  */
 const RAIL_KEY = 'elasticpro.menu.rail';
+const RAIL_IDLE_MS = 3 * 60 * 1000;
 let menuRail = (() => { try { return localStorage.getItem(RAIL_KEY) === '1'; } catch (_) { return false; } })();
+let autoFold = false;
+let railIdleTimer = null;
+let railArmedAt = 0;
+const railOn = () => menuRail || autoFold;
 function applyRail() {
-  if (menuRail) document.documentElement.dataset.rail = 'on';
+  if (railOn()) document.documentElement.dataset.rail = 'on';
   else delete document.documentElement.dataset.rail;
+  if (!autoFold || menuRail) delete document.documentElement.dataset.peek;
 }
 applyRail();
+/** Starts (or restarts) the inactivity count while the full left menu is shown. The browser checks
+ *  can shorten it (`window.__EP_RAIL_IDLE_MS`): nobody waits three minutes in a test. */
+function armRailIdle() {
+  clearTimeout(railIdleTimer);
+  railIdleTimer = null;
+  if (menuPosition !== 'left' || railOn()) return;
+  railArmedAt = Date.now();
+  railIdleTimer = setTimeout(() => {
+    railIdleTimer = null;
+    if (menuPosition !== 'left' || railOn()) return;
+    autoFold = true;
+    applyRail();
+    navBuiltFor = '';
+    renderNav();
+  }, Number(window.__EP_RAIL_IDLE_MS) || RAIL_IDLE_MS);
+}
+for (const t of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  // Re-armed at most once a second: a moving mouse is one long activity, not a hundred.
+  document.addEventListener(t, () => { if (!railOn() && Date.now() - railArmedAt > 1000) armRailIdle(); }, { passive: true, capture: true });
+}
 function toggleRail() {
-  menuRail = !menuRail;
+  if (railOn()) { menuRail = false; autoFold = false; } else menuRail = true;
   try { localStorage.setItem(RAIL_KEY, menuRail ? '1' : '0'); } catch (_) { /* kept for this visit */ }
   applyRail();
   navBuiltFor = '';
   renderNav();
+  armRailIdle();
   const btn = $('#nav .nav-rail-btn');
   if (btn) btn.focus();
+}
+/** Folded by itself: the full menu shows over the page while the mouse is on it. Wired once. */
+function wireRailPeek(nav) {
+  if (!nav || nav.dataset.peekWired) return;
+  nav.dataset.peekWired = '1';
+  nav.addEventListener('mouseenter', () => { if (autoFold && !menuRail) document.documentElement.dataset.peek = 'on'; });
+  nav.addEventListener('mouseleave', () => { delete document.documentElement.dataset.peek; });
 }
 /**
  * The scope the app opens on: this person's own choice when they made one, else the config's
@@ -571,6 +609,12 @@ function runningDot(btn, title) {
   if (dot.title !== title) { dot.title = title; dot.setAttribute('aria-label', title); }
 }
 
+/** « / », at the top of the left menu and at its foot (one definition for both). */
+function railButton(where) {
+  const label = menuRail ? 'Show the full menu' : autoFold ? 'Keep the menu open' : 'Fold the menu to icons';
+  return h(`button.nav-rail-btn.${where}`, { type: 'button', onclick: toggleRail, 'aria-expanded': String(!railOn()), title: label, 'aria-label': label },
+    railOn() ? '\u00bb' : '\u00ab');
+}
 function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
@@ -582,14 +626,15 @@ function renderNav() {
   // The tab's colour is the worst open level: red, orange for High, else yellow.
   const tone = crit ? 'red' : counts && counts.high ? 'high' : 'yellow';
   const shown = visiblePages().filter((p) => !p.noTab);
-  const key = [menuPosition, menuRail, me && me.name, ...shown.map((p) => p.id)].join(',');
+  const key = [menuPosition, menuRail, autoFold, me && me.name, ...shown.map((p) => p.id)].join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
     navBuiltFor = key;
     // One row of the pages of a shift, Config-Management last (the ☰ that held Automation,
     // Requests, Accounts and Config is gone: those live in Config-Management now). With the
     // menu on the left the brand heads it and the person's name sits at its foot.
-    nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
+    nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro'),
+      menuPosition === 'left' ? railButton('nav-rail-top') : null));
     shown.forEach((p) => {
       // The name is the tooltip and the label too: in the icon rail (toggleRail) it is all there is.
       nav.append(h('button', { dataset: { page: p.id }, title: p.label, 'aria-label': p.label, onclick: () => go(p.id) },
@@ -602,11 +647,9 @@ function renderNav() {
         h('span.ico', '└'), h('span', 'Overview')));
       }
     });
-    if (menuPosition === 'left') {
-      nav.append(h('button.nav-rail-btn', { type: 'button', onclick: toggleRail, 'aria-expanded': String(!menuRail),
-        title: menuRail ? 'Show the full menu' : 'Fold the menu to icons', 'aria-label': menuRail ? 'Show the full menu' : 'Fold the menu to icons' },
-      menuRail ? '\u00bb' : '\u00ab'));
-    }
+    if (menuPosition === 'left') nav.append(railButton('nav-rail-foot'));
+    wireRailPeek(nav);
+    armRailIdle();
     if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
   // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md), on the tab of the
@@ -637,8 +680,11 @@ function renderNav() {
   const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
-    // A sub-item is current only when its section is the one on screen; its page's own button is current for both.
-    const cur = here === id && (!b.dataset.section || clustersSection(location.hash) === b.dataset.section);
+    // A sub-item is current when its section is the one on screen, and then it alone is marked: the
+    // page's own button steps back (the owner, 0.3.72). Folded to icons the sub-item is hidden, so
+    // the page's icon stays marked there.
+    const subOn = !railOn() && [...nav.querySelectorAll('button.nav-sub')].some((x) => x.dataset.page === id && clustersSection(location.hash) === x.dataset.section);
+    const cur = here === id && (b.dataset.section ? clustersSection(location.hash) === b.dataset.section : !subOn);
     if (cur) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
     else if (b.hasAttribute('aria-current')) b.removeAttribute('aria-current');
     // The alert count belongs on the tab: it is the reason to go there. Nothing else

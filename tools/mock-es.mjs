@@ -47,8 +47,8 @@
  * with both, a device with one); Zone dc1–dc4 and tag1 firewall/proxy/switch on each.
  *
  * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
- * except snapshot deletes, index-template PUT/DELETE and documents (PUT/DELETE `<index>/_doc/<id>`,
- * 409 on a stale if_seq_no), which are honoured in memory.
+ * except snapshot deletes, index-template PUT/DELETE and the shard-allocation cluster setting,
+ * which are honoured in memory.
  */
 
 import http from 'node:http';
@@ -233,14 +233,27 @@ function catProject(url, rows) {
 // the operator deletes it again. That has been reported as a product bug. Deleting is the one
 // write this fixture honours. In memory only: restarting the mock brings both snapshots back,
 // which the index checks below rely on.
+/* PUT /_cluster/settings is remembered for shard allocation (`cluster.routing.allocation.enable`),
+ * so the Nodes & shards switch reads back what it wrote; a null clears it, as Elasticsearch does. */
+const clusterSettings = { persistent: {}, transient: {} };
+const ALLOC_KEY = 'cluster.routing.allocation.enable';
+function putClusterSettings(body) {
+  let b = null;
+  try { b = JSON.parse(body || 'null'); } catch { return; }
+  for (const scope of ['persistent', 'transient']) {
+    const block = b && b[scope];
+    if (!block || !(ALLOC_KEY in block)) continue;
+    if (block[ALLOC_KEY] === null) delete clusterSettings[scope][ALLOC_KEY];
+    else clusterSettings[scope][ALLOC_KEY] = String(block[ALLOC_KEY]);
+  }
+}
 const deletedSnapshots = new Set();
 const snapshotsLeft = (list) => list.filter((s) => !deletedSnapshots.has(s.snapshot));
 
 /* ------------------------- documents (Indices › Documents) -------------------------
  * What an open index holds, for the documents view (ui/js/ui/documents-view.js): 60 documents
  * a piece, generated on the first request for that index (deterministic by name) and then held
- * in memory — PUT / DELETE `<index>/_doc/<id>` with the if_seq_no / if_primary_term that was
- * read change them, a stale pair is refused 409 as a cluster does. Timestamps run back from
+ * in memory; the view only reads them (GET `<index>/_doc/<id>` for Open in REST). Timestamps run back from
  * when the index was first asked for, three minutes apart over three hours, so "24h" and "7d"
  * hold them all at any hour and the table has pages at every size. */
 const DOC_PROPS = {
@@ -291,7 +304,7 @@ function queryTest(qs) {
     return JSON.stringify(src).includes(v);
   });
 }
-/** The documents view's two searches: a page of hits (seq_no_primary_term), or a field's top values. */
+/** The documents view's two searches: a page of hits, or a field's top values. */
 function docsSearch(url, body) {
   const names = openTargets(targetOf(url));
   const filter = (((body.query || {}).bool || {}).filter) || [];
@@ -322,46 +335,16 @@ function docsSearch(url, body) {
   const from = Math.max(0, Number(body.from) || 0), size = Math.max(0, Number(body.size) || 10);
   return { took: 3, timed_out: false, _shards: { total: names.length, successful: names.length, failed: 0 },
     hits: { total: (() => { const cap = body.track_total_hits === true ? Infinity : Number.isFinite(body.track_total_hits) ? body.track_total_hits : 10000; return all.length > cap ? { value: cap, relation: 'gte' } : { value: all.length, relation: 'eq' }; })(), max_score: null,
-      hits: all.slice(from, from + size).map((d) => ({ _index: d._index, _id: d._id, _seq_no: d._seq_no, _primary_term: d._primary_term, _source: d._source })) } };
+      hits: all.slice(from, from + size).map((d) => ({ _index: d._index, _id: d._id, _source: d._source })) } };
 }
-/** GET / PUT / DELETE `<index>/_doc/<id>` as `{status, body}`, or null when the path is not one. */
-function docRequest(method, url, body) {
+/** GET `<index>/_doc/<id>` as `{status, body}`, or null when the path is not one. */
+function docRequest(url) {
   const m = /^\/([^/]+)\/_doc\/([^/]+)$/.exec(url.split('?')[0]);
   if (!m) return null;
   const index = decodeURIComponent(m[1]), id = decodeURIComponent(m[2]);
-  const params = new URLSearchParams(url.split('?')[1] || '');
-  const known = CAT_INDICES.some((i) => i.index === index);
-  const docs = known ? docsOf(index) : [];
-  const k = docs.findIndex((d) => d._id === id);
-  const d = k >= 0 ? docs[k] : null;
-  if (method === 'GET') {
-    if (!d) return { status: 404, body: { _index: index, _id: id, found: false } };
-    return { status: 200, body: { _index: index, _id: id, _version: d._seq_no + 1, _seq_no: d._seq_no, _primary_term: d._primary_term, found: true, _source: d._source } };
-  }
-  if (!known) return { status: 404, body: { error: { type: 'index_not_found_exception', reason: `no such index [${index}]` }, status: 404 } };
-  const seq = params.get('if_seq_no'), term = params.get('if_primary_term');
-  if (seq !== null || term !== null) {
-    if (!d) return { status: 404, body: { error: { type: 'document_missing_exception', reason: `[${id}]: document missing` }, status: 404 } };
-    if (Number(seq) !== d._seq_no || Number(term) !== d._primary_term) {
-      return { status: 409, body: { error: { type: 'version_conflict_engine_exception',
-        reason: `[${id}]: version conflict, required seqNo [${seq}], primary term [${term}]. current document has seqNo [${d._seq_no}] and primary term [${d._primary_term}]` }, status: 409 } };
-    }
-  }
-  const nextSeq = docs.reduce((s, x) => Math.max(s, x._seq_no), -1) + 1;
-  if (method === 'DELETE') {
-    if (!d) return { status: 404, body: { _index: index, _id: id, result: 'not_found' } };
-    docs.splice(k, 1);
-    return { status: 200, body: { _index: index, _id: id, _version: d._seq_no + 2, result: 'deleted', _seq_no: nextSeq, _primary_term: d._primary_term } };
-  }
-  let parsed = null;
-  try { parsed = JSON.parse(body || 'null'); } catch { /* answered below */ }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { status: 400, body: { error: { type: 'mapper_parsing_exception', reason: 'failed to parse: a document is a JSON object' }, status: 400 } };
-  }
-  const primaryTerm = d ? d._primary_term : 1;
-  const doc = { _id: id, _seq_no: nextSeq, _primary_term: primaryTerm, _source: parsed };
-  if (d) docs[k] = doc; else docs.push(doc);
-  return { status: d ? 200 : 201, body: { _index: index, _id: id, _version: nextSeq + 1, result: d ? 'updated' : 'created', _seq_no: nextSeq, _primary_term: primaryTerm } };
+  const d = CAT_INDICES.some((i) => i.index === index) ? docsOf(index).find((x) => x._id === id) : null;
+  if (!d) return { status: 404, body: { _index: index, _id: id, found: false } };
+  return { status: 200, body: { _index: index, _id: id, _version: d._seq_no + 1, _seq_no: d._seq_no, _primary_term: d._primary_term, found: true, _source: d._source } };
 }
 
 const routes = [
@@ -383,7 +366,7 @@ const routes = [
     { node: 'UNASSIGNED', shards: '2' },
   ])],
   [(u) => u.startsWith('/_cluster/settings'), () => ({
-    persistent: {}, transient: {},
+    persistent: { ...clusterSettings.persistent }, transient: { ...clusterSettings.transient },
     defaults: {
       'cluster.routing.allocation.disk.watermark.low': '85%',
       'cluster.routing.allocation.disk.watermark.high': '90%',
@@ -553,9 +536,9 @@ const routes = [
     let body = {};
     try { body = JSON.parse(hit.body || '{}'); } catch { /* fall through to the hit list */ }
 
-    // Indices › Documents (core/documents.js): a page of hits that asks for seq_no_primary_term,
-    // or a field's top values (the `top_values` terms agg). Nothing else sends either.
-    if (body.seq_no_primary_term === true || (body.aggs && body.aggs.top_values)) return docsSearch(hit.url, body);
+    // Indices › Documents (core/documents.js SEARCH_FLAGS): its address alone carries
+    // allow_no_indices=true&expand_wildcards=open — a page of hits, or a field's top values.
+    if (/[?&]allow_no_indices=true&expand_wildcards=open/.test(hit.url) || (body.aggs && body.aggs.top_values)) return docsSearch(hit.url, body);
     // The volume collector's one search per day (docs/VOLUME.md, "Collection" step 3).
     if (body.aggs && body.aggs.by_index) return volumeSearch(hit.url, body);
     // Volume by host: one composite page (docs/REPORT-TYPES.md "Collection").
@@ -973,7 +956,7 @@ if (SCALE) {
 }
 // Scaled bodies are the same every time, and big: serialised once each.
 const memo = new Map();
-const memoable = (u) => SCALE && u !== '/' && !u.startsWith('/_tasks') && !u.includes('_template') && !u.includes('_search') && !u.includes('_bulk');
+const memoable = (u) => SCALE && u !== '/' && !u.startsWith('/_tasks') && !u.startsWith('/_cluster/settings') && !u.includes('_template') && !u.includes('_search') && !u.includes('_bulk');
 // The native realm, as Elasticsearch answers it: a map of username → user. (Without this the
 // fixture's generic acknowledgement stood in for it, which is not a shape a cluster sends.)
 routes.unshift([(u) => u.split('?')[0] === '/_security/user', () => ({
@@ -1109,9 +1092,7 @@ function handle(req, res, url, body, port) {
       // "deleted it and it is still there" means the app, not the fixture. Everything else
       // stays a no-op.
       const bare = url.split('?')[0];
-      // A document: PUT replaces it, DELETE removes it, each only at the version named (409 otherwise).
-      const dw = (req.method === 'PUT' || req.method === 'DELETE') ? docRequest(req.method, url, body) : null;
-      if (dw) { res.statusCode = dw.status; return res.end(JSON.stringify(dw.body)); }
+      if (req.method === 'PUT' && bare === '/_cluster/settings') { putClusterSettings(body); return res.end(JSON.stringify({ acknowledged: true, persistent: clusterSettings.persistent, transient: clusterSettings.transient })); }
       const sim = req.method === 'POST' && /^\/_index_template\/_simulate_index\/([^/]+)$/.exec(bare);
       if (sim) return res.end(JSON.stringify(simulateIndex(decodeURIComponent(sim[1]))));
       const tpl = /^\/_index_template\/([^_/][^/]*)$/.exec(bare);
@@ -1144,7 +1125,7 @@ function handle(req, res, url, body, port) {
     }
     // GET `<index>/_doc/<id>` (the REST console's Open in REST): the document as it is now, or a 404.
     if (req.method === 'GET') {
-      const dg = docRequest('GET', url, '');
+      const dg = docRequest(url);
       if (dg) { res.statusCode = dg.status; return res.end(JSON.stringify(dg.body)); }
     }
     if (memoable(url) && memo.has(url)) return res.end(memo.get(url));
