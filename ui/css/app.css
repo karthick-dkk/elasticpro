@@ -1677,6 +1677,7 @@ button.pill.cl-pillbtn:focus-visible { outline: 2px solid var(--accent); outline
 .vs-avg .btn { padding: 1px 6px; font-size: 10.5px; line-height: 16px; }
 .vs-high { color: var(--critical-ink); font-weight: 600; }
 .vs-notm { color: var(--warning-ink); white-space: nowrap; }
+.vs-backfill { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 button.vs-notm { font-size: inherit; font-weight: inherit; }
 .vs-top { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .vs-note { margin-top: 6px; font-size: 11.5px; color: var(--warning-ink); }

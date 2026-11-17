@@ -10,6 +10,7 @@
 //! (nothing is sent; the timer tries again next tick) and an unreachable cluster (left
 //! alone until the health probe says it is back).
 
+use super::backfill;
 use super::collect::{self, Indices, RowResolution, Split};
 use super::derive::{self, Totals};
 use super::schedule::{self, day_key, month_key, parse_day};
@@ -79,6 +80,8 @@ pub(crate) struct Collected {
     /// The days this collection changed in the record (`YYYY-MM-DD`): what the history store
     /// is sent (`history_store::history_volume_changed`).
     pub changed_days: std::collections::BTreeSet<String>,
+    /// What the backfill found and did (docs/VOLUME.md "Backfill"): a daily run's, while it is on.
+    pub backfill: Option<backfill::Status>,
 }
 
 /// A request a person asked for (the field check, the pattern preview): their class and
@@ -285,6 +288,7 @@ impl Core {
             "progress": run.running.then(|| json!({ "done": run.done, "total": run.total })),
             "lastError": st.last_error,
             "collectAt": s.collect_at,
+            "backfill": st.backfill,
         })
     }
 
@@ -903,10 +907,17 @@ impl Core {
                     Err(e) => Outcome::failed(e.clone(), None),
                     // The emergency stop: the scheduled run is tried again when it is over.
                     Ok(c) if c.interrupted.is_some() => Outcome::deferred(c.error.clone().or_else(|| c.interrupted.clone()).unwrap_or_default(), Some(c.searched)),
-                    Ok(c) => match &c.error {
-                        Some(e) => Outcome::failed(e.clone(), Some(c.searched)),
-                        None => Outcome::completed(Some(c.searched)),
-                    },
+                    Ok(c) => {
+                        let o = match &c.error {
+                            Some(e) => Outcome::failed(e.clone(), Some(c.searched)),
+                            None => Outcome::completed(Some(c.searched)),
+                        };
+                        // The run log says what the backfill did (docs/JOBS.md "Volume backfill").
+                        let b = c.backfill.as_ref();
+                        o.with_note(b.and_then(backfill::Status::note))
+                            .with_count(crate::jobs::COUNT_BACKFILLED, b.map_or(0, |b| b.filled))
+                            .with_count(crate::jobs::COUNT_BACKFILL_PAUSED, b.is_some_and(|b| b.paused.is_some()) as u64)
+                    }
                 });
             }
             if let Some(r) = core.volume.runs.lock().get_mut(&id) {
@@ -967,6 +978,24 @@ impl Core {
         res
     }
 
+    /// Whether the cluster is under query pressure now, before a backfill day
+    /// (`backfill::pressure`): one fresh `_cat/thread_pool/search` reading — noted in the load
+    /// view like every reading (`report::control::pool_pressure`), its rejected count carried to
+    /// the next — then the busy definition. A reading that fails says nothing.
+    async fn volume_pressure(self: &Arc<Self>, id: &str, origin: &str, last_rejected: &mut Option<u64>) -> Option<String> {
+        let mut r = crate::report::hosts::pool_request(id, 30_000);
+        r.origin = Some(origin.to_string());
+        let res = self.es_req(r).await;
+        let mut reading = None;
+        if res.get("ok").and_then(Value::as_bool) == Some(true) {
+            let (why, rejected) = crate::report::control::pool_pressure(res.get("json").unwrap_or(&Value::Null), *last_rejected);
+            self.load.note_pool(id, why.clone(), crate::fleet::now_ms());
+            *last_rejected = Some(rejected);
+            reading = why;
+        }
+        backfill::pressure(reading, self.cluster_busy(id).as_ref())
+    }
+
     pub(crate) async fn volume_collect(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
         let out = self.volume_collect_days(id, s, opts).await?;
         // The days it changed, to the history store's queue — only while its gates are open;
@@ -990,8 +1019,13 @@ impl Core {
         let why = |v: &Value| v.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
         let started = now_ms();
         let today = schedule::utc_day(started);
-        let oldest = month_key(schedule::oldest_kept_month(today, s.keep_months));
+        let first_kept = schedule::oldest_kept_month(today, s.keep_months);
+        let oldest = month_key(first_kept);
         let mut out = Collected::default();
+        // The backfill's days (docs/VOLUME.md "Backfill"): a daily run's only, not a report's.
+        let window = if job { None } else { backfill::window(today, s.backfill_days, first_kept) };
+        let in_window = |d: NaiveDate| window.is_some_and(|(f, t)| d >= f && d <= t);
+        let mut kinds: BTreeMap<NaiveDate, backfill::Kind> = BTreeMap::new();
 
         // 1. Sizes per day, from the names; the indices split by time apart.
         let cat = self.volume_req(tag(collect::cat_request(id, &ind)), opts.stop).await;
@@ -1090,6 +1124,14 @@ impl Core {
                     continue;
                 }
                 let group = listing.days.get(&date);
+                if in_window(date) {
+                    let kind = backfill::classify(Some(d), group, split.has(date));
+                    kinds.insert(date, kind);
+                    // The backfill's to search, a few a run (below); the rest say why as before.
+                    if kind == backfill::Kind::Fillable {
+                        continue;
+                    }
+                }
                 if collect::needs_search(d, group, split.has(date)) {
                     to_search.push(date);
                 } else if let Some(e) = collect::not_searched_why(d, group, &split, today) {
@@ -1109,8 +1151,11 @@ impl Core {
             }
         }
 
+        let plan = window.map(|(f, t)| backfill::plan(f, t, &kinds, s.backfill_per_run));
+        let back: Vec<NaiveDate> = plan.as_ref().map(|p| p.days.clone()).unwrap_or_default();
+
         // 2. Which field each row is (asked above when some index is split by time).
-        let rows: Option<Vec<RowResolution>> = if to_search.is_empty() || halted {
+        let rows: Option<Vec<RowResolution>> = if (to_search.is_empty() && back.is_empty()) || halted {
             None
         } else if rows.is_some() {
             rows
@@ -1130,7 +1175,7 @@ impl Core {
                 let e = fc_failed.clone().unwrap_or_else(|| format!("_field_caps: {}", why(&fc)));
                 let note = format!("not aggregated: {e}; asked again on the next run");
                 let mut by_month: BTreeMap<String, Vec<NaiveDate>> = BTreeMap::new();
-                for d in &to_search {
+                for d in to_search.iter().chain(&back) {
                     by_month.entry(month_key(*d)).or_default().push(*d);
                 }
                 for (m, dates) in by_month {
@@ -1149,60 +1194,77 @@ impl Core {
             }
         };
 
-        // 3. One search per unfinished day, one at a time, a month file at a time.
+        // 3. One search per unfinished day, one at a time, a month file at a time: the run's own
+        // days first, then the backfill's, oldest first, each only while the cluster is not under
+        // query pressure (`volume_pressure`).
+        let (mut bf_searched, mut bf_filled, mut paused) = (0u64, 0u64, None::<String>);
         if let Some(rows) = rows {
             let body = collect::search_body(&rows, s.top_values);
-            let total = to_search.len() as u64;
+            let total = (to_search.len() + back.len()) as u64;
             out.total = total;
             (opts.progress)(0, total);
             let mut done = 0u64;
-            let mut by_month: BTreeMap<String, Vec<NaiveDate>> = BTreeMap::new();
-            for d in to_search {
-                by_month.entry(month_key(d)).or_default().push(d);
-            }
-            'months: for (m, dates) in by_month {
-                let mut file = store.read_month(id, &m);
-                for date in dates {
+            let mut last_rejected: Option<u64> = None;
+            let order: Vec<(NaiveDate, bool)> = to_search.iter().map(|d| (*d, false)).chain(back.iter().map(|d| (*d, true))).collect();
+            let mut cur: Option<(String, super::store::MonthFile)> = None;
+            for (date, is_back) in order {
+                let m = month_key(date);
+                if cur.as_ref().is_none_or(|(k, _)| *k != m) {
+                    if let Some((k, f)) = cur.take() {
+                        store.write_month(id, &k, &f)?;
+                        summaries.insert(k.clone(), derive::month_summary(&k, &f.days));
+                    }
+                    cur = Some((m.clone(), store.read_month(id, &m)));
+                }
+                let Some((_, file)) = cur.as_mut() else { break };
+                if let Some(reason) = (opts.stop)() {
+                    out.error = Some(format!("{reason} after {done} of {total} days"));
+                    out.interrupted = Some(reason);
+                    break;
+                }
+                if is_back {
+                    if let Some(why) = self.volume_pressure(id, opts.origin, &mut last_rejected).await {
+                        paused = Some(backfill::paused_why(&why));
+                        break;
+                    }
+                }
+                let group = listing.group_for(date, &split);
+                let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body)), opts.stop).await;
+                if !ok(&res) {
+                    // Refused or cut off because the stop came on: not this day's fault.
                     if let Some(reason) = (opts.stop)() {
                         out.error = Some(format!("{reason} after {done} of {total} days"));
                         out.interrupted = Some(reason);
-                        store.write_month(id, &m, &file)?;
-                        summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
-                        break 'months;
+                        break;
                     }
-                    let group = listing.group_for(date, &split);
-                    let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body)), opts.stop).await;
-                    if !ok(&res) {
-                        // Refused or cut off because the stop came on: not this day's fault.
-                        if let Some(reason) = (opts.stop)() {
-                            out.error = Some(format!("{reason} after {done} of {total} days"));
-                            out.interrupted = Some(reason);
-                            store.write_month(id, &m, &file)?;
-                            summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
-                            break 'months;
-                        }
-                    }
-                    if let Some(day) = file.days.get_mut(&day_key(date)) {
-                        out.changed_days.insert(day_key(date));
-                        if ok(&res) {
-                            collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, today, now_ms());
-                            if let Some(e) = &day.error {
-                                out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
-                            }
-                        } else {
-                            let e = format!("the search failed: {}; asked again on the next run", why(&res));
-                            out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
-                            day.error = Some(e);
-                        }
-                    }
-                    done += 1;
-                    out.searched = done;
-                    (opts.progress)(done, total);
                 }
-                store.write_month(id, &m, &file)?;
-                summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
+                if let Some(day) = file.days.get_mut(&day_key(date)) {
+                    out.changed_days.insert(day_key(date));
+                    if ok(&res) {
+                        collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, today, now_ms());
+                        if let Some(e) = &day.error {
+                            out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
+                        }
+                    } else {
+                        let e = format!("the search failed: {}; asked again on the next run", why(&res));
+                        out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
+                        day.error = Some(e);
+                    }
+                    if is_back {
+                        bf_searched += 1;
+                        bf_filled += !backfill::wanted(day) as u64;
+                    }
+                }
+                done += 1;
+                out.searched = done;
+                (opts.progress)(done, total);
+            }
+            if let Some((k, f)) = cur.take() {
+                store.write_month(id, &k, &f)?;
+                summaries.insert(k.clone(), derive::month_summary(&k, &f.days));
             }
         }
+        out.backfill = plan.as_ref().map(|p| backfill::Status::of(p, started, bf_searched, bf_filled, paused));
 
         // 4. Month summaries; for the daily run also its status, then what is older than
         // keepMonths goes — only after a run that finished cleanly under settings the
@@ -1227,11 +1289,15 @@ impl Core {
             st.skipped_count = listing.skipped_count;
             st.time_split = listing.time_split.len() as u64;
             st.months.extend(summaries);
+            st.backfill = out.backfill.clone();
         })?;
         if opts.prune && out.error.is_none() && out.interrupted.is_none() {
             store.prune(id, &oldest)?;
         }
-        tracing::info!(cluster = %id, days = listing.days.len(), error = error.as_deref().unwrap_or(""), "volume daily: run finished");
+        let (bf_filled, bf_queued) = out.backfill.as_ref().map_or((0, 0), |b| (b.filled, b.queued));
+        tracing::info!(cluster = %id, days = listing.days.len(), backfilled = bf_filled, backfill_queued = bf_queued,
+                       backfill_paused = out.backfill.as_ref().is_some_and(|b| b.paused.is_some()),
+                       error = error.as_deref().unwrap_or(""), "volume daily: run finished");
         Ok(out)
     }
 

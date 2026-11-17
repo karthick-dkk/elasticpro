@@ -43,7 +43,7 @@ test('every VOLUME.md managed name and config.txt key is mapped', () => {
   const managed = V.VOLUME_KEYS.map((k) => k.managed);
   assert.deepEqual(managed, ['volumeIndexFormat', 'volumeIndexPattern', 'volumeDayFrom', 'volumeTimeField', 'volumeTag', 'volumeForwarder', 'volumeSourceHost', 'volumeSourceIp',
     'volumeEventSize', 'volumeSubSize', 'volumeExtraName', 'volumeExtraFields', 'volumeSizeBasis', 'volumeTopValues',
-    'volumeKeepMonths', 'volumeCollectAt']);
+    'volumeKeepMonths', 'volumeCollectAt', 'volumeBackfillDays', 'volumeBackfillPerRun']);
   assert.ok(V.VOLUME_KEYS.every((k) => /^UI_VOLUME_[A-Z_]+$/.test(k.env)));
 });
 
@@ -156,7 +156,13 @@ test('the YAML block and the config.txt lines carry the current values', () => {
   assert.match(V.yamlBlock(v), /keepMonths: {2}6/);
   assert.match(V.yamlBlock(v), /collectAt: {3}"06:00"/);
   const t = V.configTxtLines(v).split('\n');
-  assert.equal(t.length, 16);
+  assert.equal(t.length, 18);
+  assert.ok(t.includes('UI_VOLUME_BACKFILL_DAYS=30') && t.includes('UI_VOLUME_BACKFILL_PER_RUN=7'), 'the backfill keys (docs/VOLUME.md "Backfill")');
+  assert.match(V.yamlBlock(v), /backfillDays: {3}30\n {4}backfillPerRun: 7$/);
+  assert.equal(V.validateVolume({ ...V.VOLUME_DEFAULTS, backfillDays: 367 }).length, 1, 'backfillDays 0..366');
+  assert.deepEqual(V.validateVolume({ ...V.VOLUME_DEFAULTS, backfillDays: 0 }), [], '0 is off, and valid');
+  assert.equal(V.validateVolume({ ...V.VOLUME_DEFAULTS, backfillPerRun: 0 }).length, 1, 'backfillPerRun 1..31');
+  assert.equal(V.mergeVolume(V.VOLUME_DEFAULTS, { backfillDays: 0 }).backfillDays, 0, 'a file\'s 0 is kept, not dropped');
   assert.ok(t.includes('UI_VOLUME_INDEX_PATTERN=logstash-*'));
   assert.ok(t.includes('UI_VOLUME_DAY_FROM=name'));
   assert.ok(t.includes('UI_VOLUME_TAG_FIELDS=tag1,labels.tag1,tags'));
