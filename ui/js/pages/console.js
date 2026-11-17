@@ -438,6 +438,8 @@ function draw() {
   }
   mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns));
   fitColumns();
+  // Once more after the browser has laid the page out (the top bar and the strip settle late).
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fitColumns);
 }
 
 /** Below this the boxes stop shrinking and the page scrolls instead: a box of three lines is no box. */
@@ -458,7 +460,8 @@ function fitColumns() {
   const footH = foot ? foot.getBoundingClientRect().height : 0;
   const page = cols.closest('.page');
   const pad = page ? parseFloat(getComputedStyle(page).paddingBottom) || 0 : 0;
-  cols.style.height = `calc(100dvh - ${Math.round(top + footH + pad)}px)`;
+  // app.css: #c-columns { height: calc(100dvh - var(--c-fit)) }.
+  cols.style.setProperty('--c-fit', `${Math.round(top + footH + pad)}px`);
 }
 // A resize moves where the boxes start (the strip and the request line wrap) as well as the window.
 window.addEventListener('resize', () => { if (host && host.isConnected && !ui.full) fitColumns(); });
