@@ -1205,7 +1205,7 @@ await goOne('snapshots');
     return realFetch(input, init);
   };
   const pill = () => doc.getElementById('reports-pill');
-  const rows = () => [...doc.querySelectorAll('#rj-panel .rj-job')];
+  const rows = () => [...doc.querySelectorAll('#rj-jobs .rj-job')];
   try {
     // An older core: no pill, no Generate report, and the job list is not asked for again.
     R.resetReports();
@@ -1238,10 +1238,21 @@ await goOne('snapshots');
     ok(!!open && !!open.closest('section.card') && /Generated reports/.test(open.closest('section.card').querySelector('h2').textContent),
       'reports: Generate report is not on the Generated reports card');
     if (open) {
-      // The list of jobs is what the card is for: the panel is open on arrival.
+      // Generated reports (the owner, 2026-11-17): the files are a full-width table, drawn with the
+      // form closed; the form opens above it only from its button. Nothing built yet: said, with the way to build one.
       const panelEl = doc.getElementById('rj-panel');
-      if (panelEl && panelEl.hidden) { open.click(); await settleFor(100); }
-      ok(!!panelEl && !panelEl.hidden, 'reports: the Generated reports card does not show the jobs');
+      const tableEl = doc.getElementById('rj-table');
+      ok(!!panelEl && panelEl.hidden, 'reports: the Generate report form is open on arrival');
+      ok(!!tableEl && tableEl.isConnected && tableEl.closest('#rp-generated') && !tableEl.closest('#rj-panel'), 'reports: the report files table is not on the Generated reports card, outside the form');
+      const cols = [...tableEl.querySelectorAll('thead th')].map((t) => t.textContent.trim());
+      ok(cols.join('|') === 'Cluster(s)|Report kind|Period|Format|Size|Created|Status|Download', `reports: the report files table's columns read ${cols.join(' · ')}`);
+      ok(/No report built in the last 7 days · Generate report/.test(tableEl.textContent) && doc.getElementById('rj-empty-open'), `reports: an empty table reads "${tableEl.textContent.trim().slice(0, 80)}"`);
+      doc.getElementById('rj-empty-open').click(); await settleFor(100);
+      ok(!panelEl.hidden, 'reports: Generate report in the empty table did not open the form');
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Close').click(); await settleFor(50);
+      ok(panelEl.hidden && tableEl.isConnected, 'reports: Close did not shut the form, or took the table with it');
+      open.click(); await settleFor(100);
+      ok(!panelEl.hidden, 'reports: Generate report did not open the form');
       // The first cluster shown is listed until "More clients…".
       const first = [...doc.querySelectorAll('#rj-panel .rj-client input')];
       ok(first.length === 1, `reports: ${first.length} client boxes before More clients…, want only the first cluster`);
@@ -1304,8 +1315,8 @@ await goOne('snapshots');
       ];
       await R.refreshReports();
       await settleFor(50);
-      const txt = doc.getElementById('rj-panel').textContent;
-      ok(txt.includes('Running · 62 %') && !!doc.querySelector('#rj-panel .rj-bar'), 'reports: the running job has no "Running · 62 %" and bar');
+      const txt = doc.getElementById('rp-generated').textContent;
+      ok(txt.includes('Running · 62 %') && !!doc.querySelector('#rj-jobs .rj-bar'), 'reports: the running job has no "Running · 62 %" and bar');
       ok(txt.includes('Queued · #1 in line'), 'reports: the queued job does not say its place');
       ok(txt.includes(`Done · ${FILE}`), 'reports: the finished job does not name its file');
       ok(txt.includes('Not mailed: mail is not set up'), 'reports: a mailError is not shown');
@@ -1318,12 +1329,12 @@ await goOne('snapshots');
       // elements, only the status line changes (0.3.54 flicker pass — the button under the mouse
       // used to be replaced every 2 s, so its hover blinked and a slow click hit nothing).
       {
-        const row0 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        const row0 = doc.querySelector('#rj-jobs .rj-job[data-job="jr"]');
         const stop0 = row0 && row0.querySelector('.rj-stop');
         jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 40, total: 50 } } : j));
         await R.refreshReports();
         await settleFor(50);
-        const row1 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        const row1 = doc.querySelector('#rj-jobs .rj-job[data-job="jr"]');
         ok(row1 === row0 && row1.querySelector('.rj-stop') === stop0, 'reports: a progress poll rebuilt the running job\'s row or its Stop button');
         ok(/Running · 80 %/.test(row1 ? row1.textContent : ''), `reports: the progress did not move on in place (${row1 && row1.textContent})`);
         jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 31, total: 50 } } : j));
@@ -1342,9 +1353,10 @@ await goOne('snapshots');
       jobs = [hostsJob, ...jobs];
       await R.refreshReports();
       await settleFor(50);
-      const hj = doc.querySelector('#rj-panel .rj-job[data-job="jh"]');
-      const cl = (id) => hj && hj.querySelector(`.rj-cl[data-cluster="${id}"]`);
-      ok(hj && /Volume by host · 3 clusters/.test(hj.textContent), `reports: the hosts job does not say its kind (${hj && hj.textContent})`);
+      const hj = doc.querySelector('#rj-jobs .rj-job[data-job="jh"]');
+      const hsub = doc.querySelector('#rj-jobs .rj-subrow[data-job="jh"]');
+      const cl = (id) => hsub && hsub.querySelector(`.rj-cl[data-cluster="${id}"]`);
+      ok(hj && hj.querySelector('.rj-kind').textContent === 'Volume by host' && hj.querySelector('.rj-client-name').textContent === 'a, b, c', `reports: the hosts job does not say its kind and clusters (${hj && hj.textContent})`);
       ok(cl('a') && /3 at once/.test(cl('a').textContent) && /halved 1× \(HTTP 429\)/.test(cl('a').textContent) && /1\/3 partitions/.test(cl('a').textContent) && /2 of 3 days/.test(cl('a').textContent),
         `reports: cluster a's line reads "${cl('a') && cl('a').textContent}"`);
       ok(cl('b') && /waiting/.test(cl('b').textContent) && !/at once/.test(cl('b').textContent), `reports: a waiting cluster shows a concurrency (${cl('b') && cl('b').textContent})`);
@@ -1355,7 +1367,7 @@ await goOne('snapshots');
 
       // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
       rsent.length = 0;
-      const dl = doc.querySelector('#rj-panel .rj-job[data-job="jd"] .rj-dl');
+      const dl = doc.querySelector('#rj-jobs .rj-job[data-job="jd"] .rj-dl');
       ok(!!dl, 'reports: the done job has no Download');
       if (dl) {
         dl.click();
@@ -1364,8 +1376,30 @@ await goOne('snapshots');
         ok(files.at(-1) && files.at(-1).name === FILE, `reports: Download saved "${files.at(-1) && files.at(-1).name}"`);
       }
 
+      // The table's cells: the done file's size, its creation time, its full name as the row's title, newest first; a failed one says why.
+      {
+        jobs = [...jobs, { ...jobs.find((j) => j.id === 'jd'), id: 'jf', status: 'failed', file: null, mailError: null, error: 'the cluster did not answer within 60 s', createdAt: Date.now() - 3600000, endedAt: Date.now() - 3500000 },
+          { ...jobs.find((j) => j.id === 'jd'), id: 'jlong', file: { name: `volume-${'zbx-local-es-cluster-'.repeat(4)}2026-11-01_2026-11-30.xlsx`, bytes: 2621440 }, mailError: null, createdAt: Date.now() - 60000, endedAt: Date.now() - 30000 }];
+        await R.refreshReports();
+        await settleFor(50);
+        const jd = doc.querySelector('#rj-jobs .rj-job[data-job="jd"]');
+        const cell = (tr, c) => tr && tr.querySelector(`.${c}`) && tr.querySelector(`.${c}`).textContent.trim();
+        ok(jd && jd.title === FILE && cell(jd, 'rj-size') === '4 B' && cell(jd, 'rj-format') === '.xlsx' && cell(jd, 'rj-period') === 'Sep 2026' && cell(jd, 'rj-kind') === 'Volume report',
+          `reports: the done row reads "${jd && [...jd.cells].map((c) => c.textContent).join(' | ')}" (title ${jd && jd.title})`);
+        const jl = doc.querySelector('#rj-jobs .rj-job[data-job="jlong"]');
+        ok(jl && jl.title.startsWith('volume-zbx-local-es-cluster-zbx') && jl.title.endsWith('.xlsx') && cell(jl, 'rj-size') === '2.50 MB' && /\d/.test(cell(jl, 'rj-created')) && jl.querySelector('.rj-dl'),
+          `reports: a long file name is not the row's full title with its size, created time and Download (${jl && jl.title})`);
+        const jf = doc.querySelector('#rj-jobs .rj-job[data-job="jf"]');
+        ok(jf && /Failed: the cluster did not answer within 60 s/.test(cell(jf, 'rj-status')) && !jf.querySelector('.rj-dl'), `reports: a failed row reads "${jf && cell(jf, 'rj-status')}"`);
+        const order = rows().map((r) => r.dataset.job);
+        ok(order.indexOf('jd') < order.indexOf('jlong') && order.indexOf('jlong') < order.indexOf('jf'), `reports: the finished files are not newest first (${order.join(', ')})`);
+        jobs = jobs.filter((j) => j.id !== 'jf' && j.id !== 'jlong');
+        await R.refreshReports();
+        await settleFor(50);
+      }
+
       // Stop: an admin's (the portable build has no accounts, so it is admin here).
-      const stop = doc.querySelector('#rj-panel .rj-job[data-job="jr"] .rj-stop');
+      const stop = doc.querySelector('#rj-jobs .rj-job[data-job="jr"] .rj-stop');
       ok(!!stop, 'reports: an admin sees no Stop on a running job');
       rsent.length = 0;
       if (stop) { stop.click(); await settleFor(200); }
@@ -1376,20 +1410,21 @@ await goOne('snapshots');
       st.caller = { name: 'reader', role: 'user' };
       await R.refreshReports();
       await settleFor(50);
-      ok(!doc.querySelector('#rj-panel .rj-stop'), 'reports: a user is offered Stop');
-      ok(/admin only/.test(doc.querySelector('#rj-panel .rj-job[data-job="jr"]').textContent), 'reports: a user is not told Stop is admin only');
+      ok(!doc.querySelector('#rj-jobs .rj-stop'), 'reports: a user is offered Stop');
+      ok(/admin only/.test(doc.querySelector('#rj-jobs .rj-job[data-job="jr"]').textContent), 'reports: a user is not told Stop is admin only');
       ok(doc.getElementById('rj-stop-all').hidden, 'reports: a user is offered Stop all');
       ok(doc.getElementById('rj-concurrency').disabled, 'reports: a user can change how many run at once');
       st.caller = null;
       await R.refreshReports();
 
-      // Close it, leave, and come back through the pill: Exports & schedules, the jobs open.
+      // Close it, leave, and come back through the pill: Exports & schedules, the files listed, the form shut.
       [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Close').click();
       await go('overview');
       pill().click();
       await settleFor(500);
-      const back = await waitFor(() => { const p = doc.getElementById('rj-panel'); return p && p.isConnected && !p.hidden ? p : null; },
-        'reports: the pill did not open Reports › Exports & schedules with the report jobs');
+      const back = await waitFor(() => { const t = doc.getElementById('rj-jobs'); return t && t.isConnected && doc.querySelector('#rj-jobs .rj-job') ? t : null; },
+        'reports: the pill did not open Reports › Exports & schedules with the report files');
+      ok(doc.getElementById('rj-panel').hidden, 'reports: the pill opened the Generate report form');
       ok(!!back && (doc.location.hash || '') === '#/reports/exports', `reports: the pill went to ${doc.location.hash}`);
     }
   } finally {
@@ -3046,6 +3081,33 @@ await go('log-delay');
   navigateTo('overview');
   await settleFor(300);
   ok(state.selected === 'all', `plain navigation should not change the selection, got "${state.selected}"`);
+}
+
+/* --------- the cluster chosen stays chosen on every page (the owner, 2026-11-17) --------- */
+{
+  const { state } = await load('core/state.js');
+  const pickTop = async (v) => { const sl = doc.getElementById('cluster-select'); sl.value = v; sl.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250); };
+  const chooser = () => (doc.getElementById('cluster-select') || {}).value;
+  const one = config.clusters.length > 1 ? (await load('core/state.js')).clusters()[1].id : (await load('core/state.js')).clusters()[0].id;
+  await go('log-delay');
+  await pickTop(one);
+  for (const p of ['indices', 'reports', 'alerts', 'overview', 'snapshots', 'log-delay', 'jobs']) {
+    await go(p);
+    ok(state.selected === one && chooser() === one, `selection: a cluster picked on Log Delay became "${state.selected}" (chooser "${chooser()}") on ${p}`);
+  }
+  // All clusters, chosen on Clusters, stays All on a page that can show it.
+  await go('overview');
+  await pickTop('all');
+  for (const p of ['reports', 'alerts', 'log-delay']) {
+    await go(p);
+    ok(state.selected === 'all' && chooser() === 'all', `selection: All clusters chosen on Clusters became "${state.selected}" on ${p}`);
+  }
+  // A page that cannot show All clusters borrows one; the person's All comes back on the next page that can show it.
+  await go('indices');
+  ok(state.selected !== 'all', 'selection: Indices drew All clusters');
+  await go('reports');
+  ok(state.selected === 'all' && chooser() === 'all', `selection: All clusters chosen before Indices became "${state.selected}" on Reports`);
+  await go('overview');
 }
 
 /* ------------------ refresh follows the cluster picker ------------------ */
