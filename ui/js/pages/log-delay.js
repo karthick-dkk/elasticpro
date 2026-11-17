@@ -4,6 +4,8 @@
  *
  *   Dashboard   the core's store: the fleet's count tiles, Devices behind, the cluster × time
  *               heat map, By cluster; one cluster (logdelay/boards.js)
+ *   Summary     the fleet view of Reports › Log delay before 0.3.60, back on the owner's word: four
+ *               tiles, Delay reduced, Day by day, a ring per cluster worst first (logdelay/summary.js)
  *   Devices     every device, searched and filtered by level, each with its fix ("i") and its
  *               logs; one device beside the list (logdelay/boards.js)
  *   Live Watch  every cluster measured now from this browser, the delayed devices, one device
@@ -13,7 +15,8 @@
  * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
  * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
  * one tools row: the time range (one button group on every tab: 5m to 12h, or custom) and the
- * cluster's log time zone as a chip. Every time on the page is in the server's zone.
+ * cluster's log time zone as a chip (not on Summary, whose figures are the core's totals for every
+ * zone). Every time on the page is in the server's zone.
  *
  * The cluster is the app's one chooser, in the top bar (the owner, 2026-11-14: the page had a
  * second one of its own, and two controls for one choice is one too many). `reconcile()` keeps
@@ -57,6 +60,7 @@ const P = nodeCache();
 
 const TABS = [
   ['fleet', 'Dashboard', 'The core’s measurements: every cluster, or one cluster'],
+  ['summary', 'Summary', 'Every device in four figures, delays reduced, day by day, and a ring per cluster worst first'],
   ['devices', 'Devices', 'Every device, by level, with its fix and its logs; one device in detail'],
   ['watch', 'Live Watch', 'Live check from this browser (500 devices per cluster at most): the delayed devices, and one device live'],
   ['live', 'Live logs', 'The log documents over the time range, with each one’s delay'],
@@ -114,7 +118,8 @@ export function render(el) {
  * One cluster choice (the top bar's chooser) and one address, kept in step. `lead` says which
  * one just moved: 'address' (a link, a tab, Back, a bookmark) moves the chooser to the cluster
  * it names, or to All clusters when it names none; 'chooser' moves the address to the same tab
- * for the cluster chosen — the cluster board or its devices, the fleet or every device for All.
+ * for the cluster chosen — the cluster board, its summary or its devices; the fleet, the fleet's
+ * summary or every device for All.
  * Live Watch and Live logs read the chooser themselves (activeClusters), so they are left alone.
  */
 function reconcile(lead) {
@@ -124,7 +129,7 @@ function reconcile(lead) {
   const sel = pickId();
   if (named === sel) return;
   if (lead === 'address') { bus.emit('select-cluster', named || 'all'); return; }
-  const want = tab === 'devices' ? ldHash('devices', sel, null, route) : sel ? ldHash('cluster', sel, null, route) : ldHash('fleet', null, null, route);
+  const want = tab === 'devices' || tab === 'summary' ? ldHash(tab, sel, null, route) : sel ? ldHash('cluster', sel, null, route) : ldHash('fleet', null, null, route);
   if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (_) { location.hash = want; } }
   route = ldRoute(location.hash);
 }
@@ -160,7 +165,7 @@ export function onLeave() {
 }
 
 function leave(tab) {
-  if (tab === 'fleet' || tab === 'devices') boardsLeave();
+  if (tab === 'fleet' || tab === 'summary' || tab === 'devices') boardsLeave();
   if (tab === 'watch') watchLeave();
   if (tab === 'live') liveLeave();
 }
@@ -180,11 +185,11 @@ function busy() {
 
 /* ------------------------------------ the bar ------------------------------------ */
 
-/** The tabs, each for the cluster chosen: Dashboard is the cluster's board (the fleet for All), Devices its devices. */
+/** The tabs, each for the cluster chosen: Dashboard is the cluster's board (the fleet for All), Summary and Devices its own. */
 function tabs() {
   const cur = ldTab(route.view);
   const sel = pickId();
-  const hrefOf = (id) => (id === 'fleet' && sel ? ldHash('cluster', sel, null, route) : id === 'devices' ? ldHash('devices', sel, null, route) : ldHash(id, null, null, route));
+  const hrefOf = (id) => (id === 'fleet' && sel ? ldHash('cluster', sel, null, route) : id === 'devices' || id === 'summary' ? ldHash(id, sel, null, route) : ldHash(id, null, null, route));
   return P.get('tabs', `${cur}|${route.tz}|${sel}`, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
     ...TABS.map(([id, label, title]) => h('a', { href: hrefOf(id), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
 }
@@ -316,11 +321,15 @@ function rangePick(withZone) {
   });
 }
 
-/** One tools row for every tab: the time range, then the time-zone chip (boards) or the zone's name (Live Watch, Live logs). The cluster is the top bar's chooser. */
+/**
+ * One tools row for every tab: the time range, then the time-zone chip (Dashboard, Devices) or the
+ * zone's name (Live Watch, Live logs); Summary has the range alone. The cluster is the top bar's chooser.
+ */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
   if (tab === 'watch' || tab === 'live') mount(row, rangePick(true));
+  else if (tab === 'summary') mount(row, rangePick(false));
   else mount(row, rangePick(false), tzTools());
   return row;
 }

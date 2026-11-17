@@ -7757,7 +7757,12 @@ await settleFor(300);
     ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === '#/log-delay/devices?tz=480', 'log delay: the tabs drop the time-zone filter');
     press(doc.querySelector('.ld-tabs a[data-tab="devices"]'));
     await waitFor(() => ldView() === 'devices' && g('ld-devices'), 'log delay: the Devices tab did not open with the zone filter');
+    // The list opens on the delayed devices only (the owner, 2026-11-17): the zone's one device is in another time zone, not delayed.
+    ok([...g('ld-devices').querySelectorAll('tbody tr')].filter((tr) => tr.dataset.device).length === 0 && /No delayed devices · Show all devices/.test(g('ld-devices').textContent),
+      `log delay: a zone without a delayed device does not say "No delayed devices · Show all devices" (${g('ld-devices').textContent.slice(0, 80)})`);
+    press(g('ld-devices').querySelector('button.ld-show-all')); await settleFor(120);
     ok([...g('ld-devices').querySelectorAll('tbody tr')].filter((tr) => tr.dataset.device).length === 1, 'log delay: Devices does not show only the devices in the zone');
+    press(g('ld-dev-showall')); await settleFor(120);
     g('ld-tz-chip').click(); await settleFor(120);
     ok(tzEntries().includes('Show all time zones'), 'log delay: a filtered panel offers no Show all time zones');
     press(doc.querySelector('#ld-tz-panel .ld-tz-all'));
@@ -7817,7 +7822,31 @@ await settleFor(300);
     const chipText = [...view().querySelectorAll('#ld-dev-chips .ld-chip-btn')].map((b) => b.textContent.trim());
     ok(chipText.some((t) => /^Below 30 min \d+$/.test(t)) && chipText.some((t) => /^30–60 min \d+$/.test(t)) && chipText.some((t) => /^Silent \d+$/.test(t)), `log delay: the chips read ${chipText.join(' · ')}`);
     ok(g('ld-dev-zone') && g('ld-dev-tag') && [...g('ld-dev-zone').options].some((o) => o.value === 'dc1'), 'log delay: Devices has no zone and tag1 filters');
-    press(view().querySelector('#ld-dev-chips [data-filter="all"]')); await settleFor(120);
+    /* ---- Delayed devices only by default (the owner, 2026-11-17); "Show all devices" ⇄ "Show delayed only"; no All chip ---- */
+    {
+      const fx = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list);
+      const lateN = fx.devices.filter((d) => d.state === 'delay' || d.state === 'critical').length;
+      ok(!view().querySelector('#ld-dev-chips [data-filter="all"]'), 'log delay: the All chip is still drawn (the Show all devices button replaces it)');
+      press(chipOn()); await settleFor(120);
+      ok(!chipOn(), 'log delay: a pressed chip pressed again did not let go');
+      const shownStates = () => devRows().map((tr) => tr.cells[4].textContent.trim());
+      ok(devRows().length === lateN && shownStates().every((x) => /^(delayed|critical)\b/i.test(x)),
+        `log delay: Devices does not open on the ${lateN} delayed devices only (${devRows().length} rows: ${[...new Set(shownStates())].join(', ')})`);
+      ok(/^Show all devices\s*[\d,]+$/.test(g('ld-dev-showall').textContent.trim()) && g('ld-dev-showall').textContent.includes(fx.devices.length.toLocaleString('en')),
+        `log delay: the set button reads "${g('ld-dev-showall').textContent.trim()}"`);
+      ok(new RegExp(`${lateN} delayed of ${fx.devices.length} devices`).test(view().textContent), 'log delay: the Devices card does not say how many are delayed of how many');
+      const chipCount = (f) => Number(view().querySelector(`#ld-dev-chips [data-filter="${f}"] b`).textContent.replace(/,/g, ''));
+      const before = ['late', 'delay', 'critical', 'ok', 'silent'].map(chipCount);
+      press(g('ld-dev-showall')); await settleFor(120);
+      ok(devRows().length === Math.min(50, fx.devices.length) && g('ld-dev-showall').textContent.trim() === 'Show delayed only', `log delay: Show all devices left ${devRows().length} rows, the button reads "${g('ld-dev-showall').textContent.trim()}"`);
+      ok(['late', 'delay', 'critical', 'ok', 'silent'].map(chipCount).join() === before.join() && chipCount('late') === lateN, 'log delay: the chip counts moved with the set shown');
+      press(g('ld-dev-showall')); await settleFor(120);
+      ok(devRows().length === lateN && /^Show all devices/.test(g('ld-dev-showall').textContent.trim()), 'log delay: Show delayed only did not go back to the delayed devices');
+      // A level that is not delayed is what was asked for: Below 30 shows those devices, with every device's set.
+      press(view().querySelector('#ld-dev-chips [data-filter="ok"]')); await settleFor(120);
+      ok(devRows().length > 0 && g('ld-dev-showall').textContent.trim() === 'Show delayed only', 'log delay: the Below 30 chip shows nothing while the list holds the delayed devices');
+      press(chipOn()); await settleFor(120);
+    }
     // Unknown is not zero: the silent and the unmeasurable device.
     const rowOf = (re) => devRows().find((tr) => re.test(tr.textContent));
     const silent = rowOf(/silent/); const cant = rowOf(/can.t measure/);
@@ -7848,6 +7877,75 @@ await settleFor(300);
     ok(after.length > 0 && after.length < before && after.every((tr) => /proxy/.test(tr.textContent)), `log delay: the device filter left ${after.length} of ${before} rows`);
     ok(doc.activeElement === g('ld-dev-filter'), 'log delay: typing in the device filter lost the focus');
     g('ld-dev-filter').value = ''; g('ld-dev-filter').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(120);
+    /* ---- Summary (the fleet view of Reports › Log delay before 0.3.60), second tab: tiles, Delay reduced, Day by day, rings ---- */
+    {
+      const tabIds = [...doc.querySelectorAll('.ld-tabs a')].map((a) => `${a.dataset.tab}:${a.textContent.trim()}`);
+      ok(tabIds.join('|') === 'fleet:Dashboard|summary:Summary|devices:Devices|watch:Live Watch|live:Live logs', `log delay: the tabs read ${tabIds.join(' · ')}`);
+      press(doc.querySelector('.ld-tabs a[data-tab="summary"]'));
+      await waitFor(() => ldView() === 'summary' && g('ld-sum-tiles') && g('ld-rings'), 'log delay: the Summary tab did not draw');
+      ok(location.hash === '#/log-delay/summary', `log delay: the Summary address reads ${location.hash}`);
+      ok(doc.querySelector('.ld-tabs a[data-tab="summary"]').getAttribute('aria-current') === 'page', 'log delay: the tabs do not mark Summary');
+      ok(!doc.querySelector('#view h1') && g('ld-range') && !doc.querySelector('.ld-tools .ld-tz-chip') && !g('ld-period') && !g('ld-clusters'),
+        'log delay: Summary is not the page range alone (no title, no time-zone chip, no Period or Clusters select)');
+      const fx = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list);
+      const t = fx.totals; const n = (x) => x.toLocaleString('en');
+      const tile = (k) => g('ld-sum-tiles').querySelector(`[data-kpi="${k}"]`);
+      ok(tile('devices').querySelector('b').textContent === n(t.devices) && /total devices/.test(tile('devices').textContent), `log delay: the total tile reads ${tile('devices').textContent}`);
+      ok(tile('late').querySelector('b').textContent === n(t.late) && tile('late').textContent.includes(`devices with delay now · ${n(t.delay)} at 30–60 min, ${n(t.critical)} above 60 min`), `log delay: the delay-now tile reads ${tile('late').textContent}`);
+      ok(tile('onTime').querySelector('b').textContent === n(t.onTime) && tile('onTime').textContent.includes(`devices with no delay · ${t.pctOnTime.toFixed(1)} % on time`), `log delay: the no-delay tile reads ${tile('onTime').textContent}`);
+      ok(tile('pct').querySelector('b').textContent === `${t.pctOnTime.toFixed(1)} %` && tile('pct').textContent.includes(`${t.pctLate.toFixed(1)} % delayed · ${t.pctSilent.toFixed(1)} % silent · ${t.pctUnmeasured.toFixed(1)} % can’t measure`), `log delay: the share tile reads ${tile('pct').textContent}`);
+      const reds = [...g('ld-sum-reduced').querySelectorAll('.ld-red')];
+      ok(reds.length === 5 && reds.map((r) => r.querySelector('b').textContent).join() === fx.reduced.map((r) => r.n).join() && reds.every((r) => r.querySelector('i')),
+        `log delay: Delay reduced draws ${reds.map((r) => r.querySelector('b').textContent).join(', ')}`);
+      ok([...tile('reduced').querySelectorAll('.ld-red-labels span')].map((x) => x.textContent).join() === '2 h,4 h,6 h,12 h,24 h' && /back under 30 min in the last/.test(tile('reduced').textContent), 'log delay: Delay reduced is not 2 h to 24 h under the delay level');
+      // The 1 h range: the day(s) it touches, each tick its own date, the header says which.
+      const ticks = () => [...g('ld-sum-ticks').querySelectorAll('span')].map((x) => x.textContent).filter(Boolean);
+      const days = g('ld-sum-days').querySelectorAll('.ld-day').length;
+      ok(days >= 1 && days <= 2 && ticks().length === days && new Set(ticks()).size === ticks().length, `log delay: Summary on 1 h draws ${days} day(s), ticks ${ticks().join(' · ')}`);
+      ok(/the days? the time range touches/.test(g('ld-sum-days').closest('section').textContent), 'log delay: Day by day does not say which days it covers');
+      // A 30-day custom range: 30 bars, a day without totals a gap, the ticks every one its own date.
+      g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);
+      g('ld-range-from').value = new Date(Date.parse(`${g('ld-range-to').value}:00Z`) - 29 * 86400000).toISOString().slice(0, 16);
+      g('ld-range-apply').click(); await settleFor(200);
+      await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length === 30, 'log delay: Day by day did not follow a 30-day range');
+      ok(ticks().length > 1 && new Set(ticks()).size === ticks().length, `log delay: the Day by day ticks repeat a date (${ticks().join(' · ')})`);
+      const gapDay = g('ld-sum-days').querySelector('.ld-day.ld-gap');
+      ok(gapDay && !gapDay.querySelector('i') && /no measurement/.test(gapDay.title), 'log delay: a day without totals is not a gap in Day by day');
+      ok([...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent or can’t measure',
+        `log delay: the Day by day legend reads ${[...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join(' · ')}`);
+      g('ld-range').querySelector('[data-range="1h"]').click(); await settleFor(200);
+      await waitFor(() => g('ld-sum-days') && g('ld-sum-days').querySelectorAll('.ld-day').length <= 2, 'log delay: Summary did not go back to the 1 h range');
+      // The rings: All clusters first, then worst first; a cluster never measured last, saying so (no 0 % ring).
+      const rings = () => [...g('ld-rings').querySelectorAll('a.ld-ring')];
+      const share = (a) => (a.dataset.known === 'true' ? Number(a.querySelector('.ld-ring-mid b').textContent.replace(/[^\d.]/g, '')) : -1);
+      ok(rings()[0].dataset.ring === 'all' && rings()[0].getAttribute('href') === '#/log-delay', 'log delay: the first ring is not All clusters');
+      ok(rings().length === list.length + 1, `log delay: ${rings().length} rings for ${list.length} clusters`);
+      const shares = rings().slice(1).map(share);
+      ok(shares.every((v, i) => i === 0 || v <= shares[i - 1]), `log delay: the rings are not worst first (${shares.join(', ')})`);
+      const last = rings().at(-1);
+      ok(last.dataset.known === 'false' && /never measured/.test(last.textContent) && !last.querySelector('.ld-arc') && /—/.test(last.querySelector('.ld-ring-mid b').textContent),
+        `log delay: the never-measured cluster's ring reads "${last.textContent}"`);
+      // A ring opens its cluster (Dashboard), and the top chooser follows it.
+      const r1 = rings()[1]; const r1id = r1.dataset.ring;
+      press(r1);
+      await waitFor(() => ldView() === 'cluster' && location.hash === `#/log-delay/cluster/${encodeURIComponent(r1id)}` && g('ld-cluster-devices'), `log delay: a ring did not open its cluster (${location.hash})`);
+      ok(g('cluster-select').value === r1id, `log delay: the chooser did not follow the ring (${g('cluster-select').value})`);
+      // One cluster: Summary is that cluster's tiles, days and its own ring.
+      ok(doc.querySelector('.ld-tabs a[data-tab="summary"]').getAttribute('href') === `#/log-delay/summary/${encodeURIComponent(r1id)}`, 'log delay: the Summary tab does not follow the cluster chosen');
+      press(doc.querySelector('.ld-tabs a[data-tab="summary"]'));
+      await waitFor(() => ldView() === 'summary' && g('ld-rings') && rings().length === 1 && rings()[0].dataset.ring === r1id, `log delay: Summary for one cluster is not its own ring (${location.hash})`);
+      const one = logDelayAnswer({ type: 'LOGDELAY_SUMMARY', clusterIds: [r1id] }, list).totals;
+      ok(tile('devices').querySelector('b').textContent === n(one.devices), `log delay: the one-cluster tiles read ${tile('devices').textContent}`);
+      // The top chooser redraws Summary for the cluster it names, and All clusters for the fleet.
+      const pickTopS = (v) => { const sl = g('cluster-select'); sl.value = v; sl.dispatchEvent(new window.Event('change', { bubbles: true })); };
+      const other = list.find((c) => c.id !== r1id && fx.byCluster.some((b) => b.id === c.id && b.lastRunAt)) || list.find((c) => c.id !== r1id);
+      pickTopS(other.id);
+      await waitFor(() => ldView() === 'summary' && location.hash === `#/log-delay/summary/${encodeURIComponent(other.id)}` && g('ld-rings') && rings().length === 1 && rings()[0].dataset.ring === other.id,
+        `log delay: the top chooser did not redraw Summary for ${other.id} (${location.hash})`);
+      ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && Array.isArray(m.clusterIds) && m.clusterIds.length === 1 && m.clusterIds[0] === other.id), 'log delay: Summary did not ask for the cluster chosen');
+      pickTopS('all');
+      await waitFor(() => ldView() === 'summary' && location.hash === '#/log-delay/summary' && g('ld-rings') && rings()[0].dataset.ring === 'all', `log delay: All clusters did not redraw the fleet's Summary (${location.hash})`);
+    }
     // The old Recommended fixes address opens Devices.
     location.hash = '#/log-delay/fixes';
     await waitFor(() => ldView() === 'devices' && location.hash === '#/log-delay/devices', `log delay: #/log-delay/fixes did not open Devices (${location.hash})`);
@@ -7923,6 +8021,20 @@ await settleFor(300);
     ok(dv.querySelectorAll('.ld-ins').length === 3 && !/average|median/i.test(dv.querySelector('.ld-insights').textContent), 'log delay: the insights strip is not peak, longest, late most often');
     ok(!dv.querySelector('[data-kpi="median"]') && dv.querySelectorAll('.ld-split-board .ld-kpi').length === 5, 'log delay: the device tiles are not five without a median');
     ok(dv.querySelectorAll('.ld-mini').length === 0, 'log delay: the device page shows the per-cluster panel');
+    // A link that names a device opens it even when it is not delayed: listed beside its board, and the list says why.
+    {
+      const fx = logDelayAnswer({ type: 'LOGDELAY_SUMMARY', clusterIds: [c0] }, list);
+      const calm = fx.devices.find((d) => d.state === 'no_delay');
+      location.hash = `#/log-delay/device/${encodeURIComponent(c0)}/${encodeURIComponent(calm.device)}`;
+      await waitFor(() => ldView() === 'device' && g('ld-graph') && view().querySelector('.ld-split-list tr.ld-sel'), `log delay: a link to ${calm.device} (not delayed) did not open it`);
+      // The list beside the board holds the delayed devices only (Show all was pressed earlier in this visit).
+      if (g('ld-dev-showall') && g('ld-dev-showall').textContent.trim() === 'Show delayed only') { press(g('ld-dev-showall')); await settleFor(150); }
+      const sel = view().querySelector('.ld-split-list tr.ld-sel');
+      ok(sel && sel.dataset.device === calm.device && g('ld-dev-pinned') && /is listed because it is open; it is not delayed/.test(g('ld-dev-pinned').textContent),
+        `log delay: the device opened by a link is not listed beside its board with why (${g('ld-dev-pinned') ? g('ld-dev-pinned').textContent : 'no note'})`);
+      location.hash = `#/log-delay/device/${encodeURIComponent(c0)}/${encodeURIComponent(devName)}`;
+      await waitFor(() => ldView() === 'device' && g('ld-periods') && view().querySelector('.ld-split-list tr.ld-sel') && view().querySelector('.ld-split-list tr.ld-sel').dataset.device === devName, 'log delay: the first device did not open again');
+    }
     ok(g('ld-periods') && /still late/.test(g('ld-periods').textContent), 'log delay: Every delay does not show the open delay as still late');
     const ph = [...g('ld-periods').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
     ok(ph.includes('zone') && ph.includes('tag1'), `log delay: Every delay has no zone or tag1 (${ph.join(' · ')})`);
