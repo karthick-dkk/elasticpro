@@ -186,8 +186,20 @@ brings the file in:
   `.bak`), or merge by hand: put the release's file in place with your changes, then run
   `--upgrade` again (it then finds a worker and leaves the file alone).
 
-`--upgrade` runs the `deploy.sh` of the installed release. One from before 0.3.54 knows nothing
-of the compose file, so fetch the new script first, then upgrade:
+**Since 0.3.79 `--upgrade` brings its own script up to date.** It first fetches the target
+release's `deploy.sh` (from the same place as its compose file, `ELASTICPRO_RELEASE_URL`), checks
+that it parses, puts it in place — the old one kept as `deploy/deploy.sh.previous` — and runs it
+with the same options, so whatever that release changed in the upgrade applies on the way to it.
+`--dry-run` only says it would; an older target (`--force`) keeps the script; when the script
+cannot be fetched (no route to GitHub) the installed one goes on and says so.
+`ELASTICPRO_NO_SELF_UPDATE=1` keeps the installed script. A server with no route to GitHub can
+serve the release's files from disk: `ELASTICPRO_RELEASE_URL=file:///srv/elasticpro-release`
+with `v<version>/deploy/deploy.sh` and `v<version>/deploy/docker-compose.yml` under it.
+
+A `deploy.sh` from **before 0.3.79** runs as it is, so fetch the new script by hand once (below,
+and "Upgrading from a release with the PostgreSQL container" for 0.3.76 and older).
+
+One from before 0.3.54 knows nothing of the compose file, so fetch the new script first, then upgrade:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/v0.3.54/deploy/deploy.sh -o deploy/deploy.sh
@@ -202,14 +214,15 @@ deploy/deploy.sh --upgrade=0.3.54
 
 Releases up to 0.3.76 ran a PostgreSQL container, `db`, that nothing in ElasticPro ever
 connected to; the stack no longer has it and `elasticpro-postgres` is no longer published.
-**Fetch the 0.3.77 `deploy.sh` first.** `--upgrade` runs the installed release's script, and
-one from 0.3.76 or older still pulls `elasticpro-postgres:<version>`: it stops with "… is not
-published — nothing changed" (nothing is changed, but the reason is this, not a missing release):
+**Fetch the target's `deploy.sh` first.** An installed script from before 0.3.79 runs as it is,
+and one from 0.3.76 or older still pulls `elasticpro-postgres:<version>`: it stops with "… is not
+published — nothing changed" (nothing is changed, but the reason is this, not a missing release).
+Once, by hand (from 0.3.79 on, `--upgrade` does this itself):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/v0.3.77/deploy/deploy.sh -o deploy/deploy.sh
+curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/v0.3.79/deploy/deploy.sh -o deploy/deploy.sh
 chmod +x deploy/deploy.sh
-deploy/deploy.sh --upgrade=0.3.77
+deploy/deploy.sh --upgrade=0.3.79
 ```
 
 On an install whose `docker-compose.yml` still has the `db` service, the new `--upgrade`:
