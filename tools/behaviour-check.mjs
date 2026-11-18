@@ -7827,12 +7827,14 @@ await settleFor(300);
     for (const gone of [/Every device that sends logs/, /last run = /, /in range = /, /most delayed first \(/, /pages asked, whether the list is complete/]) ok(!gone.test(fleet.textContent), `log delay: the description ${gone} is still on the Dashboard`);
     ok(!g('ld-fleet-counts'), 'log delay: the counts line under the state bar is still drawn');
     // The tools row is one line: every control the same height class, none a labelled field.
-    ok(!doc.querySelector('.ld-tools label.field') && doc.querySelector('.ld-tools .seg-group') && doc.querySelector('.ld-tools .ld-tz-chip'), 'log delay: the tools row is not the range group beside the time-zone chip');
+    ok(!doc.querySelector('.ld-tools label.field') && !doc.querySelector('.ld-tools .seg-group') && doc.querySelector('.ld-tools .ld-tz-chip'), 'log delay: the tools row is not the time-zone chip alone (the range moved to the bar)');
     {
-      // 0.3.77: the range sits at the right end of the tools row, behind a toggle that folds it away and is kept per browser.
-      const row = doc.querySelector('.ld-tools');
-      ok(row.lastElementChild && row.lastElementChild.classList.contains('ld-tools-range') && row.firstElementChild.classList.contains('ld-tz-tools'),
-        `log delay: the tools row is not the time-zone chip then the range at the right end (${[...row.children].map((x) => x.className).join(' | ')})`);
+      // 0.3.78: the time range and Fetch now are one row — the range at the right end of the title bar, Fetch now after it;
+      // the range is behind a toggle that folds it away and is kept per browser.
+      const right = doc.querySelector('.ld-bar .ld-bar-right');
+      const kids = right ? [...right.children].map((x) => x.className) : [];
+      const ri = kids.findIndex((c) => /ld-tools-range/.test(c)); const fi = kids.findIndex((c) => /ld-fetch/.test(c));
+      ok(ri >= 0 && fi > ri, `log delay: the bar's right end is not the range then Fetch now (${kids.join(' | ')})`);
       const tg = g('ld-range-toggle');
       ok(tg && tg.tagName === 'BUTTON' && tg.getAttribute('aria-controls') === 'ld-range-body' && tg.getAttribute('aria-expanded') === 'true' && /1h/.test(tg.textContent) && tg.querySelector('svg') && !g('ld-range-body').hidden,
         `log delay: the range toggle is not an open button reading the range (${tg && tg.outerHTML.slice(0, 160)})`);
@@ -7977,9 +7979,8 @@ await settleFor(300);
     rbtn('1h').click(); await settleFor(200);
     ok(g('ld-range').querySelector('[aria-pressed="true"]').textContent === '1h', 'log delay: 1h did not stay pressed');
     await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');
-    // Export .xlsx is the log_delay report job.
-    g('ld-export').click(); await settleFor(150);
-    ok(lsent.some((m) => m.type === 'REPORT_RUN' && m.kind === 'log_delay' && m.mail === false), 'log delay: Build report did not queue a log_delay report');
+    // 0.3.78: no Build report or Report covers on the boards — Config › Reports' Download now builds it.
+    ok(!g('ld-export') && !g('ld-report-period'), 'log delay: Build report or Report covers is back on the Dashboard');
     /* ---- Fetch now: a split button at the right end of the title bar; one cluster at a time ---- */
     const fetchWrap = () => doc.querySelector('.ld-fetch');
     ok(fetchWrap() && fetchWrap().dataset.phase === 'idle', `log delay: Fetch now starts in phase ${fetchWrap() && fetchWrap().dataset.phase}`);
@@ -8219,6 +8220,9 @@ await settleFor(300);
     await waitFor(() => ldView() === 'cluster' && location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}` && g('ld-cluster-devices'), `log delay: a cluster in the top bar did not open its board (${location.hash})`);
     ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === `#/log-delay/devices/${encodeURIComponent(c0)}`, 'log delay: the Devices tab does not follow the cluster chosen');
     ok(view().querySelectorAll('.ld-kpi').length === 5 && !/median/i.test(view().textContent), 'log delay: the cluster board is not five count tiles without a median');
+    // 0.3.78: the cluster board's head has no Devices › (the tab is above), no Report covers, no Build report.
+    ok(![...view().querySelectorAll('.ld-head a.btn')].some((a) => /Devices ›/.test(a.textContent)) && !g('ld-export') && !g('ld-report-period'),
+      'log delay: the cluster board still has Devices ›, Report covers or Build report');
     /* ---- Fetch now on one cluster: the menu, its schedule note, Escape, Whole cluster → JOB_RUN devices: all ---- */
     ok(fetchWrap().dataset.phase === 'idle' && g('ld-fetch-menu').hidden, 'log delay: Fetch now on a cluster does not start idle with its menu hidden');
     const caret = doc.querySelector('.ld-fetch-caret');

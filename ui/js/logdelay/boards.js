@@ -63,7 +63,6 @@ const S = {
   win: { from: '', to: '' },   // the window's local days, as the messages take them
   pk: '',                // `${win.from}..${win.to}`: in every cache key
   rng: normaliseRange(null, BOARD_RANGES), zone: '',
-  reportPeriod: 'shown',
   tz: null,             // the time-zone filter of the address (`?tz=`): an offset, 'none', or null
   clAll: false, clPage: 0,   // By cluster: every cluster (30 a page) instead of the 5 most delayed
   devFilter: '', devAll: false, devState: 'all', devZone: '', devTag: '',
@@ -330,26 +329,13 @@ function scheduleNotice(res) {
       : null;
 }
 
-/** "Build report" and "Send now" cover the period shown, or the whole hour before now (docs/LOGDELAY.md `lastHour`). */
-function reportPeriodSelect() {
-  const s = h('select#ld-report-period', { 'aria-label': 'Report covers', onchange: (e) => { S.reportPeriod = e.target.value; } },
-    h('option', { value: 'shown' }, 'Period shown'), h('option', { value: 'lastHour' }, 'Last hour'));
-  s.value = S.reportPeriod;
-  return h('label.ld-inline', { title: 'What Build report and Send now cover: the period shown above, or the whole hour before now' }, 'Report covers', s);
-}
-const reportPeriod = (res, fallback) => (S.reportPeriod === 'lastHour' ? 'lastHour' : res && res.from ? { from: res.from, to: res.to } : fallback);
-
-async function exportXlsx(btn, clusterIds, res) {
-  btn.disabled = true;
-  const r = await ldReportRun({ clusterIds, period: reportPeriod(res, 'last7'), mail: false });
-  btn.disabled = false;
-  if (r && r.ok) { toast('The log delay report is building: Reports › Exports & schedules has it when it is done.', 'ok', 6000); refreshReports(); }
-  else toast(`Not started: ${(r && (r.message || r.kind)) || 'no answer'}`, 'err', 6000);
-}
+/** "Send now" covers the period shown (the bar's time range). Building a report by hand is
+ *  Config › Reports' Download now, with its own clusters and period (0.3.78: not on the boards). */
+const reportPeriod = (res, fallback) => (res && res.from ? { from: res.from, to: res.to } : fallback);
 
 async function mailNow(btn, clusterIds, res) {
   const yes = await confirmDialog('Mail the log delay report now?',
-    `It goes to the log delay schedule’s recipients, covering ${S.reportPeriod === 'lastHour' ? 'the whole hour before now' : (res && res.label) || 'the period shown'}, with its .xlsx and .csv.`, { yes: 'Mail now' });
+    `It goes to the log delay schedule’s recipients, covering ${(res && res.label) || 'the period shown'}, with its .xlsx and .csv.`, { yes: 'Mail now' });
   if (!yes) return;
   btn.disabled = true;
   const r = await ldReportRun({ clusterIds, period: reportPeriod(res, 'yesterday'), mail: true });
@@ -571,12 +557,11 @@ function fleetView() {
   const ent = need(`sum|${S.pk}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
   const res = ent.state === 'ok' ? ent.res : null;
   const head = B.get('fleet:head', `${S.pk}|${ids.join(',')}|${entSig(ent)}`, () => {
-    const exportBtn = h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, ids, res) }, 'Build report (.xlsx)');
     const mailBtn = h('button.btn.primary#ld-mail', { type: 'button', disabled: !res, onclick: (e) => mailNow(e.currentTarget, ids, res) }, 'Send now…');
     return h('div.ld-head',
       h('div.ld-title',
         h('h2', S.clusterPick === 'all' ? 'Every cluster' : nameOf(S.clusterPick))),
-      h('div.ld-actions', reportPeriodSelect(), exportBtn, mailBtn));
+      h('div.ld-actions', mailBtn));
   });
   if (!res) return [head, B.get('fleet:problem', entSig(ent), () => problem(ent, 'The log delay summary'))];
 
@@ -744,7 +729,6 @@ function clusterView(id) {
   const name = (res && res.name) || nameOf(id);
   const lv = res && res.levels; const b = bands(lv);
   const head = B.get('cl:head', `${id}|${S.pk}|${entSig(ent)}`, () => {
-    const exportBtn = h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, [id], res) }, 'Build report (.xlsx)');
     const tz = res && res.timeZone;
     return h('div.ld-head',
       h('div.ld-title',
@@ -752,8 +736,7 @@ function clusterView(id) {
         h('h2.ld-h-row', name, h('span.ld-h-sub', ` · ${(res && res.label) || ''}`),
           res ? fixButton({ kind: 'cluster', id: name, items: () => clusterFixItems(res) }) : null),
         h('p.sub', `Every device in this cluster that sends logs. Late means ${b.late}.`),
-        tz ? h('div.ld-chips', tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', `Delay shown after the time zone (${timeZoneShort(tz)}) is taken out`)) : null),
-      h('div.ld-actions', link(ldHash('devices', id, null, { tz: S.tz }), 'Devices ›', { cls: 'btn' }), reportPeriodSelect(), exportBtn));
+        tz ? h('div.ld-chips', tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', `Delay shown after the time zone (${timeZoneShort(tz)}) is taken out`)) : null));
   });
   if (!res) return [head, B.get('cl:problem', entSig(ent), () => problem(ent, `${name}’s log delay`))];
   const rid = objId(res);
@@ -846,8 +829,7 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
       h('h2', clusterId ? `Devices · ${nameOf(clusterId)}` : 'Devices'),
       h('p.sub', `The delayed devices of the period until Show all devices, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
     h('div.ld-actions',
-      h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'),
-      h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, ids, res) }, 'Build report (.xlsx)'))));
+      h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'))));
   if (!res) return [head, B.get('dev:problem', entSig(ent), () => problem(ent, 'The devices'))].filter(Boolean);
   const rid = objId(res);
   const rows = (res.devices || []).filter((r) => matchesZone(r, S.tz));

@@ -12,14 +12,15 @@
  *               from this browser on Fetch, one device watched (logdelay/watch.js) — and "Logs",
  *               its documents on Search (logdelay/live-logs.js). Nothing runs until pressed.
  *
- * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js; not on
- * Live, which has its own Fetch from the browser): one cluster at a time, its late devices by
- * default, the whole cluster from its ▾ menu. Under it
- * one tools row: at the left the cluster's log time zone as a chip (Dashboard and Devices, and only
- * when a zone is set or detected in view: "not detected" everywhere said nothing, 0.3.77), at the
- * right end the time range (one button group; the boards 30m to 12h with 1d to 60d in a More
- * menu, the live tabs 5m to 12h, each set keeping its own choice; or custom) behind its toggle
- * ("⏱ 1h ▾"), which folds the group away, kept per browser. Every time on the page is in the
+ * The title bar is one row: the tabs, and at the right end the time range then Fetch now
+ * (the owner, 0.3.78: period and Fetch on one row). The time range is one button group (the
+ * boards 30m to 12h with 1d to 60d in a More menu, the live tabs 5m to 12h, each set keeping its
+ * own choice; or custom) behind its toggle ("⏱ 1h ▾"), which folds the group away, kept per
+ * browser. Fetch now (logdelay/fetch-now.js; not on Live, which has its own Fetch from the
+ * browser): one cluster at a time, its late devices by default, the whole cluster from its ▾ menu.
+ * Under the bar a tools row only when it has something to say: the cluster's log time zone as a
+ * chip (Dashboard and Devices, and only when a zone is set or detected in view: "not detected"
+ * everywhere said nothing, 0.3.77), or on Live the zone's name. Every time on the page is in the
  * server's zone.
  *
  * The cluster is the app's one chooser, in the top bar (the owner, 2026-11-14: the page had a
@@ -233,7 +234,7 @@ function fetchControl() {
 }
 
 /**
- * The title bar: the name, the tabs, the loading line and Fetch now. One row that wraps on a
+ * The title bar: the tabs, the loading line, the time range and Fetch now. One row that wraps on a
  * narrow window; the shell is kept for the visit and its two slots are filled in place.
  */
 function bar() {
@@ -243,7 +244,7 @@ function bar() {
   const top = P.get('bar', '', () => h('div.rp-head.ld-bar', h('div.ld-bar-tabs'), h('div.ld-bar-right')));
   mount(top.children[0], tabs());
   // Live has its own Fetch, from the browser: the core's Fetch now beside it would be a second button for a different thing.
-  mount(top.children[1], status, ldTab(route.view) === 'live' ? null : fetchControl());
+  mount(top.children[1], status, rangePick(), ldTab(route.view) === 'live' ? null : fetchControl());
   return top;
 }
 
@@ -410,16 +411,16 @@ function zoneNote() {
 }
 
 /**
- * One tools row for every tab: at the left the time-zone chip (Dashboard, Devices; only when it
- * has a zone to say) or the zone's name (Live); the time range at the right end. Summary has the
- * range alone. The cluster is the top bar's chooser.
+ * The tools row under the bar: the time-zone chip (Dashboard, Devices; only when it has a zone to
+ * say) or the zone's name (Live). Empty — and so not drawn (CSS :empty) — on Summary and wherever
+ * no zone is set or detected. The time range is in the bar, beside Fetch now.
  */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
-  if (tab === 'live') mount(row, zoneNote(), rangePick());
-  else if (tab === 'summary') mount(row, rangePick());
-  else mount(row, tzTools(), rangePick());
+  if (tab === 'live') mount(row, zoneNote());
+  else if (tab === 'summary') mount(row);
+  else mount(row, tzTools());
   return row;
 }
 

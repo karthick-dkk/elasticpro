@@ -682,7 +682,7 @@ drawn on Live (Live's Fetch is the browser's).
   Today's measurement windows; 60d is far inside the core's 1200-day limit, and a custom range
   over it is refused at Apply, not sent) and, where the window is after the last scheduled run,
   say so in words ("No scheduled measurement in the last 30 minutes — last run 11:40"), never
-  zeros; *Report covers › Period shown* is those days. Summary's *Day by day* is a day range's own
+  zeros; the fleet board's *Send now* covers those days (since 0.3.78 the boards have no *Build report* or *Report covers*: Config › Reports' *Download now* builds a report, with its own clusters and period). Summary's *Day by day* is a day range's own
   days from 7d up (7d, 15d, 30d, 60d), and the last 7 days for anything shorter. The **time zone** chip — never a chooser
   (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
   counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
