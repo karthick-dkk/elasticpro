@@ -119,7 +119,7 @@ function openDaily(id) {
 function movedSection() {
   return h('div.rp-section', h('div.banner', h('div',
     h('div.ttl', 'Log delay has moved to its own page'),
-    h('div', 'The fleet, cluster and device boards, the recommended fixes, Build report and Send are on ',
+    h('div', 'The fleet, cluster and device boards, the recommended fixes and Send now are on ',
       h('a#rp-ld-moved', { href: '#/log-delay' }, 'Log Delay ›'), ', with Live Watch and Live logs beside them.'))));
 }
 

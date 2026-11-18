@@ -3101,6 +3101,8 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-tool { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .ld-tool select, .ld-tool input { height: 30px; }
 .ld-tools .seg-group, .ld-tools .ld-tz-chip, .ld-tools .btn { height: 30px; }
+/* 0.3.78: the range sits in the title bar beside Fetch now — the same 30 px controls there. */
+.ld-bar .ld-tools-range .seg-group, .ld-bar .ld-tools-range .btn { height: 30px; }
 .ld-tools .ld-tz-chip { align-self: center; }
 .ld-h-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* The five count tiles: buttons, each opening Devices on its level. */
