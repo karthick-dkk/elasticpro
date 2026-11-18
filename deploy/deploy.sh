@@ -28,6 +28,13 @@
 # way back). An image already on this machine under that name is used as it is (release tags
 # are never moved).
 #
+# The script itself (0.3.79): --upgrade first fetches the target release's own deploy.sh (from
+# ELASTICPRO_RELEASE_URL, like the compose file below), checks it parses, puts it in place — this
+# one kept as deploy.sh.previous — and runs it with the same options, so a release's changes to
+# the upgrade itself apply on the way to it. Not on --dry-run (it says it would), not to an older
+# version, and when it cannot be fetched this script goes on and says so.
+# ELASTICPRO_NO_SELF_UPDATE=1 keeps this script.
+#
 # The compose file (0.3.54): a docker-compose.yml with no `worker` service runs everything in
 # the core (role all, docs/WORKER.md). --upgrade then puts the release's docker-compose.yml in
 # place, fetched from ELASTICPRO_RELEASE_URL (default: the GitHub repository's raw files,
@@ -63,6 +70,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+ORIG_ARGS=("$@")    # as given: the target release's deploy.sh is run with them (self_update)
 PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0; APPLY=0; REPLACE_COMPOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -172,6 +180,43 @@ COMPOSE=docker-compose.yml
 COMPOSE_MARK=.compose-previous     # the backup --rollback puts back (one line: its file name)
 RELEASE_URL=${ELASTICPRO_RELEASE_URL:-https://raw.githubusercontent.com/karthick-dkk/elasticpro}
 COMPOSE_NEW=; COMPOSE_BACKUP=
+
+# --- the script itself: the target release's deploy.sh does the upgrade (0.3.79) ------------
+# A script only knows the releases before it — 0.3.76's still pulled elasticpro-postgres, which
+# 0.3.77 no longer published. So --upgrade first fetches the target's own deploy.sh from where its
+# compose file comes from (RELEASE_URL), checks that it parses, puts it in place (this one kept as
+# deploy.sh.previous) and runs it with the same options. Not on a dry run (it says what it would
+# do), not to an older release, not when it cannot be fetched or does not parse (this one goes on,
+# and says so), and never twice: ELASTICPRO_SELF_UPDATED names the release already switched to.
+# ELASTICPRO_NO_SELF_UPDATE=1 keeps this script.
+SELF=$(basename "$0")
+self_update() {   # TARGET NOW
+  local target=$1 now=$2 t new got=
+  [ "${ELASTICPRO_NO_SELF_UPDATE:-0}" != 1 ] || return 0
+  [ "${ELASTICPRO_SELF_UPDATED:-}" != "$target" ] || return 0
+  [ -z "$now" ] || ! older "$target" "$now" || return 0
+  new=$(mktemp "${TMPDIR:-/tmp}/elasticpro-deploy.XXXXXX")
+  for t in "v$target" "$target"; do
+    curl -fsSL --max-time 20 "$RELEASE_URL/$t/deploy/$SELF" -o "$new" 2>/dev/null && [ -s "$new" ] && { got=1; break; }
+  done
+  if [ -z "$got" ]; then
+    rm -f "$new"; say "! the $target deploy.sh could not be fetched ($RELEASE_URL/v$target/deploy/$SELF) — this one ($SELF) does the upgrade"; return 0
+  fi
+  if cmp -s "$new" "$SELF"; then rm -f "$new"; return 0; fi
+  if ! bash -n "$new" 2>/dev/null || ! grep -q -- '--upgrade' "$new"; then
+    rm -f "$new"; say "! the fetched $target deploy.sh is not a deploy script (it does not parse) — this one does the upgrade"; return 0
+  fi
+  if [ "$DRY" = 1 ]; then
+    rm -f "$new"; say "  would: put the $target deploy.sh in place (this one kept as $SELF.previous) and run it with the same options — the plan below is this script's"; return 0
+  fi
+  cp -p "$SELF" "$SELF.previous"
+  # A new file moved over the old one: the shell running this script keeps reading its own copy.
+  cp "$new" ".$SELF.new" && chmod 755 ".$SELF.new" && mv -f ".$SELF.new" "$SELF"
+  rm -f "$new"
+  say "== deploy.sh: the $target one is in place (the old one kept as $SELF.previous) — it does the upgrade"
+  cleanup
+  exec env ELASTICPRO_SELF_UPDATED="$target" bash "./$SELF" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
+}
 has_worker() { grep -Eq '^  worker:[[:space:]]*(#.*)?$' "$1"; }
 # The PostgreSQL service compose files had until it left the stack (nothing ever connected to it).
 has_db() { grep -Eq '^  db:[[:space:]]*(#.*)?$' "$1" && grep -q 'elasticpro-postgres' "$1"; }
@@ -918,6 +963,8 @@ if [ -n "$UPGRADE" ]; then
   TARGET=${TAG#v}
   printf '%s' "$TARGET" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "not a release version: $TAG (expected X.Y.Z, e.g. --upgrade=0.3.16)"
   NOW=$(version_of "$CURRENT")
+  # The target's own deploy.sh does the rest (it knows what that release changed).
+  self_update "$TARGET" "$NOW"
 
   # What changes: every released image not already at the target.
   PLAN=

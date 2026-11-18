@@ -14,7 +14,10 @@
 #      and ELASTICPRO_DB_IMAGE leaves .env (kept as _PREVIOUS); an edited one is left alone
 #      with a note, and the upgrade goes on;
 #   7. the same upgrade for real, then --rollback (the db file and image back) and --rollback
-#      again — against a stand-in `docker` that records what it was asked, so nothing starts.
+#      again — against a stand-in `docker` that records what it was asked, so nothing starts;
+#   8. --upgrade puts the target release's own deploy.sh in place and runs it (0.3.79): not on a
+#      dry run, not with ELASTICPRO_NO_SELF_UPDATE=1, not when the fetched one does not parse,
+#      once (no loop), and the old script is kept as deploy.sh.previous.
 #
 # The mirror's releases are made from today's deploy/docker-compose.yml: the target is it as
 # it is, an older release is it without the worker (and with the db it had then) and with its
@@ -200,6 +203,8 @@ no_volume_touched() {
 echo "== deploy.sh --upgrade from a compose file with the db, for real, then --rollback"
 real --upgrade=9.9.0
 [ $RC = 0 ] && ok "the upgrade ran" || bad "the upgrade (rc $RC): $OUT"
+# No deploy.sh in the mirror (section 8 adds one): the fetch fails and the installed script goes on.
+case $OUT in *"could not be fetched"*) ok "no deploy.sh in the mirror: the installed one went on, and said so" ;; *) bad "no note that the script could not be fetched: $OUT" ;; esac
 cmp -s "$R/docker-compose.yml" "$T/mirror/v9.9.0/deploy/docker-compose.yml" && ok "the 9.9.0 file (no db) is in place" || bad "the compose file is not the 9.9.0 one"
 prev=$(head -1 "$R/.compose-previous" 2>/dev/null || true)
 [ -n "$prev" ] && cmp -s "$R/$prev" "$T/mirror/v9.6.0/deploy/docker-compose.yml" && ok "the old file (with the db) is kept as $prev, named in .compose-previous" \
@@ -230,5 +235,47 @@ real --rollback
 [ $RC = 0 ] && cmp -s "$R/docker-compose.yml" "$T/mirror/v9.9.0/deploy/docker-compose.yml" \
   && ok "a second --rollback goes forward again (the file without the db)" || bad "second --rollback (rc $RC): $OUT"
 no_volume_touched "second rollback"
+
+# --- 8. the script brings itself up to date (0.3.79) ------------------------------------------
+# The mirror's 9.9.0 deploy.sh is today's with one line that says it ran. Sections 1-7 had no
+# deploy.sh in the mirror: there the fetch failed and the installed script went on (checked too).
+echo "== deploy.sh --upgrade: the target release's deploy.sh does the upgrade"
+awk '{ print } /^set -euo pipefail$/ && !d { print "echo \"MIRROR-9.9.0-SCRIPT-RAN self=${ELASTICPRO_SELF_UPDATED:-}\""; d=1 }' deploy/deploy.sh > "$T/mirror/v9.9.0/deploy/deploy.sh"
+S=$T/self/deploy
+mkdir -p "$T/self"
+cp -R "$T/inst/deploy" "$S"; cp Cargo.toml "$T/self/"
+cp "$T/mirror/v9.8.0/deploy/docker-compose.yml" "$S/docker-compose.yml"
+cp deploy/deploy.sh "$T/installed.sh"
+selfrun() {
+  RC=0
+  : > "$T/shim.log"; printf '%s\n' karthickdk02/elasticpro-core:9.8.0 karthickdk02/elasticpro-nginx:9.8.0 > "$T/images"
+  OUT=$(cd "$S" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_IMAGES="$T/images" ELASTICPRO_RELEASE_URL="file://$T/mirror" \
+        "$@" 2>&1) || RC=$?
+  LOG=$(cat "$T/shim.log")
+}
+selfrun ./deploy.sh --timeout 5 --upgrade=9.9.0 --dry-run
+cmp -s "$S/deploy.sh" "$T/installed.sh" && [ ! -e "$S/deploy.sh.previous" ] && ok "a dry run keeps the installed script" || bad "a dry run replaced the script"
+case $OUT in *"would: put the 9.9.0 deploy.sh in place"*) ok "the dry run says it would put the 9.9.0 script in place" ;; *) bad "the dry run did not say so: $OUT" ;; esac
+case $OUT in *MIRROR-9.9.0-SCRIPT-RAN*) bad "the dry run ran the fetched script: $OUT" ;; *) ok "the dry run did not run the fetched script" ;; esac
+
+selfrun env ELASTICPRO_NO_SELF_UPDATE=1 ./deploy.sh --timeout 5 --upgrade=9.9.0 --dry-run
+case $OUT in *"9.9.0 deploy.sh"*|*MIRROR-9.9.0*) bad "ELASTICPRO_NO_SELF_UPDATE=1 still fetched the script: $OUT" ;; *) ok "ELASTICPRO_NO_SELF_UPDATE=1 keeps the installed script" ;; esac
+
+printf '#!/usr/bin/env bash\nif then fi --upgrade\n' > "$T/broken.sh"; cp "$T/mirror/v9.9.0/deploy/deploy.sh" "$T/good.sh"; cp "$T/broken.sh" "$T/mirror/v9.9.0/deploy/deploy.sh"
+selfrun ./deploy.sh --timeout 5 --upgrade=9.9.0 --dry-run
+case $OUT in *"is not a deploy script"*) ok "a fetched script that does not parse is refused; the installed one goes on" ;; *) bad "a broken fetched script was not refused: $OUT" ;; esac
+cp "$T/good.sh" "$T/mirror/v9.9.0/deploy/deploy.sh"
+
+selfrun ./deploy.sh --timeout 5 --upgrade=9.9.0
+[ $RC = 0 ] && ok "the upgrade ran" || bad "the self-updating upgrade (rc $RC): $OUT"
+cmp -s "$S/deploy.sh" "$T/mirror/v9.9.0/deploy/deploy.sh" && ok "the 9.9.0 deploy.sh is in place" || bad "the script was not replaced"
+cmp -s "$S/deploy.sh.previous" "$T/installed.sh" && ok "the old script is kept as deploy.sh.previous" || bad "no deploy.sh.previous"
+[ -x "$S/deploy.sh" ] && ok "the new script is executable" || bad "the new script is not executable"
+case $OUT in *"MIRROR-9.9.0-SCRIPT-RAN self=9.9.0"*) ok "the 9.9.0 script ran the upgrade, with the same options" ;; *) bad "the fetched script did not run: $OUT" ;; esac
+[ "$(printf '%s' "$OUT" | grep -c 'MIRROR-9.9.0-SCRIPT-RAN')" = 1 ] && ok "it switched once (no loop)" || bad "the script ran more than once: $OUT"
+case $LOG in *"pull -q karthickdk02/elasticpro-core:9.9.0"*) ok "and the upgrade itself went on (the core was pulled)" ;; *) bad "the upgrade did not go on after the switch: $LOG" ;; esac
+
+selfrun ./deploy.sh --timeout 5 --upgrade=9.9.0
+case $OUT in *"is in place (the old one"*) bad "the same script was put in place again: $OUT" ;; *) ok "a script already the target's is kept as it is" ;; esac
 
 [ $fail = 0 ] && echo "ok" || { echo "FAILED"; exit 1; }

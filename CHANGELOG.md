@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.79
+
+- **`deploy.sh --upgrade` brings its own script up to date.** It first fetches the target release's `deploy.sh` (from `ELASTICPRO_RELEASE_URL`, like the compose file), checks it parses, puts it in place — the old one kept as `deploy/deploy.sh.previous` — and runs it with the same options. A release's changes to the upgrade itself now apply on the way to it: 0.3.77's dropped Postgres image needed the new script fetched by hand. Not on `--dry-run` (it says it would), not to an older version, never twice (`ELASTICPRO_SELF_UPDATED`); when the script cannot be fetched or does not parse, the installed one goes on and says so. `ELASTICPRO_NO_SELF_UPDATE=1` keeps the installed script. A server without a route to GitHub can serve `v<version>/deploy/deploy.sh` and `docker-compose.yml` from disk with `ELASTICPRO_RELEASE_URL=file:///…`. **An installed script from before 0.3.79 still has to be replaced by hand once** (deploy/README.md).
+- `tools/compose-upgrade-check.sh` section 8 covers it against the stand-in `docker`: the dry run keeps the script, `ELASTICPRO_NO_SELF_UPDATE=1` keeps it, a fetched script that does not parse is refused, the real upgrade puts the target's script in place (executable, old one kept), runs it once with the same options, and the upgrade goes on.
+
 ## 0.3.78
 
 - **Log Delay: the time range and Fetch now are one row.** The range toggle ("⏱ 1h ▾") and its button group moved from the row under the tabs to the title bar's right end, just before Fetch now. The row under the bar is drawn only when it has something to say: the time-zone chip (when a zone is set or detected) or, on Live, the zone's name — so on most clusters the page is one row shorter.
