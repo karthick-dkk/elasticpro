@@ -390,16 +390,6 @@ function countsLine(counts) {
     h('span', h('b', countText(counts.inRange)), ' in range'));
 }
 
-/** The note on a board for the period before the zone was known: history is not rewritten. */
-function tzSinceNote(items) {
-  const since = (items || []).filter((x) => x.tz && (x.tz.mode === 'detected' || x.tz.mode === 'set'));
-  if (!since.length) return null;
-  const parts = since.filter((x) => x.tz.mode === 'detected' && finite(x.tz.since)).map((x) => `${x.name} before ${whenText(x.tz.since, Date.now())}`);
-  return h('div.muted.ld-note.ld-tz-note', 'Delays are shown after each cluster’s log time zone is taken out (arrival − event − time zone). ',
-    'Measurements from before a zone was set or detected stay as they were measured',
-    parts.length ? `: ${parts.join(', ')}.` : '.');
-}
-
 /* ------------------------------------ the fixes ("i") ------------------------------------ */
 
 /**
@@ -667,7 +657,6 @@ function fleetView() {
           ['critical', b.high, 1], anyZone ? ['otherTz', 'Other time zone', 1] : null, ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']].filter(Boolean)),
         h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 12 : 11 }, empty('No cluster you can see is measured.')))])))), foot]);
   });
-  const tzNote = B.get('fleet:tznote', rid, () => tzSinceNote((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), tz: c.timeZone }))));
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', '',
     h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',
       h('thead', h('tr', h('th', 'Cluster'), h('th', 'Read'), h('th.num', 'Devices read'), h('th.num', 'Without a device name'))),
@@ -682,7 +671,7 @@ function fleetView() {
   // The owner's order (prototype v22): tiles, the state bar with its legend, By cluster, Devices behind, the heat map.
   const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
   // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, Hourly Delay Status.
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, tzNote, noDevNote, readCard, neverNote];
+  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, noDevNote, readCard, neverNote];
 }
 
 /* ------------------------------------ the summary ------------------------------------ */
@@ -781,8 +770,7 @@ function clusterView(id) {
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
     `${S.cdSet === 'delayed' ? `${countText(cdLate)} delayed of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [cdBtn, filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
-  return [head, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard, tzNote];
+  return [head, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */

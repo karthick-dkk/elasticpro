@@ -102,8 +102,9 @@ offset, not a queue" matched whole hours alone, so +05:30 and +05:45 never match
    named zone that is not in the database is refused at save time (`bad_request`, by name), never
    kept as "no correction".
 6. **History is not rewritten.** Corrected figures apply from the next measurement; stored points,
-   periods and day files stay as they were measured. The boards and the mail carry the note, with
-   the instant detection began (`timeZone.since`).
+   periods and day files stay as they were measured. The mail carries the note, with the instant
+   detection began (`timeZone.since`); the boards no longer show it (the owner, 0.3.81 — the
+   cluster board's chip says whether a zone is taken out).
 
 **Naming a detected offset.** A detected zone is an offset. It is given a name only when one is
 unambiguous — the server's own zone (`volume::schedule::server_zone`) or a zone set by name on
