@@ -1885,7 +1885,7 @@ mod tests {
         let disk = c("disk.free", "disk", "Data volume free", Level::Warn, "12% · 5.7 GiB free");
         let late = c("poller.late", "poller", "Poller late datasets", Level::Warn, "6% · 3 of 50");
         let worker = c("worker.heartbeat", "worker", "Report worker", Level::Bad, "2 min 0 s ago");
-        assert_eq!(reason(&[ok.clone()]), None, "nothing amber: nothing to say");
+        assert_eq!(reason(std::slice::from_ref(&ok)), None, "nothing amber: nothing to say");
         assert_eq!(reason(&[ok.clone(), disk.clone(), late]).as_deref(), Some("Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%"));
         assert_eq!(reason(&[disk.clone(), worker]).as_deref(), Some("Report worker: 2 min 0 s ago — over at ≥ 90 s, or version mismatch"), "red before amber");
         // Unknown never turns the dot: it is not a reason either.
