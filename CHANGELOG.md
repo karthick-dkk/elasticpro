@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.80
+
+- **Log delay measurement: one unreadable cluster no longer turns the 2-hour schedule into a daily one.** Any cluster that failed made the whole run "failed", and a failed run backs off — doubling, up to a day — so a cluster whose log index matches nothing (seen in production: `demo`, every run) stretched every cluster's measurement from every 2 h to once a day (runs at 16:56 → 00:57 → 16:57). Now only a run that wrote nothing it read (the store or the sink refused), or read nothing at all, backs off; a run that measured the rest goes on at the normal interval. On Jobs such a run is **Completed** with a note naming the clusters it could not measure and the first reason ("4 cluster(s) not measured: demo, … — first: …"), not Failed. The audit line `delay sink run` and DELAY_SINK_RUN's answer carry every such cluster (`failed_clusters` / `failedClusters`), not only the first; the answer also has `writeFailed`.
+
 ## 0.3.79
 
 - **`deploy.sh --upgrade` brings its own script up to date.** It first fetches the target release's `deploy.sh` (from `ELASTICPRO_RELEASE_URL`, like the compose file), checks it parses, puts it in place — the old one kept as `deploy/deploy.sh.previous` — and runs it with the same options. A release's changes to the upgrade itself now apply on the way to it: 0.3.77's dropped Postgres image needed the new script fetched by hand. Not on `--dry-run` (it says it would), not to an older version, never twice (`ELASTICPRO_SELF_UPDATED`); when the script cannot be fetched or does not parse, the installed one goes on and says so. `ELASTICPRO_NO_SELF_UPDATE=1` keeps the installed script. A server without a route to GitHub can serve `v<version>/deploy/deploy.sh` and `docker-compose.yml` from disk with `ELASTICPRO_RELEASE_URL=file:///…`. **An installed script from before 0.3.79 still has to be replaced by hand once** (deploy/README.md).
