@@ -4,13 +4,17 @@
 //!
 //! * `open` / `take` — a run's `detail::Collecting`, keyed by its run id: opened when the run
 //!   begins, taken when its last part ends (and written into its detail then).
-//! * `Layer` — a `tracing` layer the binary installs beside its JSON log. Every event written
-//!   inside a span that carries `run = <id>` (the governor's lane wraps every job's work in
-//!   one, `Core::governed`), or with a `run` field of its own, is added to that run's lines —
-//!   only while the run is open, so a line about a run that ended is not held.
+//! * `Layer` — a `tracing` layer the binary installs beside its JSON log. **Opt-in only**: it
+//!   takes an event only when it is explicitly a job line — target `jobline` (`JOB_LINE_TARGET`)
+//!   or a field `job_line = true` — and it belongs to an open run (a `run` field of its own, or
+//!   a span that carries `run = <id>`: the governor's lane wraps every job's work in one,
+//!   `Core::governed`). Any other event, inside a run or not, is never captured: free text
+//!   can carry cluster URLs, request bodies, error bodies and header values.
+//! * Everything kept goes through `detail::redact` (in `Collecting::line`): credentials out,
+//!   300 characters at most. Readers are narrowed in `detail::detail_view`.
 //!
-//! Lines a run adds itself (`add_line`) go straight in and are marked `captured`, so the layer
-//! does not add them twice.
+//! The run's own structured lines (start, one per cluster outcome, end) are added directly
+//! (`add_line`); a job line also written to the log with `captured = true` is not added twice.
 
 use super::detail::{Collecting, Line, Part};
 use std::collections::HashMap;
@@ -30,6 +34,10 @@ static COUNT: AtomicUsize = AtomicUsize::new(0);
 pub const RUN_FIELD: &str = "run";
 /// The field a line written by `add_line` carries, so the layer leaves it.
 pub const CAPTURED_FIELD: &str = "captured";
+/// The target of an event written to be a run's line (`tracing::info!(target: "jobline", …)`).
+pub const JOB_LINE_TARGET: &str = "jobline";
+/// The field that makes an event a run's line whatever its target.
+pub const JOB_LINE_FIELD: &str = "job_line";
 
 /// Begin gathering for `run_id`.
 pub fn open(run_id: &str) {
@@ -87,6 +95,7 @@ struct Fields {
     cluster: Option<String>,
     message: Option<String>,
     captured: bool,
+    job_line: bool,
     rest: Vec<(String, String)>,
 }
 
@@ -95,6 +104,7 @@ impl Fields {
         match name {
             RUN_FIELD => self.run = Some(v),
             CAPTURED_FIELD => self.captured = true,
+            JOB_LINE_FIELD => self.job_line = v == "true",
             "cluster" | "cluster_id" | "clusterId" => {
                 self.cluster.get_or_insert_with(|| v.clone());
                 self.rest.push((name.to_string(), v));
@@ -153,7 +163,8 @@ where
         }
         let mut f = Fields::default();
         event.record(&mut f);
-        if f.captured {
+        // Opt-in only: an event that is not explicitly a job line is never a run's line.
+        if f.captured || !(event.metadata().target() == JOB_LINE_TARGET || f.job_line) {
             return;
         }
         let run = f.run.clone().or_else(|| {
@@ -186,17 +197,24 @@ mod tests {
             open(&other);
             let span = tracing::info_span!("job_run", run = %id);
             span.in_scope(|| {
-                tracing::warn!(cluster = "aib", failed = 2, "shards failed");
-                tracing::info!("page read");
+                tracing::warn!(target: "jobline", cluster = "aib", failed = 2, "shards failed");
+                tracing::info!(job_line = true, "page read");
+                // Not a job line: never captured, whatever it says.
+                tracing::info!(cluster = "aib", url = "https://elastic:pw@es:9200", "GET /_search body={{...}}");
+                tracing::warn!("request to other-cluster failed: 500 {{\"error\":...}}");
             });
             tracing::info!("outside every run");
-            tracing::error!(run = %other, cluster = "c9", "the other run's line");
+            tracing::error!(target: "jobline", run = %other, cluster = "c9", "the other run's line");
+            tracing::error!(run = %other, cluster = "c9", "not a job line");
             add_line(&id, Line { at: 1, level: "INFO".into(), cluster: None, run: true, text: "run.end".into() });
-            tracing::info!(run = %id, captured = true, "run.end");
+            tracing::info!(target: "jobline", run = %id, captured = true, "run.end");
+            tracing::info!(target: "jobline", run = %id, "auth Authorization: Bearer abc.def.ghi to https://u:secret@h");
         });
         let mine = take(&id).expect("open").finish();
         let texts: Vec<&str> = mine.lines.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(texts, vec!["shards failed cluster=aib failed=2", "page read", "run.end"]);
+        assert_eq!(texts[..3], ["shards failed cluster=aib failed=2", "page read", "run.end"]);
+        assert_eq!(texts.len(), 4, "un-opted events inside the run are not captured: {texts:?}");
+        assert!(!texts[3].contains("abc.def.ghi") && !texts[3].contains("secret"), "redacted on capture: {}", texts[3]);
         assert_eq!(mine.lines[0].cluster.as_deref(), Some("aib"));
         assert_eq!(mine.lines[0].level, "WARN");
         let theirs = take(&other).expect("open").finish();

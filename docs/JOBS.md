@@ -158,15 +158,23 @@ person can do, where ElasticPro knows: `{label, text, page}`).
 The job's own retry: log delay "Next run", hosts "Next tick, up to 3 tries a day", daily volume
 "Next scheduled run". A deferred part is `BUSY` unless its text says otherwise.
 
-**Lines** — every line the core or the worker writes while the run's work goes, as it is
-written: `governed()` runs each job's work in a `tracing` span carrying `run = <id>`, and the
-binary installs `jobs::capture::Layer` beside its JSON log, which adds every event inside such a
-span (or with a `run` field) to that run — while the run is open, never after. No container log
-is read. The run adds its own: `run.start job=… trigger=…`, one line per part (`ERROR` failed,
+**Lines** — opt-in only. The run's own structured lines are added as it goes, and the binary's
+`jobs::capture::Layer` (beside the JSON log) adds an event only when it is explicitly a job line
+— target `jobline` or a field `job_line = true` — and belongs to an open run (its own `run` field,
+or the `run = <id>` span `governed()` wraps each job's work in). Every other event, inside a run
+or not, is never captured: free text can carry cluster URLs, request paths and bodies, error
+bodies and header values. No container log is read.
+
+**Redacted on capture, in one place** (`detail::redact`): every kept line and every part's
+message loses a URL's userinfo (`https://user:pass@host` → `https://***@host`), the value after
+`Basic` / `Bearer` / `ApiKey`, and the value of an `Authorization`, API-key, password, secret or
+token field, and is cut to 300 characters. The run adds its own: `run.start job=… trigger=…`, one line per part (`ERROR` failed,
 `WARN` partial / deferred / skipped, `INFO` succeeded) and `run.end status=… ok= partial= failed=
 deferred= skipped= records= took=`. Each line: `at` (ms), `level`, `cluster` (when the line names
 one), `run` (true for the run's own start and end lines, which name no cluster), `text` (at most
-600 characters).
+300 characters). **Narrowed on read**: a line naming a cluster the caller may not see is dropped
+for them, and a line naming no cluster is shown to a limited caller only when it is one of the
+run's own start/end lines (which carry no cluster names).
 
 **Bounds** — successes listed by name up to 300 (`partsNotListed` counts the rest); every
 exception kept (a hard bound of 2,000 only so a record can never grow without end); lines: the

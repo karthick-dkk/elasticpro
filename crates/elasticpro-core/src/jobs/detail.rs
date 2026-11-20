@@ -29,8 +29,8 @@ pub const EXCEPTIONS_MAX: usize = 2_000;
 /// between are counted (`linesDropped`), not kept.
 pub const LINES_HEAD: usize = 100;
 pub const LINES_TAIL: usize = 400;
-/// One line's text, at most.
-pub const LINE_MAX_CHARS: usize = 600;
+/// One line's text (and a part's message), at most, after `redact`.
+pub const LINE_MAX_CHARS: usize = 300;
 /// `<data>/job-runs/detail/`: one file per run, under its owner.
 pub const DIR: &str = "detail";
 /// A run's detail is kept as long as the run log keeps the run, and never longer than this.
@@ -67,6 +67,25 @@ pub enum ErrorCode {
     Auth,
     Unreachable,
     Other,
+}
+
+static URL_USERINFO: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@").expect("a fixed pattern"));
+static AUTH_SCHEME: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\b(Basic|Bearer|ApiKey)\s+[A-Za-z0-9._~+/=-]+").expect("a fixed pattern"));
+static SECRET_FIELD: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)\b(authorization|x-api-key|api[-_]?key|password|passwd|secret|token)(["']?\s*[:=]\s*["']?)[^\s"',;}&]+"#).expect("a fixed pattern")
+});
+
+/// The one redaction every captured line and every part's message goes through before it is
+/// kept (docs/JOBS.md "Run details"): a URL's userinfo (`https://user:pass@host` →
+/// `https://***@host`), the value after `Basic` / `Bearer` / `ApiKey`, and the value of an
+/// `Authorization`, API key, password, secret or token field; then cut to `LINE_MAX_CHARS`.
+pub fn redact(text: &str) -> String {
+    let s = URL_USERINFO.replace_all(text, "${1}***@");
+    let s = AUTH_SCHEME.replace_all(&s, "${1} ***");
+    let s = SECRET_FIELD.replace_all(&s, "${1}${2}***");
+    cut(&s, LINE_MAX_CHARS)
 }
 
 static AUTH_STATUS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b(401|403)\b").expect("a fixed pattern"));
@@ -189,7 +208,7 @@ impl Part {
         }
         let code = (status != PartStatus::Skipped || code != ErrorCode::Other).then_some(code);
         Part {
-            cluster: cluster.into(), status, code, message: Some(cut(error, LINE_MAX_CHARS)), records, elapsed_ms,
+            cluster: cluster.into(), status, code, message: Some(redact(error)), records, elapsed_ms,
             retry: retry_text(job, status, code), todo: code.and_then(|c| what_to_do(job, c)),
         }
     }
@@ -298,7 +317,7 @@ impl Collecting {
 
     /// One line: the first `LINES_HEAD` and the last `LINES_TAIL` are kept.
     pub fn line(&mut self, mut l: Line) {
-        l.text = cut(&l.text, LINE_MAX_CHARS);
+        l.text = redact(&l.text);
         if self.head.len() < LINES_HEAD {
             self.head.push(l);
             return;
@@ -419,6 +438,24 @@ mod tests {
         for c in ErrorCode::ALL {
             assert_eq!(serde_json::to_value(c).unwrap(), json!(c.as_str()));
         }
+    }
+
+    #[test]
+    fn credentials_never_reach_a_line_or_a_message() {
+        let r = redact("GET https://elastic:s3cr3t@es1.example:9200/_search failed; Authorization: Basic ZWxhc3RpYzpzM2NyM3Q= sent");
+        assert!(!r.contains("s3cr3t") && !r.contains("ZWxhc3RpYzpzM2NyM3Q"), "{r}");
+        assert!(r.contains("https://***@es1.example:9200/_search"), "{r}");
+        let r = redact(r#"headers {"Authorization":"ApiKey abc123=="} x-api-key=k-999 Bearer eyJhbGciOi.x.y token=t0k"#);
+        for secret in ["abc123", "k-999", "eyJhbGciOi", "t0k"] {
+            assert!(!r.contains(secret), "{secret} in {r}");
+        }
+        assert_eq!(redact("prod ok records=3"), "prod ok records=3", "nothing to hide: as it was");
+        assert!(redact(&"x".repeat(1000)).chars().count() <= LINE_MAX_CHARS);
+        let mut c = Collecting::default();
+        c.line(Line { at: 1, level: "ERROR".into(), cluster: Some("a".into()), run: false, text: "http://u:p@h/x".into() });
+        let p = Part::not_ok("j", "a", PartStatus::Failed, "connection refused: https://admin:hunter2@10.0.0.1:9200", None, None);
+        assert!(!p.message.as_deref().unwrap().contains("hunter2"));
+        assert_eq!(c.finish().lines[0].text, "http://***@h/x");
     }
 
     #[test]
