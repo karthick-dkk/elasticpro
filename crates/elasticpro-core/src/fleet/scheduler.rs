@@ -446,11 +446,12 @@ impl State {
                         offer(PRIO_BACKGROUND, entry.and_then(|e| e.next_due).unwrap_or(0).max(first));
                     }
                     // The floor for what the Clusters page shows: once read (a page asked for it),
-                    // at most 5 min old — or the dataset's own interval when shorter. Never read:
-                    // nothing (a fresh core under Client basis still sends nothing until a page
-                    // asks). From the last attempt, stretched like any interval while slowed.
+                    // at most 5 min old. A shorter interval is the schedule's business (background
+                    // mode runs it above); the floor never speeds a dataset past 5 min — Play's own
+                    // pace. Never read: nothing (a fresh core under Client basis still sends nothing
+                    // until a page asks). From the last attempt, stretched like any interval while slowed.
                     if let (true, Some(last)) = (KEEP_FRESH.contains(&ds), entry.and_then(|e| e.attempted_at.or(e.fetched_at))) {
-                        let every = self.interval_for(&s.id, (cfg.interval(ds) * 1000).min(KEEP_FRESH_MS));
+                        let every = self.interval_for(&s.id, KEEP_FRESH_MS);
                         offer(PRIO_BACKGROUND, last + every);
                     }
                     if let (true, Some(iv)) = (self.play_watching(&key, now), cfg.play.interval_secs(ds)) {
