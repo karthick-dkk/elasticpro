@@ -119,8 +119,7 @@ impl Core {
             // One more than the cap leaves room for: a device beyond it says the list was cut.
             let ask = size.min(max - out.readings.len() + 1).max(1);
             let body = measure::page_body(f, from_ms, to_ms, ask, after.as_ref(), devices);
-            let mut req = crate::delay_sink::search_request_for(id, &f.pattern, body);
-            req.timeout_ms = Some(PAGE_TIMEOUT_MS);
+            let req = crate::delay_sink::search_request_for(id, &f.pattern, body, PAGE_TIMEOUT_MS);
             let res = self.es_req(req).await;
             let failure = if res.get("ok").and_then(Value::as_bool) != Some(true) {
                 if res.get("kind").and_then(Value::as_str) == Some("response_too_large") && size > measure::PAGE_SIZE_MIN {

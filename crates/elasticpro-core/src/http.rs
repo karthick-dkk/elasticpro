@@ -141,6 +141,32 @@ impl Default for EsRequest {
     }
 }
 
+/// The `timeout` a search of the core's own jobs carries, from the client's limit for that
+/// same request: five sixths of it (25 s under a 30 s limit, 91.665 s under the volume's 110 s).
+/// Elasticsearch then stops the search a little before we would give up on it, and answers
+/// what it has with `timed_out: true` (`volume::collect::partial_answer`: kept, not final, asked
+/// again) instead of working on for nobody. Never `terminate_after`: counts stay exact.
+pub fn search_timeout_ms(client_ms: u64) -> u64 {
+    client_ms / 6 * 5
+}
+
+impl EsRequest {
+    /// This search with its body's `timeout` set from its own `timeout_ms` (`search_timeout_ms`),
+    /// the client limit taken as the gate's ceiling where it asks for more (the gate clamps it
+    /// there, `gate::Limits::max_timeout_ms`). Call it after `timeout_ms` is set. A request
+    /// without a limit or without a JSON object body is left as it is.
+    pub fn with_search_timeout(mut self) -> EsRequest {
+        let Some(client) = self.timeout_ms else { return self };
+        let client = client.min(crate::gate::Limits::default().max_timeout_ms);
+        let parsed = self.body.as_deref().and_then(|b| serde_json::from_str::<Value>(b).ok());
+        if let Some(Value::Object(mut m)) = parsed {
+            m.insert("timeout".into(), json!(format!("{}ms", search_timeout_ms(client))));
+            self.body = Some(Value::Object(m).to_string());
+        }
+        self
+    }
+}
+
 fn default_method() -> String {
     "GET".into()
 }
@@ -616,5 +642,29 @@ impl CachedClient {
     }
     fn verifier_pins(&self) -> &Arc<PinStore> {
         self.verifier.pins()
+    }
+}
+
+#[cfg(test)]
+mod search_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn a_search_stops_on_the_cluster_a_little_before_we_stop_waiting() {
+        assert_eq!(search_timeout_ms(30_000), 25_000);
+        assert_eq!(search_timeout_ms(110_000), 91_665);
+        let r = EsRequest { body: Some(r#"{"size":0,"aggs":{}}"#.into()), timeout_ms: Some(30_000), ..Default::default() }.with_search_timeout();
+        let b: Value = serde_json::from_str(r.body.as_deref().unwrap()).unwrap();
+        assert_eq!(b["timeout"], "25000ms");
+        assert_eq!((b["size"].clone(), b.get("terminate_after")), (json!(0), None), "the body kept, and never cut short by count");
+        // Above the gate's ceiling the cluster is given the ceiling's share, so it stops under it.
+        let r = EsRequest { body: Some("{}".into()), timeout_ms: Some(120_000), ..Default::default() }.with_search_timeout();
+        let ceiling = crate::gate::Limits::default().max_timeout_ms;
+        assert_eq!(r.body, Some(format!(r#"{{"timeout":"{}ms"}}"#, search_timeout_ms(ceiling))));
+        // No limit, or no JSON object: left as it is.
+        let none = EsRequest { body: Some("{}".into()), ..Default::default() }.with_search_timeout();
+        assert_eq!(none.body.as_deref(), Some("{}"));
+        let text = EsRequest { body: Some("not json".into()), timeout_ms: Some(30_000), ..Default::default() }.with_search_timeout();
+        assert_eq!(text.body.as_deref(), Some("not json"));
     }
 }

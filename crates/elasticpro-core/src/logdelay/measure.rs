@@ -257,6 +257,9 @@ mod tests {
         assert!(read_page(&full, &fields(), 3).unwrap().done, "fewer buckets than asked: the last page");
         let partial = json!({ "_shards": { "total": 3, "failed": 1 }, "aggregations": { "devices": { "buckets": [] } } });
         assert!(matches!(read_page(&partial, &fields(), 10), Err(PageError::Retry(_))), "a failed shard is not the end of the list");
+        // Nor is a page the cluster cut at the body's `timeout` (0.3.81): asked again, like a failed shard.
+        let timed = json!({ "timed_out": true, "_shards": { "total": 3, "failed": 0 }, "aggregations": { "devices": { "buckets": [] } } });
+        assert!(matches!(read_page(&timed, &fields(), 10), Err(PageError::Retry(ref w)) if w.contains("timed out")), "a time-out is not the end of the list");
         assert!(matches!(read_page(&json!({ "hits": {} }), &fields(), 10), Err(PageError::Shape(_))));
         assert_eq!(next_page_size(1000, 10, 100), 1000);
         assert_eq!(next_page_size(1000, 101, 100), 500);

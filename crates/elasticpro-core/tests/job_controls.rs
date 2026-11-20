@@ -484,7 +484,8 @@ async fn a_busy_cluster_defers_only_itself_and_resumes_when_it_eases() {
     let calm = volume_cluster(1, 0, Arc::new(AtomicBool::new(false))).await;
     let dir = TempDir::new("jc-busy");
     let c = portable(&dir, vec![("busy", busy.url()), ("calm", calm.url())]).await;
-    let mut started = c.volume_tick_at(local(t, "06:00")).await;
+    // 06:30: both clusters' places around collectAt (06:00 ± 30 min, jobs::spread) have come.
+    let mut started = c.volume_tick_at(local(t, "06:30")).await;
     started.sort();
     assert_eq!(started, vec!["busy".to_string(), "calm".to_string()]);
     // busy answers 429: its part is deferred and its day given back; calm completes.
@@ -507,8 +508,8 @@ async fn a_busy_cluster_defers_only_itself_and_resumes_when_it_eases() {
 
     // Still busy: the next tick leaves it, adding no record a tick.
     let n_runs = list["runs"].as_array().unwrap().len();
-    assert!(c.volume_tick_at(local(t, "06:01")).await.is_empty(), "busy waits; calm is done for the day");
-    assert!(c.volume_tick_at(local(t, "06:02")).await.is_empty());
+    assert!(c.volume_tick_at(local(t, "06:31")).await.is_empty(), "busy waits; calm is done for the day");
+    assert!(c.volume_tick_at(local(t, "06:32")).await.is_empty());
     let l = c.handle(json!({ "type": "JOBS_LIST" })).await;
     assert_eq!(l["runs"].as_array().unwrap().len(), n_runs, "one record for the wait: {l}");
     // A person's own request is never held back: it goes.
@@ -519,7 +520,7 @@ async fn a_busy_cluster_defers_only_itself_and_resumes_when_it_eases() {
     // It eases: the first tick collects it.
     throttled.store(false, Ordering::SeqCst);
     c.load_clear_for_tests("busy");
-    assert_eq!(c.volume_tick_at(local(t, "06:03")).await, vec!["busy".to_string()]);
+    assert_eq!(c.volume_tick_at(local(t, "06:33")).await, vec!["busy".to_string()]);
     wait_for("the busy cluster's run", || busy.hits().iter().any(|h| support::day_search(h).is_some())).await;
 }
 

@@ -20,6 +20,7 @@
 pub mod controls;
 pub mod governor;
 pub mod load;
+pub mod spread;
 
 use crate::delay_sink::SinkView;
 use crate::report::jobs::{Job, Kind as ReportJobKind, ReportKind, Status as ReportStatus};
@@ -223,17 +224,17 @@ const fn mailed(id: &'static str, name: &'static str, kind: ReportKind) -> Descr
 pub static REGISTRY: [Descriptor; 13] = [
     Descriptor {
         id: LOGDELAY_MEASURE, name: "Log delay measurement", kind: JobKind::Automatic, owner: Owner::Core,
-        schedule: "every everyHours while armed (Config-Management › Data › Scheduled log delay, DELAY_SINK_SET); a failing run backs off",
+        schedule: "every everyHours while armed (Config-Management › Data › Scheduled log delay, DELAY_SINK_SET); a failing run backs off; the timer's run spreads its clusters over the first quarter of the interval (at most 10 min)",
         next_run: NextRun::DelaySink, priority: Priority::High, pausable: true, requests: req(1, 4), report: None, cluster_scoped: false, admin_details: false,
     },
     Descriptor {
         id: VOLUME_DAILY, name: "Daily volume collection", kind: JobKind::Automatic, owner: Owner::Worker,
-        schedule: "once a day at each cluster's collectAt, server local time (volume settings)",
+        schedule: "once a day around each cluster's collectAt (within 30 min either side, a fixed place per cluster), server local time (volume settings)",
         next_run: NextRun::VolumeDaily, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     Descriptor {
         id: HOSTS_COLLECT, name: "Hosts collection", kind: JobKind::Automatic, owner: Owner::Worker,
-        schedule: "daily from UI_REPORT_HOSTS_AT (06:00) for clusters missing days of the month, at most three tries a cluster a day",
+        schedule: "daily from UI_REPORT_HOSTS_AT (06:00), each cluster at its fixed place in the two hours after, for clusters missing days of the month, at most three tries a cluster a day",
         next_run: NextRun::HostsDaily, priority: Priority::Medium, pausable: true, requests: req(1, 2), report: None, cluster_scoped: true, admin_details: false,
     },
     Descriptor {

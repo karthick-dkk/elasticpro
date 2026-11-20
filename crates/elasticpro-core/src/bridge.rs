@@ -5911,6 +5911,7 @@ impl Core {
     /// that run's id instead of measuring (and writing) the same hour twice at once. `scope`
     /// narrows it to some clusters or one device (*Fetch now*); the query is the same.
     pub(crate) async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger, scope: delay_sink::MeasureScope) -> SinkRun {
+        let paced = matches!(trigger, crate::jobs::Trigger::Timer) && scope.is_full();
         let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
             Ok(r) => r,
             Err(busy) => return SinkRun { body: busy.answer("the scheduled log delay measurement"), skipped: None, error: None },
@@ -5920,7 +5921,7 @@ impl Core {
         }
         // A job of the core: its requests in a lane fixed at its maximum (docs/JOBS.md "Governor").
         let (out, clusters) =
-            self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink(&scope, Some(&run))).await;
+            self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink(&scope, Some(&run), paced)).await;
         run.clusters(&clusters);
         let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
         let mut note = out.body.get("note").and_then(Value::as_str).map(String::from);
@@ -5962,7 +5963,10 @@ impl Core {
     /// clusters it measured and wrote to, for the run log. A scoped run (*Fetch now*) measures
     /// the clusters it names (primed ones) or one device, by the same query, and leaves the
     /// schedule's state alone.
-    async fn measure_delay_sink(self: &Arc<Self>, scope: &delay_sink::MeasureScope, run: Option<&crate::jobs::Run>) -> (SinkRun, Vec<String>) {
+    /// `paced`: the timer's own full run, whose clusters start in `jobs::spread` order, spread
+    /// over the first part of the interval (`spread::measure_spread_ms`); a person's run, and a
+    /// Fetch now, read at once.
+    async fn measure_delay_sink(self: &Arc<Self>, scope: &delay_sink::MeasureScope, run: Option<&crate::jobs::Run>, paced: bool) -> (SinkRun, Vec<String>) {
         let cfg = self.delay_sink.read().config.clone();
         let now = delay_sink::now_ms();
         let full = scope.is_full();
@@ -6035,11 +6039,34 @@ impl Core {
             }
         }
         let mut scope_note: Option<String> = None;
+        // The timer's run (docs/JOBS.md "Spread"): its clusters in the spread's order, so two
+        // behind the same jump host do not follow each other, each started no sooner than its
+        // place in the first quarter of the interval (at most 10 min). A cluster that took
+        // longer than its slot is followed at once: the run never waits to catch up.
+        let members: Vec<crate::jobs::spread::Member> = if paced {
+            let p = self.primed.read();
+            targets.iter().map(|id| crate::jobs::spread::Member::new(id, p.clusters.get(id).and_then(|s| s.via.as_deref()))).collect()
+        } else {
+            vec![]
+        };
+        let targets: Vec<String> = if paced { crate::jobs::spread::order(&members) } else { targets };
+        let spread_ms = crate::jobs::spread::measure_spread_ms(cfg.every_hours.clamp(1, 24) * 3_600_000);
+        let begun = std::time::Instant::now();
 
         for (done, id) in targets.iter().enumerate() {
             // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
             if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
                 break;
+            }
+            if paced {
+                let place = std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms));
+                // A second at a time, so a cancel (or the stop) is heard while it waits.
+                while begun.elapsed() < place && self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_none() {
+                    tokio::time::sleep(place.saturating_sub(begun.elapsed()).min(std::time::Duration::from_secs(1))).await;
+                }
+                if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
+                    break;
+                }
             }
             let fields = self.logdelay_fields(id, &settings).await;
             let before = read_total;

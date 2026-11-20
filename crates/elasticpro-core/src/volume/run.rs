@@ -1068,7 +1068,7 @@ impl Core {
                             let (from, to) = opts.period.unwrap_or_else(|| {
                                 (NaiveDate::parse_from_str(&format!("{oldest}-01"), "%Y-%m-%d").unwrap_or(today), today)
                             });
-                            let h = self.volume_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today))), opts.stop).await;
+                            let h = self.volume_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today), today)), opts.stop).await;
                             if ok(&h) {
                                 let res = h.get("json").unwrap_or(&Value::Null);
                                 match collect::partial_answer(res) {
@@ -1229,7 +1229,7 @@ impl Core {
                     }
                 }
                 let group = listing.group_for(date, &split);
-                let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body)), opts.stop).await;
+                let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body, today)), opts.stop).await;
                 if !ok(&res) {
                     // Refused or cut off because the stop came on: not this day's fault.
                     if let Some(reason) = (opts.stop)() {
@@ -1368,13 +1368,19 @@ impl Core {
                 return vec![];
             }
         };
+        // Each cluster at its own place within half an hour either side of its collectAt
+        // (jobs::spread, docs/JOBS.md "Spread"): the fleet does not start in the same minute.
+        let members: Vec<crate::jobs::spread::Member> =
+            specs.iter().map(|s| crate::jobs::spread::Member::new(&s.id, s.via.as_deref())).collect();
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
             let r = self.volume_resolve(raw.as_ref(), Some(&id), None);
             let prev = store.read_state(&id).last_scheduled_day;
             let last = prev.as_deref().and_then(parse_day);
-            if !schedule::is_due(local, r.settings.collect_time(), last) || self.volume_unreachable(&id) {
+            let at = crate::jobs::spread::start_at(r.settings.collect_time(),
+                crate::jobs::spread::centred_offset_ms(&members, &id, crate::jobs::spread::VOLUME_HALF_WINDOW_MS));
+            if !schedule::is_due(local, at, last) || self.volume_unreachable(&id) {
                 continue;
             }
             // Busy (docs/JOBS.md "Busy clusters"): not marked, so it waits, with one deferred

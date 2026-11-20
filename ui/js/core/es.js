@@ -542,7 +542,14 @@ export class EsClient {
   slmStats() { return this.json('GET', '/_slm/stats'); }
   slmStatus() { return this.json('GET', '/_slm/status'); }
   ilmStatus() { return this.json('GET', '/_ilm/status'); }
-  ilmErrors() { return this.json('GET', '/*/_ilm/explain?only_errors=true&only_managed=true'); }
+  /**
+   * The log indices in ILM error, only the fields the pages read: the request the core's
+   * `ilm_errors` dataset makes (fleet/catalogue.rs `ilm_errors_path`), character for character.
+   */
+  ilmErrors(pattern) {
+    return this.json('GET', `/${encodeURIComponent(String(pattern || '').trim() || '*')}/_ilm/explain?only_errors=true&only_managed=true` +
+      '&filter_path=indices.*.policy,indices.*.phase,indices.*.step,indices.*.failed_step,indices.*.step_info.type,indices.*.step_info.reason');
+  }
   aliases() { return this.json('GET', '/_cat/aliases?format=json&h=alias,index,is_write_index'); }
   search(index, body, opts = {}) {
     const qs = opts.qs ? `?${opts.qs}` : '?ignore_unavailable=true&allow_no_indices=true';
