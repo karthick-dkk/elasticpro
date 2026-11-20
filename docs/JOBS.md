@@ -136,7 +136,7 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
   "ok": true, "role": "core",
   "jobs": [
     { "id": "logdelay.measure", "name": "Log delay measurement", "kind": "automatic", "owner": "core",
-      "schedule": "every everyHours while armed (…, DELAY_SINK_SET); a failing run backs off",
+      "schedule": "every everyHours while armed (…, DELAY_SINK_SET); a run that wrote nothing, or read nothing at all, backs off (doubling, capped at a day); clusters that could not be read are named in the run's note and failedClusters, and do not back the schedule off (0.3.80)",
       "nextRun": "delay_sink", "priority": "high", "pausable": true, "requests": { "min": 1, "max": 4 },
       "report": null, "detailsFor": "user", "clusterScoped": false,
       "state": { "enabled": true, "paused": false,

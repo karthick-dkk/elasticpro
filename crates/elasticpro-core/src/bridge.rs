@@ -5923,13 +5923,28 @@ impl Core {
             self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink(&scope, Some(&run))).await;
         run.clusters(&clusters);
         let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
-        let note = out.body.get("note").and_then(Value::as_str).map(String::from);
+        let mut note = out.body.get("note").and_then(Value::as_str).map(String::from);
+        let num = |k: &str| out.body[k].as_u64().unwrap_or(0) as usize;
+        // Some clusters unreadable, the rest measured and written: a run that worked, with the
+        // clusters it could not read named — not Failed (0.3.80; delay_sink::backs_off).
+        let partial = out.body["ok"] != json!(true) && out.skipped.is_none()
+            && !delay_sink::backs_off(num("measured"), num("failed"), num("writeFailed"));
+        if partial {
+            // A count, no names: the run is listed to every user, and which clusters failed is
+            // per-cluster detail (the run's error is narrowed by its clusters like any run's).
+            let n = out.body["failedClusters"].as_array().map_or(0, Vec::len);
+            let said = format!("{n} of {} cluster(s) not measured — the rest were", num("clusters"));
+            note = Some(match note { Some(n) => format!("{n}; {said}"), None => said });
+            if let Some(n) = &out.error {
+                run.clusters(&note_ids(n));
+            }
+        }
         let outcome = if let Some(by) = run.cancel_asked() {
             crate::jobs::Outcome::cancelled(&by, out.body["measured"].as_u64())
         } else if let Some(n) = &out.skipped {
             run.clusters(&note_ids(n));
             crate::jobs::Outcome::skipped(n.text())
-        } else if out.body["ok"] == json!(true) {
+        } else if out.body["ok"] == json!(true) || partial {
             crate::jobs::Outcome::completed(out.body["measured"].as_u64())
         } else {
             if let Some(n) = &out.error {
@@ -6000,6 +6015,11 @@ impl Core {
         let mut measured = 0usize;
         let mut read_total = 0u64;
         let mut failed = 0usize;
+        // Failures writing what was read (the store or the sink): these, not one cluster that
+        // cannot be read, are what makes the schedule back off (delay_sink::backs_off).
+        let mut write_failed = 0usize;
+        // Every cluster the run could not read or write, named in the log and the answer.
+        let mut failed_ids: Vec<String> = vec![];
         let mut first_error: Option<SinkNote> = None;
         let mut opened = 0usize;
         let mut solved = 0usize;
@@ -6083,6 +6103,7 @@ impl Core {
             }
             if got.readings.is_empty() && got.error.is_some() {
                 failed += 1;
+                failed_ids.push(id.clone());
                 first_error.get_or_insert_with(|| SinkNote::read(id, got.error.clone().unwrap_or_default()));
                 continue;
             }
@@ -6093,6 +6114,7 @@ impl Core {
             if let Some(e) = &got.error {
                 // Part of the list read: kept, nobody it did not read turned silent; the run says so.
                 failed += 1;
+                failed_ids.push(id.clone());
                 first_error.get_or_insert_with(|| SinkNote::read(id, e.clone()));
             }
             let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
@@ -6104,6 +6126,8 @@ impl Core {
                 Ok(x) => x,
                 Err(e) => {
                     failed += 1;
+                    write_failed += 1;
+                    failed_ids.push(id.clone());
                     first_error.get_or_insert(SinkNote::write(Some(id), None, format!("the built-in store could not be written: {e}")));
                     continue;
                 }
@@ -6128,6 +6152,8 @@ impl Core {
                 };
                 if let Some(e) = delay_sink::bulk_failure(&wrote) {
                     failed += 1;
+                    write_failed += 1;
+                    failed_ids.push(id.clone());
                     wrote_all = false;
                     // Into the sink cluster (as named for this run), or the history store.
                     let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
@@ -6152,7 +6178,11 @@ impl Core {
             s.state.last_error = first_error.clone();
             s.state.last_measured = measured;
             s.state.last_failed = failed;
-            s.state.consecutive_failures = if ok { 0 } else { s.state.consecutive_failures + 1 };
+            // Back off only when the run could not do its job (nothing written, or nothing read at
+            // all): one cluster that cannot be read must not stretch every cluster's schedule
+            // from 2 h to a day (0.3.80 — a cluster with no log index did exactly that).
+            s.state.consecutive_failures =
+                if delay_sink::backs_off(measured, failed, write_failed) { s.state.consecutive_failures + 1 } else { 0 };
             s.state.next_due_at =
                 Some(delay_sink::next_due(now, cfg.every_hours, s.state.consecutive_failures));
         }
@@ -6161,6 +6191,7 @@ impl Core {
             message = "delay sink run",
             clusters = targets.len(), measured, read = read_total, pages, failed, opened, solved, index = %index, destination = ?cfg.destination,
             scoped = !full, truncated = truncated.len(),
+            failed_clusters = %failed_ids.join(","),
             error = first_error.as_ref().map(SinkNote::text).unwrap_or_default(),
         );
         let mut notes: Vec<String> = vec![];
@@ -6181,7 +6212,7 @@ impl Core {
             touched.push(cfg.sink_cluster_id.clone());
         }
         (SinkRun {
-            body: json!({ "ok": ok, "measured": measured, "read": read_total, "pages": pages, "failed": failed, "clusters": targets.len(),
+            body: json!({ "ok": ok, "measured": measured, "read": read_total, "pages": pages, "failed": failed, "writeFailed": write_failed, "failedClusters": failed_ids, "clusters": targets.len(),
                           "opened": opened, "solved": solved, "index": index, "destination": cfg.destination,
                           "window": { "from": from_ms, "to": to_ms }, "maxDevices": max_devices, "truncated": truncated,
                           "scope": (!full).then(|| scope.to_json()), "note": (!notes.is_empty()).then(|| notes.join("; ")) }),
@@ -6252,6 +6283,13 @@ impl Core {
                 let run = self.run_delay_sink(crate::jobs::Trigger::manual(who), delay_sink::MeasureScope::default()).await;
                 let view = self.sink_view(caller);
                 let mut out = run.body;
+                // The clusters it names, narrowed to the caller's: a limited admin reads nothing
+                // of a cluster outside their view (as with every note here).
+                for k in ["failedClusters", "truncated"] {
+                    if let Some(a) = out.get_mut(k).and_then(Value::as_array_mut) {
+                        a.retain(|v| v.as_str().is_some_and(|id| view.sees(id)));
+                    }
+                }
                 if let Some(n) = &run.skipped {
                     out["skipped"] = json!(view.note(n));
                 } else {

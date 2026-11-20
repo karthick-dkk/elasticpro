@@ -3407,3 +3407,12 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
   .docs-body, .docs-body.with-detail { grid-template-columns: 1fr; }
   .docs-fields { max-height: 32vh; }
 }
+
+/* Nodes & shards › slow work (0.3.80): a task's detail — a search's whole query — cut to five
+   lines; a click shows all of it. Cells sit at the top so Action / Node / Running stay in view. */
+tr.slow-task > td { vertical-align: top; }
+.slow-detail { max-width: 640px; }
+.slow-detail-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; word-break: break-all; cursor: pointer; }
+.slow-detail-text.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; max-height: 320px; overflow: auto; }
+.slow-detail-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.slow-more { margin-top: 4px; }

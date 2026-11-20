@@ -387,6 +387,15 @@ pub fn next_due(now_ms: i64, every_hours: u64, consecutive_failures: u32) -> i64
     now_ms + (base * factor).min(24 * 3_600_000)
 }
 
+/// Whether a scheduled run counts as failed for the back-off: it wrote nothing it read (the
+/// store or the sink refused), or it read nothing at all while something failed. Some clusters
+/// failing to read is a run that worked — those clusters are named in the run's note and log —
+/// and the next run comes at the normal interval. Before 0.3.80 any failed cluster backed the
+/// whole schedule off, so one cluster with no log index made every cluster's measurement daily.
+pub fn backs_off(measured: usize, failed: usize, write_failed: usize) -> bool {
+    write_failed > 0 || (measured == 0 && failed > 0)
+}
+
 pub(crate) fn bucket_key(b: &Value) -> Option<String> {
     match b.get("key") {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
@@ -666,6 +675,15 @@ mod tests {
         assert_eq!(next_due(0, 2, 1), 4 * h);
         assert_eq!(next_due(0, 2, 3), 16 * h);
         assert_eq!(next_due(0, 2, 9), 24 * h, "capped at a day, however long it has failed");
+    }
+
+    #[test]
+    fn one_unreadable_cluster_does_not_back_the_schedule_off() {
+        assert!(!backs_off(16_238, 4, 0), "67 of 71 clusters measured, 4 unreadable: the next run at the normal interval");
+        assert!(!backs_off(10, 0, 0));
+        assert!(backs_off(16_000, 1, 1), "a write that failed backs off: the sink may be down");
+        assert!(backs_off(0, 3, 0), "nothing read at all: back off");
+        assert!(!backs_off(0, 0, 0), "nothing to measure and nothing failed is not a failure");
     }
 
     #[test]

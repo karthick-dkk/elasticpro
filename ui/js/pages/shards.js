@@ -320,6 +320,16 @@ function block(c) {
 
 /** A task running longer than this is worth looking at rather than scrolling past. */
 const SLOW_TASK_MS = 30000;
+/** Slow tasks listed at first, and the lines a task's detail (its whole query) is cut to. */
+const SLOW_ROWS = 5;
+let slowAll = false;
+/** The details opened in full, by their text: page state, so a push from the core (which redraws
+ *  the card) does not fold an opened query back to five lines. */
+const openDetails = new Set();
+function toggleDetail(text) {
+  if (openDetails.has(text)) openDetails.delete(text); else openDetails.add(text);
+  draw();
+}
 
 /**
  * What the cluster is doing right now, and whether it is coping.
@@ -395,14 +405,26 @@ function loadBody(c) {
             h('div.muted', { style: { fontSize: '11px', marginBottom: '3px' } },
               `running longer than ${Math.round(SLOW_TASK_MS / 1000)}s`),
             table(['Action', 'Node', { label: 'Running', num: true }, 'Detail'],
-              slow.slice(0, 10).map((t) => h('tr',
+              // Compact (the owner, 0.3.80: a search's whole query filled eight screens): the
+              // five longest, each detail cut to SLOW_DETAIL_LINES lines — a click on it shows
+              // all of it, and its tooltip has it too; "Show all" lists the rest.
+              slow.slice(0, slowAll ? 10 : SLOW_ROWS).map((t) => h('tr.slow-task',
                 h('td.mono', { style: { fontSize: '11px' } }, t.action),
                 h('td', t.node),
                 h('td.num', h('b', { style: { color: t.ms > 300000 ? 'var(--critical-ink)' : 'var(--warning-ink)' } },
                   t.running_time)),
-                h('td.muted', { style: { fontSize: '11px', maxWidth: '340px', wordBreak: 'break-word' } },
-                  t.description || ''))),
-              { emptyText: '' }))
+                h('td.muted.slow-detail', { style: { fontSize: '11px' } },
+                  h(`div.slow-detail-text${openDetails.has(t.description || '') ? '.open' : ''}`, {
+                    title: t.description || '', tabIndex: 0, role: 'button', 'aria-expanded': String(openDetails.has(t.description || '')),
+                    'aria-label': openDetails.has(t.description || '') ? 'Task detail — press to cut it to five lines' : 'Task detail — press to show all of it',
+                    onclick: () => toggleDetail(t.description || ''),
+                    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDetail(t.description || ''); } },
+                  }, t.description || '')))),
+              { emptyText: '' }),
+            slow.length > SLOW_ROWS
+              ? h('button.btn.sm.slow-more', { type: 'button', onclick: () => { slowAll = !slowAll; draw(); } },
+                  slowAll ? `Show the ${SLOW_ROWS} longest` : `Show all ${Math.min(slow.length, 10)}`)
+              : null)
         : null,
 
       poolTrs.length

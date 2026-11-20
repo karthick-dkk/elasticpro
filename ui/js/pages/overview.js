@@ -3,7 +3,7 @@
 import { h, svg, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
-import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
+import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage, keepFresh } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
 import { refreshButton } from '../lib/freshness.js';
 import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
@@ -224,8 +224,11 @@ export function render(el) {
   focusDown = f && f.section === 'unreachable' ? { cluster: f.cluster || null, prepared: false } : null;
   askOnOpen();
   draw();
-  // The Refresh badge counts minutes; nothing else on the page moves on its own.
-  if (!ageTimer) ageTimer = setInterval(() => { if (host && host.isConnected) paintAges(); else onLeave(); }, 30000);
+  // The Refresh badge counts minutes, and health and node figures are kept at most 2 min old
+  // while the page is open (the owner, 0.3.80: it opened on hour-old figures). Without
+  // anybody on it, the core keeps them at most 5 min old (fleet::scheduler KEEP_FRESH).
+  keepListFresh();
+  if (!ageTimer) ageTimer = setInterval(() => { if (host && host.isConnected) { paintAges(); keepListFresh(); } else onLeave(); }, 30000);
 }
 export function onData() {
   if (section === OVERVIEW) { board.onData(); return; }
@@ -240,6 +243,13 @@ function listLeave() {
   if (ageTimer) { clearInterval(ageTimer); ageTimer = null; }
 }
 let ageTimer = null;
+/** What the list shows that changes minute to minute, and how old it may be while it is open. */
+export const LIST_FRESH_DATASETS = ['health', 'nodes'];
+export const LIST_FRESH_MS = 2 * 60_000;
+function keepListFresh() {
+  if (isSnapshotMode()) return;
+  keepFresh(activeClusters().map((c) => c.id), LIST_FRESH_DATASETS, LIST_FRESH_MS).catch(() => {});
+}
 
 /* ------------------------------ per-user layout ------------------------------ */
 

@@ -335,7 +335,10 @@ export async function reprime() {
   // browser priming them would only offer it a worse copy.
   // A config cluster set aside because Zabbix has its address is still primed: its
   // credential is the one "use ElasticPro credentials" hands to the Zabbix cluster there.
-  const own = state.config.clusters.filter((c) => c.source !== 'zabbix').concat(state.config.shadowedClusters || []);
+  // A cluster switched off (enabled: false) is not given to the core, so it is not polled — not
+  // even its health (0.3.80; Zabbix clusters switched off were already left out by the core).
+  // Leaving it out forgets nothing: a credential kept on the server stays until cleared.
+  const own = state.config.clusters.filter((c) => c.source !== 'zabbix' && c.enabled !== false).concat(state.config.shadowedClusters || []);
   const hosted = credentialsKeptOnServer();
   const dropAnonymous = [...leavingAnonymous];
   for (const c of own) if (leavingAnonymous.has(c.id)) c.anonymous = false;
@@ -1634,7 +1637,7 @@ export async function askFleetDataset(id, dataset, { maxAgeSec } = {}) {
  */
 const demandAsked = new Map();
 const datasetRead = new Map();
-export async function demandDataset(ids, dataset, { force = false } = {}) {
+export async function demandDataset(ids, dataset, { force = false, maxAgeMs = null } = {}) {
   if ((await detectFleet()) !== 'fleet') return false;
   const known = (ids || []).filter(fleetKnows);
   if (!known.length) return true;
@@ -1653,7 +1656,7 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
       id, reach: cur && cur.reach, askedAt: demandAsked.get(`${id}\u0000${dataset}`),
       entry: e ? { status: e.status, fetchedAt: local(e.fetchedAt), attemptedAt: local(e.attemptedAt) } : null,
     };
-  }), { now, force, intervalMs: cat && cat.intervalSec ? cat.intervalSec * 1000 : 0 });
+  }), { now, force, intervalMs: maxAgeMs || (cat && cat.intervalSec ? cat.intervalSec * 1000 : 0) });
   if (!due.length) return true;
   for (const id of due) demandAsked.set(`${id}\u0000${dataset}`, now);
   const r = await refreshFleet({ clusterIds: due, datasets: [dataset] });
@@ -1706,6 +1709,17 @@ export function fetchesOnlyOnAsk() {
  * that chose `hybrid` chose reading the rest to be a decision (the page's coverage bar).
  * Returns whether it asked.
  */
+/**
+ * A page that must not show old figures (the Clusters list, 0.3.80: health and nodes at most
+ * `maxAgeMs` old while it is open), in every request mode — not only Client basis: the clusters
+ * on screen whose reading is older are asked for again (REFRESH), each at most every 30 s.
+ */
+export async function keepFresh(ids, datasets, maxAgeMs) {
+  if (!ids || !ids.length) return false;
+  for (const ds of datasets) await demandDataset(ids, ds, { maxAgeMs }).catch(() => false);
+  return true;
+}
+
 export async function askForPage(ids, datasets, { force = false } = {}) {
   if (!fetchesOnlyOnAsk() || !ids || !ids.length) return false;
   for (const ds of datasets) await demandDataset(ids, ds, { force }).catch(() => false);
