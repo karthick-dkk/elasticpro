@@ -285,13 +285,14 @@ log line a minute and nothing else). The disk copy is `<data dir>/cache/<cluster
 (`.json.gz` over 64 KB), 0600, good entries only, and follows the configured clusters.
 Idle rule: nothing asked `FLEET_STATE`/`CLUSTER_DATASET`/events for 10 minutes ⇒ only health is polled.
 
-Keep-fresh floor (0.3.81): what the Clusters page shows — `health` and `nodes` — once read for a
-cluster is never older than **5 min** while idle and **2 min** while somebody has ElasticPro open
-(or the dataset's own interval when shorter), in **every** mode, Client basis (on-demand) and
-hybrid included; stretched like any interval while the cluster is slowed, held by a stop, a
-throttle or a down tunnel like everything else. A dataset never read is not fetched by the floor,
-so a fresh core under Client basis still sends nothing until a page asks
-(`fleet::scheduler::KEEP_FRESH`).
+Keep-fresh floor (0.3.80): what the Clusters page shows — `health` and `nodes` — once read for a
+cluster is never older than **5 min** (or the dataset's own interval when shorter), in **every**
+mode, Client basis (on-demand) and hybrid included, whether anybody is looking or not; stretched
+like any interval while the cluster is slowed, held by a stop, a throttle or a down tunnel like
+everything else. A dataset never read is not fetched by the floor, so a fresh core under Client
+basis still sends nothing until a page asks (`fleet::scheduler::KEEP_FRESH`). While the Clusters
+list is open it asks for both again once they are **2 min** old (`REFRESH`, each cluster at most
+every 30 s; ui/js/pages/overview.js `LIST_FRESH_MS`).
 
 **Zabbix clusters** are in the poller like any other: `all_specs()` is the Zabbix sync's
 clusters first, then the primed ones, so a host added in Zabbix is polled from the sync that
