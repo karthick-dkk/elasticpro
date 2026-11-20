@@ -620,7 +620,7 @@ function allJobsCard(now) {
       trs.push(tr(`${k}:sub`, [td(`${k}:sub:td`, [
         sub.rec ? h('span.jb-rec', sub.rec) : null,
         sub.rec && t ? h('span.muted', ' · ') : null,
-        t ? h(t.level === 'warn' ? 'span.jb-warn' : 'span.jb-err', { title: t.title || t.text }, J.truncate(t.text, 160)) : null,
+        t ? h(t.level === 'warn' ? 'span.jb-warn' : 'span.jb-err', { title: t.title || t.text }, J.truncate(t.text, t.level === 'warn' ? 160 : 120)) : null,
       ].filter(Boolean), { colspan: n, cls: 'jb-subl' })], { cls: 'jb-sub', data: { sub: job.id } }));
     }
     if (open) trs.push(tr(`${k}:more`, [td(`${k}:more:td`, detailPanel(job, cur, last, now), { colspan: n, cls: 'jb-more' })], { cls: 'jb-detail', data: { detail: job.id } }));
