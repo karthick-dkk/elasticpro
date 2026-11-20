@@ -28,6 +28,81 @@ use std::collections::HashSet;
 pub const TASKS_PATH: &str = "/_tasks?actions=*search*,*cat*,*snapshot/status*&detailed&group_by=none";
 /// What every opaque id of ours starts with.
 pub const OPAQUE_PREFIX: &str = "elasticpro/";
+/// The searches running now, grouped by node so each task's node has its name: the Jobs
+/// page's *Slow searches now* (docs/JOBS.md "Slow searches"). A sibling of `TASKS_PATH`, its
+/// one definition.
+pub const SEARCH_TASKS_PATH: &str = "/_tasks?actions=*search*&detailed";
+
+/// One search running on a cluster, as *Slow searches now* shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlowSearch {
+    pub task_id: String,
+    /// The node's name when the answer gives it, else its id.
+    pub node: String,
+    pub action: String,
+    pub running_ms: u64,
+    pub start_ms: Option<u64>,
+    /// `indices[...]` of the description, when it says.
+    pub indices: Option<String>,
+    /// `source[...]` of the description: the query, when Elasticsearch gives it.
+    pub query: Option<String>,
+    pub description: Option<String>,
+    pub opaque_id: Option<String>,
+}
+
+impl SlowSearch {
+    /// One of ElasticPro's own searches (its opaque id is ours).
+    pub fn ours(&self) -> bool {
+        self.opaque_id.as_deref().is_some_and(|o| o.starts_with(OPAQUE_PREFIX))
+    }
+}
+
+/// `indices[a,b], search_type[...], source[{...}]` -> (indices, source). The source is the last
+/// part and may itself hold brackets: it runs to the last `]`.
+pub fn split_description(d: &str) -> (Option<String>, Option<String>) {
+    let indices = d.find("indices[").and_then(|i| {
+        let rest = &d[i + "indices[".len()..];
+        rest.find(']').map(|j| rest[..j].to_string())
+    });
+    let source = d.find("source[").and_then(|i| {
+        let rest = &d[i + "source[".len()..];
+        rest.rfind(']').map(|j| rest[..j].to_string())
+    });
+    (indices.filter(|s| !s.is_empty()), source.filter(|s| !s.is_empty()))
+}
+
+/// The top-level searches in a `_tasks` answer (either shape) running at least `min_ms`,
+/// longest first. A child task (a shard's phase) is its parent's, not a search of its own.
+pub fn slow_searches(res: &Value, min_ms: u64) -> Vec<SlowSearch> {
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(nodes) = res.get("nodes").and_then(Value::as_object) {
+        for (id, n) in nodes {
+            if let Some(name) = n.get("name").and_then(Value::as_str) {
+                names.insert(id.clone(), name.to_string());
+            }
+        }
+    }
+    let mut out: Vec<SlowSearch> = all_tasks(res).into_iter().filter_map(|(task_id, t)| {
+        let action = t.get("action").and_then(Value::as_str).unwrap_or("");
+        if !action.contains("search") || t.get("parent_task_id").is_some_and(|p| !p.is_null()) {
+            return None;
+        }
+        let running_ms = t.get("running_time_in_nanos").and_then(Value::as_u64)? / 1_000_000;
+        if running_ms < min_ms {
+            return None;
+        }
+        let node_id = t.get("node").and_then(Value::as_str).map(String::from)
+            .unwrap_or_else(|| task_id.split(':').next().unwrap_or("").to_string());
+        let description = t.get("description").and_then(Value::as_str).map(String::from).filter(|s| !s.is_empty());
+        let (indices, query) = description.as_deref().map(split_description).unwrap_or((None, None));
+        Some(SlowSearch {
+            task_id, node: names.get(&node_id).cloned().unwrap_or(node_id), action: action.to_string(), running_ms,
+            start_ms: t.get("start_time_in_millis").and_then(Value::as_u64), indices, query, description, opaque_id: opaque_of(t),
+        })
+    }).collect();
+    out.sort_by(|a, b| b.running_ms.cmp(&a.running_ms).then_with(|| a.task_id.cmp(&b.task_id)));
+    out
+}
 
 /// `elasticpro/<instance>/<origin>/<cluster>/<n>`, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,6 +279,34 @@ mod tests {
         let p = choose(&res, &s);
         assert_eq!(p.iter().map(|p| p.task_id.as_str()).collect::<Vec<_>>(), vec!["nodeA:1"], "the parent only");
         assert_eq!(p[0].running_ms, Some(400_000));
+    }
+
+    #[test]
+    fn slow_searches_are_the_long_top_level_ones_longest_first_with_their_node_and_query() {
+        let mut child = task(3, "indices:data/read/search[phase/query]", "x", 500);
+        child["parent_task_id"] = json!("nodeA:1");
+        let mut a = task(1, "indices:data/read/search", "elasticpro/abcd/core:logdelay/es1/9", 372);
+        a["description"] = json!(r#"indices[logstash-2026.11.*], search_type[QUERY_THEN_FETCH], source[{"size":0,"aggs":{"t":{"terms":{"field":"a","include":["x"]}}}}]"#);
+        let res = json!({ "nodes": { "nodeA": { "name": "es-data-3", "tasks": {
+            "nodeA:1": a,
+            "nodeA:2": task(2, "indices:data/read/search", "kibana-7f", 58),
+            "nodeA:3": child,
+            "nodeA:4": task(4, "indices:data/read/search", "quick", 2),
+            "nodeA:5": task(5, "cluster:monitor/nodes/stats", "not-a-search", 900),
+        } } } });
+        let s = slow_searches(&res, 30_000);
+        assert_eq!(s.iter().map(|x| x.task_id.as_str()).collect::<Vec<_>>(), vec!["nodeA:1", "nodeA:2"]);
+        assert_eq!(s[0].node, "es-data-3");
+        assert_eq!(s[0].running_ms, 372_000);
+        assert_eq!(s[0].indices.as_deref(), Some("logstash-2026.11.*"));
+        assert!(s[0].query.as_deref().unwrap().ends_with(r#"["x"]}}}}"#), "the source runs to the last bracket");
+        assert!(s[0].ours() && !s[1].ours());
+        assert_eq!(s[1].query, None, "no description: unknown, not empty");
+        assert_eq!(slow_searches(&res, 60_000).len(), 1);
+        // The flat shape (group_by=none): the node's id stands for its name.
+        let flat = json!({ "tasks": [task(7, "indices:data/read/search", "x", 40)] });
+        assert_eq!(slow_searches(&flat, 30_000)[0].node, "nodeA");
+        assert!(SEARCH_TASKS_PATH.starts_with("/_tasks?actions=*search*") && SEARCH_TASKS_PATH.contains("detailed"));
     }
 
     #[test]

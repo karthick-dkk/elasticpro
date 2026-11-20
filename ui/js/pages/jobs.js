@@ -20,18 +20,19 @@
 import { h, mount, reconcile } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
 import { tableSort } from '../lib/table-sort.js';
-import { dt, num as fmtNum } from '../lib/fmt.js';
+import { dt, num as fmtNum, download } from '../lib/fmt.js';
 import { state, clusters, requestLoad, refreshRequestLoad } from '../core/state.js';
-import { jobsList, jobControl } from '../core/es.js';
+import { jobsList, jobControl, jobRunDetail, slowSearches } from '../core/es.js';
 import { ensureWrites } from '../core/writes.js';
 import { MANAGED_NOTE } from '../core/managed.js';
-import { confirmDialog } from '../ui/modal.js';
+import { confirmDialog, modal } from '../ui/modal.js';
 import { toast, rowMenu } from '../ui/menu.js';
 import { openCreateJob, createdToast } from '../ui/job-create.js';
 import { keptCard, keptTable } from './common.js';
-import { canOpenPage } from '../core/intent.js';
+import { canOpenPage, navigateTo } from '../core/intent.js';
 import * as J from '../core/jobs.js';
 import * as GR from '../core/jobs-graph.js';
+import * as D from '../core/job-detail.js';
 import { createGraph } from './jobs-graph.js';
 
 /** The tabs, in order. */
@@ -88,6 +89,7 @@ const SORTS = {
 
 export function render(el) {
   host = el;
+  details.clear();
   tab = tabOfHash(hashNow());
   if (!visHooked && typeof document !== 'undefined') { document.addEventListener('visibilitychange', onVisibility); visHooked = true; }
   gen++;
@@ -159,6 +161,8 @@ async function load() {
   if (host && tab === 'history' && !hist.before) await loadHistory({ quiet: true });
   // The graphical view's own reads (health lines, ElasticPro health, the runs): each at its own pace.
   if (host && tab === 'jobs' && list) graph.refresh({ admin: isAdmin(), onDone: () => { if (host && tab === 'jobs') draw(); } });
+  // Slow searches now: at most every 30 s, only while this tab is open (SLOW_SEARCHES).
+  if (host && tab === 'jobs' && list) loadSlow();
   if (host) draw();
 }
 
@@ -336,7 +340,8 @@ function jobsKids(now) {
   if (!list) return [built.same('loading', h('div.tbl-empty', unsupported ? '' : 'Reading the jobs…'))];
   // The approved graphical view (0.3.77): Now, Health, ElasticPro health (an administrator's),
   // Runs — then the tables.
-  return [nowCard(now), healthCard(now), isAdmin() ? appHealthCard() : null, runsCard(now),
+  // Slow searches now (0.3.81) sits under Now: what is running long on the clusters right now.
+  return [nowCard(now), slowCard(), healthCard(now), isAdmin() ? appHealthCard() : null, runsCard(now),
     allJobsCard(now), upNextCard(now), createdCard(now)].filter(Boolean);
 }
 
@@ -543,34 +548,37 @@ function allColumns(now) {
     name: { type: 'text', value: (r) => r.job.name },
     type: { type: 'text', value: (r) => J.jobTypeText(r.job) },
     status: { type: 'text', value: (r) => J.statusWord(r.status) },
-    progress: { type: 'percent', value: (r) => (r.cur ? J.progressOf(r.cur).pct : null), start: -1 },
     ran: { type: 'date', value: (r) => (r.run ? r.run.startedAt : null), start: -1 },
+    dur: { type: 'number', value: (r) => J.durationMs(r.run, now), start: -1 },
     next: { type: 'date', value: (r) => r.next.at },
-    last: { type: 'date', value: (r) => (r.last ? r.last.endedAt : null), start: -1 },
+    last: { type: 'text', value: (r) => (r.last ? D.resultOf(r.last).text : null) },
     priority: { type: 'number', value: (r) => J.priorityRank(r.job.priority) },
   };
 }
 
 /**
- * All jobs fits the page without a sideways scrollbar at 1280 px with the menu on the left
- * (owner, 0.3.77): Started and Duration are one "Ran" cell, Next and Last run short relative
- * times (the full time on hover), the last result a pill beside its time, Priority and
- * Requests one cell, Paused a chip in Status, and Records and Error a line under the row,
- * only when there is one.
+ * All jobs (the approved design, 0.3.81): the exact time the open run (else the last) started,
+ * how long it took, the exact next run, and the last run's result — "Partial · 4 of 71
+ * clusters" — so the row says what happened without opening it. ▸ opens the run's summary,
+ * exceptions and log (JOB_RUN_DETAIL, read only then). It fits 1280 px with the menu on the
+ * left: Priority and Requests one cell, Paused a chip in Status, Records and the trouble a line
+ * under the row, only when there is one.
  */
 const ALL_HEADERS = [
   { label: 'Name', sort: 'name' }, { label: 'Type', sort: 'type' }, { label: 'Status', sort: 'status' },
-  { label: 'Progress', sort: 'progress', num: true }, { label: 'Ran', sort: 'ran', title: 'when the open run (else the last) started · how long it took' },
-  { label: 'Next run', sort: 'next' }, { label: 'Last run', sort: 'last' },
+  { label: 'Last run', sort: 'ran', title: 'when the open run (else the last) started' },
+  { label: 'Duration', sort: 'dur', num: true, title: 'how long it took, or has taken so far' },
+  { label: 'Next run', sort: 'next' },
+  { label: 'Result', sort: 'last', title: 'how the last run ended, and of how many clusters' },
   { label: 'Priority · requests', sort: 'priority', title: 'its priority · the requests it may use at once (what the governor gives it now, when it reports it)' },
 ];
 
-/** The line under a row of All jobs: what the run processed and why the last one failed. Null when neither. */
+/** The line under a row of All jobs: what the run processed, and the last run's trouble (a deferral amber, an error red). Null when neither. */
 function subLineOf(run, last) {
   const rec = run && run.records !== null && run.records !== undefined ? `${fmtNum(run.records)} record${run.records === 1 ? '' : 's'}` : '';
-  const err = last && last.error ? String(last.error) : '';
-  if (!rec && !err) return null;
-  return { rec, err };
+  const trouble = D.troubleOf(last, nameOfCluster);
+  if (!rec && !trouble) return null;
+  return { rec, trouble };
 }
 
 function allJobsCard(now) {
@@ -586,54 +594,317 @@ function allJobsCard(now) {
     const req = J.requestsText(job);
     const st = job.state || {};
     const sub = subLineOf(run, last);
-    const ran = J.ranText(run, now);
+    const res = D.resultOf(last);
     const toggle = h('button.jb-x', {
-      type: 'button', 'aria-expanded': String(open), title: open ? 'Hide the details' : 'Show the details',
-      onclick: () => { if (expanded.has(job.id)) expanded.delete(job.id); else expanded.add(job.id); draw(); },
+      type: 'button', 'aria-expanded': String(open), title: open ? 'Hide the details' : 'Show the last run\'s summary, exceptions and log',
+      onclick: () => toggleRow(job.id),
     }, open ? '▾' : '▸');
     // Paused while a run goes: the run's status, and a chip that says the timer is held.
     const pausedChip = st.paused && r.status !== 'paused' ? h('span.jb-chiplet', { title: `paused${st.pausedBy ? ` by ${st.pausedBy}` : ''}: its timer starts nothing; this run finishes` }, 'paused') : null;
     trs.push(tr(k, [
       td(`${k}:name`, h('span.jb-name', toggle, h('b', job.name), J.isCreated(job) ? h('span.muted.jb-cr', ' · created') : null), { cls: 'jb-nm', title: `${job.name} · ${job.id}` }),
       td(`${k}:type`, J.jobTypeText(job)),
-      td(`${k}:status`, h('span.jb-st', pill(J.statusWord(r.status), J.statusTone(r.status), r.status === 'paused' && st.pausedBy ? `paused by ${st.pausedBy}` : null), pausedChip)),
-      td(`${k}:prog`, p ? p.text : '—', { num: true, cls: p && p.pct === null ? 'muted' : '' }),
-      td(`${k}:ran`, ran || '—', { cls: ran ? '' : 'muted', title: run && run.startedAt ? `started ${dt(run.startedAt)}${run.endedAt ? ` · ended ${dt(run.endedAt)}` : ' · still running'}` : null }),
-      td(`${k}:next`, r.next.at !== null ? J.shortRelative(r.next.at, now) : '—', { cls: r.next.at !== null ? '' : 'muted', title: r.next.at !== null ? `${r.next.text} · ${r.next.zone}` : r.next.note }),
-      td(`${k}:last`, last ? h('span.jb-st', pill(J.statusWord(last.status), J.statusTone(last.status)), last.endedAt ? h('span.jb-ago', J.shortRelative(last.endedAt, now)) : null) : dash(),
-        { title: last && last.endedAt ? dt(last.endedAt) : null }),
+      td(`${k}:status`, h('span.jb-st', pill(J.statusWord(r.status), J.statusTone(r.status), r.status === 'paused' && st.pausedBy ? `paused by ${st.pausedBy}` : null), pausedChip,
+        p ? h('span.muted.jb-pct', p.text) : null)),
+      td(`${k}:ran`, run && run.startedAt ? D.exactTime(run.startedAt, { tz: tz() }) : '—', { cls: run && run.startedAt ? 'mono' : 'muted',
+        title: run && run.startedAt ? `${J.relativeText(run.startedAt, now)}${run.endedAt ? ` · ended ${D.exactTime(run.endedAt, { tz: tz() })}` : ' · still running'}` : null }),
+      td(`${k}:dur`, run ? D.runDuration(run, now) : '—', { num: true, cls: run ? '' : 'muted' }),
+      td(`${k}:next`, r.next.at !== null ? D.exactTime(r.next.at, { tz: tz(), seconds: false }) : '—', { cls: r.next.at !== null ? 'mono' : 'muted',
+        title: r.next.at !== null ? `${r.next.rel} · ${r.next.zone}` : r.next.note }),
+      td(`${k}:last`, last ? pill(res.text, res.tone, last.endedAt ? `ended ${D.exactTime(last.endedAt, { tz: tz() })}` : null) : dash(), { cls: 'jb-res' }),
       td(`${k}:req`, `${J.priorityText(job.priority)} · ${req.text}`, { title: req.title }),
       admin ? td(`${k}:act`, rowMenu(() => jobMenu(job.id), { title: `Actions for ${job.name}`, menuLabel: job.name }), { cls: 'jb-acts' }) : null,
     ].filter(Boolean), { cls: sub ? 'jb-has-sub' : '', data: { job: job.id, status: r.status } }));
     if (sub) {
+      const t = sub.trouble;
       trs.push(tr(`${k}:sub`, [td(`${k}:sub:td`, [
         sub.rec ? h('span.jb-rec', sub.rec) : null,
-        sub.rec && sub.err ? h('span.muted', ' · ') : null,
-        sub.err ? h('span.jb-err', { title: sub.err }, `Error: ${J.truncate(sub.err, 110)}`) : null,
+        sub.rec && t ? h('span.muted', ' · ') : null,
+        t ? h(t.level === 'warn' ? 'span.jb-warn' : 'span.jb-err', { title: t.title || t.text }, J.truncate(t.text, 160)) : null,
       ].filter(Boolean), { colspan: n, cls: 'jb-subl' })], { cls: 'jb-sub', data: { sub: job.id } }));
     }
-    if (open) trs.push(tr(`${k}:more`, [td(`${k}:more:td`, detailsOf(job, cur, last, now), { colspan: n, cls: 'jb-more' })], { cls: 'jb-detail', data: { detail: job.id } }));
+    if (open) trs.push(tr(`${k}:more`, [td(`${k}:more:td`, detailPanel(job, cur, last, now), { colspan: n, cls: 'jb-more' })], { cls: 'jb-detail', data: { detail: job.id } }));
   }
   const headers = [...ALL_HEADERS, ...(admin ? [''] : [])];
-  return keptCard(built, 'all', 'All jobs', `${(list.jobs || []).length} jobs · a column sorts; unknown values go last`,
+  return keptCard(built, 'all', 'All jobs', `${(list.jobs || []).length} jobs · times in ${tz() ? `server time (${tz()})` : 'your time'} · ▸ opens a job's last run`,
     keptTable(built, 'all', headers, trs, { sort: SORTS.all }));
 }
 
-function detailsOf(job, cur, last, now) {
+/* ------------------------- a job opened: its run's details (JOB_RUN_DETAIL) ------------------------- */
+
+/** Open rows: which tab, which run (null: the last), and the job's run history once asked for. */
+const rowState = new Map();
+/** Runs' details as read: runId → { res, error, loading }. Read once, when a row opens on it. */
+const details = new Map();
+
+function toggleRow(jobId) {
+  if (expanded.has(jobId)) { expanded.delete(jobId); rowState.delete(jobId); }
+  else { expanded.add(jobId); rowState.set(jobId, { tab: 'summary', runId: null, hist: null, histLoading: false, showAll: false }); }
+  draw();
+}
+
+/** The run a row shows: the one picked in its Run history, else the job's last. */
+function rowRun(jobId, last) {
+  const s = rowState.get(jobId);
+  const picked = s && s.runId && s.hist && Array.isArray(s.hist.runs) ? s.hist.runs.find((x) => x.id === s.runId) : null;
+  return picked || last;
+}
+
+async function loadDetail(runId) {
+  if (!runId || details.has(runId)) return;
+  details.set(runId, { res: null, error: null, loading: true });
+  const res = await jobRunDetail(runId);
+  details.set(runId, res && res.ok ? { res, error: null, loading: false }
+    : { res: null, error: J.refusalText(res) || 'the core did not answer', loading: false, unsupported: !!(res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) });
+  if (host) draw();
+}
+
+async function loadRowHistory(jobId) {
+  const s = rowState.get(jobId);
+  if (!s || s.histLoading) return;
+  s.histLoading = true;
+  const res = await jobsList({ jobId, limit: 15 });
+  s.histLoading = false;
+  s.hist = res && res.ok ? res : { error: J.refusalText(res) || 'the core did not answer', runs: [] };
+  if (host) draw();
+}
+
+function setRowTab(jobId, tab) {
+  const s = rowState.get(jobId);
+  if (!s) return;
+  s.tab = tab;
+  if (tab === 'history' && !s.hist) loadRowHistory(jobId);
+  draw();
+}
+
+/** The expanded row: Summary · Exceptions (n) · All clusters (n) · Log · Run history. */
+function detailPanel(job, cur, last, now) {
+  const s = rowState.get(job.id) || { tab: 'summary' };
+  const run = rowRun(job.id, last);
+  const done = run && !J.isOpen(run);
+  if (done) loadDetail(run.id);
+  const d = done ? details.get(run.id) : null;
+  const sig = JSON.stringify([s.tab, s.showAll, run && run.id, run && run.status, run && run.endedAt, d && [!!d.res, d.error, d.loading],
+    s.hist ? (s.hist.runs || []).map((x) => x.id).join(',') : null, s.histLoading, cur && cur.id, job.state && job.state.nextRunAt,
+    s.tab === 'summary' && cur ? Math.floor(now / 5000) : 0]);
+  return built.get(`det:${job.id}`, sig, () => buildPanel(job, cur, run, d, s, now));
+}
+
+function buildPanel(job, cur, run, d, s, now) {
+  const detail = d && d.res ? d.res.detail : null;
+  const tabs = D.detailTabs(detail).map((t) => h('button', {
+    type: 'button', dataset: { dtab: t.id }, 'aria-pressed': String(s.tab === t.id), onclick: () => setRowTab(job.id, t.id),
+  }, t.label));
+  // Why there are no details to show, when there are none (yet).
+  const why = !run || J.isOpen(run) ? null
+    : !d || d.loading ? 'Reading the run\'s details…'
+      : d.error ? (d.unsupported ? 'This server keeps no run details yet: JOB_RUN_DETAIL needs ElasticPro 0.3.81.' : `The run's details could not be read: ${d.error}`)
+        : (d.res && !d.res.detail ? d.res.why : null);
+  let body;
+  if (s.tab === 'history') body = historyPane(job, run);
+  else if (!run) body = h('div.jb-dnote.muted', 'This job has not run here yet.');
+  // The summary says what the run record says, whatever became of its details.
+  else if (s.tab === 'summary') body = summaryPane(job, cur, run, detail, now, why);
+  else if (J.isOpen(run)) body = h('div.jb-dnote.muted', 'The run is still going: its parts and log are kept when it ends.');
+  else if (!detail) body = h('div.jb-dnote', h(d && d.error ? 'span.jb-err' : 'span.muted', why || 'This run kept no details.'));
+  else if (s.tab === 'exceptions') body = partsPane(job, D.exceptionsOf(detail), detail, { exceptions: true });
+  else if (s.tab === 'clusters') body = partsPane(job, (detail && detail.parts) || [], detail, { exceptions: false });
+  else body = logPane(run, detail);
+  return h('div.jb-exp', { dataset: { run: run ? run.id : '' } }, h('div.jb-dtabs', { role: 'group', 'aria-label': 'Run details' }, ...tabs), body);
+}
+
+function summaryPane(job, cur, run, detail, now, why = null) {
   const st = job.state || {};
   const line = (k, v) => (v === null || v === undefined || v === '' ? null : h('div.jb-kv', h('span.k', k), h('span.v', String(v))));
-  const runLine = (label, r) => r && h('div.jb-kv', h('span.k', label),
-    h('span.v', `${J.statusWord(r.status)} · ${J.triggerText(r.trigger)} · ${r.startedAt ? dt(r.startedAt) : 'not started'}${r.endedAt ? ` → ${dt(r.endedAt)}` : ''} · run ${r.id}${r.retryOf ? ` · retry ${r.attempt || ''} of ${r.retryOf}` : ''}`));
-  return h('div.jb-details',
-    line('Schedule', job.schedule),
-    line('Next run', st.nextRunAt ? `${dt(st.nextRunAt)} (${J.relativeText(st.nextRunAt, now)})` : st.nextRunNote),
-    st.paused ? line('Paused', `by ${st.pausedBy || 'an administrator'}${st.pausedAt ? ` · ${dt(st.pausedAt)}` : ''}`) : null,
-    runLine('Open run', cur), runLine('Last run', last),
-    last && last.error ? line('Error', last.error) : null,
-    last && last.note ? line('Note', last.note) : null,
-    last && last.deferred ? line('Waited for', J.busyText(last.deferred, nameOfCluster, now)) : null,
-    (cur || last) && (cur || last).clusters && (cur || last).clusters.length ? line('Clusters', (cur || last).clusters.map(nameOfCluster).join(', ')) : null,
-    line('Runs in', job.owner), line('Job id', job.id));
+  const cells = D.summaryCells(run, detail, { tz: tz(), now });
+  return h('div.jb-sum',
+    h('div.jb-h', 'Run summary'),
+    h('div.jb-grid', ...cells.map(([k, v, tone]) => h('div', h('small', k), h(`b${tone ? `.t-${tone}` : ''}`, v)))),
+    why ? h('div.jb-dnote.muted', why) : null,
+    h('div.jb-details',
+      line('Schedule', job.schedule),
+      line('Next run', st.nextRunAt ? `${D.exactTime(st.nextRunAt, { tz: tz(), seconds: false })} (${J.relativeText(st.nextRunAt, now)})` : st.nextRunNote),
+      st.paused ? line('Paused', `by ${st.pausedBy || 'an administrator'}${st.pausedAt ? ` · ${dt(st.pausedAt)}` : ''}`) : null,
+      cur && cur.id !== run.id ? line('Open run', `${J.statusWord(cur.status)} · run ${cur.id} · since ${D.exactTime(cur.startedAt, { tz: tz() })}`) : null,
+      run.retryOf ? line('Retry of', `run ${run.retryOf}${run.attempt ? ` · try ${run.attempt}` : ''}`) : null,
+      run.error ? line(run.status === 'deferred' ? 'Waited' : 'Error', run.error) : null,
+      run.note ? line('Note', run.note) : null,
+      run.deferred ? line('Waited for', J.busyText(run.deferred, nameOfCluster, now)) : null,
+      run.clusters && run.clusters.length ? line('Clusters', run.clusters.map(nameOfCluster).join(', ')) : null,
+      line('Runs in', job.owner), line('Job id', job.id)));
+}
+
+/** A part's Action: the page that has the setting, when the core names one the caller may open. */
+function todoLink(p) {
+  const t = p.todo;
+  if (!t) return dash();
+  if (!D.TODO_PAGES.includes(t.page) || !canOpenPage(t.page)) return h('span.muted', { title: t.text }, t.label);
+  return h('a', { href: '#', title: t.text, onclick: (e) => { e.preventDefault(); navigateTo(t.page, null, { cluster: p.cluster }); } }, t.label);
+}
+
+function partsPane(job, parts, detail, { exceptions }) {
+  const c = (detail && detail.counts) || {};
+  const head = exceptions ? `Exceptions — clusters not fully ${job.id === 'logdelay.measure' ? 'measured' : 'done'}` : 'All clusters';
+  const rows = parts.map((p) => h(`tr${p.status === 'deferred' ? '.jb-defer' : ''}`, { dataset: { part: p.cluster, status: p.status } },
+    h('td', h('b', nameOfCluster(p.cluster))),
+    h('td', pill(D.partWord(p.status), D.partTone(p.status))),
+    h('td.jb-perr', p.code ? h('span.jb-code', p.code) : (p.status === 'succeeded' ? dash() : null),
+      p.message ? h('div.sub', { title: p.message }, p.message) : null),
+    h('td.num', p.records === null || p.records === undefined ? '—' : fmtNum(p.records)),
+    h('td.num', D.elapsedText(p.elapsedMs)),
+    h('td', p.retry || '—'),
+    h('td', todoLink(p))));
+  const okN = Number(c.succeeded) || 0;
+  const allN = ['succeeded', 'partial', 'failed', 'deferred', 'skipped'].reduce((n, k) => n + (Number(c[k]) || 0), 0);
+  const notListed = Number(detail && detail.partsNotListed) || 0;
+  const foot = exceptions
+    ? h('div.jb-dnote.muted', `${fmtNum(okN)} cluster${okN === 1 ? '' : 's'} succeeded · `,
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); setRowTab(job.id, 'clusters'); } }, `View all ${fmtNum(allN)}`))
+    : (notListed ? h('div.jb-dnote.muted', `${fmtNum(notListed)} more succeeded — counted, not listed (a run keeps up to 300 by name)`) : null);
+  const narrowed = detail && detail.narrowed ? h('div.jb-dnote.muted', 'Only the clusters you can see are listed, and counted.') : null;
+  const tbl = parts.length
+    ? h('div.jb-scroll', h('table.tbl.jb-inner', h('thead', h('tr', ...['Cluster', 'Result', 'Error', 'Records', 'Elapsed', 'Retry', 'Action'].map((x, i) => h(`th${[3, 4].includes(i) ? '.num' : ''}`, x)))), h('tbody', ...rows)))
+    : h('div.jb-dnote.muted', exceptions ? 'Every cluster of this run succeeded.' : 'This run reported no clusters.');
+  return h('div.jb-parts', h('div.jb-h', head), tbl, foot, narrowed);
+}
+
+function logPane(run, detail) {
+  const lines = (detail && detail.lines) || [];
+  const text = D.logText(detail, { tz: tz(), runId: run.id });
+  const copy = async (e) => {
+    e.preventDefault();
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('this window has no clipboard access');
+      await navigator.clipboard.writeText(text); toast('Log copied', 'ok', 1600);
+    } catch (err) { toast(`Not copied: ${err && err.message ? err.message : err}`, 'err', 3000); }
+  };
+  const save = (e) => { e.preventDefault(); download(D.logFileName(run.id), text); };
+  const body = lines.length
+    ? h('pre.jb-log', ...lines.map((l) => h('div', h('span.m', D.logStamp(l.at, tz())), ' ',
+      h(`span${l.level === 'ERROR' ? '.e' : l.level === 'WARN' ? '.w' : ''}`, `${String(l.level || '').padEnd(5)}  ${l.text}`))))
+    : h('div.jb-dnote.muted', detail && detail.linesNote ? detail.linesNote : 'This run wrote no lines of its own.');
+  return h('div.jb-logp',
+    h('div.jb-h', `Log — run ${run.id} `, h('span.jb-hn', '· kept as long as the run · ',
+      h('a', { href: '#', dataset: { act: 'copy' }, onclick: copy }, 'Copy'), ' · ',
+      h('a', { href: '#', dataset: { act: 'download' }, onclick: save }, 'Download .txt'))),
+    detail && detail.linesDropped ? h('div.jb-dnote.muted', `${fmtNum(detail.linesDropped)} lines between the first ${D.LOG_HEAD} and the last ${D.LOG_TAIL} were not kept.`) : null,
+    body);
+}
+
+function historyPane(job, shown) {
+  const s = rowState.get(job.id);
+  if (!s || !s.hist) return h('div.jb-dnote.muted', 'Reading the job\'s runs…');
+  if (s.hist.error) return h('div.jb-dnote', h('span.jb-err', `The runs could not be read: ${s.hist.error}`));
+  const runs = (s.hist.runs || []).filter((r) => r.jobId === job.id);
+  if (!runs.length) return h('div.jb-dnote.muted', 'No run of this job is kept.');
+  const now = Date.now();
+  return h('div.jb-scroll', h('table.tbl.jb-inner',
+    h('thead', h('tr', ...['Started', 'Duration', 'Result', 'Trigger', ''].map((x) => h('th', x)))),
+    h('tbody', ...runs.map((r) => {
+      const res = D.resultOf(r);
+      const pick = !J.isOpen(r) ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); s.runId = r.id; s.tab = 'summary'; draw(); } }, shown && shown.id === r.id ? 'shown' : 'Open') : h('span.muted', 'running');
+      return h(`tr${shown && shown.id === r.id ? '.jb-focus' : ''}`, { dataset: { hrun: r.id } },
+        h('td.mono', D.exactTime(r.startedAt || r.createdAt, { tz: tz() })), h('td.num', D.runDuration(r, now)),
+        h('td', pill(res.text, res.tone)), h('td', J.triggerText(r.trigger)), h('td', pick));
+    }))));
+}
+
+/* ------------------------------- Slow searches now (SLOW_SEARCHES) ------------------------------- */
+
+/** The card's state: the threshold, the last answer, and whether all rows are shown. */
+const slow = { minMs: D.SLOW_DEFAULT_MS, res: null, error: null, at: 0, loading: false, showAll: false, unsupported: false };
+
+/** Ask for the slow searches — at most every 30 s, and only while the Jobs tab is open. */
+async function loadSlow({ now = false } = {}) {
+  if (slow.loading || slow.unsupported) return;
+  if (!now && Date.now() - slow.at < D.SLOW_POLL_MS) return;
+  slow.loading = true; slow.at = Date.now();
+  const res = await slowSearches(slow.minMs);
+  slow.loading = false;
+  if (res && res.ok) { slow.res = res; slow.error = null; }
+  else if (res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) slow.unsupported = true;
+  else slow.error = J.refusalText(res) || 'the core did not answer';
+  if (host && tab === 'jobs') draw();
+}
+
+function setSlowMin(ms) {
+  if (slow.minMs === ms) return;
+  slow.minMs = ms; slow.showAll = false;
+  draw();
+  loadSlow({ now: true });
+}
+
+function openSearch(sx) {
+  const text = D.searchText(sx, nameOfCluster);
+  const who = D.whoRan(sx);
+  modal('Search running', `${sx.name || nameOfCluster(sx.cluster)} · ${D.runningText(sx.runningMs)} · task ${sx.taskId}`, [
+    h('div.jb-kvs',
+      h('div.jb-kv', h('span.k', 'Node'), h('span.v', sx.node || '—')),
+      h('div.jb-kv', h('span.k', 'Index'), h('span.v.mono', sx.indices || 'not said')),
+      h('div.jb-kv', h('span.k', 'Task id'), h('span.v.mono', sx.taskId)),
+      h('div.jb-kv', h('span.k', 'X-Opaque-Id'), h('span.v.mono', sx.opaqueId || 'not set'), who === 'ElasticPro' ? h('span.jb-chiplet', 'ElasticPro') : null)),
+    h('pre.jb-q-full', sx.query || sx.description || 'The cluster did not say the query.'),
+  ], (ctx) => [
+    h('button.btn', { type: 'button', onclick: async () => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('this window has no clipboard access');
+        await navigator.clipboard.writeText(text); toast('Copied', 'ok', 1600);
+      } catch (e) { ctx.msg(`Not copied: ${e && e.message ? e.message : e}`); }
+    } }, 'Copy'),
+    h('button.btn.primary', { type: 'button', onclick: () => ctx.done(null) }, 'Close'),
+  ], { width: '760px', cls: 'jb-search-dlg' });
+}
+
+function slowCard() {
+  if (slow.unsupported) return null;
+  if (!slow.res && !slow.error && !slow.loading) loadSlow({ now: true });
+  const r = slow.res;
+  const sig = JSON.stringify([slow.minMs, slow.showAll, slow.error, r && r.at, r && r.minMs, !!r]);
+  return built.get('slow:card', sig, () => {
+    const seg = h('span.seg.jb-seg', { role: 'group', 'aria-label': 'Running longer than' }, ...D.SLOW_THRESHOLDS.map(([ms, label]) =>
+      h('button.btn.sm', { type: 'button', dataset: { min: String(ms) }, 'aria-pressed': String(slow.minMs === ms), onclick: () => setSlowMin(ms) }, label)));
+    const label = (D.SLOW_THRESHOLDS.find(([ms]) => ms === slow.minMs) || [0, '30 s'])[1];
+    const sub = `searches running longer than ${label} on the clusters you see · read every 30 s while this page is open · read only`;
+    let body;
+    if (slow.error) body = [h('div.jb-dnote', h('span.jb-err', `The slow searches could not be read: ${slow.error}`))];
+    else if (!r) body = [h('div.jb-dnote.muted', 'Reading the clusters\' tasks…')];
+    else {
+      // A higher threshold than the answer's is applied here at once; a lower one waits for the next answer.
+      const all = r.searches || [];
+      const list = all.filter((x) => (Number(x.runningMs) || 0) >= slow.minMs);
+      const tiles = D.slowTiles({ ...r, searches: list, count: list.length === all.length ? r.count : list.length }, nameOfCluster);
+      const shown = slow.showAll ? list : list.slice(0, D.SLOW_ROWS);
+      const rows = shown.map((sx) => {
+        const tone = D.runningTone(sx.runningMs);
+        return h('tr', { dataset: { task: sx.taskId, cluster: sx.cluster } },
+          h('td', h('b', sx.name || nameOfCluster(sx.cluster)), sx.by === 'ElasticPro' ? h('span.jb-chiplet', { title: 'one of ElasticPro\'s own searches' }, 'ElasticPro') : null),
+          h('td.num', h(`b${tone ? `.t-${tone}` : ''}`, D.runningText(sx.runningMs))),
+          h('td', sx.node || '—'),
+          h('td.mono.jb-idx', { title: sx.indices || '' }, sx.indices || '—'),
+          h('td.jb-qc', h('div.jb-q', { title: 'Open shows all of it' }, sx.query || sx.description || 'not said')),
+          h('td', h('button.btn.sm', { type: 'button', onclick: () => openSearch(sx) }, 'Open')));
+      });
+      const more = list.length > shown.length
+        ? h('tr', h('td.muted', { colspan: 6 }, `${list.length - shown.length} more · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); slow.showAll = true; draw(); } }, `Show all ${list.length}`)))
+        : null;
+      const notRead = (r.notRead || []);
+      body = [
+        h('div.jg-tiles.jb-slow-tiles',
+          h('div.jg-tile', { dataset: { tile: 'slow-count' } }, h('span.k', 'Running long'), h('b.v', tiles.count.value), h('span.d', tiles.count.sub)),
+          h('div.jg-tile', { dataset: { tile: 'slow-longest' } }, h('span.k', 'Longest'), h(`b.v${tiles.longest.tone ? `.t-${tiles.longest.tone}` : ''}`, tiles.longest.value), h('span.d', tiles.longest.sub)),
+          h('div.jg-tile', { dataset: { tile: 'slow-cluster' } }, h('span.k', 'Cluster slowest now'), h('b.v', tiles.slowest.value), h('span.d', tiles.slowest.sub))),
+        list.length
+          ? h('div.jb-scroll', h('table.tbl.jb-slow', h('thead', h('tr', ...['Cluster', 'Running', 'Node', 'Index', 'Query', ''].map((x, i) => h(`th${i === 1 ? '.num' : ''}`, x)))), h('tbody', ...rows, more)))
+          : h('div.jb-none.muted', `No search has run longer than ${label} on the ${r.clustersRead} cluster${r.clustersRead === 1 ? '' : 's'} read.`),
+        notRead.length ? h('div.jb-dnote.jb-notread', { title: notRead.map((x) => `${x.name || nameOfCluster(x.cluster)}: ${x.why}`).join('\n') },
+          `${notRead.length} cluster${notRead.length === 1 ? '' : 's'} not read — `, notRead.slice(0, 3).map((x) => `${x.name || nameOfCluster(x.cluster)} (${x.why.replace(/^not read: /, '')})`).join(', '),
+          notRead.length > 3 ? ` +${notRead.length - 3}` : '', ': unknown, not "none"') : null,
+      ];
+    }
+    return h('section.card.jb-slowcard', { dataset: { card: 'slow' } },
+      h('header', h('h2', 'Slow searches now'), h('span.sub', sub), h('div.card-acts', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }, seg)),
+      h('div.body', ...body));
+  });
 }
 
 function jobMenu(id) {

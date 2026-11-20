@@ -40,10 +40,14 @@ impl Core {
     }
 
     /// Run `f` as part of the run `key` of `job_id`: every request it sends waits in the run's lane.
+    /// Every line it writes is in a span that names the run (`run = <key>`), so the run's own
+    /// log (docs/JOBS.md "Run details", `jobs::capture`) gathers it.
     pub(crate) async fn governed<F: Future>(&self, key: &str, job_id: &str, f: F) -> F::Output {
+        use tracing::Instrument as _;
         let g = self.job_lane(key, job_id);
+        let span = tracing::info_span!("job_run", run = %key, job = %job_id);
         // On the heap: a job's future is large, and is polled on a runtime thread's stack.
-        governor::within(Some(g.lane()), Box::pin(f)).await
+        governor::within(Some(g.lane()), Box::pin(f)).instrument(span).await
     }
 
     /// The worker's jobs running now: report jobs and the two collections' open runs. One

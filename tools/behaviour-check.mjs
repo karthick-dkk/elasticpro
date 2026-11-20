@@ -8458,11 +8458,35 @@ await settleFor(300);
   const longError = `the data directory is full: ${'no space left on device; '.repeat(6)}free some space`;
   const failed = { id: 'run-fail', jobId: 'settings.backup', owner: 'core', trigger: 'timer', status: 'failed', createdAt: now - 7200e3, startedAt: now - 7200e3,
     endedAt: now - 7100e3, progress: null, done: null, total: null, records: null, error: longError, clusters: [] };
+  // 0.3.81: a log delay run that reported its clusters' parts (4 of 71 not fully measured), and a
+  // hosts collection run deferred for a busy cluster — a warning, never an "Error:".
+  const ldRun = { id: 'be9229a1', jobId: 'logdelay.measure', owner: 'core', trigger: 'timer', status: 'completed', createdAt: now - 3 * 3600e3, startedAt: now - 3 * 3600e3,
+    endedAt: now - 3 * 3600e3 + 91_000, progress: null, done: 71, total: 71, records: 16238, error: null, clusters: [cid(0)],
+    parts: { succeeded: 67, partial: 1, failed: 3, deferred: 0, skipped: 0 } };
+  const deferredRun = { id: 'run-def', jobId: 'hosts.collect', owner: 'worker', trigger: 'timer', status: 'deferred', createdAt: now - 600e3, startedAt: null, endedAt: now - 600e3,
+    progress: null, done: null, total: null, records: null, error: `${cid(1)} is busy: response time 15.7 s exceeded the 8 s threshold; tried again when it eases`, clusters: [cid(1)],
+    deferred: { cluster: cid(1), signal: 'slow', reason: 'response time 15.7 s exceeded the 8 s threshold', since: now - 600e3 }, parts: { succeeded: 0, partial: 0, failed: 0, deferred: 1, skipped: 0 } };
+  const part = (cluster, status, code, message, records, elapsedMs, retry, todo = null) => ({ cluster, status, code, message, records, elapsedMs, retry, todo });
+  const detailAnswer = (runId) => ({ ok: true, run: { ...ldRun, id: runId }, why: null, detail: {
+    counts: { succeeded: 67, partial: 1, failed: 3, deferred: 0, skipped: 0 }, partsNotListed: 0, linesDropped: 0, narrowed: false, window: [now - 5 * 3600e3, now - 3 * 3600e3],
+    parts: [
+      part('demo', 'failed', 'INDEX_NOT_FOUND', 'the answer has no device aggregation', 0, 400, 'None — config issue', { label: 'Set log index', text: "set the cluster's log index (Config › Clusters)", page: 'settings' }),
+      part('ussc', 'failed', 'TIMEOUT', 'no response within 30 s (page 1)', 0, 30000, 'Next run', { label: 'Cluster health', text: 'look at its health', page: 'overview' }),
+      part('finshape', 'failed', 'TIMEOUT', 'no response within 30 s (page 1)', 0, 30000, 'Next run', { label: 'Cluster health', text: 'look at its health', page: 'overview' }),
+      part('aib', 'partial', 'SHARD_FAILURE', '2 of 5 shards failed on page 3', 212, 32800, 'Next run', { label: 'Shard status', text: 'look at shard allocation', page: 'shards' }),
+      part('sisa', 'succeeded', null, null, 1904, 3100, null),
+    ],
+    lines: [
+      { at: now - 3 * 3600e3, level: 'INFO', run: true, text: 'run.start job=logdelay.measure trigger=timer' },
+      { at: now - 3 * 3600e3 + 1400, level: 'ERROR', cluster: 'demo', text: 'demo INDEX_NOT_FOUND the answer has no device aggregation — None — config issue' },
+      { at: now - 3 * 3600e3 + 38000, level: 'WARN', cluster: 'aib', text: 'aib SHARD_FAILURE 2 of 5 shards failed records=212 — Next run' },
+      { at: now - 3 * 3600e3 + 91000, level: 'WARN', run: true, text: 'run.end status=completed ok=67 partial=1 failed=3 deferred=0 skipped=0 records=16238 took=91.0s' },
+    ] } });
   const jobs = () => [
-    mkJob('logdelay.measure', 'Log delay measurement', { priority: 'high', owner: 'core', clusterScoped: false }, { nextRunAt: now + 30 * 60e3 }),
+    mkJob('logdelay.measure', 'Log delay measurement', { priority: 'high', owner: 'core', clusterScoped: false }, { nextRunAt: now + 30 * 60e3, lastRun: ldRun }),
     mkJob('volume.daily', 'Daily volume collection', {}, { current: running(), activeRuns: 1, nextRunAt: now + 5 * 3600e3,
       allocation: withGov ? { requests: 2, min: 1, max: 4, auto: true, reason: 'share' } : null }),
-    mkJob('hosts.collect', 'Hosts collection', { requests: { min: 1, max: 2 } }, { current: stale, activeRuns: 1, nextRunNote: 'not known: a clock change' }),
+    mkJob('hosts.collect', 'Hosts collection', { requests: { min: 1, max: 2 } }, { current: stale, activeRuns: 1, nextRunNote: 'not known: a clock change', lastRun: deferredRun }),
     mkJob('report.run', 'Report runs', { kind: 'manual', pausable: false }, { nextRunNote: 'runs when a person asks' }),
     mkJob('housekeeping', 'Housekeeping', { priority: 'low', requests: { min: 1, max: 1 }, owner: 'core', clusterScoped: false }, { current: counting, activeRuns: 1, nextRunAt: now + 40 * 60e3 }),
     mkJob('settings.backup', 'Settings backup', { owner: 'core', clusterScoped: false }, { lastRun: failed, nextRunAt: now + 26 * 3600e3 }),
@@ -8496,8 +8520,9 @@ await settleFor(300);
       defaults: { requests: { ...j.requests }, priority: j.priority } })) };
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
-    if (['JOBS_LIST', 'HEALTH_HISTORY', 'SYSTEM_HEALTH'].includes(body.type) || /^JOB_/.test(body.type || '')) jsent.push(body);
+    if (['JOBS_LIST', 'HEALTH_HISTORY', 'SYSTEM_HEALTH', 'SLOW_SEARCHES'].includes(body.type) || /^JOB_/.test(body.type || '')) jsent.push(body);
     if (body.type === 'JOBS_LIST') return stubReply(listAnswer(body));
+    if (body.type === 'JOB_RUN_DETAIL' && body.runId === 'be9229a1') return stubReply(detailAnswer(body.runId));
     if (body.type === 'HEALTH_HISTORY') return stubReply(historyAnswer(body));
     if (body.type === 'SYSTEM_HEALTH') return stubReply(sysAnswer);
     if (body.type === 'JOB_SETTINGS_GET') return stubReply(settings);
@@ -8579,6 +8604,29 @@ await settleFor(300);
     const volJob = panel('All jobs') && panel('All jobs').querySelector('tbody tr[data-job="volume.daily"]');
     ok(volJob && /2 of 1–4 · auto/.test(volJob.textContent), `jobs: All jobs does not show the allocation: "${volJob && volJob.textContent}"`);
     ok(runRow('run-vol') === vol && vol.querySelector('.jb-stop') === stopBtn, 'jobs: the governor\'s arrival replaced the running row or its Stop');
+    // Slow searches now (0.3.81): under Now, from the core's `_tasks` read of the mock clusters
+    // (tools/mock-es.mjs: somebody's 42 s search, ours 95 s) — the query cut short, Open shows it all.
+    const slowRow = await waitFor(() => doc.querySelector('[data-card="slow"] tr[data-task="node-1:4712"]'), 'jobs: the slow searches card listing the mock\'s 42 s search', 9000);
+    ok(count('SLOW_SEARCHES', (m) => m.minMs === 30000) >= 1, 'jobs: the slow searches card did not ask SLOW_SEARCHES at 30 s');
+    const cards = [...doc.querySelectorAll('.jb-page section.card')].map((c) => (c.querySelector('header h2') || {}).textContent);
+    ok(cards.indexOf('Slow searches now') === cards.indexOf('Now') + 1, `jobs: the slow searches card is not under Now: ${cards.join(' | ')}`);
+    if (slowRow) {
+      ok(/metrics-\*/.test(slowRow.textContent) && /\*error\*/.test(slowRow.querySelector('.jb-q').textContent) && /^4\ds$/.test(slowRow.querySelector('td:nth-child(2)').textContent),
+        `jobs: the slow search row reads "${slowRow.textContent}"`);
+      const sc = doc.querySelector('[data-card="slow"]');
+      ok(sc.querySelector('[data-tile="slow-count"]') && sc.querySelector('[data-tile="slow-longest"]') && sc.querySelector('[data-tile="slow-cluster"]'), 'jobs: the slow searches tiles are missing');
+      ok(!/cancel/i.test(sc.textContent.replace(/cancelled/gi, '')), 'jobs: the slow searches card offers to cancel');
+      slowRow.querySelector('button').click(); await settleFor(100);
+      const dlg = doc.querySelector('.modal.jb-search-dlg');
+      ok(dlg && /node-1:4712/.test(dlg.textContent) && /kibana-reporting-7f3a/.test(dlg.textContent) && /"sort":\[\{"@timestamp":"desc"\}\]/.test(dlg.textContent)
+        && [...dlg.querySelectorAll('button')].some((b) => b.textContent === 'Copy'), `jobs: Open shows "${dlg && dlg.textContent.slice(0, 200)}"`);
+      if (dlg) { [...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Close').click(); await settleFor(50); }
+      doc.querySelector('[data-card="slow"] button[data-min="60000"]').click(); await settleFor(600);
+      ok(count('SLOW_SEARCHES', (m) => m.minMs === 60000) >= 1, 'jobs: the 1 min threshold did not ask again');
+      ok(!doc.querySelector('[data-card="slow"] tr[data-task="node-1:4712"]'), 'jobs: a 42 s search is listed at 1 min');
+      ok(doc.querySelector('[data-card="slow"] button[data-min="60000"][aria-pressed="true"]'), 'jobs: 1 min is not marked chosen');
+      doc.querySelector('[data-card="slow"] button[data-min="30000"]').click(); await settleFor(300);
+    }
     // Up next: soonest first, the paused job last; the manual one not at all.
     const next = rowsOf('Up next');
     ok(next[0] === 'logdelay.measure' && next.at(-1) === 'zabbix.sync' && !next.includes('report.run'), `jobs: Up next is ${next.join(', ')}`);
@@ -8607,17 +8655,69 @@ await settleFor(300);
     ok(volSub && /12 records/.test(volSub.textContent), `jobs: the running collection's records are not under its row: "${volSub && volSub.textContent}"`);
     // Fewer, merged columns (no sideways scroll at 1280 px — tools/fit-check.mjs measures the width).
     const heads = [...panel('All jobs').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[▲▼↑↓⇅]/g, '').trim());
-    ok(heads.length === 9 && heads.includes('Ran') && heads.includes('Priority · requests') && !heads.includes('Paused') && !heads.includes('Error') && !heads.includes('Records'),
-      `jobs: All jobs has the columns ${heads.join(' | ')}`);
-    ok(/\d+[mhd] ago · /.test((backup.querySelector('td:nth-child(5)') || {}).textContent || ''), `jobs: Ran reads "${(backup.querySelector('td:nth-child(5)') || {}).textContent}"`);
+    ok(heads.length === 9 && ['Last run', 'Duration', 'Next run', 'Result', 'Priority · requests'].every((x) => heads.includes(x)) && !heads.includes('Ran')
+      && !heads.includes('Paused') && !heads.includes('Error') && !heads.includes('Records'), `jobs: All jobs has the columns ${heads.join(' | ')}`);
+    // 0.3.81: the exact last and next run, how long it took, and the result of how many clusters.
+    const cell = (row, i) => ((row && row.querySelector(`td:nth-child(${i})`)) || {}).textContent || '';
+    ok(/^\d{2} [A-Z][a-z]{2,3} \d{2}:\d{2}:\d{2}$/.test(cell(backup, 4)), `jobs: Last run reads "${cell(backup, 4)}", not an exact time`);
+    ok(/^\d+(\.\d+)? ?(ms|s)$|^\d+m \d{2}s$/.test(cell(backup, 5)), `jobs: Duration reads "${cell(backup, 5)}"`);
+    ok(/^\d{2} [A-Z][a-z]{2,3} \d{2}:\d{2}$/.test(cell(backup, 6)), `jobs: Next run reads "${cell(backup, 6)}", not an exact time`);
+    const ldRow = panel('All jobs').querySelector('tbody tr[data-job="logdelay.measure"]');
+    ok(/Partial · 4 of 71 clusters/.test(cell(ldRow, 7)) && ldRow.querySelector('td:nth-child(7) .pill.orange'), `jobs: the log delay result reads "${cell(ldRow, 7)}"`);
+    ok(cell(ldRow, 5) === '1m 31s', `jobs: the log delay duration reads "${cell(ldRow, 5)}"`);
+    // Deferred, cluster busy: amber, a warning — never a red "Error:".
+    const defSub = panel('All jobs').querySelector('tbody tr[data-sub="hosts.collect"]');
+    ok(defSub && defSub.querySelector('.jb-warn') && !defSub.querySelector('.jb-err') && !/Error:/.test(defSub.textContent) && /deferred — response time 15\.7 s/.test(defSub.textContent)
+      && /a warning, not a failure/.test(defSub.textContent), `jobs: the deferred run reads "${defSub && defSub.textContent}"`);
+    const hostsRow = panel('All jobs').querySelector('tbody tr[data-job="hosts.collect"]');
+    ok(/Deferred · 1 cluster/.test(cell(hostsRow, 7)) && !hostsRow.querySelector('td:nth-child(7) .pill.red'), `jobs: the deferred result reads "${cell(hostsRow, 7)}"`);
     const zbx = panel('All jobs').querySelector('tbody tr[data-job="zabbix.sync"]');
     ok(zbx && /Paused/.test(zbx.querySelector('td:nth-child(3)').textContent), 'jobs: a paused job does not say so in Status');
     // Just ran: the newest finished runs, newest end first, under the open ones.
     const justIds = [...doc.querySelectorAll('[data-just]')].map((t) => t.dataset.just);
     ok(justIds.length === 6 && justIds[0] === 'h1' && justIds[1] === 'h2' && !justIds.includes('run-vol'), `jobs: Just ran lists ${justIds.join(', ')}`);
+    ok(count('JOB_RUN_DETAIL') === 0, 'jobs: a run\'s details were read before its row was opened');
     backup.querySelector('.jb-x').click(); await settleFor(150);
     const detail = panel('All jobs').querySelector('tr[data-detail="settings.backup"]');
     ok(detail && detail.textContent.includes(longError), 'jobs: opening the row does not show the whole error');
+    ok(count('JOB_RUN_DETAIL', (m) => m.runId === 'run-fail') === 1, 'jobs: opening a row did not read its run\'s details (JOB_RUN_DETAIL) once');
+    backup.querySelector('.jb-x').click(); await settleFor(100);
+    // The log delay run (0.3.81): Summary · Exceptions (4) · All clusters (71) · Log · Run history.
+    ldRow.querySelector('.jb-x').click();
+    const ldDet = await waitFor(() => { const d = panel('All jobs').querySelector('tr[data-detail="logdelay.measure"]'); return d && d.querySelector('.jb-grid') && /Exceptions \(4\)/.test(d.textContent) ? d : null; }, 'jobs: the opened log delay row');
+    if (ldDet) {
+      ok(count('JOB_RUN_DETAIL', (m) => m.runId === 'be9229a1') === 1, 'jobs: the log delay row did not read JOB_RUN_DETAIL for its last run');
+      const tabs = [...ldDet.querySelectorAll('.jb-dtabs button')].map((b) => b.textContent);
+      ok(tabs.join('|') === 'Summary|Exceptions (4)|All clusters (71)|Log|Run history', `jobs: the opened row's tabs are ${tabs.join(' | ')}`);
+      const grid = Object.fromEntries([...ldDet.querySelectorAll('.jb-grid > div')].map((d) => [d.querySelector('small').textContent, d.querySelector('b').textContent]));
+      const sum = ['Succeeded', 'Partial', 'Failed'].reduce((n, k) => n + Number(grid[k]), 0);
+      ok(grid.Clusters === '71' && sum === 71 && grid['Run ID'] === 'be9229a1' && grid['Success rate'] === '94.4 %' && grid['Records collected'] === '16,238',
+        `jobs: the run summary does not add up: ${JSON.stringify(grid)}`);
+      ok(grid['Query window'] && /\d{2}:\d{2} – \d{2}:\d{2}/.test(grid['Query window']), `jobs: the query window reads "${grid['Query window']}"`);
+      ldDet.querySelector('.jb-dtabs button[data-dtab="exceptions"]').click(); await settleFor(100);
+      const ex = panel('All jobs').querySelector('tr[data-detail="logdelay.measure"]');
+      const exRows = [...ex.querySelectorAll('tbody tr[data-part]')];
+      ok(exRows.length === 4 && exRows.every((r) => r.dataset.status !== 'succeeded'), `jobs: the exceptions list ${exRows.map((r) => r.dataset.part).join(', ')}`);
+      const demo = ex.querySelector('tr[data-part="demo"]');
+      ok(demo && /INDEX_NOT_FOUND/.test(demo.textContent) && /None — config issue/.test(demo.textContent) && /0\.4 s/.test(demo.textContent)
+        && [...demo.querySelectorAll('a, span')].some((a) => a.textContent === 'Set log index'), `jobs: the demo exception reads "${demo && demo.textContent}"`);
+      const aib = ex.querySelector('tr[data-part="aib"]');
+      ok(aib && aib.querySelector('.pill.orange') && /212/.test(aib.textContent), 'jobs: a partial cluster is not amber with its records');
+      ok(/67 clusters succeeded/.test(ex.textContent) && /View all 71/.test(ex.textContent), 'jobs: the exceptions do not say how many succeeded');
+      ex.querySelector('.jb-dtabs button[data-dtab="log"]').click(); await settleFor(100);
+      const lg = panel('All jobs').querySelector('tr[data-detail="logdelay.measure"]');
+      const log = lg && lg.querySelector('pre.jb-log');
+      ok(log && log.children.length === 4 && log.querySelector('.e') && /INDEX_NOT_FOUND/.test(log.querySelector('.e').textContent) && log.querySelector('.w'),
+        `jobs: the run's log reads "${log && log.textContent.slice(0, 160)}"`);
+      const dl = lg && lg.querySelector('a[data-act="download"]');
+      ok(dl && lg.querySelector('a[data-act="copy"]'), 'jobs: the log has no Copy or Download .txt');
+      if (dl) {
+        press(dl); await settleFor(50);
+        const f = files.at(-1);
+        ok(f && f.name === 'elasticpro-run-be9229a1.txt' && /run\.start/.test(f.text) && /ERROR  demo INDEX_NOT_FOUND/.test(f.text), `jobs: Download .txt saved "${f && f.name}"`);
+      }
+      ldRow.querySelector('.jb-x').click(); await settleFor(100);
+    }
     // Retry from the row menu: the core's retry_wait refusal said as a sentence.
     const trigger = panel('All jobs').querySelector('tbody tr[data-job="settings.backup"] .menu-trigger');
     if (trigger) {

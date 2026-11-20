@@ -45,6 +45,10 @@ export const healthHistory = (range) => send({ type: 'HEALTH_HISTORY', range });
 
 /** Every job, its state and a page of runs (docs/JOBS.md `JOBS_LIST {before?, limit?, jobId?}`). User and up. */
 export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });
+/** One run's per-cluster parts and its own log lines (docs/JOBS.md `JOB_RUN_DETAIL {runId}`), read when its row opens. User and up. */
+export const jobRunDetail = (runId) => send({ type: 'JOB_RUN_DETAIL', runId });
+/** Searches running longer than `minMs` on the clusters the caller sees (docs/JOBS.md `SLOW_SEARCHES {minMs}`). User and up. */
+export const slowSearches = (minMs) => send({ type: 'SLOW_SEARCHES', minMs });
 /** A job control (docs/JOBS.md "Controls": JOB_RUN, JOB_PAUSE, … JOB_SETTINGS_SET). Administrators only. */
 export const jobControl = (type, params = {}) => send({ type, ...params });
 

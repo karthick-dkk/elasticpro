@@ -42,13 +42,19 @@ export function levelWord(level) {
 }
 
 /**
- * The dot on the Request Centre's nav entry, from PING's `health` (administrators only): null
- * when there is nothing to say (ok, an older core, not an administrator).
+ * The dot on the Jobs menu entry, from PING's `health` (administrators only): null when there
+ * is nothing to say (ok, an older core, not an administrator). The dot is ElasticPro's own
+ * health, not running jobs, and its tooltip names the check that turned it — PING's
+ * `healthReason`, the first red else the first amber check (core health.rs `reason`), e.g.
+ * "ElasticPro health amber: Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%". An older
+ * core that sends no reason gets the general words.
  */
 export function navDot(ping) {
   const h = ping && ping.health;
-  if (h === 'warn') return { tone: 'yellow', title: 'ElasticPro health: something is amber — open Requests › ElasticPro health' };
-  if (h === 'bad') return { tone: 'red', title: 'ElasticPro health: something is red — open Requests › ElasticPro health' };
+  const why = ping && typeof ping.healthReason === 'string' && ping.healthReason.trim() ? ping.healthReason.trim() : null;
+  const open = 'open Jobs › Requests › ElasticPro health';
+  if (h === 'warn') return { tone: 'yellow', title: why ? `ElasticPro health amber: ${why} — ${open}` : `ElasticPro health: something is amber — ${open}` };
+  if (h === 'bad') return { tone: 'red', title: why ? `ElasticPro health red: ${why} — ${open}` : `ElasticPro health: something is red — ${open}` };
   return null;
 }
 

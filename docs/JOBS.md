@@ -110,6 +110,7 @@ if any was, else `cancelled`, else `completed`; its `note` counts each.
 | `deferred` | a busy cluster's wait: `{cluster, signal, reason, since}`; null otherwise |
 | `scope` | what a person narrowed the run to (the log delay measurement's *Fetch now*: `{clusterIds: [one], devices: "late"\|"all", device}`); absent otherwise. `JOB_RETRY` runs the same scope again |
 | `stale` | role core: a worker run still open while the worker's heartbeat is late or never came — it may have ended with the worker. Never ended by the core, only marked |
+| `parts` | 0.3.81: how its clusters' parts ended, when the run reported parts — `{succeeded, partial, failed, deferred, skipped}`, which always add up to the clusters it worked on; absent otherwise. The parts themselves and the run's lines are its detail ("Run details" below) |
 
 **Kept:** the last 50 finished runs per job, 2000 per file; an open run is never dropped. A run
 open when its process stopped ends `failed`, "the server restarted while this ran", at the next
@@ -121,6 +122,127 @@ that runs the core's jobs, `<data>/job-runs/worker.json` by the one that runs th
 `all` writes both). The core reads the worker's file, as the worker last wrote it — a running run
 there is as running as the worker's last write says. The worker's own read-only Zabbix sync is
 held one at a time but not recorded: the job is the core's.
+
+## Run details (0.3.81)
+
+A run of a job that works on many clusters keeps, besides its record, **what happened on each
+cluster** and **the lines it wrote** — read with `JOB_RUN_DETAIL` when a row of All jobs is
+opened, never before. Code: `jobs/detail.rs` (pure: the codes, the bounds, who reads what),
+`jobs/capture.rs` (the in-process capture).
+
+**Parts** — one per cluster: `cluster`, `status` (`succeeded` · `partial` · `failed` · `deferred`
+· `skipped`), `code`, `message`, `records`, `elapsedMs`, `retry` (in words) and `todo` (what a
+person can do, where ElasticPro knows: `{label, text, page}`).
+
+- The log delay measurement reports one part per cluster it measures (`bridge.rs
+  measure_delay_sink`): measured in full, partly (some pages read — `partial`, its records kept),
+  or not at all; a write that failed is that cluster's `failed`.
+- The daily volume and hosts collections are one run of one part per cluster already: each
+  part's outcome becomes its cluster's part (`completed` → succeeded, `failed` with records →
+  partial, else failed, `deferred` → deferred, cancelled or skipped → skipped).
+- A busy cluster's deferral (`Jobs::defer`) is a run of one `deferred` part, code `BUSY`, and one
+  `WARN` line: a warning, never shown as an error.
+
+**Error codes** — one definition, `detail::ErrorCode::of(text)`, the first that matches:
+
+| code | the error says | retry | what to do |
+|---|---|---|---|
+| `AUTH` | 401, 403, unauthorized, forbidden, security_exception, not primed | None — config issue | check the cluster's user and password (Config › Clusters) |
+| `BUSY` | 429, too many requests, rejected execution, circuit breaking, "is busy" | When the cluster eases (automatic) | — (tried again by itself) |
+| `INDEX_NOT_FOUND` | index_not_found, no such index, no device aggregation, no index matches | None — config issue | log delay: set the cluster's log index (Config › Clusters); volume and hosts: set the cluster's volume index pattern (Reports › Settings) |
+| `SHARD_FAILURE` | shard(s) failed, search_phase_execution, a partial answer | the job's own | look at shard allocation (Nodes & shards) |
+| `TIMEOUT` | timed out, timeout, deadline | the job's own | look at the cluster's health and load (Clusters) |
+| `UNREACHABLE` | connection refused, unreachable, DNS, tunnel, jump host, SSH | the job's own | check the cluster's address or jump host (Config › Clusters) |
+| `OTHER` | anything else | the job's own | — |
+
+The job's own retry: log delay "Next run", hosts "Next tick, up to 3 tries a day", daily volume
+"Next scheduled run". A deferred part is `BUSY` unless its text says otherwise.
+
+**Lines** — every line the core or the worker writes while the run's work goes, as it is
+written: `governed()` runs each job's work in a `tracing` span carrying `run = <id>`, and the
+binary installs `jobs::capture::Layer` beside its JSON log, which adds every event inside such a
+span (or with a `run` field) to that run — while the run is open, never after. No container log
+is read. The run adds its own: `run.start job=… trigger=…`, one line per part (`ERROR` failed,
+`WARN` partial / deferred / skipped, `INFO` succeeded) and `run.end status=… ok= partial= failed=
+deferred= skipped= records= took=`. Each line: `at` (ms), `level`, `cluster` (when the line names
+one), `run` (true for the run's own start and end lines, which name no cluster), `text` (at most
+600 characters).
+
+**Bounds** — successes listed by name up to 300 (`partsNotListed` counts the rest); every
+exception kept (a hard bound of 2,000 only so a record can never grow without end); lines: the
+first 100 and the last 400 (500 a run; `linesDropped` counts those between). The counts in
+`parts` and `detail.counts` count every part, listed or not.
+
+**Kept** — written once, when the run's last part ends, beside the run log:
+`<data>/job-runs/detail/<owner>/<run id>.json` (one writer per owner, as the run files), and
+removed when the run log no longer keeps the run (50 a job, 2000 a file), or after 7 days,
+whichever is first. Without a data directory: the newest 200, in memory. Report runs
+(`report-…`) keep none — `jobs.json` is their record.
+
+### `JOB_RUN_DETAIL {runId}`
+
+User and up, like `JOBS_LIST`; read-only, not in the activity log. The run is found where
+`JOBS_LIST` finds it; who may read it is `JOBS_LIST`'s rule (`run_view`): a run a caller may not
+list is `not_found`, as one that is not there.
+
+```json
+{ "ok": true, "run": { …a run record, as in runs[]… },
+  "detail": { "counts": {"succeeded": 67, "partial": 1, "failed": 3, "deferred": 0, "skipped": 0},
+              "parts": [ {"cluster": "demo", "status": "failed", "code": "INDEX_NOT_FOUND",
+                          "message": "the answer has no device aggregation", "records": 0, "elapsedMs": 400,
+                          "retry": "None — config issue",
+                          "todo": {"label": "Set log index", "text": "set the cluster's log index (Config › Clusters)", "page": "settings"}} ],
+              "partsNotListed": 0, "lines": [ {"at": 1763591163112, "level": "INFO", "run": true, "text": "run.start job=logdelay.measure trigger=timer"} ],
+              "linesDropped": 0, "window": [from, to], "narrowed": false },
+  "why": null }
+```
+
+- `detail` is null, with `why`, for a run still open, one from before 0.3.81, a report run, or a
+  job that reports nothing; the record's own fields are still in `run`.
+- `parts` are worst first (failed, partial, deferred, then by cluster), then the clusters that
+  succeeded. `window` is the time window the run read (the log delay measurement's), or null.
+- **A caller limited to some clusters** (the one per-caller view, `sink_view` / `visible_ids`)
+  reads only their clusters' parts, the lines about their clusters and the run's own start and
+  end lines; `counts` are counted from the parts they read and `narrowed` is true — the totals
+  still add up and say nothing of anybody else's.
+- An admin-only job's (`detailsFor: admin`) messages, actions and lines go to administrators
+  only; others read `linesNote: "an administrator can read why"`.
+- `bad_request` for a `runId` that is not one (`[A-Za-z0-9-]`, at most 64); `io_error` when the
+  file cannot be read (where, to an administrator).
+
+## Slow searches (0.3.81)
+
+`SLOW_SEARCHES {minMs}` — the searches running longer than `minMs` (10000 · 30000 · 60000 ·
+300000; default 30000) on every cluster the caller sees, for the *Slow searches now* card. User
+and up; read-only, not in the activity log (a poll).
+
+- Per cluster, one `GET /_tasks?actions=*search*&detailed` (`tasks::SEARCH_TASKS_PATH`, beside
+  `TASKS_PATH`; one definition each), background class through the core's gate like every
+  background read, at most 4 clusters at a time, 10 s each. A cluster is read **at most once in
+  25 s** however many people ask (its answer is kept that long); the page asks every 30 s and only
+  while Jobs › Jobs is open.
+- A cluster the governor's signals call busy, or the poller cannot reach, is **not read**, and so
+  is one with no credential here: each is in `notRead` with why ("not read: busy: …"). Unknown is
+  not zero — such a cluster is never counted as having no slow search.
+- Only top-level searches (a shard's phase is its parent's), longest first:
+
+```json
+{ "ok": true, "minMs": 30000, "at": 1763591163112, "readEveryMs": 25000, "count": 7,
+  "searches": [ {"cluster": "mh", "name": "mswipe-ho", "taskId": "n1:4711", "node": "es-data-3",
+                 "action": "indices:data/read/search", "runningMs": 372000, "startedAt": …,
+                 "indices": "logstash-2026.11.*", "query": "{\"size\":0,…}", "description": "…",
+                 "opaqueId": "elasticpro/…", "by": "ElasticPro", "readAt": …} ],
+  "clustersRead": 4, "clustersSeen": 5, "notRead": [ {"cluster": "ussc", "name": "ussc", "why": "not read: busy: …"} ] }
+```
+
+- `indices` and `query` come from the task's description (`indices[…]`, `source[…]`); null when
+  the cluster does not say — never an empty query. `node` is the node's name when the answer
+  gives it. `by` is `"ElasticPro"` for ElasticPro's own searches (opaque id `elasticpro/…`),
+  else null; `opaqueId` is the `X-Opaque-Id` as the cluster has it.
+- Nothing is cancelled from here: cancelling is a write, and would sit behind the write guard and
+  a person's confirmation (ask if one is wanted). The task reaper's own rule is unchanged.
+- `bad_request` for a `minMs` not offered. At most 200 searches are listed; `count` says how many
+  there were.
 
 ## `JOBS_LIST`
 
@@ -577,11 +699,30 @@ by default) before its `JOB_*` message.
     the next run dashed at the right edge, a "now" line; a bar's hover has the job, its clusters,
     start, duration, result and error. From `JOBS_LIST` paged 200 at a time (at most six pages)
     back to the window's start — the run log the core already keeps; nothing new is recorded.
+  - *Slow searches now* (0.3.81, under Now; "Slow searches" above): three tiles — how many
+    searches run long and on how many clusters (and how many were not read), the longest (cluster
+    · node), the cluster slowest now (most long searches) — then the searches, longest first:
+    cluster (an *ElasticPro* chip on our own), running time (amber from 1 min, red from 5 min),
+    node, index and the query cut to two lines; three rows, then "Show all". *Open* shows the
+    whole query, the task id, the `X-Opaque-Id` and Copy. The switch 10 s · 30 s · 1 min · 5 min
+    (30 s first) asks again at once; otherwise `SLOW_SEARCHES` every 30 s while the tab is open.
+    Clusters not read are named under the table. Read-only: no cancel.
   - *All jobs* — one table that fits the page at 1280 px with the menu on the left: Name · Type ·
-    Status (a *paused* chip beside a running job's status) · Progress · Ran (start and duration of
-    the open run, else the last) · Next run · Last run (short relative times, the full time on
-    hover; the last result's pill) · Priority · requests; records and the last error a line under
-    the row only when there is one, the error cut short there and whole when the row is opened.
+    Status (a *paused* chip beside a running job's status, its progress beside a running one) ·
+    Last run (the exact time the open run, else the last, started: "19 Nov 22:26:03") · Duration ·
+    Next run (exact: "20 Nov 00:26"; relative on hover) · Result (the last run's: "Partial · 4 of
+    71 clusters", "Succeeded · 71 clusters", "Deferred · 1 cluster" — from its `parts`, else its
+    status) · Priority · requests; records and the last run's trouble a line under the row only
+    when there is one: an error in red ("Error: …", cut short, whole on hover and in the opened
+    row), a deferral in amber ("ussc deferred — response time 15.7 s exceeded the 8 s threshold;
+    retried automatically when it eases (a warning, not a failure)"). ▸ opens the row on its last
+    run, read then with `JOB_RUN_DETAIL` (once a visit): *Summary* (the run summary grid — run id,
+    trigger, start → end, duration, query window, clusters = succeeded + partial + failed (+
+    deferred + skipped), records collected, success rate — and the job's schedule, next run,
+    error, note), *Exceptions (n)* (cluster, result, code and message, records, elapsed, retry,
+    the action as a link to the page with the setting), *All clusters (n)*, *Log* (the run's
+    lines, errors red and warnings amber, Copy and Download .txt) and *Run history* (the job's
+    last 15 runs; Open shows one of them).
     Every column sorts by core/sort.js (unknown last both ways). A row menu of Run now, Pause /
     Resume, Stop, Retry (the last run, when failed, deferred or cancelled), Settings and, for a
     created schedule, Delete (`JOB_DELETE`, asked first). *Up next* — the automatic jobs by

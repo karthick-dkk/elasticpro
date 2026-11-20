@@ -6,6 +6,7 @@ use crate::auth::{self, Caller, Edition, Role, Sessions, TokenStore, UserStore};
 use crate::delay_sink::{self, SinkConfig, SinkNote, SinkState};
 use crate::fleet::events::Reauth;
 use crate::guard::Writes;
+use crate::jobs::detail::PartStatus;
 use crate::gate::Class;
 use crate::http::{BodyLimit, ClusterSpec, EsRequest, Route, Transport};
 use crate::socks::{self, SocksServer};
@@ -26,6 +27,7 @@ use std::time::{Duration, Instant};
 mod governor_api;
 mod job_controls;
 mod jobs_api;
+mod slow_searches;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
 /// holds without widening any field.
 mod system_health;
@@ -338,6 +340,9 @@ pub struct Core {
     /// The running jobs' lanes and the rule that sizes them (docs/JOBS.md "Governor"). See
     /// `jobs::governor` and `governor_api`.
     pub(crate) governor: Arc<crate::jobs::governor::Governor>,
+    /// *Slow searches now* (docs/JOBS.md "Slow searches"): each cluster's last task list read,
+    /// kept `slow_searches::READ_EVERY_MS` so several open pages read a cluster once.
+    pub(crate) slow_cache: parking_lot::Mutex<HashMap<String, slow_searches::SlowRead>>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -427,6 +432,18 @@ pub const REQUEST_PATH_KEEP: usize = 600;
 /// The most late devices *Fetch now* names in one `terms` filter; above it the whole cluster is
 /// read instead (docs/LOGDELAY.md "Fetch now").
 pub const LATE_FILTER_MAX: usize = 10_000;
+
+/// One cluster's part of a log delay measurement's details (docs/JOBS.md "Run details"):
+/// measured in full (`err: None`), partly, or not at all — the error's code, retry and what to
+/// do worked out once, in `jobs::detail`.
+fn ld_part(run: Option<&crate::jobs::Run>, cluster: &str, started: u64, records: u64, err: Option<(PartStatus, &str)>) {
+    let Some(r) = run else { return };
+    let elapsed = Some(crate::fleet::now_ms().saturating_sub(started));
+    r.part(match err {
+        None => crate::jobs::detail::Part::ok(cluster, Some(records), elapsed),
+        Some((status, why)) => crate::jobs::detail::Part::not_ok(crate::jobs::LOGDELAY_MEASURE, cluster, status, why, Some(records), elapsed),
+    });
+}
 /// The most in-flight records kept; beyond it the oldest is dropped.
 pub const REQUEST_INFLIGHT_KEEP: usize = 1000;
 
@@ -953,6 +970,7 @@ impl Core {
             jobs: crate::jobs::Jobs::open(data_dir_for_jobs.as_deref(), role, crate::fleet::now_ms()),
             load: crate::jobs::load::LoadView::default(),
             governor: Arc::new(crate::jobs::governor::Governor::default()),
+            slow_cache: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1689,6 +1707,8 @@ impl Core {
             "HEALTH_HISTORY" => self.health_history(&msg, caller.as_ref()),
             // Jobs (docs/JOBS.md): the registry, each job's state and the run log.
             "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
+            "JOB_RUN_DETAIL" => self.job_run_detail(&msg, caller.as_ref()).await,
+            "SLOW_SEARCHES" => self.slow_searches(&msg, caller.as_ref()).await,
             // The job controls (docs/JOBS.md): run now, pause, resume, cancel, retry, create, settings.
             "JOB_RUN" | "JOB_PAUSE" | "JOB_RESUME" | "JOB_CANCEL" | "JOB_RETRY" | "JOB_CREATE" | "JOB_DELETE"
             | "JOB_SETTINGS_GET" | "JOB_SETTINGS_SET" => self.job_msg(&t, &msg, caller.as_ref()).await,
@@ -2484,6 +2504,8 @@ impl Core {
         // the level the minute task last worked out. An administrator's, like the tab.
         if admin {
             m.insert("health".into(), json!(self.health.level().ping()));
+            // Which check turned it (health::reason): the dot's tooltip names it.
+            m.insert("healthReason".into(), json!(self.health.reason()));
         }
         out
     }
@@ -6034,6 +6056,9 @@ impl Core {
             }
         }
         let mut scope_note: Option<String> = None;
+        if let Some(r) = run {
+            r.window(from_ms, to_ms);
+        }
 
         for (done, id) in targets.iter().enumerate() {
             // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
@@ -6042,6 +6067,8 @@ impl Core {
             }
             let fields = self.logdelay_fields(id, &settings).await;
             let before = read_total;
+            // This cluster's part of the run's details (docs/JOBS.md "Run details").
+            let part_at = crate::fleet::now_ms();
             // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
             // stored at this moment (late = delay or critical by the cluster's own levels, on the
             // corrected delay — levels.rs is the one definition), or every one.
@@ -6057,6 +6084,7 @@ impl Core {
                         scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
                                                    Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
                         if let Some(r) = run { r.progress(0, 0); }
+                        ld_part(run, id, part_at, 0, None);
                         continue;
                     }
                     if late.len() > LATE_FILTER_MAX {
@@ -6090,6 +6118,7 @@ impl Core {
             }).await;
             pages += got.pages;
             read_total += got.readings.len() as u64;
+            let n_read = got.readings.len() as u64;
             if let Some(r) = run {
                 if one_cluster {
                     // Ended: every device that answered is done; one set out for that sent nothing
@@ -6104,12 +6133,15 @@ impl Core {
                 failed += 1;
                 failed_ids.push(id.clone());
                 first_error.get_or_insert_with(|| SinkNote::read(id, got.error.clone().unwrap_or_default()));
+                ld_part(run, id, part_at, 0, Some((PartStatus::Failed, got.error.as_deref().unwrap_or(""))));
                 continue;
             }
             if got.truncated {
                 truncated.push(id.clone());
             }
             let read = got.info(now, from_ms, to_ms, max_devices, &filter);
+            // Part of the list read: the cluster's part is partial, whatever is written.
+            let partly = got.error.clone();
             if let Some(e) = &got.error {
                 // Part of the list read: kept, nobody it did not read turned silent; the run says so.
                 failed += 1;
@@ -6127,19 +6159,24 @@ impl Core {
                     failed += 1;
                     write_failed += 1;
                     failed_ids.push(id.clone());
-                    first_error.get_or_insert(SinkNote::write(Some(id), None, format!("the built-in store could not be written: {e}")));
+                    let why = format!("the built-in store could not be written: {e}");
+                    ld_part(run, id, part_at, n_read, Some((PartStatus::Failed, &why)));
+                    first_error.get_or_insert(SinkNote::write(Some(id), None, why));
                     continue;
                 }
             };
+            let done_part = |records: u64| ld_part(run, id, part_at, records, partly.as_deref().map(|e| (PartStatus::Partial, e)));
             opened += applied.opened.len();
             solved += applied.solved.len();
             if applied.rows.is_empty() {
                 // No device at all: a fact about the cluster, not a failure of the job, and
                 // not written as a row of zeroes.
+                done_part(0);
                 continue;
             }
             if to_builtin {
                 measured += applied.rows.len();
+                done_part(applied.rows.len() as u64);
                 continue;
             }
             let mut wrote_all = true;
@@ -6156,12 +6193,14 @@ impl Core {
                     wrote_all = false;
                     // Into the sink cluster (as named for this run), or the history store.
                     let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
+                    ld_part(run, id, part_at, n_read, Some((PartStatus::Failed, &format!("writing the measurements failed: {e}"))));
                     first_error.get_or_insert(SinkNote::write(Some(id), sink, e));
                     break;
                 }
             }
             if wrote_all {
                 measured += applied.rows.len();
+                done_part(applied.rows.len() as u64);
             }
         }
         // The recommended fixes, from what is now stored and what the poller last read.
