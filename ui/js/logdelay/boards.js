@@ -38,7 +38,7 @@ import { refreshReports } from '../core/reports.js';
 import { rememberLevels } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
 import {
-  LD_COLOURS as C, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
+  LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
@@ -529,11 +529,22 @@ function fleetStateBar(t, b) {
 }
 
 /** The mini stacked bar of a cluster's states, in the By cluster table. */
+/** By cluster's "Change": "+12 −5" — became late, came back — in the last run's window; — unknown. */
+function changeCell(k, b) {
+  if (!k) return h('td.num', { title: 'no run today: the change is not known' }, h('span.muted', '—'));
+  const title = `last run (${k.label}): ${countText(k.up)} became late (${b.late}), ${countText(k.down)} came back below the line · net ${k.net > 0 ? '+' : ''}${countText(k.net)}`;
+  if (!k.up && !k.down) return h('td.num', { title }, h('span.muted', '0'));
+  return h('td.num.ld-change', { title },
+    k.up ? h('span.ld-chg-up', `+${countText(k.up)}`) : null,
+    k.up && k.down ? ' ' : null,
+    k.down ? h('span.ld-chg-dn', `−${countText(k.down)}`) : null);
+}
+
 function stateBar(c, b) {
   const parts = [[c.below, C.ok, b.below], [c.delay, C.delay, b.mid], [c.critical, C.crit, b.high], [c.otherTz, C.tz, 'Other time zone'], [c.silent, C.silent, 'Silent'], [c.unmeasured, 'var(--surface-3)', 'Can’t measure']]
     .filter(([v]) => finite(v) && v > 0);
   if (!parts.length) return h('span.muted', '—');
-  return h('div.ld-mini', { role: 'img', 'aria-label': parts.map(([v, , t]) => `${t} ${v}`).join(', ') },
+  return h('div.ld-statemini', { role: 'img', 'aria-label': parts.map(([v, , t]) => `${t} ${v}`).join(', ') },
     ...parts.map(([v, colour, t]) => h('i', { style: { flex: `${v} 0 0`, background: colour }, title: `${t}: ${countText(v)}` })));
 }
 
@@ -603,6 +614,7 @@ function fleetView() {
       tag1: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'tag1') },
       lateNow: { type: 'number', value: seen((c) => c.lateNow), start: -1 },
       latePct: { type: 'percent', value: seen((c) => c.latePct), start: -1 },
+      change: { type: 'number', value: seen((c) => { const k = lastRunChange(c); return k ? k.net : null; }), start: -1 },
       critical: { type: 'number', value: seen((c) => c.critical), start: -1 },
       otherTz: { type: 'number', value: seen((c) => (c.timeZone && c.timeZone.mode !== 'none' ? c.otherTz : null)), start: -1 },
       devices: { type: 'number', value: (c) => c.devices, start: -1 },
@@ -628,11 +640,12 @@ function fleetView() {
           : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
-        neverRun ? h('td', { colspan: anyZone ? 8 : 7 }, h('span.muted', LD_NEVER_MEASURED))
+        neverRun ? h('td', { colspan: anyZone ? 9 : 8 }, h('span.muted', LD_NEVER_MEASURED))
           : [h('td', stateBar(c, cb)),
             // Late now and its share in one cell: "12 · 3 %".
             h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now · their share of the cluster's devices` },
               countText(c.lateNow), h('span.muted', ` · ${pctText(c.latePct)}`)),
+            changeCell(lastRunChange(c), cb),
             h(`td.num${c.critical ? '.ld-crit' : ''}`, countText(c.critical)),
             anyZone ? h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
               c.timeZone && c.timeZone.mode !== 'none' ? countText(c.otherTz) : h('span.muted', '—')) : null,
@@ -653,9 +666,9 @@ function fleetView() {
         h('button.linkish#ld-cl-top', { type: 'button', onclick: () => { S.clAll = false; S.clPage = 0; repaint(); } }, `Show the top ${CLUSTER_TOP} only`));
     return card('By cluster', '',
       [h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', `${b.lateShort} · share`, 1],
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['lateNow', `${b.lateShort} · share`, 1], ['change', 'Change', 1],
           ['critical', b.high, 1], anyZone ? ['otherTz', 'Other time zone', 1] : null, ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']].filter(Boolean)),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 12 : 11 }, empty('No cluster you can see is measured.')))])))), foot]);
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 13 : 12 }, empty('No cluster you can see is measured.')))])))), foot]);
   });
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', '',
     h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',

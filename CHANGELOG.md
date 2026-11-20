@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.81
+
+- **Log Delay › By cluster: the States bar is drawn again, and a Change column says what moved.** The bar shared a class with the old per-cluster cards and drew as an empty box; it has its own now. *Change* reads "+12 −5": devices that became late and devices that came back below the line in the last run's window today, sortable by the net; "—" when the last run was not today (unknown, never "no change").
+- **Log Delay: the time-zone history note is gone from the boards** ("Delays are shown after each cluster's log time zone is taken out… Measurements from before…"). The cluster board's chip still says whether a zone is taken out; the mailed report keeps the note.
+
 ## 0.3.80
 
 - **A cluster switched off is not polled any more — not even its health.** A cluster from ElasticPro's own config set to disabled was still handed to the core (PRIME), and the core polls what it is given: its health kept being read. Now only enabled clusters are primed; switching one back on primes it again, and a credential kept on the server is not forgotten meanwhile. (Zabbix clusters switched off in ElasticPro were already listed and not polled.)

@@ -3160,8 +3160,14 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-heatmap .ld-heat-name { fill: var(--text-secondary); }
 .ld-heatmap .ld-heat-never { fill: var(--text-muted); font-style: italic; }
 /* The mini stacked bar of a cluster's states, in By cluster. */
-.ld .ld-mini { display: flex; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; }
-.ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
+/* By cluster's States bar (0.3.81: its own class — sharing .ld-mini with the old per-cluster
+   cards made it a column of zero-height pieces, an empty box). */
+.ld .ld-statemini { display: flex; flex-direction: row; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; padding: 0; border: 0; }
+.ld .ld-statemini i { display: block; min-width: 2px; height: 100%; }
+/* By cluster's Change: + became late, − came back (text inks, not series colours). */
+.ld-change { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ld-chg-up { color: var(--critical-ink); font-weight: 600; }
+.ld-chg-dn { color: var(--good-ink); font-weight: 600; }
 /* Devices: the search, the level chips with counts, zone and tag1. */
 .ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
 .ld .ld-dev-bar input[type="search"] { min-width: 190px; height: 28px; }
