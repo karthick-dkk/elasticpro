@@ -13,6 +13,14 @@ pub type Key = (String, Dataset);
 
 /// Nothing asked for fleet state for this long: only health is polled.
 pub const IDLE_MS: u64 = 10 * 60_000;
+/// What the Clusters page shows — health and the node figures (disk, heap, CPU) — once read is
+/// kept at most this old in the background, whatever the mode and whether anybody is looking (the
+/// owner, 0.3.81: the page opened on hour-old figures under hybrid / Client basis with 71
+/// clusters). The other datasets keep the mode's rules.
+pub const KEEP_FRESH: [Dataset; 2] = [Dataset::Health, Dataset::Nodes];
+pub const KEEP_FRESH_MS: u64 = 5 * 60_000;
+/// …and at most this old while somebody has ElasticPro open (not idle).
+pub const KEEP_FRESH_LOOKING_MS: u64 = 2 * 60_000;
 /// One person may ask for the same dataset of the same cluster once in this long.
 pub const REFRESH_EVERY_MS: u64 = 10_000;
 /// A write is followed by a re-read this long after it, so the cluster has applied it.
@@ -416,7 +424,7 @@ impl State {
                         continue;
                     }
                     (PRIO_BACKGROUND, self.reach.get(&s.id).and_then(|r| r.next_probe_at).unwrap_or(now))
-                } else if idle && ds != Dataset::Health {
+                } else if idle && !KEEP_FRESH.contains(&ds) {
                     continue;
                 } else {
                     // Who wants it, and how often: the schedule (background) or a page that
@@ -435,6 +443,16 @@ impl State {
                         }
                     } else {
                         offer(PRIO_BACKGROUND, entry.and_then(|e| e.next_due).unwrap_or(0).max(first));
+                    }
+                    // The floor for what the Clusters page shows: once read (a page asked for it),
+                    // 5 min unattended, 2 min while somebody looks — or the dataset's own interval
+                    // when shorter. Never read: nothing (a fresh core under Client basis still
+                    // sends nothing until a page asks). From the last attempt, and stretched like
+                    // any interval while the cluster is slowed.
+                    if let (true, Some(last)) = (KEEP_FRESH.contains(&ds), entry.and_then(|e| e.attempted_at.or(e.fetched_at))) {
+                        let cap = if idle { KEEP_FRESH_MS } else { KEEP_FRESH_LOOKING_MS };
+                        let every = self.interval_for(&s.id, (cfg.interval(ds) * 1000).min(cap));
+                        offer(if idle { PRIO_BACKGROUND } else { PRIO_DUE }, last + every);
                     }
                     if let (true, Some(iv)) = (self.play_watching(&key, now), cfg.play.interval_secs(ds)) {
                         // From the last attempt, so a cluster that keeps failing is not asked
@@ -907,14 +925,42 @@ mod tests {
     }
 
     #[test]
-    fn idle_means_health_only() {
+    fn idle_means_health_and_what_was_read_of_nodes_only() {
         let mut st = State::default();
         let s = specs(1);
         st.first_due.insert("c00".into(), 0);
         let plan = st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg());
-        assert_eq!(plan.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health]);
+        assert_eq!(plan.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health], "nodes never read: not fetched while idle");
         st.last_activity = IDLE_MS;
         assert_eq!(st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg()).len(), 7);
+    }
+
+    /// Health and nodes, once read, are never older than 5 min unattended, 2 min while somebody
+    /// looks — in every mode, Client basis (on-demand) and hybrid included (0.3.81).
+    #[test]
+    fn health_and_nodes_keep_fresh_in_every_mode() {
+        for mode in [Mode::OnDemand, Mode::Hybrid, Mode::Background] {
+            let c = with_mode(mode);
+            let s = specs(1);
+            let k = ("c00".to_string(), Dataset::Nodes);
+            let fresh = |at: u64| {
+                let mut st = State::default();
+                st.first_due.insert("c00".into(), 0);
+                st.entries.insert(k.clone(), Entry { fetched_at: Some(at), attempted_at: Some(at), next_due: Some(u64::MAX), ..Entry::never(1, None) });
+                st
+            };
+            let nodes_due = |st: &mut State, now: u64| st.plan(&s, now, &HashSet::new(), &c).iter().any(|x| x.dataset == Dataset::Nodes);
+            // Unattended (nobody since 0): read at T, due again at T + 5 min, not before.
+            let t = IDLE_MS + 1;
+            let mut st = fresh(t);
+            assert!(!nodes_due(&mut st, t + KEEP_FRESH_MS - 1), "{mode:?}: unattended, not before 5 min");
+            assert!(nodes_due(&mut st, t + KEEP_FRESH_MS), "{mode:?}: unattended, read again at 5 min");
+            // Somebody looking: read at 0, due again at 2 min, not before.
+            let mut st = fresh(0);
+            st.last_activity = KEEP_FRESH_LOOKING_MS;
+            assert!(!nodes_due(&mut st, KEEP_FRESH_LOOKING_MS - 1), "{mode:?}: looking, not before 2 min");
+            assert!(nodes_due(&mut st, KEEP_FRESH_LOOKING_MS), "{mode:?}: looking, read again at 2 min");
+        }
     }
 
     #[test]
