@@ -60,6 +60,9 @@ pub fn stable_hash(s: &str) -> u64 {
     h
 }
 
+/// One jump host's clusters (`None`: one cluster reached directly), each with its hash rank.
+type Group<'a> = (Option<&'a str>, VecDeque<(usize, &'a str)>);
+
 /// The order the clusters start in (see the module header). Each id once.
 pub fn order(members: &[Member]) -> Vec<String> {
     let mut ms: Vec<&Member> = members.iter().collect();
@@ -67,7 +70,7 @@ pub fn order(members: &[Member]) -> Vec<String> {
     ms.dedup_by(|a, b| a.id == b.id);
     // One group per jump host, in hash order; a direct cluster is a group of its own (`None`,
     // which is next to nothing).
-    let mut groups: Vec<(Option<&str>, VecDeque<(usize, &str)>)> = vec![];
+    let mut groups: Vec<Group<'_>> = vec![];
     for (rank, m) in ms.iter().enumerate() {
         match m.via.as_deref() {
             Some(v) => match groups.iter_mut().find(|(k, _)| *k == Some(v)) {
