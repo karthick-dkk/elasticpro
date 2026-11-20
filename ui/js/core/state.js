@@ -335,7 +335,10 @@ export async function reprime() {
   // browser priming them would only offer it a worse copy.
   // A config cluster set aside because Zabbix has its address is still primed: its
   // credential is the one "use ElasticPro credentials" hands to the Zabbix cluster there.
-  const own = state.config.clusters.filter((c) => c.source !== 'zabbix').concat(state.config.shadowedClusters || []);
+  // A cluster switched off (enabled: false) is not given to the core, so it is not polled — not
+  // even its health (0.3.80; Zabbix clusters switched off were already left out by the core).
+  // Leaving it out forgets nothing: a credential kept on the server stays until cleared.
+  const own = state.config.clusters.filter((c) => c.source !== 'zabbix' && c.enabled !== false).concat(state.config.shadowedClusters || []);
   const hosted = credentialsKeptOnServer();
   const dropAnonymous = [...leavingAnonymous];
   for (const c of own) if (leavingAnonymous.has(c.id)) c.anonymous = false;
