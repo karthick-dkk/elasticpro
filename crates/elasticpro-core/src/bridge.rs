@@ -5952,9 +5952,10 @@ impl Core {
         let partial = out.body["ok"] != json!(true) && out.skipped.is_none()
             && !delay_sink::backs_off(num("measured"), num("failed"), num("writeFailed"));
         if partial {
-            let ids: Vec<String> = out.body["failedClusters"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
-            let first = out.error.as_ref().map(SinkNote::text).unwrap_or_default();
-            let said = format!("{} cluster(s) not measured: {} — first: {first}", ids.len(), ids.join(", "));
+            // A count, no names: the run is listed to every user, and which clusters failed is
+            // per-cluster detail (the run's error is narrowed by its clusters like any run's).
+            let n = out.body["failedClusters"].as_array().map_or(0, Vec::len);
+            let said = format!("{n} of {} cluster(s) not measured — the rest were", num("clusters"));
             note = Some(match note { Some(n) => format!("{n}; {said}"), None => said });
             if let Some(n) = &out.error {
                 run.clusters(&note_ids(n));
@@ -6321,6 +6322,13 @@ impl Core {
                 let run = self.run_delay_sink(crate::jobs::Trigger::manual(who), delay_sink::MeasureScope::default()).await;
                 let view = self.sink_view(caller);
                 let mut out = run.body;
+                // The clusters it names, narrowed to the caller's: a limited admin reads nothing
+                // of a cluster outside their view (as with every note here).
+                for k in ["failedClusters", "truncated"] {
+                    if let Some(a) = out.get_mut(k).and_then(Value::as_array_mut) {
+                        a.retain(|v| v.as_str().is_some_and(|id| view.sees(id)));
+                    }
+                }
                 if let Some(n) = &run.skipped {
                     out["skipped"] = json!(view.note(n));
                 } else {

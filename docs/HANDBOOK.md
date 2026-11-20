@@ -286,7 +286,7 @@ log line a minute and nothing else). The disk copy is `<data dir>/cache/<cluster
 Idle rule: nothing asked `FLEET_STATE`/`CLUSTER_DATASET`/events for 10 minutes ⇒ only health is polled.
 
 Keep-fresh floor (0.3.80): what the Clusters page shows — `health` and `nodes` — once read for a
-cluster is never older than **5 min** (or the dataset's own interval when shorter), in **every**
+cluster is never older than **5 min** (a shorter interval stays the schedule's own business), in **every**
 mode, Client basis (on-demand) and hybrid included, whether anybody is looking or not; stretched
 like any interval while the cluster is slowed, held by a stop, a throttle or a down tunnel like
 everything else. A dataset never read is not fetched by the floor, so a fresh core under Client
