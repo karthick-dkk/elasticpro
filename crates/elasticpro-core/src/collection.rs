@@ -118,7 +118,7 @@ impl Hours {
     /// Whether `hour` (0–23) is inside: `[from, to)`, across midnight when `to < from`.
     pub fn contains(&self, hour: u32) -> bool {
         let (f, t) = (self.from as u32, self.to as u32);
-        if f < t { hour >= f && hour < t } else { hour >= f || hour < t }
+        if f < t { (f..t).contains(&hour) } else { hour >= f || hour < t }
     }
 
     /// Whether the local time is inside.
