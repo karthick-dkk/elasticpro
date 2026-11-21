@@ -14,6 +14,16 @@ round trip) and stops when left. Compact density, ElasticPro tokens, no new colo
 dot in the Request Centre nav entry turns amber/red when any check below is amber/red
 (from `PING`, which gains `health: "ok"|"warn"|"bad"` for administrators).
 
+**The dot names its cause (0.3.81).** The dot sits on the Jobs menu entry and is ElasticPro's
+own health, not running jobs. `PING` also carries `healthReason` for administrators: the first
+red check, else the first amber one, in the checks' order (`health::reason`, from the same checks
+as the level — one definition of what turns it), as "label: value — watch at <amber>" or
+"— over at <red>", e.g. `Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%`; null when
+nothing is amber or red. The tooltip reads "ElasticPro health amber: Data volume free: 12% ·
+5.7 GiB free — watch at ≤ 15% — open Jobs › Requests › ElasticPro health" (`core/system-health.js
+navDot`); an older core without the field gets the general words. Worked out by the minute task
+with the level (`Health::set_checks`), so it moves within a minute and PING costs nothing more.
+
 ## What it shows
 
 1. **Status strip** — one chip each: Core (version, uptime), Report worker (up / heartbeat age

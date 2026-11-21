@@ -17,7 +17,9 @@
 //!
 //! Nothing here sends a cluster anything.
 
+pub mod capture;
 pub mod controls;
+pub mod detail;
 pub mod governor;
 pub mod load;
 pub mod spread;
@@ -418,6 +420,11 @@ pub struct RunRecord {
     /// clusterIds, device}`): kept so `JOB_RETRY` runs the same scope again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Value>,
+    /// How its clusters' parts ended (docs/JOBS.md "Run details"), when the run reported parts:
+    /// the five add up to the clusters it worked on. The parts themselves and the run's lines
+    /// are its detail (`JOB_RUN_DETAIL`), kept beside the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<detail::PartCounts>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -610,6 +617,18 @@ struct Inner {
     waiting: HashMap<(String, String), String>,
     /// When a job's timer next starts it, where the timer keeps no other record (Zabbix sync).
     next_at: HashMap<String, u64>,
+    /// Runs' details where there is no data directory (tests, a portable run): the newest
+    /// `MEM_DETAILS`, in memory.
+    mem_details: VecDeque<(Owner, String, detail::RunDetail)>,
+}
+
+/// Details kept in memory without a data directory.
+const MEM_DETAILS: usize = 200;
+
+/// A run id as this log writes them (hex), or a report run's (`report-<id>`): anything else is
+/// never put in a path.
+pub fn is_run_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// `controls.json` as last read, with the file time it was read at.
@@ -648,17 +667,82 @@ impl Jobs {
         }
         let jobs = Arc::new(Jobs {
             dir, role, writers, controls: parking_lot::Mutex::new(ControlsCache::default()),
-            inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new(), waiting: HashMap::new(), next_at: HashMap::new() }),
+            inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new(), waiting: HashMap::new(), next_at: HashMap::new(), mem_details: VecDeque::new() }),
         });
-        {
+        let kept: Vec<(Owner, std::collections::HashSet<String>)> = {
             let inner = jobs.inner.lock();
             for owner in inner.logs.keys() {
                 if inner.logs.get(owner).is_some_and(|f| !f.runs.is_empty()) {
                     jobs.save(&inner, *owner);
                 }
             }
+            inner.logs.iter().map(|(o, f)| (*o, f.runs.iter().map(|r| r.id.clone()).collect())).collect()
+        };
+        for (owner, ids) in kept {
+            jobs.prune_details(owner, &ids, now);
         }
         jobs
+    }
+
+    /* ------------------------------ run details (docs/JOBS.md "Run details") ------------------------------ */
+
+    fn detail_dir(&self, owner: Owner) -> Option<PathBuf> {
+        self.dir.as_ref().map(|d| d.join(detail::DIR).join(owner.as_str()))
+    }
+
+    /// Keep a finished run's detail: a file beside the run log, written once (or in memory
+    /// without a data directory).
+    fn store_detail(&self, owner: Owner, id: &str, d: detail::RunDetail) {
+        match self.detail_dir(owner) {
+            Some(dir) => {
+                let body = match serde_json::to_vec(&d) {
+                    Ok(b) => b,
+                    Err(e) => return tracing::warn!(error = %e, "jobs: a run's detail could not be serialised"),
+                };
+                if let Err(e) = crate::volume::store::write_atomic(&dir.join(format!("{id}.json")), &body) {
+                    tracing::warn!(error = %e, run = %id, captured = true, "jobs: a run's detail could not be written");
+                }
+            }
+            None => {
+                let mut inner = self.inner.lock();
+                inner.mem_details.retain(|(o, i, _)| !(*o == owner && i == id));
+                inner.mem_details.push_back((owner, id.to_string(), d));
+                while inner.mem_details.len() > MEM_DETAILS {
+                    inner.mem_details.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Remove the details of runs the log no longer keeps, and any older than `DETAIL_KEEP_MS`.
+    fn prune_details(&self, owner: Owner, keep: &std::collections::HashSet<String>, now: u64) {
+        let Some(dir) = self.detail_dir(owner) else {
+            self.inner.lock().mem_details.retain(|(o, i, _)| *o != owner || keep.contains(i));
+            return;
+        };
+        let Ok(rd) = std::fs::read_dir(&dir) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(id) = name.strip_suffix(".json") else { continue };
+            let old = e.metadata().ok().and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .is_some_and(|t| now.saturating_sub(t.as_millis() as u64) > detail::DETAIL_KEEP_MS);
+            if !keep.contains(id) || old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
+    /// The detail of a finished run of `owner`: `Ok(None)` when it has none (it ran before
+    /// 0.3.81, is still open, or reported nothing), an error when its file cannot be read.
+    pub fn detail(&self, owner: Owner, run_id: &str) -> Result<Option<detail::RunDetail>, String> {
+        if !is_run_id(run_id) {
+            return Ok(None);
+        }
+        let Some(dir) = self.detail_dir(owner) else {
+            return Ok(self.inner.lock().mem_details.iter().rev().find(|(o, i, _)| *o == owner && i == run_id).map(|(_, _, d)| d.clone()));
+        };
+        crate::worker::read_json_retry::<detail::RunDetail>(&dir.join(format!("{run_id}.json"))).map_err(|e| e.to_string())
     }
 
     pub fn role(&self) -> Role {
@@ -697,14 +781,14 @@ impl Jobs {
                 o.reserved = false;
                 let id = o.run_id.clone();
                 drop(inner);
-                let run = Run { jobs: self.clone(), job: job.to_string(), id, ended: false };
+                let run = Run { jobs: self.clone(), job: job.to_string(), id, ended: false, cluster: None, begun: now };
                 run.clusters(&clusters);
                 return Ok(run);
             }
             return Err(Busy { run_id: o.run_id.clone() });
         }
         let id = self.start(&mut inner, job, trigger, clusters, now, false, RunMeta::default());
-        Ok(Run { jobs: self.clone(), job: job.to_string(), id, ended: false })
+        Ok(Run { jobs: self.clone(), job: job.to_string(), id, ended: false, cluster: None, begun: now })
     }
 
     /// Begin a run for a person (`JOB_RUN`, `JOB_RETRY`) before the job's own code starts,
@@ -773,12 +857,21 @@ impl Jobs {
             ended_at: Some(now), done: None, total: None, records: None,
             error: Some(format!("{} is busy: {}; tried again when it eases", b.cluster, b.reason)),
             clusters: vec![b.cluster.clone()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: Some(b.clone()), scope: None,
+            parts: Some(detail::PartCounts { deferred: 1, ..Default::default() }),
         };
+        let error = rec.error.clone().unwrap_or_default();
         if let Some(f) = inner.logs.get_mut(&owner) {
             f.push(rec);
         }
         self.save(inner, owner);
         inner.waiting.insert(key, id.clone());
+        drop(guard);
+        // Its detail: the one cluster, deferred (a warning, not a failure), and why.
+        let mut c = detail::Collecting::default();
+        c.part(detail::Part::not_ok(job, &b.cluster, detail::PartStatus::Deferred, &error, None, None));
+        c.line(detail::Line { at: now, level: "WARN".into(), cluster: Some(b.cluster.clone()), run: false,
+                              text: format!("{} deferred — {}; retried automatically when it eases (a warning, not a failure)", b.cluster, b.reason) });
+        self.store_detail(owner, &id, c.finish());
         tracing::info!(job, cluster = %b.cluster, reason = %b.reason, "job: deferred, the cluster is busy");
         Some(id)
     }
@@ -884,7 +977,7 @@ impl Jobs {
             }
             None => self.start(&mut inner, job, trigger, vec![cluster.to_string()], now, true, meta),
         };
-        Run { jobs: self.clone(), job: job.to_string(), id, ended: false }
+        Run { jobs: self.clone(), job: job.to_string(), id, ended: false, cluster: Some(cluster.to_string()), begun: now }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -893,15 +986,20 @@ impl Jobs {
         let owner = descriptor(job).map(|d| d.owner).or_else(|| is_created_id(job).then_some(Owner::Worker))
             .filter(|o| inner.logs.contains_key(o));
         if let Some(owner) = owner {
+            let said = trigger.text();
             let rec = RunRecord {
                 id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Running, created_at: now, started_at: Some(now),
                 ended_at: None, done: counted.then_some(0), total: counted.then_some(1), records: None, error: None, clusters, note: None,
-                cancel_asked: None, retry_of: meta.retry_of, attempt: meta.attempt, deferred: None, scope: None,
+                cancel_asked: None, retry_of: meta.retry_of, attempt: meta.attempt, deferred: None, scope: None, parts: None,
             };
             if let Some(f) = inner.logs.get_mut(&owner) {
                 f.push(rec);
             }
             self.save(inner, owner);
+            // Its own lines and parts, gathered until it ends (docs/JOBS.md "Run details").
+            capture::open(&id);
+            capture::add_line(&id, detail::Line { at: now, level: "INFO".into(), cluster: None, run: true,
+                                                  text: format!("run.start job={job} trigger={said}") });
         }
         inner.open.insert(job.to_string(), Open { run_id: id.clone(), owner, parts: 1, counted, ..Open::default() });
         id
@@ -951,6 +1049,8 @@ impl Jobs {
             inner.open.remove(job);
         }
         let Some(owner) = o.owner else { return };
+        // The run's details, taken with its last part (docs/JOBS.md "Run details").
+        let mut gathered = if last { capture::take(id) } else { None };
         if let Some(r) = inner.logs.get_mut(&owner).and_then(|l| l.get_mut(id)) {
             if o.counted {
                 r.done = Some(o.ended);
@@ -996,14 +1096,42 @@ impl Jobs {
                 if r.status == RunStatus::Completed {
                     r.error = None;
                 }
+                if let Some(c) = gathered.as_mut() {
+                    let counts = c.counts();
+                    r.parts = (counts.total() > 0).then_some(counts);
+                    let took = now.saturating_sub(r.started_at.unwrap_or(now));
+                    let status = serde_json::to_value(r.status).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                    let level = match r.status {
+                        RunStatus::Failed => "ERROR",
+                        RunStatus::Completed => if counts.exceptions() > 0 { "WARN" } else { "INFO" },
+                        _ => "WARN",
+                    };
+                    let tally = if counts.total() > 0 {
+                        format!(" ok={} partial={} failed={} deferred={} skipped={}", counts.succeeded, counts.partial, counts.failed, counts.deferred, counts.skipped)
+                    } else {
+                        String::new()
+                    };
+                    let records = r.records.map(|n| format!(" records={n}")).unwrap_or_default();
+                    c.line(detail::Line { at: now, level: level.into(), cluster: None, run: true,
+                                          text: format!("run.end status={status}{tally}{records} took={:.1}s", took as f64 / 1000.0) });
+                }
             }
         }
+        let mut keep = None;
         if last {
             if let Some(f) = inner.logs.get_mut(&owner) {
                 f.trim();
+                keep = Some(f.runs.iter().map(|r| r.id.clone()).collect::<std::collections::HashSet<String>>());
             }
         }
         self.save(inner, owner);
+        drop(guard);
+        if let Some(c) = gathered.take() {
+            self.store_detail(owner, id, c.finish());
+        }
+        if let Some(keep) = keep {
+            self.prune_details(owner, &keep, now);
+        }
     }
 
     /// The runs this process records, with their owner.
@@ -1041,6 +1169,11 @@ pub struct Run {
     job: String,
     id: String,
     ended: bool,
+    /// A collection's part (`join`): the cluster it is, whose part of the run's details its
+    /// outcome becomes when it ends.
+    cluster: Option<String>,
+    /// When this part began (unix ms): its elapsed time.
+    begun: u64,
 }
 
 impl Run {
@@ -1083,16 +1216,62 @@ impl Run {
         });
     }
 
+    /// One cluster's part of the run's details (docs/JOBS.md "Run details"), and its line in
+    /// the run's log. For the runs that loop over clusters themselves (the log delay
+    /// measurement); a collection's parts come from its parts' outcomes.
+    pub fn part(&self, p: detail::Part) {
+        let (level, text) = match p.status {
+            detail::PartStatus::Succeeded => ("INFO", format!("{} ok records={} took={}", p.cluster,
+                p.records.map(|n| n.to_string()).unwrap_or_else(|| "not known".into()), p.elapsed_ms.map(|m| format!("{:.1}s", m as f64 / 1000.0)).unwrap_or_else(|| "—".into()))),
+            s => (if s == detail::PartStatus::Failed { "ERROR" } else { "WARN" },
+                  format!("{} {} {}{} — {}", p.cluster, p.code.map(detail::ErrorCode::as_str).unwrap_or("OTHER"), p.message.as_deref().unwrap_or(""),
+                          p.records.filter(|n| *n > 0).map(|n| format!(" records={n}")).unwrap_or_default(),
+                          p.retry.as_deref().unwrap_or("not retried"))),
+        };
+        capture::add_line(&self.id, detail::Line { at: crate::fleet::now_ms(), level: level.into(), cluster: Some(p.cluster.clone()), run: false, text });
+        capture::add_part(&self.id, p);
+    }
+
+    /// The time window the run reads (unix ms), for its summary.
+    pub fn window(&self, from: i64, to: i64) {
+        capture::set_window(&self.id, from, to);
+    }
+
+    /// A collection's part ended `out`: its cluster's part of the details.
+    fn own_part(&self, out: &Outcome, now: u64) {
+        let Some(cluster) = &self.cluster else { return };
+        let elapsed = Some(now.saturating_sub(self.begun));
+        let p = match out.status {
+            RunStatus::Completed => detail::Part::ok(cluster, out.records, elapsed),
+            st => {
+                let status = match st {
+                    RunStatus::Failed if out.records.is_some_and(|n| n > 0) => detail::PartStatus::Partial,
+                    RunStatus::Failed => detail::PartStatus::Failed,
+                    RunStatus::Deferred => detail::PartStatus::Deferred,
+                    _ => detail::PartStatus::Skipped,
+                };
+                let why = out.error.clone().or_else(|| out.note.clone()).unwrap_or_else(|| "not done".into());
+                detail::Part::not_ok(&self.job, cluster, status, &why, out.records, elapsed)
+            }
+        };
+        self.part(p);
+    }
+
     pub fn end(mut self, out: Outcome) {
         self.ended = true;
-        self.jobs.end_part(&self.job, &self.id, out, crate::fleet::now_ms());
+        let now = crate::fleet::now_ms();
+        self.own_part(&out, now);
+        self.jobs.end_part(&self.job, &self.id, out, now);
     }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
         if !self.ended {
-            self.jobs.end_part(&self.job, &self.id, Outcome::failed(NO_RESULT, None), crate::fleet::now_ms());
+            let now = crate::fleet::now_ms();
+            let out = Outcome::failed(NO_RESULT, None);
+            self.own_part(&out, now);
+            self.jobs.end_part(&self.job, &self.id, out, now);
         }
     }
 }
@@ -1159,7 +1338,7 @@ pub fn from_report_job(j: &Job) -> RunRecord {
         // Exactly what REPORT_JOBS decides visibility on (`Job::covered`); not known is `*`.
         clusters: j.covered().unwrap_or_else(|| vec![crate::report::jobs::ALL_CLUSTERS.to_string()]), note,
         cancel_asked: j.stop_asked.clone(), retry_of: j.retry_of.as_ref().map(|r| format!("report-{r}")), attempt: j.attempt,
-        deferred: None, scope: None,
+        deferred: None, scope: None, parts: None,
     }
 }
 
@@ -1201,8 +1380,35 @@ pub fn run_view(owner: Owner, r: &RunRecord, who: Reader<'_>) -> Option<Value> {
         "note": if hidden { Value::Null } else { json!(r.note) },
         "clusters": r.clusters,
         "cancelAsked": r.cancel_asked.is_some(), "retryOf": r.retry_of, "attempt": r.attempt,
-        "deferred": r.deferred, "scope": r.scope,
+        "deferred": r.deferred, "scope": r.scope, "parts": r.parts,
     }))
+}
+
+/// Why a run has no details to show.
+pub const NO_DETAIL: &str = "this run kept no details: it ran before ElasticPro 0.3.81, is still running, or its job reports none";
+
+/// `JOB_RUN_DETAIL`: a run and its details as `who` may read them, or `None` when they may not
+/// read the run at all — the same rule as `JOBS_LIST` (`run_view`). Within it, a caller limited
+/// to some clusters reads only their clusters' parts and lines (`detail::detail_view`); an
+/// admin-only job's messages and lines go to administrators only.
+pub fn run_detail_view(owner: Owner, r: &RunRecord, d: Option<&detail::RunDetail>, who: Reader<'_>) -> Option<Value> {
+    let run = run_view(owner, r, who)?;
+    let hidden = !who.admin && descriptor(&r.job_id).is_some_and(|d| d.admin_details);
+    let detail = d.map(|d| {
+        let mut v = detail::detail_view(d, who.view);
+        if hidden {
+            if let Some(parts) = v["parts"].as_array_mut() {
+                for p in parts.iter_mut().filter_map(Value::as_object_mut) {
+                    p.remove("message");
+                    p.remove("todo");
+                }
+            }
+            v["lines"] = json!([]);
+            v["linesNote"] = json!(DETAIL_ADMIN);
+        }
+        v
+    });
+    Some(json!({ "ok": true, "run": run, "detail": detail, "why": if d.is_none() { json!(NO_DETAIL) } else { Value::Null } }))
 }
 
 /// `JOBS_LIST {before?, limit?, jobId?}`: which runs, newest first.
@@ -1333,7 +1539,7 @@ mod tests {
             id: id.into(), job_id: job.into(), trigger: Trigger::Timer, status, created_at: at, started_at: Some(at),
             ended_at: status.finished().then_some(at + 1), done: None, total: None, records: Some(7),
             error: Some("prod-b: search failed".into()), clusters: clusters.iter().map(|s| s.to_string()).collect(), note: Some("n".into()),
-            cancel_asked: None, retry_of: None, attempt: 0, deferred: None, scope: None,
+            cancel_asked: None, retry_of: None, attempt: 0, deferred: None, scope: None, parts: None,
         }
     }
 
@@ -1437,6 +1643,95 @@ mod tests {
         assert_eq!(done.clusters, vec!["a", "b", "c"]);
         assert_eq!(done.error.as_deref(), Some("the emergency stop came on"));
         assert_eq!(done.note.as_deref(), Some("3 clusters: 2 completed, 1 deferred"));
+    }
+
+    #[test]
+    fn a_collections_parts_and_lines_are_its_detail_written_when_it_ends() {
+        let d = tmp("detail");
+        let jobs = Jobs::open(Some(&d), Role::Worker, 1);
+        let a = jobs.join(HOSTS_COLLECT, Trigger::Timer, "a", 1);
+        let b = jobs.join(HOSTS_COLLECT, Trigger::Timer, "b", 2);
+        let c = jobs.join(HOSTS_COLLECT, Trigger::Timer, "c", 3);
+        let id = a.id().to_string();
+        assert!(capture::is_open(&id), "gathered while it runs");
+        capture::add_line(&id, detail::Line { at: 5, level: "INFO".into(), cluster: Some("a".into()), run: false, text: "a page=1 records=3".into() });
+        a.end(Outcome::completed(Some(3)));
+        b.end(Outcome::failed("the answer has no device aggregation", None));
+        c.end(Outcome::deferred("c is busy: answers over 8 s; tried again when it eases", None));
+        assert!(!capture::is_open(&id), "nothing held once it ended");
+        jobs.flush();
+        let r = jobs.own_runs().into_iter().find(|(_, r)| r.id == id).unwrap().1;
+        let counts = r.parts.expect("a run of parts says how they ended");
+        assert_eq!((counts.succeeded, counts.failed, counts.deferred, counts.total()), (1, 1, 1, 3), "the totals add up to its clusters");
+        let det = jobs.detail(Owner::Worker, &id).unwrap().expect("written beside the log");
+        assert_eq!(det.counts, counts);
+        let codes: Vec<(&str, Option<detail::ErrorCode>)> = det.parts.iter().map(|p| (p.cluster.as_str(), p.code)).collect();
+        assert_eq!(codes, vec![("b", Some(detail::ErrorCode::IndexNotFound)), ("c", Some(detail::ErrorCode::Busy)), ("a", None)]);
+        assert_eq!(det.parts[1].status, detail::PartStatus::Deferred, "deferred, not failed");
+        assert!(det.parts[2].elapsed_ms.is_some());
+        let texts: Vec<&str> = det.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts[0].starts_with("run.start job=hosts.collect trigger=timer"), "{texts:?}");
+        assert!(texts.contains(&"a page=1 records=3"));
+        assert!(texts.iter().any(|t| t.starts_with("b INDEX_NOT_FOUND")));
+        assert!(texts.last().unwrap().starts_with("run.end status=failed ok=1 partial=0 failed=1 deferred=1"), "{texts:?}");
+        // A run id that is not one is never a path.
+        assert_eq!(jobs.detail(Owner::Worker, "../core").unwrap(), None);
+        // Read by the core's process from the worker's file.
+        let core = Jobs::open(Some(&d), Role::Core, 9);
+        assert_eq!(core.detail(Owner::Worker, &id).unwrap().unwrap().counts, counts);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_runs_own_parts_and_a_deferral_are_details_too_and_go_with_the_run() {
+        let jobs = Jobs::open(None, Role::Core, 1);
+        let run = jobs.begin(LOGDELAY_MEASURE, Trigger::Timer, vec![], 1).unwrap();
+        let id = run.id().to_string();
+        run.window(10, 20);
+        run.part(detail::Part::ok("sisa", Some(1904), Some(3100)));
+        run.part(detail::Part::not_ok(LOGDELAY_MEASURE, "demo", detail::PartStatus::Failed, "the answer has no device aggregation", Some(0), Some(400)));
+        run.end(Outcome::completed(Some(1904)));
+        let det = jobs.detail(Owner::Core, &id).unwrap().unwrap();
+        assert_eq!(det.window, Some((10, 20)));
+        assert_eq!((det.counts.succeeded, det.counts.failed), (1, 1));
+        let demo = &det.parts[0];
+        assert_eq!(demo.todo.as_ref().map(|t| t.text.as_str()), Some("set the cluster's log index (Config › Clusters)"));
+        assert!(det.lines.iter().any(|l| l.level == "ERROR" && l.text.starts_with("demo INDEX_NOT_FOUND")));
+        // A busy cluster's deferral: one run, one deferred part, a warning line.
+        let w = Jobs::open(None, Role::Worker, 1);
+        let b = load::Busy { cluster: "ussc".into(), signal: "slow".into(), reason: "response time 15.7 s exceeded the 8 s threshold".into(), since: Some(1) };
+        let rid = w.defer(HOSTS_COLLECT, Trigger::Timer, &b, 2).unwrap();
+        let rec = w.own_runs().into_iter().find(|(_, r)| r.id == rid).unwrap().1;
+        assert_eq!(rec.parts, Some(detail::PartCounts { deferred: 1, ..Default::default() }));
+        let dd = w.detail(Owner::Worker, &rid).unwrap().unwrap();
+        assert_eq!(dd.parts[0].code, Some(detail::ErrorCode::Busy));
+        assert_eq!(dd.lines[0].level, "WARN");
+        // Trimmed out of the log: its detail goes with it.
+        let mut keep = std::collections::HashSet::new();
+        keep.insert("other".to_string());
+        jobs.prune_details(Owner::Core, &keep, 3);
+        assert_eq!(jobs.detail(Owner::Core, &id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_runs_detail_is_read_by_who_reads_the_run_narrowed_to_their_clusters() {
+        let limited_view = SinkView { visible: Some(["prod".to_string(), "dr".to_string()].into()) };
+        let all_view = SinkView::default();
+        let limited = Reader { view: &limited_view, admin: false };
+        let admin = Reader { view: &all_view, admin: true };
+        let mut c = detail::Collecting::default();
+        c.part(detail::Part::ok("prod", Some(3), None));
+        c.part(detail::Part::not_ok(VOLUME_DAILY, "dr", detail::PartStatus::Failed, "timed out", None, None));
+        let d = c.finish();
+        let theirs = rec(VOLUME_DAILY, "t", 3, RunStatus::Failed, &["prod", "prod-b"]);
+        assert!(run_detail_view(Owner::Worker, &theirs, Some(&d), limited).is_none(), "a run they may not list, they may not open");
+        let mine = rec(VOLUME_DAILY, "m", 3, RunStatus::Failed, &["prod", "dr"]);
+        let v = run_detail_view(Owner::Worker, &mine, Some(&d), limited).unwrap();
+        assert_eq!(v["detail"]["narrowed"], json!(true));
+        assert_eq!(v["detail"]["counts"]["failed"], json!(1));
+        let a = run_detail_view(Owner::Worker, &theirs, None, admin).unwrap();
+        assert_eq!(a["detail"], Value::Null);
+        assert_eq!(a["why"], json!(NO_DETAIL));
     }
 
     #[test]

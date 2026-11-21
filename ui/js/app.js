@@ -683,6 +683,10 @@ function renderNav() {
     const host = nav.querySelector('button[data-page="jobs"]');
     const had = nav.querySelector('.nav-health-dot');
     const want = dot ? dot.tone : '';
+    // The tooltip names the check (PING healthReason): a new reason with the same tone is said in place.
+    if (had && dot && had.dataset.tone === want && had.parentNode === host && had.title !== dot.title) {
+      had.title = dot.title; had.setAttribute('aria-label', dot.title);
+    }
     if (had && (had.dataset.tone !== want || had.parentNode !== host)) had.remove();
     if (dot && host && !nav.querySelector('.nav-health-dot')) {
       const el = h('i.hl-dot.nav-health-dot', { class: dot.tone, title: dot.title, 'aria-label': dot.title, role: 'img' });

@@ -32,6 +32,18 @@ test('the nav dot is there for amber and red only', () => {
   assert.equal(S.navDot({ health: 'bad' }).tone, 'red');
 });
 
+test('the dot names the check that turned it (PING healthReason, 0.3.81)', () => {
+  const why = 'Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%';
+  const d = S.navDot({ health: 'warn', healthReason: why });
+  assert.equal(d.tone, 'yellow');
+  assert.ok(d.title.startsWith(`ElasticPro health amber: ${why}`), d.title);
+  assert.ok(S.navDot({ health: 'bad', healthReason: 'Report worker: 2 min 0 s ago — over at ≥ 90 s' }).title.startsWith('ElasticPro health red: Report worker'));
+  // An older core sends no reason: the general words, never an empty name.
+  assert.match(S.navDot({ health: 'warn', healthReason: null }).title, /something is amber/);
+  assert.match(S.navDot({ health: 'warn', healthReason: '  ' }).title, /something is amber/);
+  assert.equal(S.navDot({ health: 'ok', healthReason: why }), null, 'ok: no dot, whatever else is sent');
+});
+
 test('unknown is not zero and never green', () => {
   assert.equal(S.levelTone('unknown'), 'grey');
   assert.equal(S.levelWord('unknown'), 'not known');

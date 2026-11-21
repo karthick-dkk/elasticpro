@@ -95,10 +95,17 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    // The JSON log, and beside it the run log's capture (docs/JOBS.md "Run details"): the lines
+    // a job's run writes are kept with that run as well. The filter is the one for both.
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(elasticpro_core::jobs::capture::Layer)
+            .init();
+    }
     // Loading could not log: tracing was not up yet.
     elasticpro_core::settings::report();
     let ui = std::env::args().nth(1).unwrap_or_else(|| "ui".into());
