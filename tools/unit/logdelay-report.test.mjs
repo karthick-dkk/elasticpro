@@ -243,6 +243,26 @@ test('late grid: a window with no measurement is missing, never an earlier readi
   assert.deepEqual(R.windowHeads(4), ['00', '04', '08', '12', '16', '20']);
 });
 
+test('late grid: the window in progress with no reading is pending, not a miss, and not in Measured', () => {
+  const H = 3600000;
+  const w = (i, o) => ({ from: i * 2 * H, to: (i + 1) * 2 * H, label: `${String(i * 2).padStart(2, '0')}:00`, ...o });
+  // 05:00 now: 00 and 02 ended (02 not measured), 04 in progress with no reading yet.
+  const [r] = R.lateGridRows([{ id: 'a', lastRunAt: 3 * H, lateNow: 5, critical: 1,
+    windows: [w(0, { measured: true, lateAt: 4, complete: true }), w(1, { measured: false, complete: true }), w(2, { measured: false, complete: false })] }], 2);
+  assert.deepEqual(r.cells.slice(0, 4).map((c) => c.state), ['measured', 'missing', 'pending', 'future']);
+  assert.deepEqual([r.measured, r.done, r.begun], [1, 2, 3], 'the pending window is not in the denominator');
+  assert.equal(r.nextAt, 5 * H, 'next measurement: the last run plus the interval');
+  assert.equal(r.lastBeforeToday, false);
+  // A window in progress that already has a reading counts, as measured.
+  const [m] = R.lateGridRows([{ id: 'a', lastRunAt: 1, lateNow: 2, windows: [w(0, { measured: true, lateAt: 2, complete: false })] }], 2);
+  assert.deepEqual([m.cells[0].state, m.measured, m.done], ['measured', 1, 1]);
+  // From midnight until the first run: Late now is yesterday's last measurement, flagged; nothing is "missing".
+  const day = 10 * 24 * H;
+  const [y] = R.lateGridRows([{ id: 'a', lastRunAt: day - H, lateNow: 7, critical: 0, yesterdayWindow: { measured: true, lateAt: 6, criticalAt: 0 },
+    windows: [{ from: day, to: day + 2 * H, label: '00:00', measured: false, complete: false }] }], 2);
+  assert.deepEqual([y.cells[0].state, y.measured, y.done, y.lateNow, y.vs, y.lastBeforeToday], ['pending', 0, 0, 7, 1, true]);
+});
+
 test('late grid: each row is shaded on its own scale, its worst window darkest', () => {
   assert.deepEqual([R.gridShade(null, 8), R.gridShade(0, 8), R.gridShade(1, 8), R.gridShade(4, 8), R.gridShade(8, 8)], [-1, 0, 1, 2, 4]);
   assert.equal(R.gridShade(1, 1), 4, 'a quiet cluster\'s one late device is its worst: darkest');

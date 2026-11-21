@@ -146,6 +146,26 @@ pub const DEFAULT_PROXY: &str = "nginx";
 const PROXY_LOOKUP_GAP: Duration = Duration::from_secs(5);
 /// How long one lookup may take.
 const PROXY_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// What a lookup of the default proxy's name leaves trusted (`None` from the lookup: it timed
+/// out): the addresses it found; nothing, only when the answer is definite — the name does not
+/// resolve (outside compose, nginx gone); `None` — keep the last good list — on a timeout or any
+/// other failure (a DNS server slow or briefly away must not turn every user into nginx).
+pub fn next_proxy_list(outcome: Option<Result<Vec<IpAddr>, String>>) -> Option<Vec<IpAddr>> {
+    match outcome? {
+        Ok(addrs) => {
+            let mut v: Vec<IpAddr> = addrs.into_iter().map(canon).collect();
+            v.sort();
+            v.dedup();
+            Some(v)
+        }
+        Err(e) => {
+            const NO_SUCH_NAME: [&str; 5] = ["not known", "nodename nor servname", "does not resolve", "no address associated", "nxdomain"];
+            let e = e.to_ascii_lowercase();
+            NO_SUCH_NAME.iter().any(|m| e.contains(m)).then(Vec::new)
+        }
+    }
+}
+
 /// How often the hosted binary looks the name up regardless (`ZbxLink::refresh_proxies`): the
 /// bound on how long an address the proxy has given up stays trusted.
 pub const PROXY_REFRESH: Duration = Duration::from_secs(30);
@@ -471,6 +491,9 @@ pub struct ZbxLink {
     /// The addresses `server.default_proxy` resolved to at the last lookup, and when that was.
     proxy_addrs: RwLock<Vec<IpAddr>>,
     proxy_looked_up: Mutex<Option<Instant>>,
+    /// Held for the length of one lookup: a request arriving meanwhile waits for its answer
+    /// rather than being judged on the list the lookup is about to replace.
+    proxy_lookup: tokio::sync::Mutex<()>,
 }
 
 impl ZbxLink {
@@ -488,6 +511,7 @@ impl ZbxLink {
             writing: Mutex::new(()),
             proxy_addrs: RwLock::new(Vec::new()),
             proxy_looked_up: Mutex::new(None),
+            proxy_lookup: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -634,6 +658,8 @@ impl ZbxLink {
     /// [`PROXY_REFRESH`], so an address nginx gave up is not trusted for long.
     pub async fn refresh_proxies(&self, force: bool) {
         let Some(name) = self.server.default_proxy.clone() else { return };
+        // One lookup at a time; whoever waited here finds it just done and uses its answer.
+        let _running = self.proxy_lookup.lock().await;
         {
             let mut last = self.proxy_looked_up.lock();
             if !force && last.is_some_and(|t| t.elapsed() < PROXY_LOOKUP_GAP) {
@@ -641,14 +667,14 @@ impl ZbxLink {
             }
             *last = Some(Instant::now());
         }
-        let found: Vec<IpAddr> = match tokio::time::timeout(PROXY_LOOKUP_TIMEOUT, tokio::net::lookup_host((name.as_str(), 0))).await {
-            Ok(Ok(addrs)) => {
-                let mut v: Vec<IpAddr> = addrs.map(|a| canon(a.ip())).collect();
-                v.sort();
-                v.dedup();
-                v
-            }
-            _ => Vec::new(),
+        let outcome = match tokio::time::timeout(PROXY_LOOKUP_TIMEOUT, tokio::net::lookup_host((name.as_str(), 0))).await {
+            Ok(Ok(addrs)) => Some(Ok(addrs.map(|a| a.ip()).collect())),
+            Ok(Err(e)) => Some(Err(e.to_string())),
+            Err(_) => None,
+        };
+        let Some(found) = next_proxy_list(outcome) else {
+            tracing::warn!(proxy = %name, "trusted proxy lookup timed out or failed: keeping the last addresses");
+            return;
         };
         let mut now = self.proxy_addrs.write();
         if *now != found {
@@ -1008,6 +1034,19 @@ impl ZbxLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proxy_lookup_that_times_out_or_fails_keeps_the_last_list_and_only_no_such_name_clears_it() {
+        let ip: IpAddr = "172.18.0.5".parse().unwrap();
+        assert_eq!(next_proxy_list(Some(Ok(vec![ip, ip]))), Some(vec![ip]), "found: trusted, once");
+        assert_eq!(next_proxy_list(None), None, "a timeout keeps the last list");
+        assert_eq!(next_proxy_list(Some(Err("failed to lookup address information: Temporary failure in name resolution".into()))), None,
+                   "a DNS server briefly away keeps it too");
+        for definite in ["failed to lookup address information: Name or service not known", "failed to lookup address information: Name does not resolve",
+                         "failed to lookup address information: nodename nor servname provided, or not known"] {
+            assert_eq!(next_proxy_list(Some(Err(definite.into()))), Some(vec![]), "{definite}: the name does not resolve, nobody is trusted");
+        }
+    }
 
     #[test]
     fn urls_are_checked() {

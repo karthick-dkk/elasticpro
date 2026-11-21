@@ -274,11 +274,16 @@ does). Nothing is sent to a cluster.
   the core finishes in its request log also goes into a cost book in memory — one bucket per clock
   hour for 24 hours, per (cluster, kind) the requests sent, their total time, a latency histogram,
   the bytes read, the timeouts and the deferrals; and per cluster its 10 slowest requests. Bounded
-  (24 buckets, at most 4,096 cells a bucket — past it a cluster's further kinds share one *Other
-  kinds* cell — and 10 requests a cluster), never written to disk: a restart starts again, and
-  the answer's `since` / `hours` say how much it covers. The report worker's requests come from its
-  finished-request ring (`worker/requests.jsonl`, the one the Request Centre merges), and a job's
-  deferrals from the run log (each deferred run holds one cluster back).
+  (24 buckets, at most 4,096 cells a bucket overflow included — past it every further cluster ×
+  kind shares one *Other kinds* cell of no cluster (`"cluster": ""`, "several clusters", read only
+  by a caller who sees every cluster) — and 10 requests a cluster for at most 1,024 clusters),
+  never written to disk: a restart starts again, and the answer's `since` / `hours` say how much it
+  covers. The report worker's requests come from its finished-request ring (`worker/requests.jsonl`,
+  the one the Request Centre merges), and a job's deferrals from the run log (each deferred run
+  holds one cluster back). The ring keeps the worker's last 5,000 requests: on a busy day it does
+  not reach back 24 hours, and then the rows the worker's requests add to carry `partialSince`
+  (the ring's oldest request) and the tab says "partial — worker kept requests since HH:MM" in the
+  row and its tooltip — those counts are fewer than the window's, never presented as the whole day.
 - **Kind**: the job a request belongs to (`job:logdelay.measure`, `job:hosts.collect`,
   `job:volume.daily`, `job:report.run`, `job:history.mirror`, labelled with the job's name), a
   poller dataset (`poller:health` → "Poller · health"), a page (`page:<page>`), the REST console,
@@ -301,7 +306,7 @@ does). Nothing is sent to a cluster.
 ```json
 { "ok": true, "keepHours": 24, "since": 1763591163112, "hours": 24.0, "now": 1763677563112,
   "rows": [ { "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement", "requests": 24, "perHour": 1.0,
-              "avgMs": 8200, "p95Ms": 30000, "maxMs": 30000, "bytes": 9000000, "bytesKnown": 24, "timeouts": 2, "deferrals": 0 } ],
+              "avgMs": 8200, "p95Ms": 30000, "maxMs": 30000, "bytes": 9000000, "bytesKnown": 24, "timeouts": 2, "deferrals": 0, "partialSince": null } ],
   "top": [ { "at": 1763676963112, "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement",
              "method": "POST", "path": "/logstash-*/_search?filter_path", "ms": 30000, "bytes": null, "status": "timeout" } ] }
 ```

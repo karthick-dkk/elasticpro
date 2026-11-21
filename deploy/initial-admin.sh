@@ -10,7 +10,7 @@
 # An existing file is never replaced, and nothing here ever touches an install that already has
 # accounts. It prints "made" when it made the file. The file is created private from its first
 # byte (umask 077, noclobber), then given to the core: the core runs as uid 999 with this install's
-# group (ELASTICPRO_GID) added, so as root the file is chowned to 999 and stays 0600; as the
+# group (ELASTICPRO_GID, written to .env when it is not there yet) added, so as root the file is chowned to 999 and stays 0600; as the
 # installing user it is 0640 with that group, the same as secrets/redis/redis_password.
 #
 # The compose file mounts secrets/admin read-only into the core, and the core's entrypoint points
@@ -40,25 +40,44 @@ fresh() {
 
 case "${1:-}" in
   ensure)
-    # The folder exists before compose mounts it, so Docker does not make it as root.
-    if [ "${2:-}" != --dry-run ]; then
-      mkdir -p "$DIR"
-      chmod 0750 "$DIR" 2>/dev/null || true
+    # Fresh or not is decided first: on an install that has run before nothing here may fail the
+    # upgrade (a secrets/ owned by root, run as a normal user, is not this step's business).
+    if ! fresh; then
+      [ "${2:-}" = --dry-run ] || { mkdir -p "$DIR" && chmod 0750 "$DIR"; } 2>/dev/null || true
+      exit 0
     fi
-    fresh || exit 0
     if [ "${2:-}" = --dry-run ]; then
       echo "  would: make a random first-administrator password in deploy/$FILE (fresh install)"
       exit 0
     fi
-    gid=$(sed -n 's/^ELASTICPRO_GID=//p' .env 2>/dev/null | tail -1); gid=${gid:-1000}
+    # The folder exists before compose mounts it, so Docker does not make it as root.
+    mkdir -p "$DIR" || { echo "✗ could not make deploy/$DIR" >&2; exit 1; }
+    chmod 0750 "$DIR" || { echo "✗ could not set the mode of deploy/$DIR" >&2; exit 1; }
+    # The group the core is given (group_add: ELASTICPRO_GID in the compose file). Resolved the way
+    # install.sh does it: this user's own group, written to .env so the compose file passes the same
+    # one. As root the file is chowned to the core's uid instead and the group does not matter.
+    gid=${ELASTICPRO_GID:-$(sed -n 's/^ELASTICPRO_GID=//p' .env 2>/dev/null | tail -1)}
+    if [ -z "$gid" ] && [ "$(id -u)" != 0 ]; then
+      gid=$(id -g)
+      if [ -f .env ] && grep -q '^ELASTICPRO_GID=' .env; then :; else
+        printf 'ELASTICPRO_GID=%s\n' "$gid" >> .env || { echo "✗ could not write ELASTICPRO_GID to deploy/.env" >&2; exit 1; }
+        echo "  ELASTICPRO_GID=$gid written to deploy/.env (the core's group, so it can read the password file)" >&2
+      fi
+    fi
+    gid=${gid:-1000}
     pw=$(openssl rand -hex 12 2>/dev/null || od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
     [ "${#pw}" -ge 20 ] || { echo "✗ could not make a random password (no openssl, no /dev/urandom)" >&2; exit 1; }
     ( umask 077; set -C; printf '%s\n' "$pw" > "$FILE" ) || { echo "✗ could not write deploy/$FILE" >&2; exit 1; }
     if [ "$(id -u)" = 0 ]; then
-      chown 999:"$gid" "$FILE" && chgrp "$gid" "$DIR" || { echo "✗ could not give deploy/$FILE to the core (uid 999)" >&2; exit 1; }
+      chown 999:"$gid" "$FILE" && chgrp "$gid" "$DIR" || { rm -f "$FILE"; echo "✗ could not give deploy/$FILE to the core (uid 999)" >&2; exit 1; }
     else
-      chgrp "$gid" "$DIR" "$FILE" 2>/dev/null || true
-      chmod 0640 "$FILE" || { echo "✗ could not set the mode of deploy/$FILE" >&2; exit 1; }
+      if ! chgrp "$gid" "$DIR" "$FILE"; then
+        rm -f "$FILE"
+        echo "✗ could not give deploy/$FILE to group $gid (ELASTICPRO_GID, the core's group): this user is not in it." >&2
+        echo "  Set ELASTICPRO_GID in deploy/.env to a group you are in (id -g), or run as root." >&2
+        exit 1
+      fi
+      chmod 0640 "$FILE" || { rm -f "$FILE"; echo "✗ could not set the mode of deploy/$FILE" >&2; exit 1; }
     fi
     echo made
     ;;

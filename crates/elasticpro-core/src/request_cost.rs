@@ -6,7 +6,9 @@
 //!   (cluster, kind) the requests sent, their total time, a latency histogram (`STEPS`, for the
 //!   p95), the bytes read, the timeouts and the deferrals; and per cluster its `TOP_PER_CLUSTER`
 //!   slowest requests of the same window. Bounded: `KEEP_HOURS` buckets, at most `CELLS_MAX`
-//!   cells a bucket (past it a cluster's other kinds share one `other` cell), and nothing on disk.
+//!   cells a bucket, overflow included (past `CELLS_MAX − 1` every further cluster × kind shares
+//!   one `other` cell of no cluster, `OVERFLOW_CLUSTER`), slowest lists for at most
+//!   `TOP_CLUSTERS_MAX` clusters, and nothing on disk.
 //! * A request answered without going to the cluster (the read cache, sharing another's
 //!   request) costs the cluster nothing and is not counted. One the gate held back before it
 //!   was sent (`overloaded`, `queue_timeout`) is a *deferral*, and so is a job's cluster held
@@ -24,8 +26,14 @@ use std::collections::{HashMap, VecDeque};
 pub const HOUR_MS: u64 = 3_600_000;
 /// The window kept and shown: the last 24 clock hours.
 pub const KEEP_HOURS: u64 = 24;
-/// Cells (cluster × kind) one hour holds at most; past it a cluster's further kinds go to `OTHER`.
+/// Cells (cluster × kind) one hour holds at most, the overflow cell included: past `CELLS_MAX − 1`
+/// further cells go to (`OVERFLOW_CLUSTER`, `OTHER`).
 pub const CELLS_MAX: usize = 4_096;
+/// The cluster of the one overflow cell: none (several clusters' requests share it). Only a
+/// caller who sees every cluster reads it (`sees("")`), so it names and leaks no cluster.
+pub const OVERFLOW_CLUSTER: &str = "";
+/// Clusters with a slowest-requests list at most; a cluster past it has none kept.
+pub const TOP_CLUSTERS_MAX: usize = 1_024;
 /// The slowest requests kept per cluster, and the most expensive shown in all.
 pub const TOP_PER_CLUSTER: usize = 10;
 pub const TOP_SHOWN: usize = 10;
@@ -156,6 +164,9 @@ pub struct CostBook {
     since: Option<u64>,
     hours: VecDeque<Hour>,
     top: HashMap<String, Vec<Expensive>>,
+    /// The book holds only the requests since this time although the window is longer (the
+    /// worker's ring was full): its kinds are partial (`mark_partial`).
+    partial_since: Option<u64>,
 }
 
 /// The kind a request's origin counts under: the job it is part of (`job:<job id>`), a poller
@@ -246,8 +257,8 @@ impl CostBook {
         };
         let h = &mut self.hours[i];
         let mut key = (cluster.to_string(), kind.to_string());
-        if !h.cells.contains_key(&key) && h.cells.len() >= CELLS_MAX {
-            key.1 = OTHER.to_string();
+        if !h.cells.contains_key(&key) && h.cells.len() >= CELLS_MAX - 1 {
+            key = (OVERFLOW_CLUSTER.to_string(), OTHER.to_string());
         }
         Some(h.cells.entry(key).or_default())
     }
@@ -278,6 +289,9 @@ impl CostBook {
         if TIMED_OUT.contains(&s.status) {
             c.timeouts += 1;
         }
+        if !self.top.contains_key(s.cluster) && self.top.len() >= TOP_CLUSTERS_MAX {
+            return;
+        }
         let top = self.top.entry(s.cluster.to_string()).or_default();
         if top.len() < TOP_PER_CLUSTER || top.last().is_some_and(|e| e.ms < s.ms) {
             top.push(Expensive { at: s.started_at, cluster: s.cluster.to_string(), kind, method: s.method.to_string(),
@@ -294,6 +308,12 @@ impl CostBook {
         }
     }
 
+    /// This book has only the requests since `since` (a ring that was full): every row it adds
+    /// to is marked partial, with that time (`partialSince`).
+    pub fn mark_partial(&mut self, since: u64) {
+        self.partial_since = Some(since);
+    }
+
     /// How many cells the book holds now (for the bound's test).
     pub fn cells(&self) -> usize {
         self.hours.iter().map(|h| h.cells.len()).sum()
@@ -304,19 +324,26 @@ impl CostBook {
     /// window, most requests first, and the `TOP_SHOWN` slowest requests.
     pub fn view(books: &[&CostBook], sees: impl Fn(&str) -> bool, now: u64) -> Value {
         let edge = now.saturating_sub(KEEP_HOURS * HOUR_MS);
-        let mut sum: HashMap<(String, String), Cell> = HashMap::new();
+        // Per cluster × kind: the sum, and the latest `partial_since` of the books that added to it.
+        let mut sum: HashMap<(String, String), (Cell, Option<u64>)> = HashMap::new();
         for b in books {
             for h in b.hours.iter().filter(|h| h.start + HOUR_MS > edge) {
                 for ((cl, k), c) in h.cells.iter().filter(|((cl, _), _)| sees(cl)) {
-                    sum.entry((cl.clone(), k.clone())).or_default().add(c);
+                    let e = sum.entry((cl.clone(), k.clone())).or_default();
+                    e.0.add(c);
+                    if let Some(p) = b.partial_since.filter(|p| *p > edge) {
+                        e.1 = Some(e.1.map_or(p, |q| q.max(p)));
+                    }
                 }
             }
         }
         let since = books.iter().filter_map(|b| b.since).min().map(|s| s.max(edge));
         // Requests per hour over the hours the book has actually covered, at least one.
         let hours = since.map_or(1.0, |s| (now.saturating_sub(s) as f64 / HOUR_MS as f64).clamp(1.0, KEEP_HOURS as f64));
-        let mut rows: Vec<Value> = sum.into_iter().map(|((cluster, kind), c)| json!({
+        let mut rows: Vec<Value> = sum.into_iter().map(|((cluster, kind), (c, partial))| json!({
             "cluster": cluster, "label": kind_label(&kind), "kind": kind,
+            // Counted only since this time (the worker's ring was full): fewer than the window's.
+            "partialSince": partial,
             "requests": c.requests, "perHour": ((c.requests as f64 / hours) * 10.0).round() / 10.0,
             "avgMs": (c.requests > 0).then(|| c.ms_total / c.requests), "p95Ms": c.p95(), "maxMs": (c.requests > 0).then_some(c.ms_max),
             // Bytes over the requests whose size is known; null when none is.
@@ -413,7 +440,7 @@ mod tests {
         for n in &names {
             b.add(&req("a", n, 1, NOW), NOW);
         }
-        assert_eq!(b.cells(), CELLS_MAX + 1, "past the bound the further kinds share one cell");
+        assert_eq!(b.cells(), CELLS_MAX, "past the bound the further kinds share one cell, inside the bound");
         assert_eq!(b.top.get("a").map(Vec::len), Some(TOP_PER_CLUSTER));
         assert_eq!(kind_of(&"x".repeat(500)).len(), KIND_MAX);
         // Requests per hour: over the hours covered, at least one.
@@ -422,6 +449,37 @@ mod tests {
             b.add(&req("a", "poller:health", 10, NOW - i * HOUR_MS / 2), NOW);
         }
         assert_eq!(CostBook::view(&[&b], |_| true, NOW)["rows"][0]["perHour"], 2.2, "12 over 5.5 hours");
+    }
+
+    #[test]
+    fn the_bound_is_hard_across_clusters_and_the_overflow_is_seen_only_by_who_sees_all() {
+        // Every request a new cluster: the overflow is one shared cell, not one per cluster.
+        let ids: Vec<String> = (0..CELLS_MAX + 500).map(|i| format!("c{i}")).collect();
+        let mut b = CostBook::default();
+        for id in &ids {
+            b.add(&req(id, "poller:health", 1, NOW), NOW);
+        }
+        assert_eq!(b.cells(), CELLS_MAX, "the hour holds at most CELLS_MAX cells, the overflow included");
+        assert_eq!(b.top.len(), TOP_CLUSTERS_MAX, "slowest lists for at most TOP_CLUSTERS_MAX clusters");
+        let all = CostBook::view(&[&b], |_| true, NOW);
+        let over = all["rows"].as_array().unwrap().iter().find(|r| r["cluster"] == OVERFLOW_CLUSTER).unwrap();
+        assert_eq!((over["kind"].as_str(), over["requests"].as_u64()), (Some(OTHER), Some(501)));
+        let mine = CostBook::view(&[&b], |c| c == "c1", NOW);
+        assert_eq!(mine["rows"].as_array().unwrap().len(), 1, "a limited caller does not read the shared overflow");
+    }
+
+    #[test]
+    fn a_book_marked_partial_marks_the_rows_it_adds_to() {
+        let mut core = CostBook::default();
+        core.add(&req("a", "poller:health", 10, NOW - 100), NOW);
+        let mut worker = CostBook::default();
+        worker.add(&req("a", "volume-hosts", 10, NOW - 100), NOW);
+        worker.mark_partial(NOW - 2 * HOUR_MS);
+        let v = CostBook::view(&[&core, &worker], |_| true, NOW);
+        let rows = v["rows"].as_array().unwrap();
+        let w = rows.iter().find(|r| r["kind"] == "job:hosts.collect").unwrap();
+        assert_eq!(w["partialSince"], NOW - 2 * HOUR_MS);
+        assert_eq!(rows.iter().find(|r| r["kind"] == "poller:health").unwrap()["partialSince"], Value::Null, "the core's own book covers the window");
     }
 
     #[test]

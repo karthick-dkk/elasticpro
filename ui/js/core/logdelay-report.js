@@ -745,9 +745,15 @@ export function gridShade(v, worst) {
 /**
  * The grid's rows: one per cluster, a cell per window of today (`windowsPerDay`), each the
  * devices late at that window's measurement (`lateAtWindow`); `state` 'measured', 'missing'
- * (begun, not measured: hatched) or 'future' (not begun yet). `measured` of `begun` windows,
- * the worst cell, Late now and vs yesterday on the same terms. Worst first: Late now, then the
- * worst window, then the name; a cluster never measured last.
+ * (ended, not measured: hatched), 'pending' (the window in progress, `complete: false`, with no
+ * reading yet — runs are not aligned to windows, so this is not a miss) or 'future' (not begun).
+ * `measured` of `done` (the windows that ended, plus one in progress that already has a
+ * reading: a pending window is not in the denominator), the worst cell, Late now and vs
+ * yesterday on the same terms. Late now is the cluster's last measurement (its last run): when
+ * that was before today's first window (`lastBeforeToday`, from midnight until the first run)
+ * it is yesterday's last, and the board says so. `nextAt`: when the next measurement is due
+ * (the last run plus the interval), null when not known. Worst first: Late now, then the worst
+ * window, then the name; a cluster never measured last.
  */
 export function lateGridRows(byCluster, everyHours, mode = 'late') {
   const n = windowsPerDay(everyHours) || 0;
@@ -757,13 +763,19 @@ export function lateGridRows(byCluster, everyHours, mode = 'late') {
       const w = ws[i];
       if (!w) return { i, state: 'future', v: null, w: null };
       const v = lateAtWindow(w, mode);
-      return { i, state: v === null ? 'missing' : 'measured', v, w };
+      return { i, state: v !== null ? 'measured' : w.complete === false ? 'pending' : 'missing', v, w };
     });
     const vals = cells.filter((x) => x.state === 'measured').map((x) => x.v);
+    const never = c.lastRunAt === null || c.lastRunAt === undefined;
+    const dayStart = ws[0] && finite(ws[0].from) ? ws[0].from : null;
+    const next = !never && finite(c.lastRunAt) && finite(everyHours) && everyHours > 0 ? c.lastRunAt + everyHours * 3600000 : null;
     return {
-      id: c.id, name: c.name || c.id, never: c.lastRunAt === null || c.lastRunAt === undefined,
+      id: c.id, name: c.name || c.id, never,
       lateNow: lateNowOf(c, mode), vs: vsYesterday(c, mode), cells,
       measured: vals.length, begun: cells.filter((x) => x.state !== 'future').length,
+      done: cells.filter((x) => x.state === 'measured' || x.state === 'missing').length,
+      lastBeforeToday: !never && dayStart !== null && finite(c.lastRunAt) && c.lastRunAt < dayStart,
+      nextAt: next,
       worst: vals.length ? Math.max(...vals) : null,
     };
   });

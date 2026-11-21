@@ -488,8 +488,10 @@ function chartPanels(res, period, b, scopeId) {
 /**
  * Late devices over the day (0.3.82, replaces the heat map): one row per cluster — the name
  * kept in view, Late now, vs yesterday — then a cell per measurement window of today with the
- * devices late at that window's measurement (lateGridRows). A window with no measurement is
- * hatched "not measured", never an earlier reading carried forward; one not begun yet is blank.
+ * devices late at that window's measurement (lateGridRows). A window that ended with no
+ * measurement is hatched "not measured", never an earlier reading carried forward; the window in
+ * progress with no reading yet is "pending" (light dots, when the next run is due); one not
+ * begun yet is blank. Before today's first run, Late now is yesterday's last measurement, labelled.
  * Each row is shaded on its own scale (its worst window darkest), one hue. A cell opens the
  * cluster at that window.
  */
@@ -501,23 +503,25 @@ function lateGrid(res, b) {
   const heads = windowHeads(every);
   const what = S.gridMode === 'critical' ? b.high.toLowerCase() : b.late;
   if (!all.length || !n) return h('div.tbl-empty', !n ? 'The measurement interval is not known, so the day’s windows are not either.' : 'No cluster you can see is measured.');
+  const hm = (ms) => zonedText(ms, S.zone, { seconds: false }).slice(11);
   const tr = (r) => {
-    const today = r.begun > 0 && r.measured === 0;
     const kids = [h('th.ld-g-nm', { scope: 'row' }, link(clusterHref(r.id), r.name, { title: `${r.name} · log delay details` }))];
     if (r.never) {
       kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED)));
       return h('tr', { dataset: { cluster: r.id } }, ...kids);
     }
-    if (today) kids.push(h('td.ld-g-today', { colspan: 2 }, h('span.muted', 'not measured today')));
-    else {
-      kids.push(h('td.num.ld-g-now', { title: `devices ${what} now` }, countText(r.lateNow)));
-      kids.push(h(`td.num.ld-g-vs${finite(r.vs) && r.vs > 0 ? '.ld-g-up' : finite(r.vs) && r.vs < 0 ? '.ld-g-dn' : ''}`,
-        { title: finite(r.vs) ? 'now against yesterday’s measurement of the same window as the last run' : 'yesterday’s same window was not measured: not known' },
-        finite(r.vs) ? vsText(r.vs) : h('span.muted', '—')));
-    }
+    // Late now is the last measurement; before today's first run that is yesterday's last, said so.
+    const yday = r.lastBeforeToday;
+    kids.push(h(`td.num.ld-g-now${yday ? '.ld-g-yday' : ''}`, {
+      title: yday ? `devices ${what} at yesterday’s last measurement — no run yet today${finite(r.nextAt) ? ` (next due about ${hm(r.nextAt)})` : ''}` : `devices ${what} now (the last measurement)`,
+    }, countText(r.lateNow), yday ? h('small.muted.ld-g-ytag', ' yday') : null));
+    kids.push(h(`td.num.ld-g-vs${finite(r.vs) && r.vs > 0 ? '.ld-g-up' : finite(r.vs) && r.vs < 0 ? '.ld-g-dn' : ''}`,
+      { title: finite(r.vs) ? (yday ? 'yesterday’s last measurement against the same window a day before it' : 'now against yesterday’s measurement of the same window as the last run') : 'the same window a day earlier was not measured: not known' },
+      finite(r.vs) ? vsText(r.vs) : h('span.muted', '—')));
     for (const c of r.cells) {
       const label = c.w && c.w.label ? c.w.label : `${heads[c.i]}:00`;
       if (c.state === 'future') { kids.push(h('td.ld-gc.ld-g-fut', { title: `${label} · not begun yet` })); continue; }
+      if (c.state === 'pending') { kids.push(h('td.ld-gc.ld-g-pend', { title: `${r.name} · ${label} · pending — this window has not ended and has no reading yet${finite(r.nextAt) && r.nextAt > Date.now() ? `; next measurement about ${hm(r.nextAt)}` : ''}` })); continue; }
       if (c.state === 'missing') { kids.push(h('td.ld-gc.ld-g-na', { title: `${r.name} · ${label} · not measured — no run in this window (never a copy of an earlier one)` }, '·')); continue; }
       const shade = gridShade(c.v, r.worst);
       const open = () => openAtWindow(r.id, c.w);
@@ -527,7 +531,8 @@ function lateGrid(res, b) {
         onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } },
       }, countText(c.v)));
     }
-    kids.push(h('td.num.ld-g-meas', { title: `windows of today measured · ${countText(r.begun)} of ${countText(n)} begun so far` }, `${r.measured}/${n}`));
+    kids.push(h('td.num.ld-g-meas', { title: r.done ? `windows of today measured, of the ${countText(r.done)} ended so far (the window in progress counts once it has a reading) · ${countText(n)} in the day` : 'no window of today has ended yet' },
+      r.done ? `${r.measured}/${r.done}` : h('span.muted', '—')));
     return h('tr', { dataset: { cluster: r.id } }, ...kids);
   };
   return [
@@ -537,7 +542,8 @@ function lateGrid(res, b) {
     h('div.ld-foot.ld-g-legend',
       h('span', 'Shade = this cluster’s own scale (its worst window is darkest), so a quiet cluster’s rise still shows'),
       h('span.ld-key', h('i.ld-g-key.ld-gs-0'), '0'), h('span.ld-key', h('i.ld-g-key.ld-gs-2'), 'some'), h('span.ld-key', h('i.ld-g-key.ld-gs-4'), 'its worst'),
-      h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run in that window')),
+      h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run in that window'),
+      h('span.ld-key', h('i.ld-g-key.ld-g-pend'), 'pending — the window in progress, no reading yet')),
   ];
 }
 

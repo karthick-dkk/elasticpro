@@ -9,7 +9,7 @@
 import { h } from '../lib/dom.js';
 import { card, table, keptCard, keptTable } from './common.js';
 import { tableSort } from '../lib/table-sort.js';
-import { costRows, costTotals, topRows, msText, bytesText, perHourText, windowText } from '../core/request-cost.js';
+import { costRows, costTotals, topRows, msText, bytesText, perHourText, windowText, partialText } from '../core/request-cost.js';
 import { exactTime } from '../core/job-detail.js';
 
 let C = null;
@@ -40,6 +40,7 @@ export function costView(answer, { error = null, cache = null, redraw = () => {}
       : 'Reading the request costs…')];
   }
   const rows = costRows(answer, nameOf);
+  const clock = (ms) => exactTime(ms, { tz, seconds: false }).split(' ').pop();
   const t = costTotals(rows);
   const head = h('div.rc-line#rc-line', { title: 'Counted in memory from every request ElasticPro sent (the report worker’s too); a request answered from the read cache or by another’s request cost the cluster nothing and is not counted. Kept for a day; a restart starts again.' },
     h('b', Number(t.requests).toLocaleString('en')), ` requests to ${t.clusters} cluster${t.clusters === 1 ? '' : 's'} ${windowText(answer, (ms) => exactTime(ms, { tz, seconds: false }).split(' ').pop())}`,
@@ -55,7 +56,8 @@ export function costView(answer, { error = null, cache = null, redraw = () => {}
     ['Timeouts', 'timeouts', { type: 'number', value: (r) => r.timeouts, start: -1 }, true, 'ElasticPro gave up waiting, or closed the request past its deadline'],
     ['Deferrals', 'deferrals', { type: 'number', value: (r) => r.deferrals, start: -1 }, true, 'held back before it was sent: the request gate was full, or the job waited because the cluster was busy'],
   ], rows, (r) => h('tr', { dataset: { cluster: r.cluster, kind: r.kind } },
-    h('td', r.name), h('td', { title: r.kind }, r.label),
+    h('td', r.name), h('td', { title: partialText(r, clock) ? `${r.kind} · ${partialText(r, clock)}: the worker keeps its last 5,000 requests, so this row counts fewer than the window's` : r.kind },
+      r.label, partialText(r, clock) ? h('span.muted.rc-partial', ` · ${partialText(r, clock)}`) : null),
     h('td.num', perHourText(r.perHour)),
     h('td.num', r.avgMs === null ? dash() : msText(r.avgMs)),
     h('td.num', r.p95Ms === null ? dash() : msText(r.p95Ms)),

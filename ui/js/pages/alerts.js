@@ -804,13 +804,16 @@ function notSavedToast(what, why) {
 }
 
 async function doRetry(m) {
-  let why = '';
+  let why = ''; let dropped = '';
   for (const k of new Set([m.key, ...(m.keys || [])])) {
     if (!unsavedReason(k)) continue;
     const kept = await retrySave(k);
     if (kept && kept.unsaved) why = kept.unsaved;
+    else if (kept && kept.dropped) dropped = kept.dropped;
   }
-  if (why) toast(`Still not saved — ${why}`, 'err', 7000); else toast('Saved', 'ok', 2500);
+  if (why) toast(`Still not saved — ${why}`, 'err', 7000);
+  else if (dropped) toast(`Saved your notes. ${dropped}.`, 'warn', 7000);
+  else toast('Saved', 'ok', 2500);
   bus.emit('alerts-changed');
   draw();
 }

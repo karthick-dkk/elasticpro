@@ -224,13 +224,17 @@ export function partReason(p) {
   }
 }
 
+/** Run statuses with no measurement to read: still going or waiting, or nothing was attempted (paused, skipped). */
+const NOT_MEASURED_RUN = ['running', 'queued', 'pending', 'paused', 'skipped'];
+
 /**
- * The last finished run of `jobId` in a JOBS_LIST answer (newest first); null when none has
- * ended. A run still going keeps no details yet, so the one before it is the last run.
+ * The last run of `jobId` that actually measured, in a JOBS_LIST answer (newest first); null
+ * when none has. A run still going keeps no details yet, and a paused or skipped one attempted
+ * nothing (no details): the one before it is the last run.
  */
 export function lastFinishedRun(listRes, jobId = LOGDELAY_JOB) {
   const runs = (listRes && Array.isArray(listRes.runs)) ? listRes.runs : [];
-  return runs.find((r) => r && r.jobId === jobId && !['running', 'queued', 'pending'].includes(r.status)) || null;
+  return runs.find((r) => r && r.jobId === jobId && !NOT_MEASURED_RUN.includes(r.status)) || null;
 }
 
 /**

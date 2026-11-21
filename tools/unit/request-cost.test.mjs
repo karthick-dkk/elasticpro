@@ -29,3 +29,16 @@ test('rows keep the core\'s figures, add names, and the totals add up', () => {
   assert.equal(C.topRows(answer, (id) => `n-${id}`)[0].name, 'n-a');
   assert.deepEqual(C.costRows(null), []);
 });
+
+test('a partial row says since when; the shared overflow row is "several clusters" and no cluster in the count', () => {
+  const answer = { ok: true, rows: [
+    { cluster: 'a', kind: 'job:hosts.collect', requests: 5000, partialSince: 1000 },
+    { cluster: 'a', kind: 'poller:health', requests: 10, partialSince: null },
+    { cluster: '', kind: 'other', requests: 3 },
+  ] };
+  const rows = C.costRows(answer, (id) => `name-${id}`);
+  assert.equal(C.partialText(rows[0], () => '14:05'), 'partial — worker kept requests since 14:05');
+  assert.equal(C.partialText(rows[1]), '', 'a row that covers the window says nothing');
+  assert.equal(rows[2].name, C.OVERFLOW_NAME);
+  assert.equal(C.costTotals(rows).clusters, 1, 'the overflow row is not a cluster');
+});

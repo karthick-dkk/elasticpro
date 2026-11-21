@@ -157,6 +157,8 @@ for (const name of PAGES) {
         if (!rt || rt.dataset.tab !== 'health') errors.push(`${name}: the tab bar does not mark ElasticPro health as the one shown`);
         if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push(`${name}: no status strip with the core`);
         if (!view.querySelector('tr[data-check="core.memory"]')) errors.push(`${name}: no memory check`);
+      } else if (tab === 'cost') {
+        if (!rt || rt.dataset.tab !== 'cost') errors.push(`${name}: the tab bar does not mark Cost as the one shown`);
       } else if (!rt || rt.dataset.tab !== 'log') errors.push(`${name}: the Request Centre's tab bar does not mark Requests`);
     } else if (page === 'jobs') {
       // Jobs: the tab bar marks the tab shown, the strip is there, and the Jobs tab lists every job.

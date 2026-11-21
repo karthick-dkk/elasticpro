@@ -560,6 +560,18 @@ async fn the_default_proxy_is_trusted_by_its_name_and_only_while_it_resolves_the
 }
 
 #[tokio::test]
+async fn a_request_arriving_while_the_proxy_is_looked_up_waits_for_the_answer() {
+    // Two requests through nginx at once, before the first lookup: the second must not be judged
+    // on the empty list while the first one's lookup is still running (it would show as nginx).
+    let c = core(&TempDir::new("zlink-proxy-wait"), ServerZbx { default_proxy: Some("localhost".into()), ..Default::default() });
+    let l = c.zabbix_link();
+    let nginx: Option<std::net::IpAddr> = Some("127.0.0.1".parse().unwrap());
+    let (a, b) = tokio::join!(l.source_for(Some("203.0.113.7"), nginx), l.source_for(Some("203.0.113.8"), nginx));
+    assert_eq!(a, Some("203.0.113.7".parse().unwrap()));
+    assert_eq!(b, Some("203.0.113.8".parse().unwrap()), "the second request waited for the lookup");
+}
+
+#[tokio::test]
 async fn pairing_is_rate_limited_per_source() {
     let dir = TempDir::new("zlink-rate");
     let c = core(&dir, ServerZbx::default());

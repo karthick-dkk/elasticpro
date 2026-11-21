@@ -18,16 +18,18 @@ impl Core {
         let view = self.sink_view(caller);
         let now = crate::fleet::now_ms();
         let edge = now.saturating_sub(KEEP_HOURS * HOUR_MS);
-        // Copied out and the lock let go at once: every request going to a cluster takes it.
-        let own = self.requests.lock().cost.clone();
         // The worker's requests (role core): its ring, folded into a book of their own.
         let mut worker = CostBook::default();
         if self.role == Role::Core {
             if let Some(d) = self.data_dir.as_deref() {
-                for v in crate::worker::read_requests(d, crate::worker::REQUESTS_KEEP) {
-                    if let Some(s) = Sample::from_json(&v).filter(|s| s.started_at >= edge) {
+                let ring = crate::worker::read_requests(d, crate::worker::REQUESTS_KEEP);
+                for v in &ring {
+                    if let Some(s) = Sample::from_json(v).filter(|s| s.started_at >= edge) {
                         worker.add(&s, now);
                     }
+                }
+                if let Some(since) = ring_partial_since(&ring, crate::worker::REQUESTS_KEEP, edge) {
+                    worker.mark_partial(since);
                 }
             }
         }
@@ -41,6 +43,36 @@ impl Core {
                 deferred.add_deferral(c, &kind_of_job(&r.job_id), r.created_at, now);
             }
         }
-        CostBook::view(&[&own, &worker, &deferred], |c| view.sees(c), now)
+        // The answer is built under the request log's lock rather than the whole book copied out
+        // under it: no allocation of the book, and the summing is what the copy would cost anyway.
+        let log = self.requests.lock();
+        let answer = CostBook::view(&[&log.cost, &worker, &deferred], |c| view.sees(c), now);
+        drop(log);
+        answer
+    }
+}
+
+/// When the worker's ring (`limit` records, newest first) was full and its oldest record is
+/// inside the window, the window is not covered: the time from which it is. `None` when the ring
+/// holds the whole window (not full, or its oldest record is older than the window's start).
+fn ring_partial_since(ring: &[Value], limit: usize, edge: u64) -> Option<u64> {
+    if ring.len() < limit {
+        return None;
+    }
+    let oldest = ring.iter().filter_map(|v| v.get("startedAt").and_then(Value::as_u64)).min()?;
+    (oldest > edge).then_some(oldest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_full_worker_ring_that_does_not_reach_back_a_day_is_partial() {
+        let ring: Vec<Value> = (0..5u64).map(|i| json!({ "startedAt": 1_000 + i })).collect();
+        assert_eq!(ring_partial_since(&ring, 5, 500), Some(1_000), "full, oldest inside the window: partial since it");
+        assert_eq!(ring_partial_since(&ring, 6, 500), None, "not full: the whole window is there");
+        assert_eq!(ring_partial_since(&ring, 5, 2_000), None, "full, but the oldest is older than the window");
     }
 }

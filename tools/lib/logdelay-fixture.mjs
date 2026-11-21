@@ -114,7 +114,8 @@ function sumDays(lists) {
  * Today's measurement windows of 2 hours up to now (docs/LOGDELAY.md "windows"): newly late,
  * solved, still late; and (0.3.82) whether the window was measured and the devices late at its
  * measurement. The window before the current one is not measured (no run in it), so Late devices
- * over the day has a hatched cell whenever two windows have begun.
+ * over the day has a hatched cell whenever two windows have begun. The second cluster's window in
+ * progress has no reading yet (0.3.82: a pending cell, not counted in Measured).
  */
 function windowsOf(now, ci, late) {
   const d = new Date(now); d.setHours(0, 0, 0, 0);
@@ -125,7 +126,8 @@ function windowsOf(now, ci, late) {
     const k = Math.round((from - d.getTime()) / 7200000);
     const hh = (ms) => `${String(new Date(ms).getHours()).padStart(2, '0')}:${String(new Date(ms).getMinutes()).padStart(2, '0')}`;
     const still = Math.max(0, late - ((k + ci) % 3)); const critical = Math.min(still, (k + ci) % 2);
-    const measured = k !== begun - 2;
+    // The second cluster has no reading yet in the window in progress (runs are not aligned to windows): pending, not missing.
+    const measured = k !== begun - 2 && !(ci === 1 && k === begun - 1);
     out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: still, delay: still - critical, critical, complete: now >= to,
       measured, lateAt: measured ? still : null, criticalAt: measured ? critical : null });
   }

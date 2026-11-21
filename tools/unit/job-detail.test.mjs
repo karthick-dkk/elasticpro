@@ -164,4 +164,6 @@ test('the Log Delay page\'s not-measured line is the run details\' own parts, in
   assert.equal(D.notMeasured({ ok: true, detail: null }), null, 'no details: nothing said');
   assert.equal(D.lastFinishedRun({ runs: [{ id: 'a', jobId: 'logdelay.measure', status: 'running' }, { id: 'b', jobId: 'logdelay.measure', status: 'completed' }] }).id, 'b');
   assert.equal(D.lastFinishedRun({ runs: [] }), null);
+  assert.equal(D.lastFinishedRun({ runs: [{ id: 's', jobId: 'logdelay.measure', status: 'skipped' }, { id: 'p', jobId: 'logdelay.measure', status: 'paused' },
+    { id: 'm', jobId: 'logdelay.measure', status: 'failed' }] }).id, 'm', 'a skipped or paused run measured nothing: the last one that did');
 });

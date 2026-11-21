@@ -36,13 +36,17 @@ export function bytesText(n) {
 /** Requests per hour: "12", "0.4". */
 export const perHourText = (v) => (num(v) === null ? '—' : num(v) >= 10 ? String(Math.round(num(v))) : String(Math.round(num(v) * 10) / 10));
 
+/** The core's one overflow cell has no cluster (several clusters' further kinds share it). */
+export const OVERFLOW_NAME = 'several clusters';
+
 /**
  * The table's rows, from the answer's `rows`, with the cluster's name (`nameOf`): every figure
- * kept as the core sent it (null stays null) and the words beside it.
+ * kept as the core sent it (null stays null) and the words beside it. `partialSince`: the row
+ * counts only the requests since then (the worker's ring was full), null when it covers the window.
  */
 export function costRows(answer, nameOf = (id) => id) {
   return ((answer && Array.isArray(answer.rows)) ? answer.rows : []).map((r) => ({
-    ...r, name: nameOf(r.cluster), label: r.label || r.kind,
+    ...r, name: r.cluster === '' ? OVERFLOW_NAME : nameOf(r.cluster), label: r.label || r.kind, partialSince: num(r.partialSince),
     avgMs: num(r.avgMs), p95Ms: num(r.p95Ms), bytes: num(r.bytes), perHour: num(r.perHour),
     requests: num(r.requests) || 0, timeouts: num(r.timeouts) || 0, deferrals: num(r.deferrals) || 0,
   }));
@@ -51,7 +55,7 @@ export function costRows(answer, nameOf = (id) => id) {
 /** The figures over the whole answer, for the line above the table: requests, timeouts, deferrals, clusters. */
 export function costTotals(rows) {
   const t = { requests: 0, timeouts: 0, deferrals: 0, clusters: new Set() };
-  for (const r of rows || []) { t.requests += r.requests || 0; t.timeouts += r.timeouts || 0; t.deferrals += r.deferrals || 0; t.clusters.add(r.cluster); }
+  for (const r of rows || []) { t.requests += r.requests || 0; t.timeouts += r.timeouts || 0; t.deferrals += r.deferrals || 0; if (r.cluster !== '') t.clusters.add(r.cluster); }
   return { requests: t.requests, timeouts: t.timeouts, deferrals: t.deferrals, clusters: t.clusters.size };
 }
 
@@ -63,6 +67,11 @@ export function windowText(answer, clock = (ms) => new Date(ms).toTimeString().s
   if (hours === null || hours >= keep - 0.05) return `over the last ${keep} h`;
   const since = num(answer.since);
   return `since ${since === null ? 'the server started' : clock(since)} (${hours} h)`;
+}
+
+/** A partial row's words: "partial — worker kept requests since 14:05"; '' for a row that covers the window. */
+export function partialText(r, clock = (ms) => new Date(ms).toTimeString().slice(0, 5)) {
+  return r && num(r.partialSince) !== null ? `partial — worker kept requests since ${clock(num(r.partialSince))}` : '';
 }
 
 /** The top list's rows, slowest first as the core sent them, with names. */

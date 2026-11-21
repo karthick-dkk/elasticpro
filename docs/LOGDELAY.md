@@ -726,15 +726,20 @@ drawn on Live (Live's Fetch is the browser's).
   carried a window's last reading into the windows after it — so whole rows looked the same):
   one row per cluster, the name column kept in view while the grid scrolls sideways, then *Late
   now*, *vs yesterday* ("▲ 18", "▼ 2", "="), one cell per measurement window of today — as many
-  as the interval gives (12 at 2 h, `windowsPerDay`) — and *Measured k/12*. A cell is the devices
+  as the interval gives (12 at 2 h, `windowsPerDay`) — and *Measured k/n*: of the windows that
+  ended so far (and the one in progress once it has a reading; "—" before the first ends). A cell is the devices
   late at that window's own measurement (`lateAtWindow`): the core's `windows[].lateAt` (the delay
   band and above the critical line, as By cluster's *Late now* and *Change* count late) or
   `criticalAt` with the toggle on *Above 60 min*. The core counts each device by its last reading
   inside the window (`summary::measured_late`); a window with no reading is `measured: false` and
-  drawn hatched "not measured" — never an earlier reading carried forward; a window not begun yet
-  is blank. *vs yesterday* is Late now less the count at yesterday's measurement of the same
-  window as the last run (`yesterdayWindow`, `vsYesterday`); unknown when that window was not
-  measured. Rows are worst first (Late now, then the worst window); *Worst 10* by default, *All N*
+  drawn hatched "not measured" — never an earlier reading carried forward. The window in progress
+  (`complete: false`) with no reading yet is *pending*, light dots, its tooltip giving when the next
+  measurement is due (the last run plus the interval): runs are not aligned to windows, so this is
+  not a miss and is not counted in *Measured*. A window not begun yet is blank. *Late now* is the
+  last measurement (the last run); from midnight until today's first run that is yesterday's last,
+  marked "yday" with a tooltip saying so — no row reads "not measured today". *vs yesterday* is
+  Late now less the count at the measurement a day earlier of the same window as the last run
+  (`yesterdayWindow`, `vsYesterday`); unknown when that window was not measured. Rows are worst first (Late now, then the worst window); *Worst 10* by default, *All N*
   on one click; a cluster never measured last, saying so. Each row is shaded on its own scale
   (`gridShade`: its worst window darkest, one blue, light and dark themes alike) so a quiet
   cluster's rise still shows. A cell opens the cluster's board at that window: a line on the
@@ -745,11 +750,13 @@ drawn on Live (Live's Fetch is the browser's).
   (`partReason`: "no index matches logstash-*", "timed out (30 s)", "part read (2 shards
   failed)", "busy — deferred", …) and its fix where the core names one ("set log index" opens the
   cluster's settings), and *Run details in Jobs ›*. It is read from the same per-cluster results
-  Jobs keeps (`JOBS_LIST {jobId: "logdelay.measure"}`, the last finished run, then
+  Jobs keeps (`JOBS_LIST {jobId: "logdelay.measure"}`, the last run that measured — not one
+  still going, paused or skipped — then
   `JOB_RUN_DETAIL`; `notMeasured` in `ui/js/core/job-detail.js`), so the two never disagree;
-  narrowed to the clusters the viewer may see (the core narrows the details, the page keeps to
-  the clusters it knows). Nothing is shown when every cluster was read, or when the details cannot
-  be read (a guest, a core before 0.3.81). The per-cluster read counts stay on each cluster's board.
+  naming only clusters the viewer may see (the page keeps to the clusters it knows). Nothing is
+  shown when every cluster was read, or when the details cannot be read (a guest, a core before
+  0.3.81) — and so not to an administrator limited to some clusters: the run is fleet-wide, and a
+  run covering clusters they cannot see is not theirs to read (`run_view`, as Jobs). The per-cluster read counts stay on each cluster's board.
 * **The "i"** (`ui/js/logdelay/fix-popover.js` `fixButton`, `fixesFor`): one popover for every
   button, the core's own words (`DeviceRow.fix`, `byCluster[].fixes`, a device board's `finding`,
   Live's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,
