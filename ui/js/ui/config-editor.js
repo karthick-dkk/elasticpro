@@ -28,7 +28,7 @@ import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMet
 import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel, DESTINATION_FIELDS } from '../core/zabbix-overlay.js';
 import { zoneOptions, timeZoneText, knownZone, ZONE_HINT } from '../core/log-tz.js';
 import { zoneOf, loadLevels } from '../core/delay-levels.js';
-import { SWITCHES, WHERE as COLLECTION_WHERE, collectionOf, collectionValue, hoursText } from '../core/collection.js';
+import { SWITCHES, collectionOf, collectionValue } from '../core/collection.js';
 
 /**
  * The "Log time zone" select (docs/LOGDELAY.md "Time zones"): Detect from devices (what detection
