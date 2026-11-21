@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.82
 
 - **Security: a fresh install no longer opens with a public password.** `deploy/deploy.sh` and `tools/install.sh` give a fresh install (no core container, no `core-data` volume, no password file) a random password for the first account, `Admin`, in `deploy/secrets/admin/initial_admin_password` — private from its first byte (0600 owned by the core when run as root, else 0640 with the install's group, which the core is given) — and print it once at the end, on the terminal only, never into captured output. Sign in, set your own on the Accounts page, delete the file. An install that has run before is never given one, an existing file is never replaced, and a password the core did not use is removed. The compose file mounts `secrets/admin` read-only and points the core at the file when it exists. A core started with nothing configured (a plain `docker compose up`, the dev bridge) still makes `Admin`/`elastic` and warns on every start. deploy/README.md "First sign-in"; `tools/compose-upgrade-check.sh` section 9.
 - **Security: an initial-password file that cannot be used stops the core.** When `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` is set and the core has no accounts yet, a file it cannot read, an empty one or one shorter than 10 characters makes no account and the core exits (code 78) with a message naming the setting and the fix — it no longer falls back to the shipped password the operator set the file to avoid. An install that already has accounts never reads the file.
