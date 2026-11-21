@@ -839,6 +839,18 @@ impl Core {
             if !(reached || !place_allowed || quiet_due) {
                 continue;
             }
+            // Moved into a window that leaves its place out: never closer to UTC midnight than its
+            // place is (schedule::Shift, as the daily volume run) — a later moment of the window
+            // that is far enough is waited for; with none, a day that ended within the margin is
+            // not collected yet (a day file is written once).
+            let mut margin_ms = 0u64;
+            if let Some(h) = coll.heavy_hours.filter(|_| !place_allowed) {
+                match vsched::Shift::of(local, planned, h, None, &vsched::local_to_ms).0 {
+                    vsched::Shift::Hold => continue,
+                    vsched::Shift::Run { margin_ms: m } => margin_ms = m,
+                    vsched::Shift::NotDue | vsched::Shift::Closed => {}
+                }
+            }
             if self.reports.hosts_running.lock().contains(&id) || self.volume_unreachable(&id) || self.report_cluster_red(&id) {
                 continue;
             }
@@ -861,7 +873,11 @@ impl Core {
                     }
                 }
             }
-            let missing = self.hosts_missing(&id, &days, now);
+            let mut missing = self.hosts_missing(&id, &days, now);
+            if margin_ms > 0 {
+                let ended = |d: &NaiveDate| (*d + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX);
+                missing.retain(|d| ended(d) + margin_ms as i64 <= now);
+            }
             if missing.is_empty() {
                 self.reports.hosts_quiet.lock().remove(&id);
                 continue;

@@ -576,7 +576,7 @@ impl Core {
             self.report_progress(job_id, acc.0 + d, acc.1 + t + 1);
         };
         let to = p.to_date().min(today);
-        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false };
+        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false, final_margin_ms: 0 };
         let got = self.volume_collect(cluster, s, &opts).await
             .map_err(|e| Box::new(if self.volume_stopped() { JobEnd::held(e) } else { JobEnd::failed(e) }))?;
         if let Some(why) = got.interrupted {

@@ -74,6 +74,9 @@ pub(crate) struct CollectOpts<'a> {
     /// The settings are ones the record may be pruned by (`Core::volume_prunes`). Even then
     /// months go only after a run that finished without an error.
     pub prune: bool,
+    /// A day that ended less than this ago is searched but left not final (the next run makes it
+    /// final): a run moved into a heavy-job window too close to UTC midnight. 0 = the usual rule.
+    pub final_margin_ms: u64,
 }
 
 /// What one collection did.
@@ -835,7 +838,7 @@ impl Core {
                     let prune = self.volume_prunes(&r);
                     let part = self.jobs.join_with(crate::jobs::VOLUME_DAILY, trigger.clone(), &id, crate::fleet::now_ms(), meta.clone());
                     run_id.get_or_insert_with(|| part.id().to_string());
-                    self.volume_spawn(id.clone(), r.settings, prune, None, Some(part));
+                    self.volume_spawn(id.clone(), r.settings, prune, None, Some(part), 0);
                     started.push(id);
                 }
             }
@@ -855,7 +858,10 @@ impl Core {
     /// reason, leaves today marked: at most one scheduled run a day.
     /// `logged`: the scheduled run's part for this cluster in the run log (docs/JOBS.md); a
     /// Refresh now is not a run of the daily job.
-    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings, prune: bool, scheduled: Option<Option<String>>, logged: Option<crate::jobs::Run>) {
+    /// `final_margin_ms`: a day that ended less than this ago is left not final (a run moved into
+    /// a heavy-job window too close to UTC midnight, `schedule::Shift`); 0 otherwise.
+    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings, prune: bool, scheduled: Option<Option<String>>, logged: Option<crate::jobs::Run>,
+                    final_margin_ms: u64) {
         let core = self.clone();
         tokio::spawn(async move {
             let permit = core.volume.permits.clone().acquire_owned().await;
@@ -865,7 +871,7 @@ impl Core {
             } else {
                 // The run's lane (docs/JOBS.md "Governor"): its clusters share one allocation.
                 let key = logged.as_ref().map(|r| r.id().to_string()).unwrap_or_else(|| crate::jobs::VOLUME_DAILY.to_string());
-                core.governed(&key, crate::jobs::VOLUME_DAILY, core.volume_run_cluster(&id, &s, prune)).await
+                core.governed(&key, crate::jobs::VOLUME_DAILY, core.volume_run_cluster(&id, &s, prune, final_margin_ms)).await
             };
             drop(permit);
             // Asked to stop by a person (JOB_CANCEL): stopped at a safe point, and the day stays
@@ -991,7 +997,7 @@ impl Core {
         }
         tracing::info!(cluster = %id, "volume daily: the backfill's run at the cluster's quietest hour");
         let part = self.jobs.join(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, id, crate::fleet::now_ms());
-        self.volume_spawn(id.to_string(), s.clone(), false, None, Some(part));
+        self.volume_spawn(id.to_string(), s.clone(), false, None, Some(part), 0);
         true
     }
 
@@ -1004,13 +1010,13 @@ impl Core {
 
     /// One cluster, start to finish (docs/VOLUME.md "Each run, per cluster"): the daily run
     /// and Refresh now.
-    async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings, prune: bool) -> Result<Collected, String> {
+    async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings, prune: bool, final_margin_ms: u64) -> Result<Collected, String> {
         // The emergency stop, or a person's JOB_CANCEL of the run: both checked between
         // requests and days (the run's safe points).
         let stop = || self.volume_stopped().then(|| "the emergency stop came on".to_string())
             .or_else(|| self.jobs.cancel_asked(crate::jobs::VOLUME_DAILY).map(|by| format!("cancelled by {by}")));
         let progress = |done, total| self.volume_progress(id, done, total);
-        let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress, prune };
+        let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress, prune, final_margin_ms };
         self.volume_collect(id, s, &opts).await
     }
 
@@ -1088,6 +1094,9 @@ impl Core {
         let why = |v: &Value| v.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
         let started = now_ms();
         let today = schedule::utc_day(started);
+        // What counts as over for `final`: today's rule, or — a run moved too close to UTC midnight
+        // (`final_margin_ms`) — only days that ended at least the margin ago.
+        let final_today = schedule::utc_day(started - opts.final_margin_ms as i64);
         let first_kept = schedule::oldest_kept_month(today, s.keep_months);
         let oldest = month_key(first_kept);
         let mut out = Collected::default();
@@ -1337,7 +1346,7 @@ impl Core {
                 if let Some(day) = file.days.get_mut(&day_key(date)) {
                     out.changed_days.insert(day_key(date));
                     if ok(&res) {
-                        collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, today, now_ms());
+                        collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, final_today, now_ms());
                         if let Some(e) = &day.error {
                             out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
                         }
@@ -1482,9 +1491,28 @@ impl Core {
             // Due: past its place and not run today — or, when its heavy-job window leaves its place
             // out (00–06 with collectAt 06:00), whenever the window is open and it has not run
             // today, as the hosts collection does (docs/JOBS.md "Per-cluster switches").
+            // Due: past its place and not run today. When its heavy-job window leaves its place
+            // out (00–06 with collectAt 06:00), once each window session, at a moment at least as
+            // far past UTC midnight as its own place is — never making a UTC day final sooner after
+            // it ended than the usual run would (schedule::Shift, docs/JOBS.md "Per-cluster switches").
             let start = volume_start_at(&members, &id, &r.settings);
-            let place_allowed = spec.collection.heavy_hours.is_none_or(|h| h.contains(chrono::Timelike::hour(&start)));
-            let due = if place_allowed { schedule::is_due(local, start, last) } else { last.is_none_or(|l| l < local.date()) };
+            let mut mark = local.date();
+            let mut margin_ms = 0u64;
+            let due = match spec.collection.heavy_hours.filter(|h| !h.contains(chrono::Timelike::hour(&start))) {
+                None => schedule::is_due(local, start, last),
+                Some(h) => {
+                    let (shift, session) = schedule::Shift::of(local, start, h, last, &schedule::local_to_ms);
+                    mark = session;
+                    match shift {
+                        schedule::Shift::NotDue | schedule::Shift::Hold => false,
+                        schedule::Shift::Closed => true,
+                        schedule::Shift::Run { margin_ms: m } => {
+                            margin_ms = m;
+                            true
+                        }
+                    }
+                }
+            };
             if !due || self.volume_unreachable(&id) {
                 continue;
             }
@@ -1522,7 +1550,7 @@ impl Core {
             }
             // Marked before the run, not after: a run that crashes the process must not be
             // started again by every restart. A run that ends at the stop puts `prev` back.
-            let today = day_key(local.date());
+            let today = day_key(mark);
             if store.update_state(&id, |st| st.last_scheduled_day = Some(today.clone())).is_err() {
                 if let Some(r) = self.volume.runs.lock().get_mut(&id) {
                     r.running = false;
@@ -1533,7 +1561,11 @@ impl Core {
             // One run of the daily job for the clusters it starts, joined by any it starts while
             // some still collect (clusters may have different collectAt).
             let part = self.jobs.join(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, &id, crate::fleet::now_ms());
-            self.volume_spawn(id.clone(), r.settings, prune, Some(prev), Some(part));
+            if margin_ms > 0 {
+                tracing::info!(cluster = %id, margin_min = margin_ms / 60_000,
+                               "volume daily: run in the heavy-job window too soon after UTC midnight; a day that ended within the margin stays not final");
+            }
+            self.volume_spawn(id.clone(), r.settings, prune, Some(prev), Some(part), margin_ms);
             started.push(id);
         }
         started

@@ -11,6 +11,66 @@
 
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
+/// What the daily run does in a heavy-job window that leaves its own place out (docs/JOBS.md
+/// "Per-cluster switches"): `Shift::of`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shift {
+    /// This window session has had its run.
+    NotDue,
+    /// Due, but the window is closed: it waits for the window.
+    Closed,
+    /// The window is open, but the newest UTC day closed less than the run's usual margin ago;
+    /// a later moment of this window session is far enough past UTC midnight: wait for it.
+    Hold,
+    /// Run now. `margin_ms` > 0: no moment of this window session is far enough past UTC
+    /// midnight, so the run goes now and leaves a day that ended less than `margin_ms` ago not
+    /// final — the next run makes it final.
+    Run { margin_ms: u64 },
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+impl Shift {
+    /// The window session `local` falls in, named by the date it ends on: a window across midnight
+    /// (22–06) is one session from 22:00 to 06:00, the next day's date — so 22:00 and the 00:00
+    /// after it are the same session, and one run covers it.
+    pub fn session(local: NaiveDateTime, h: crate::collection::Hours) -> NaiveDate {
+        use chrono::Timelike;
+        if h.from > h.to && local.hour() >= h.from as u32 { local.date() + Duration::days(1) } else { local.date() }
+    }
+
+    /// The rule. The run's margin is how far past UTC midnight its own place (`start`, on this
+    /// local date) lies — 06:00 IST is 00:30 UTC, 30 minutes — so a shifted run never makes a day
+    /// final sooner after it ended than the run at its own place would. `to_ms` turns a local time
+    /// into unix ms (`local_to_ms`; the tests give a fixed offset). `last`: the session last run.
+    pub fn of(local: NaiveDateTime, start: NaiveTime, h: crate::collection::Hours, last: Option<NaiveDate>,
+              to_ms: &dyn Fn(NaiveDateTime) -> Option<i64>) -> (Shift, NaiveDate) {
+        let session = Shift::session(local, h);
+        if last.is_some_and(|l| l >= session) {
+            return (Shift::NotDue, session);
+        }
+        if !h.open_at(local) {
+            return (Shift::Closed, session);
+        }
+        let tod = |t: NaiveDateTime| to_ms(t).map(|ms| ms.rem_euclid(DAY_MS));
+        let margin = tod(local.date().and_time(start)).unwrap_or(0);
+        if tod(local).is_none_or(|x| x >= margin) {
+            return (Shift::Run { margin_ms: 0 }, session);
+        }
+        let mut t = local;
+        while t - local < Duration::hours(24) {
+            t += Duration::minutes(15);
+            if !h.open_at(t) {
+                break;
+            }
+            if tod(t).is_some_and(|x| x >= margin) {
+                return (Shift::Hold, session);
+            }
+        }
+        (Shift::Run { margin_ms: margin as u64 }, session)
+    }
+}
+
 /// `HH:MM`, 00:00 to 23:59. Leading zeros required: this is a setting, not free text.
 pub fn parse_hhmm(s: &str) -> Option<NaiveTime> {
     let b = s.trim().as_bytes();
@@ -125,6 +185,63 @@ pub fn zone_name(tz: Option<&str>, etc_timezone: Option<&str>, localtime: Option
 pub fn local_to_ms(t: NaiveDateTime) -> Option<i64> {
     use chrono::TimeZone;
     chrono::Local.from_local_datetime(&t).earliest().map(|d| d.timestamp_millis())
+}
+
+#[cfg(test)]
+mod shift_tests {
+    use super::*;
+    use crate::collection::Hours;
+
+    /// A fixed offset, as Asia/Kolkata (+05:30) or UTC.
+    fn at_offset(minutes: i64) -> impl Fn(NaiveDateTime) -> Option<i64> {
+        move |t: NaiveDateTime| Some(t.and_utc().timestamp_millis() - minutes * 60_000)
+    }
+    fn at(d: u32, h: u32, m: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, d).unwrap().and_hms_opt(h, m, 0).unwrap()
+    }
+    fn six() -> NaiveTime {
+        NaiveTime::from_hms_opt(6, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn ist_00_06_runs_at_midnight_with_the_utc_day_long_closed() {
+        let ist = at_offset(330);
+        let w = Hours::new(0, 6).unwrap();
+        // 00:00 IST is 18:30 UTC: the newest wanted day (the UTC day before) ended 18.5 h ago,
+        // far past the 30 minutes 06:00 IST (00:30 UTC) gives: final as at the usual place.
+        assert_eq!(Shift::of(at(21, 0, 0), six(), w, None, &ist), (Shift::Run { margin_ms: 0 }, NaiveDate::from_ymd_opt(2026, 11, 21).unwrap()));
+        assert_eq!(Shift::of(at(21, 3, 0), six(), w, NaiveDate::from_ymd_opt(2026, 11, 21), &ist).0, Shift::NotDue, "once a session");
+        assert_eq!(Shift::of(at(21, 9, 0), six(), w, NaiveDate::from_ymd_opt(2026, 11, 20), &ist).0, Shift::Closed);
+        // 05:45 IST is 00:15 UTC — the UTC day ended 15 minutes ago, and the window shuts at 06:00:
+        // run, but leave that day not final (30 min margin).
+        assert_eq!(Shift::of(at(21, 5, 45), six(), w, NaiveDate::from_ymd_opt(2026, 11, 20), &ist).0, Shift::Run { margin_ms: 30 * 60_000 });
+    }
+
+    #[test]
+    fn ist_22_06_runs_once_a_session_at_22_and_never_twice_in_a_night() {
+        let ist = at_offset(330);
+        let w = Hours::new(22, 6).unwrap();
+        let (s, session) = Shift::of(at(20, 22, 0), six(), w, None, &ist);
+        assert_eq!(s, Shift::Run { margin_ms: 0 }, "22:00 IST is 16:30 UTC: yesterday's UTC day long closed");
+        assert_eq!(session, NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(), "the session ends on the 21st");
+        // Marked with its session: the 00:00 that follows is the same session — no second run.
+        assert_eq!(Shift::of(at(21, 0, 0), six(), w, Some(session), &ist).0, Shift::NotDue);
+        assert_eq!(Shift::of(at(21, 12, 0), six(), w, Some(session), &ist).0, Shift::NotDue);
+        assert_eq!(Shift::of(at(21, 22, 0), six(), w, Some(session), &ist).0, Shift::Run { margin_ms: 0 }, "the next night's");
+    }
+
+    #[test]
+    fn a_window_with_no_moment_far_enough_past_utc_midnight_runs_and_leaves_the_day_not_final() {
+        // A UTC server, 00–06, collectAt 06:00: its margin is 6 h, and every moment of the window
+        // is less than 6 h past UTC midnight.
+        let utc = at_offset(0);
+        let w = Hours::new(0, 6).unwrap();
+        assert_eq!(Shift::of(at(21, 0, 0), six(), w, None, &utc).0, Shift::Run { margin_ms: 6 * 3_600_000 });
+        // A window 02–10 there: at 02:00 too soon, 06:00 is inside — wait for it.
+        let w2 = Hours::new(2, 10).unwrap();
+        assert_eq!(Shift::of(at(21, 2, 0), six(), w2, None, &utc).0, Shift::Hold);
+        assert_eq!(Shift::of(at(21, 6, 0), six(), w2, None, &utc).0, Shift::Run { margin_ms: 0 });
+    }
 }
 
 #[cfg(test)]

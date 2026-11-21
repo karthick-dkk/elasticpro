@@ -639,12 +639,20 @@ what ElasticPro may ask one cluster for, and when its heavy jobs may run. One de
   (skipped with "not now — heavy jobs only …") or for a volume or hosts report (the file has what the
   record already held, and says why). A timer waits: when the window holds the job's usual place
   (the daily volume run's `collectAt` and spread, the hosts collection's place in 06:00–08:00) it
-  runs there, and a run that comes due outside the window waits for it to open; when the window
-  leaves that place out (00–06 with `collectAt` 06:00), the job is due whenever the window is open
-  and it has not run that local day — so it runs as the window opens, once a day. Note that a window
-  ending at 06:00 IST can start a run at 05:30 IST, which is 00:00 UTC: right at the close of the UTC
-  day, so that run may count the day just ended while its last logs still arrive (the hosts
-  collection reads only closed days; the daily volume run reads the day again next time). The hosts mail does not wait for such a cluster. The scheduled
+  runs there, and a run that comes due outside the window waits for it to open.
+- **A window that leaves the usual place out** (00–06 or 22–06 with `collectAt` 06:00) moves the run
+  into the window (`volume::schedule::Shift`), once per **window session** — a window across midnight
+  is one session from 22:00 to 06:00, so 22:00 and the 00:00 after it never both run. Index days are
+  UTC days, and a day is made final when it is over; the usual place keeps a margin after UTC
+  midnight for late logs (06:00 IST is 00:30 UTC: 30 minutes). A moved run keeps the same margin: it
+  starts at the first moment of the window that lies at least that far past UTC midnight — with
+  Asia/Kolkata, 00:00 IST (18:30 UTC) and 22:00 IST (16:30 UTC) are far past it, so the run goes as the
+  window opens and makes yesterday's UTC day final exactly as the usual run would; today's UTC day is
+  still live and is never made final. When no moment of the session is far enough (a UTC server with
+  00–06 and `collectAt` 06:00: every moment is under 6 h past UTC midnight), the run goes as the
+  window opens but leaves a day that ended less than the margin ago **not final**: it is searched
+  again by the next run, which makes it final. The hosts collection follows the same rule and, then,
+  does not collect such a day yet (a day file is written once). The hosts mail does not wait for such a cluster. The scheduled
   log delay measurement is not a heavy job and keeps its interval.
 - **Stored with the cluster.** A config-file cluster: its entry's `collection:` —
   `{ilm: false, snapshots: false, logDelay: false, hosts: false, heavyHours: {from: 22, to: 6}}`, only
