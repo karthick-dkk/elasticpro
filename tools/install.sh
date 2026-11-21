@@ -397,10 +397,28 @@ if [ "$MODE" = hosted ]; then
   # The first account is made on first start rather than left for the first visitor to
   # name — whoever reached the page first would otherwise have become the administrator.
   if [ "$ADMIN_MADE" = 1 ]; then
-    # Shown once, on the terminal only (initial-admin.sh): never into a captured log.
-    ./initial-admin.sh report >&2
+    # Shown only once the core says it made the first account with it (deploy.sh's rule), and
+    # then once, on the terminal only (initial-admin.sh): never into a captured log. The file
+    # is not removed here when the core has not said so: it may simply not have started yet.
+    used=0
+    for _ in $(seq 1 45); do
+      if docker compose logs core 2>/dev/null | grep -q 'created the first one, with the password from'; then used=1; break; fi
+      sleep 2
+    done
+    if [ "$used" = 1 ]; then
+      ./initial-admin.sh report >&2
+    else
+      warn "The core has not said yet that it made the first account from deploy/secrets/admin/initial_admin_password."
+      info "If it does, sign in as  Admin  with the password in that file. If this install already"
+      info "had accounts, the file is not used: sign in with those, and delete the file."
+    fi
+  elif [ -x initial-admin.sh ] && [ -s secrets/admin/initial_admin_password ]; then
+    info "Sign in as  Admin  with the password in deploy/secrets/admin/initial_admin_password"
+    info "(made by an earlier install, used only while there are no accounts), then delete it."
   elif [ -x initial-admin.sh ]; then
-    info "Sign in with the administrator account this install already has."
+    info "No first-administrator password was made: this install has run before, so sign in with"
+    info "the accounts it has. If it has none (Docker could not say whether it was fresh), the core"
+    info "made  Admin / elastic : sign in with that and change it on the Accounts page at once."
   else
     info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
     info "until you do, anyone who reaches the sign-in page has the account."

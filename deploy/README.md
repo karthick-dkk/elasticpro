@@ -159,7 +159,10 @@ a mapping would read `0.0.0.0:8765->8765/tcp`, as it does for nginx on 443.
 
 **Upgrading to 0.3.82: who may set `X-Real-IP`.** The core now believes `X-Real-IP` only from
 the compose service `nginx` (by name) and from `TRUSTED_PROXIES`; before, an empty
-`TRUSTED_PROXIES` meant "from anyone". The shipped stack needs nothing. If a proxy of your own
+`TRUSTED_PROXIES` meant "from anyone". The shipped stack needs nothing — **as long as the front
+proxy's service in `docker-compose.yml` is still named `nginx`**, as shipped: the name is what is
+looked up. A compose file where you renamed it must list that service's address (or its network's
+range) in `TRUSTED_PROXIES`, or every user shows as the proxy's address. If a proxy of your own
 talks to the **core** directly (not through nginx) and the activity log, `allowedSources` or a
 display link's `allowFrom` should see the client's address, put that proxy's address in
 `TRUSTED_PROXIES` before upgrading. A proxy in front of nginx needs nothing (see "Rate limits
@@ -413,7 +416,8 @@ people in and removes its budget.
 
 **Whose `X-Real-IP` the core believes (0.3.82).** Only a trusted proxy's: the compose service
 **`nginx`**, looked up by name (again every 30 s, and on a header from an address it does not
-know — compose gives nginx a new address whenever it recreates it), plus any address or CIDR in
+know — compose gives nginx a new address whenever it recreates it; a lookup that fails keeps the
+addresses last confirmed for at most 90 s, then trusts nobody by name until one answers), plus any address or CIDR in
 `TRUSTED_PROXIES`. From anyone else the header is ignored and the TCP peer is the source. That
 address is what the activity log records, what `allowedSources` and a display link's `allowFrom`
 check, and what the per-source rate limits count. Nothing needs setting for the shipped stack, and

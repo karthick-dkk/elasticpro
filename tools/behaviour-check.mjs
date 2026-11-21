@@ -8049,7 +8049,20 @@ await settleFor(300);
       ok(hatched.length === (begun >= 2 ? 1 : 0) && hatched.every((c) => /not measured/.test(c.title) && !/\d/.test(c.textContent)),
         `log delay: ${hatched.length} hatched cells for ${begun} begun windows (the fixture leaves the one before the current unmeasured)`);
       ok(cells.filter((c) => c.classList.contains('ld-g-fut')).length === 12 - begun, 'log delay: windows not begun yet are not left blank');
-      ok(row0 && row0.querySelector('.ld-g-meas').textContent === `${begun - (begun >= 2 ? 1 : 0)}/12`, `log delay: Measured reads ${row0 && row0.querySelector('.ld-g-meas').textContent}`);
+      // Measured counts the windows that ended (and the one in progress once it has a reading), never the 12 of the day.
+      ok(row0 && row0.querySelector('.ld-g-meas').textContent === `${begun - (begun >= 2 ? 1 : 0)}/${begun}`, `log delay: Measured reads ${row0 && row0.querySelector('.ld-g-meas').textContent}`);
+      ok(!cells.some((c) => c.classList.contains('ld-g-pend')), 'log delay: a window with a reading is drawn pending');
+      // The second cluster's window in progress has no reading yet: pending (light dots, no figure), not hatched, not in the denominator.
+      const row1 = grid && grid.querySelector(`tbody tr[data-cluster="${list[1].id}"]`);
+      ok(list.length < 3 || row1, 'log delay: the second cluster has no grid row');
+      const cells1 = row1 ? [...row1.querySelectorAll('td.ld-gc')] : [];
+      const pend = cells1.filter((c) => c.classList.contains('ld-g-pend'));
+      if (list.length >= 3) ok(pend.length === 1 && pend[0] === cells1[begun - 1] && /pending/.test(pend[0].title) && !pend[0].textContent.trim() && !pend[0].classList.contains('ld-g-na'),
+        `log delay: the window in progress with no reading is not one pending cell (${pend.length}; ${pend[0] && pend[0].title})`);
+      const m1 = begun - 1 - (begun >= 2 ? 1 : 0); const d1 = begun - 1;
+      if (list.length >= 3) ok(row1 && row1.querySelector('.ld-g-meas').textContent.trim() === (d1 ? `${m1}/${d1}` : '—'), `log delay: the second cluster's Measured reads ${row1 && row1.querySelector('.ld-g-meas').textContent} (the pending window counted?)`);
+      ok(![...grid.querySelectorAll('tbody tr')].some((tr) => /not measured today/.test(tr.textContent)), 'log delay: a row still says "not measured today"');
+      ok(grid.parentElement.parentElement.querySelector('.ld-g-legend .ld-g-pend') || view().querySelector('.ld-g-legend .ld-g-pend'), 'log delay: the legend has no pending key');
       ok(row0 && /^▲ 1$/.test(row0.querySelector('.ld-g-vs').textContent.trim()), `log delay: vs yesterday reads "${row0 && row0.querySelector('.ld-g-vs').textContent}"`);
       const shaded = cells.filter((c) => /ld-gs-\d/.test(c.className));
       ok(shaded.length >= 1 && shaded.every((c) => c.getAttribute('role') === 'button'), 'log delay: a measured cell is not pressable');

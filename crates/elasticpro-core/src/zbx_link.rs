@@ -146,9 +146,84 @@ pub const DEFAULT_PROXY: &str = "nginx";
 const PROXY_LOOKUP_GAP: Duration = Duration::from_secs(5);
 /// How long one lookup may take.
 const PROXY_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// How one lookup of the default proxy's name ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProxyLookup {
+    /// It resolved: these addresses.
+    Found(Vec<IpAddr>),
+    /// A definite "this name does not exist" (`EAI_NONAME` / `EAI_NODATA`): outside compose, or
+    /// nginx gone. Nobody is trusted by name.
+    NoSuchName,
+    /// It timed out or failed some other way (the DNS server slow or briefly away): the last
+    /// confirmed list is kept, but only for `PROXY_TRUST_MAX` after it was last confirmed.
+    Failed,
+}
+
+/// Whether a `getaddrinfo` error code says the name does not exist (rather than "try again").
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn gai_no_such_name(rc: libc::c_int) -> bool {
+    rc == libc::EAI_NONAME || rc == libc::EAI_NODATA
+}
+
+/// Look `name` up with the system resolver, keeping its error code (std's lookup turns every
+/// resolver error into one uncategorised kind, so "does not exist" could only be told from its
+/// message text). Blocking: run it on a blocking thread.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn resolve_blocking(name: &str) -> ProxyLookup {
+    let Ok(host) = std::ffi::CString::new(name) else { return ProxyLookup::NoSuchName };
+    // SAFETY: an all-zero addrinfo is the documented "no hints" value, then two fields are set.
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: `host` is NUL-terminated and outlives the call; `res` is freed below on success.
+    let rc = unsafe { libc::getaddrinfo(host.as_ptr(), std::ptr::null(), &hints, &mut res) };
+    if rc != 0 {
+        return if gai_no_such_name(rc) { ProxyLookup::NoSuchName } else { ProxyLookup::Failed };
+    }
+    let mut out = Vec::new();
+    let mut p = res;
+    while !p.is_null() {
+        // SAFETY: `p` is a node of the list getaddrinfo returned, not yet freed.
+        let ai = unsafe { &*p };
+        if !ai.ai_addr.is_null() {
+            match ai.ai_family {
+                // SAFETY: the family says which sockaddr the address is.
+                libc::AF_INET => {
+                    let sa = unsafe { &*ai.ai_addr.cast::<libc::sockaddr_in>() };
+                    out.push(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr))));
+                }
+                libc::AF_INET6 => {
+                    let sa = unsafe { &*ai.ai_addr.cast::<libc::sockaddr_in6>() };
+                    out.push(IpAddr::V6(std::net::Ipv6Addr::from(sa.sin6_addr.s6_addr)));
+                }
+                _ => {}
+            }
+        }
+        p = ai.ai_next;
+    }
+    // SAFETY: `res` came from a successful getaddrinfo and is freed once.
+    unsafe { libc::freeaddrinfo(res) };
+    ProxyLookup::Found(out)
+}
+
+/// Elsewhere: std's lookup, where an error cannot be told apart, so it never counts as definite.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resolve_blocking(name: &str) -> ProxyLookup {
+    use std::net::ToSocketAddrs;
+    match (name, 0u16).to_socket_addrs() {
+        Ok(a) => ProxyLookup::Found(a.map(|x| x.ip()).collect()),
+        Err(_) => ProxyLookup::Failed,
+    }
+}
+
 /// How often the hosted binary looks the name up regardless (`ZbxLink::refresh_proxies`): the
 /// bound on how long an address the proxy has given up stays trusted.
 pub const PROXY_REFRESH: Duration = Duration::from_secs(30);
+/// How long the default proxy's addresses stay trusted after a lookup last confirmed them: a few
+/// failed refreshes ride out a DNS hiccup, but an address nginx gave up (and compose may hand to
+/// another container) is not trusted for ever while lookups keep failing.
+pub const PROXY_TRUST_MAX: Duration = Duration::from_secs(PROXY_REFRESH.as_secs() * 3);
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -471,6 +546,12 @@ pub struct ZbxLink {
     /// The addresses `server.default_proxy` resolved to at the last lookup, and when that was.
     proxy_addrs: RwLock<Vec<IpAddr>>,
     proxy_looked_up: Mutex<Option<Instant>>,
+    /// When a lookup last gave a definite answer (found, or no such name): `proxy_addrs` is
+    /// trusted only within `PROXY_TRUST_MAX` of it.
+    proxy_confirmed: Mutex<Option<Instant>>,
+    /// Held for the length of one lookup: a request arriving meanwhile waits for its answer
+    /// rather than being judged on the list the lookup is about to replace.
+    proxy_lookup: tokio::sync::Mutex<()>,
 }
 
 impl ZbxLink {
@@ -488,6 +569,8 @@ impl ZbxLink {
             writing: Mutex::new(()),
             proxy_addrs: RwLock::new(Vec::new()),
             proxy_looked_up: Mutex::new(None),
+            proxy_confirmed: Mutex::new(None),
+            proxy_lookup: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -598,11 +681,49 @@ impl ZbxLink {
     }
 
     /// The peer may vouch for the client's address: it is in `ELASTICPRO_TRUSTED_PROXIES`, or
-    /// it is one of the addresses the default proxy's name resolved to.
+    /// it is one of the addresses the default proxy's name resolved to at a lookup confirmed
+    /// within `PROXY_TRUST_MAX`.
     fn proxy_vouches(&self, peer: IpAddr) -> bool {
         let p = canon(peer);
         self.server.trusted_proxies.as_ref().is_some_and(|list| source_allowed(list, p))
-            || self.proxy_addrs.read().contains(&p)
+            || (self.proxy_list_fresh() && self.proxy_addrs.read().contains(&p))
+    }
+
+    /// The default proxy's list was confirmed by a lookup within `PROXY_TRUST_MAX`.
+    fn proxy_list_fresh(&self) -> bool {
+        self.proxy_confirmed.lock().is_some_and(|t| t.elapsed() < PROXY_TRUST_MAX)
+    }
+
+    /// What a lookup's outcome leaves trusted: a definite answer replaces the list and confirms
+    /// it; a failure keeps the last list while it is fresh, and empties it once it is not.
+    fn apply_proxy_lookup(&self, name: &str, outcome: ProxyLookup) {
+        let found = match outcome {
+            ProxyLookup::Found(addrs) => {
+                let mut v: Vec<IpAddr> = addrs.into_iter().map(canon).collect();
+                v.sort();
+                v.dedup();
+                v
+            }
+            ProxyLookup::NoSuchName => Vec::new(),
+            ProxyLookup::Failed => {
+                if self.proxy_list_fresh() {
+                    tracing::warn!(proxy = %name, "trusted proxy lookup timed out or failed: keeping the addresses last confirmed");
+                } else {
+                    let mut now = self.proxy_addrs.write();
+                    if !now.is_empty() {
+                        tracing::warn!(proxy = %name, "trusted proxy lookups have failed for longer than {}s: its addresses are no longer trusted", PROXY_TRUST_MAX.as_secs());
+                        now.clear();
+                    }
+                }
+                return;
+            }
+        };
+        *self.proxy_confirmed.lock() = Some(Instant::now());
+        let mut now = self.proxy_addrs.write();
+        if *now != found {
+            tracing::info!(proxy = %name, addresses = ?found, "trusted proxy for X-Real-IP");
+            *now = found;
+        }
     }
 
     /// The source a request came from: `X-Real-IP` when the peer is a trusted proxy (the
@@ -634,6 +755,8 @@ impl ZbxLink {
     /// [`PROXY_REFRESH`], so an address nginx gave up is not trusted for long.
     pub async fn refresh_proxies(&self, force: bool) {
         let Some(name) = self.server.default_proxy.clone() else { return };
+        // One lookup at a time; whoever waited here finds it just done and uses its answer.
+        let _running = self.proxy_lookup.lock().await;
         {
             let mut last = self.proxy_looked_up.lock();
             if !force && last.is_some_and(|t| t.elapsed() < PROXY_LOOKUP_GAP) {
@@ -641,20 +764,12 @@ impl ZbxLink {
             }
             *last = Some(Instant::now());
         }
-        let found: Vec<IpAddr> = match tokio::time::timeout(PROXY_LOOKUP_TIMEOUT, tokio::net::lookup_host((name.as_str(), 0))).await {
-            Ok(Ok(addrs)) => {
-                let mut v: Vec<IpAddr> = addrs.map(|a| canon(a.ip())).collect();
-                v.sort();
-                v.dedup();
-                v
-            }
-            _ => Vec::new(),
+        let n = name.clone();
+        let outcome = match tokio::time::timeout(PROXY_LOOKUP_TIMEOUT, tokio::task::spawn_blocking(move || resolve_blocking(&n))).await {
+            Ok(Ok(o)) => o,
+            _ => ProxyLookup::Failed,
         };
-        let mut now = self.proxy_addrs.write();
-        if *now != found {
-            tracing::info!(proxy = %name, addresses = ?found, "trusted proxy for X-Real-IP");
-            *now = found;
-        }
+        self.apply_proxy_lookup(&name, outcome);
     }
 
     /// The addresses the default proxy is trusted at now. Tests and the hosted binary's start line.
@@ -1008,6 +1123,39 @@ impl ZbxLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_proxy_lookup_keeps_the_list_only_while_fresh_and_no_such_name_clears_it() {
+        let l = ZbxLink::open(None, ServerZbx { default_proxy: Some("nginx".into()), ..Default::default() });
+        let ip: IpAddr = "172.18.0.5".parse().unwrap();
+        let hdr = Some("203.0.113.7");
+        let client: Option<IpAddr> = Some("203.0.113.7".parse().unwrap());
+        l.apply_proxy_lookup("nginx", ProxyLookup::Found(vec![ip, ip]));
+        assert_eq!(l.proxy_addrs(), vec![ip], "found: trusted, once");
+        assert_eq!(l.effective_source(hdr, Some(ip)), client);
+        // A failure soon after: the confirmed list is kept (a DNS hiccup does not make users nginx).
+        l.apply_proxy_lookup("nginx", ProxyLookup::Failed);
+        assert_eq!(l.effective_source(hdr, Some(ip)), client);
+        // Confirmed longer ago than PROXY_TRUST_MAX: not trusted, and a further failure empties it.
+        let Some(old) = Instant::now().checked_sub(PROXY_TRUST_MAX + Duration::from_secs(1)) else { return };
+        *l.proxy_confirmed.lock() = Some(old);
+        assert_eq!(l.effective_source(hdr, Some(ip)), Some(ip), "a list not confirmed for too long vouches for nobody");
+        l.apply_proxy_lookup("nginx", ProxyLookup::Failed);
+        assert!(l.proxy_addrs().is_empty(), "lookups failing past the bound: the old address is forgotten");
+        // A definite "no such name" empties it at once, and confirms that.
+        l.apply_proxy_lookup("nginx", ProxyLookup::Found(vec![ip]));
+        l.apply_proxy_lookup("nginx", ProxyLookup::NoSuchName);
+        assert!(l.proxy_addrs().is_empty());
+        assert_eq!(l.effective_source(hdr, Some(ip)), Some(ip));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn no_such_name_is_decided_by_the_resolver_code_not_its_words() {
+        assert!(gai_no_such_name(libc::EAI_NONAME) && gai_no_such_name(libc::EAI_NODATA));
+        assert!(!gai_no_such_name(libc::EAI_AGAIN) && !gai_no_such_name(libc::EAI_FAIL), "try again / a server failure is not definite");
+        assert!(matches!(resolve_blocking("localhost"), ProxyLookup::Found(v) if v.iter().any(|ip| ip.is_loopback())));
+    }
 
     #[test]
     fn urls_are_checked() {

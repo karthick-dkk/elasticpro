@@ -80,13 +80,14 @@ function fromServer(key, a) {
  * than look like the team's record (UI-03/UI-04). The mark itself is never sent or stored.
  */
 async function persist(rec) {
-  const { unsaved: _was, ...clean } = rec;
+  const { unsaved: _was, attemptAt: _at, ...clean } = rec;
   if (await serverKeeps()) {
     const { key, ...record } = clean;
     const res = await bridge({ type: 'ACK_SET', key, record });
     if (res && res.ok && res.ack) return fromServer(key, res.ack);
     if (!unsupported(res)) {
-      return { ...clean, unsaved: String((res && res.message) || 'the server did not answer') };
+      // When it was tried: Retry lets an acknowledgement made on the server after this win.
+      return { ...clean, unsaved: String((res && res.message) || 'the server did not answer'), attemptAt: Date.now() };
     }
     onServer = false;
   }
@@ -97,11 +98,54 @@ async function persist(rec) {
 /** Why this key's record is not saved (hosted: the server refused it or did not answer), or ''. */
 export function unsavedReason(key) { return String((cache.get(key) || {}).unsaved || ''); }
 
-/** Send a record that did not save again, as it is now. Resolves to the record kept. */
+/** Two notes are the same note when written by the same person at the same time with the same text. */
+const sameNote = (a, b) => a.ts === b.ts && a.text === b.text && (a.by || '') === (b.by || '');
+
+/**
+ * What Retry sends (pure): the server's record as it is now, with the notes this browser could
+ * not save appended (none twice), and this browser's acknowledgement — unless the server's was
+ * made after the failed attempt (`attemptAt`), when the server's stands and `dropped` says so.
+ * Sending the stale whole record instead would overwrite acknowledgements and notes others
+ * made meanwhile. `server` is the server's record for the key, or null when it has none.
+ */
+export function mergeForRetry(local, server) {
+  const { unsaved: _u, attemptAt, ...mine } = local;
+  const base = server || { key: local.key, acked: false, ackedAt: 0, ackedBy: '', notes: [], missingSince: 0 };
+  const theirs = Array.isArray(base.notes) ? base.notes : [];
+  const notes = [...theirs, ...(mine.notes || []).filter((n) => !theirs.some((t) => sameNote(t, n)))];
+  const serverNewer = !!server && Number.isFinite(server.ackedAt) && server.ackedAt > 0
+    && Number.isFinite(attemptAt) && server.ackedAt > attemptAt;
+  const ackFrom = serverNewer ? base : mine;
+  const rec = { ...base, key: local.key, notes, acked: !!ackFrom.acked, ackedAt: ackFrom.ackedAt || 0, ackedBy: ackFrom.ackedBy || '' };
+  delete rec.ackedItems;
+  if (Array.isArray(ackFrom.ackedItems)) rec.ackedItems = ackFrom.ackedItems;
+  const changedAck = !!mine.acked !== !!base.acked || (mine.acked && !!server && (mine.ackedAt || 0) !== (base.ackedAt || 0));
+  const dropped = serverNewer && changedAck
+    ? `${base.ackedBy || 'Someone'} ${base.acked ? 'acknowledged' : 'changed'} it on the server after your attempt: theirs stands, yours was dropped`
+    : '';
+  return { rec, dropped };
+}
+
+/**
+ * Send a record that did not save again — merged with the server's copy as it is now
+ * (`mergeForRetry`), never the stale whole record. Resolves to the record kept; `dropped`
+ * on it (not stored) says when this browser's acknowledgement gave way to a newer one.
+ */
 export async function retrySave(key) {
   const rec = cache.get(key);
   if (!rec || !rec.unsaved) return rec || null;
-  return save(rec);
+  if (!(await serverKeeps())) return save(rec);
+  const res = await bridge({ type: 'ACK_LIST' });
+  if (!res || !res.ok) {
+    if (unsupported(res)) { onServer = false; return save(rec); }
+    const still = { ...rec, unsaved: String((res && res.message) || 'the server did not answer') };
+    cache.set(key, still); rev++;
+    return still;
+  }
+  const a = res.acks && res.acks[key];
+  const { rec: merged, dropped } = mergeForRetry(rec, a ? fromServer(key, a) : null);
+  const kept = await save(merged);
+  return dropped && kept && !kept.unsaved ? { ...kept, dropped } : kept;
 }
 
 /** Forget one record where this edition keeps them. */
