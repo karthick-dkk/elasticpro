@@ -416,7 +416,8 @@ people in and removes its budget.
 
 **Whose `X-Real-IP` the core believes (0.3.82).** Only a trusted proxy's: the compose service
 **`nginx`**, looked up by name (again every 30 s, and on a header from an address it does not
-know — compose gives nginx a new address whenever it recreates it), plus any address or CIDR in
+know — compose gives nginx a new address whenever it recreates it; a lookup that fails keeps the
+addresses last confirmed for at most 90 s, then trusts nobody by name until one answers), plus any address or CIDR in
 `TRUSTED_PROXIES`. From anyone else the header is ignored and the TCP peer is the source. That
 address is what the activity log records, what `allowedSources` and a display link's `allowFrom`
 check, and what the per-source rate limits count. Nothing needs setting for the shipped stack, and
