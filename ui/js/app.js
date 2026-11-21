@@ -347,7 +347,7 @@ function yourSettings(anchor) {
     // Only where accounts exist. The portable build has nobody to sign out, and inside
     // Zabbix it is Zabbix you sign out of — a frame signing itself out would leave a
     // login screen asking for a password a Zabbix account does not have.
-    onSignOut: me && !embedded ? async () => { await signOut(); me = null; location.reload(); } : null,
+    onSignOut: me && !embedded ? doSignOut : null,
   });
 }
 
@@ -451,7 +451,7 @@ function renderNoClusters(res) {
       h('div', why))),
     h('div', { style: { display: 'flex', gap: '8px', marginTop: '12px' } },
       h('button.btn', { onclick: () => location.reload() }, 'Try again'),
-      me && !embedded ? h('button.btn.ghost', { onclick: async () => { await signOut(); me = null; location.reload(); } }, 'Sign out') : null)));
+      me && !embedded ? h('button.btn.ghost', { onclick: doSignOut }, 'Sign out') : null)));
 }
 
 async function pick() {
@@ -1229,6 +1229,41 @@ async function checkAcceptedCertificates() {
   writeSeen(localStorage, shown.sig);
 }
 
+/** Sign out, and reload only when the server ended the session; otherwise say so and stay. */
+async function doSignOut() {
+  const res = await signOut();
+  if (!res || res.ok !== true) {
+    toast(`Not signed out — try again (${errorText(res, 'no answer from the server')})`, 'err', 8000);
+    return;
+  }
+  me = null;
+  location.reload();
+}
+
+/**
+ * The server did not answer WHOAMI at start: say so, with Retry, rather than treating the
+ * outage as "no sign-in needed". Resolves with the next answer once Retry gets one.
+ */
+function serverNotAnswering(why) {
+  return new Promise((resolve) => {
+    let busy = false;
+    const draw = (msg) => mount(root, h('div.setup#server-not-answering',
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
+        h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),
+        h('div', h('h2', 'ElasticPro'))),
+      h('div.banner.err', h('div', h('div.ttl', 'Server not answering'), h('div', msg),
+        h('div.muted', { style: { marginTop: '6px' } }, 'Nothing is shown until it answers. If it stays like this, the ElasticPro core may be restarting or stopped (docker compose ps).'))),
+      h('div', { style: { display: 'flex', gap: '8px', marginTop: '12px' } },
+        h('button.btn.primary#server-retry', { disabled: busy, onclick: async () => {
+          busy = true; draw(msg);
+          const st = await authState().catch(() => ({ unreachable: true, message: 'no answer from the server' }));
+          busy = false;
+          if (st.unreachable) draw(st.message); else resolve(st);
+        } }, busy ? 'Trying…' : 'Retry'))));
+    draw(why);
+  });
+}
+
 /**
  * Sign in first, where this build has accounts.
  *
@@ -1238,7 +1273,8 @@ async function checkAcceptedCertificates() {
  */
 async function gateOnAuth() {
   let st;
-  try { st = await authState(); } catch (_) { return; }
+  try { st = await authState(); } catch (_) { st = { unreachable: true, message: 'no answer from the server' }; }
+  while (st.unreachable) st = await serverNotAnswering(st.message);
   // Hosted: credentials are kept encrypted by the server, typed once (core/server-credentials.js).
   setHostedEdition(st.edition === 'hosted');
   if (!st.required) { me = null; return; }

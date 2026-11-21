@@ -49,6 +49,8 @@ export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });
 export const jobRunDetail = (runId) => send({ type: 'JOB_RUN_DETAIL', runId });
 /** Searches running longer than `minMs` on the clusters the caller sees (docs/JOBS.md `SLOW_SEARCHES {minMs}`). User and up. */
 export const slowSearches = (minMs) => send({ type: 'SLOW_SEARCHES', minMs });
+/** What ElasticPro's requests cost each cluster per kind over the last day, and the slowest (docs/JOBS.md `REQUEST_COST`). Administrators only. */
+export const requestCost = () => send({ type: 'REQUEST_COST' });
 /** A job control (docs/JOBS.md "Controls": JOB_RUN, JOB_PAUSE, … JOB_SETTINGS_SET). Administrators only. */
 export const jobControl = (type, params = {}) => send({ type, ...params });
 
@@ -77,7 +79,10 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // cluster with these and no others (auth.rs DelayShape).
                                      ...(c.timeField ? { timeField: c.timeField } : {}),
                                      ...(c.delayFields ? { delayFields: c.delayFields } : {}),
-                                     ...(c.logTimeZone ? { logTimeZone: c.logTimeZone } : {}) })),
+                                     ...(c.logTimeZone ? { logTimeZone: c.logTimeZone } : {}),
+                                     // The collection switches (Edit cluster › Collection): the
+                                     // poller and the jobs never ask what is switched off.
+                                     ...(c.collection && Object.keys(c.collection).length ? { collection: c.collection } : {}) })),
     jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
   });
 }

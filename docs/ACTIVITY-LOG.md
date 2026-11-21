@@ -62,11 +62,14 @@ Writing is done by a background thread fed through a queue of 10,000 lines, so a
 never slows a request. If the queue ever fills, further lines are dropped from the file
 (not from the Accounts page) and a warning is logged at most once a minute.
 
-**Set `ELASTICPRO_TRUSTED_PROXIES`.** `source.ip` comes from the `X-Real-IP` header nginx
-sets. While `ELASTICPRO_TRUSTED_PROXIES` is unset the core believes that header from any
-peer (and logs a warning at startup saying so), so anyone who can reach the core directly,
-bypassing nginx, can put any address in `source.ip`. Set it to the proxy's IP or CIDR
-(comma separated) and the header is believed only from those peers.
+**Whose `X-Real-IP` is believed.** `source.ip` comes from the `X-Real-IP` header nginx sets,
+believed only from a trusted proxy: the compose service `nginx`, looked up by name (again every
+30 s, and when a header comes from an address it does not know), and any IP or CIDR in
+`ELASTICPRO_TRUSTED_PROXIES` (comma separated). From anyone else the header is ignored and the
+TCP peer is recorded, so a container that reaches the core without going through nginx cannot
+put an address of its choosing in `source.ip`. (Before 0.3.82, an unset list believed the header
+from any peer.) A proxy of your own that talks to the core directly needs its address in
+`ELASTICPRO_TRUSTED_PROXIES`; one in front of nginx needs nothing.
 
 The Accounts page reads the last 1000 events, held in memory since the server started;
 the file is the complete record.

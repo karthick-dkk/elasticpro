@@ -22,6 +22,7 @@ pub mod controls;
 pub mod detail;
 pub mod governor;
 pub mod load;
+pub mod quiet;
 pub mod spread;
 
 use crate::delay_sink::SinkView;
@@ -620,6 +621,10 @@ struct Inner {
     /// Runs' details where there is no data directory (tests, a portable run): the newest
     /// `MEM_DETAILS`, in memory.
     mem_details: VecDeque<(Owner, String, detail::RunDetail)>,
+    /// A job's cluster skipped because it is switched off for that cluster (Edit cluster ›
+    /// Collection): the local day of its one `skipped` run, so a timer that looks every minute
+    /// records one a day, not one a tick. In memory: a restart may add one more.
+    skipped_on: HashMap<(String, String), String>,
 }
 
 /// Details kept in memory without a data directory.
@@ -667,7 +672,8 @@ impl Jobs {
         }
         let jobs = Arc::new(Jobs {
             dir, role, writers, controls: parking_lot::Mutex::new(ControlsCache::default()),
-            inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new(), waiting: HashMap::new(), next_at: HashMap::new(), mem_details: VecDeque::new() }),
+            inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new(), waiting: HashMap::new(), next_at: HashMap::new(), mem_details: VecDeque::new(),
+                                                 skipped_on: HashMap::new() }),
         });
         let kept: Vec<(Owner, std::collections::HashSet<String>)> = {
             let inner = jobs.inner.lock();
@@ -846,6 +852,19 @@ impl Jobs {
     /// A cluster of `job` held back because it is busy: one `deferred` run says so (cluster,
     /// reason, since) for the whole wait, however many ticks it lasts. `eased` ends the wait.
     pub fn defer(&self, job: &str, trigger: Trigger, b: &load::Busy, now: u64) -> Option<String> {
+        self.defer_with(job, trigger, b, None, now)
+    }
+
+    /// Whether `job` holds a wait's record for `cluster` now (a busy cluster, or its heavy-job
+    /// hours): the next `defer` would add none.
+    pub fn waiting(&self, job: &str, cluster: &str) -> bool {
+        self.inner.lock().waiting.contains_key(&(job.to_string(), cluster.to_string()))
+    }
+
+    /// `defer`, with the run's words when they are not a busy cluster's "tried again when it
+    /// eases": a wait for the cluster's quietest hour, or for its heavy-job hours (docs/JOBS.md
+    /// "Quiet hours", "Per-cluster switches").
+    pub fn defer_with(&self, job: &str, trigger: Trigger, b: &load::Busy, error: Option<String>, now: u64) -> Option<String> {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let key = (job.to_string(), b.cluster.clone());
@@ -857,16 +876,19 @@ impl Jobs {
         let rec = RunRecord {
             id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Deferred, created_at: now, started_at: None,
             ended_at: Some(now), done: None, total: None, records: None,
-            error: Some(format!("{} is busy: {}; tried again when it eases", b.cluster, b.reason)),
+            error: Some(error.clone().unwrap_or_else(|| format!("{} is busy: {}; tried again when it eases", b.cluster, b.reason))),
             clusters: vec![b.cluster.clone()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: Some(b.clone()), scope: None,
             parts: Some(detail::PartCounts { deferred: 1, ..Default::default() }),
         };
-        let error = rec.error.clone().unwrap_or_default();
+        let said = rec.error.clone().unwrap_or_default();
         // Its detail first — the one cluster, deferred (a warning, not a failure), and why.
         let mut c = detail::Collecting::default();
-        c.part(detail::Part::not_ok(job, &b.cluster, detail::PartStatus::Deferred, &error, None, None));
+        c.part(detail::Part::not_ok(job, &b.cluster, detail::PartStatus::Deferred, &said, None, None));
         c.line(detail::Line { at: now, level: "WARN".into(), cluster: Some(b.cluster.clone()), run: false,
-                              text: format!("{} deferred — {}; retried automatically when it eases (a warning, not a failure)", b.cluster, b.reason) });
+                              text: match &error {
+                                  Some(e) => format!("{} deferred — {e} (a warning, not a failure)", b.cluster),
+                                  None => format!("{} deferred — {}; retried automatically when it eases (a warning, not a failure)", b.cluster, b.reason),
+                              } });
         self.store_detail(inner, owner, &id, c.finish());
         if let Some(f) = inner.logs.get_mut(&owner) {
             f.push(rec);
@@ -878,10 +900,54 @@ impl Jobs {
         Some(id)
     }
 
+    /// A cluster of `job` not asked because the job is switched off for it (Edit cluster ›
+    /// Collection): one `skipped` run says so on `day` (the server's local day), never a failure —
+    /// the timer looking again each minute adds none. Returns the run's id when it added one.
+    pub fn skip_switched_off(&self, job: &str, trigger: Trigger, cluster: &str, why: &str, day: &str, now: u64) -> Option<String> {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let key = (job.to_string(), cluster.to_string());
+        if inner.skipped_on.get(&key).is_some_and(|d| d == day) {
+            return None;
+        }
+        let owner = descriptor(job).map(|d| d.owner).filter(|o| inner.logs.contains_key(o))?;
+        let id = crate::auth::random_hex(8);
+        let rec = RunRecord {
+            id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Skipped, created_at: now, started_at: None,
+            ended_at: Some(now), done: None, total: None, records: None, error: Some(format!("{cluster}: {why}")),
+            clusters: vec![cluster.to_string()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: None, scope: None,
+            parts: Some(detail::PartCounts { skipped: 1, ..Default::default() }),
+        };
+        let mut c = detail::Collecting::default();
+        c.part(detail::Part::not_ok(job, cluster, detail::PartStatus::Skipped, why, None, None));
+        c.line(detail::Line { at: now, level: "INFO".into(), cluster: Some(cluster.to_string()), run: false, text: format!("{cluster} {why}") });
+        self.store_detail(inner, owner, &id, c.finish());
+        if let Some(f) = inner.logs.get_mut(&owner) {
+            f.push(rec);
+        }
+        self.save(inner, owner);
+        inner.skipped_on.insert(key, day.to_string());
+        drop(guard);
+        tracing::info!(job, cluster, "job: skipped, switched off for this cluster");
+        Some(id)
+    }
+
     /// A run (part) of `job` ended `deferred` for its busy cluster: that is the wait's record,
     /// so the ticks that find it still busy add none.
     pub fn mark_waiting(&self, job: &str, cluster: &str, run_id: &str) {
         self.inner.lock().waiting.insert((job.to_string(), cluster.to_string()), run_id.to_string());
+    }
+
+    /// End `cluster`'s wait for `job` when its record is for `signal` (`hours`: the heavy-job
+    /// window opened), so a busy wait that follows gets its own record and words.
+    pub fn ease_signal(&self, job: &str, cluster: &str, signal: &str) {
+        let mut inner = self.inner.lock();
+        let key = (job.to_string(), cluster.to_string());
+        let Some(id) = inner.waiting.get(&key).cloned() else { return };
+        let is = inner.logs.values().any(|f| f.runs.iter().any(|r| r.id == id && r.deferred.as_ref().is_some_and(|b| b.signal == signal)));
+        if is {
+            inner.waiting.remove(&key);
+        }
     }
 
     /// The cluster is no longer busy for `job`: the next deferral is a new wait.

@@ -71,11 +71,12 @@ what it would do; `--all` restarts the whole stack; `--timeout` (default 180 s).
 
 The Rust build is long on a small server; build the image on a build machine and use `--image`.
 
-**First sign-in on a new host:** the account is `Admin`, password `elastic`, on every install.
-Change it on the Accounts page before anyone else can reach the page; the core warns on every
-start until you do. `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` (a mounted file, 10+ characters)
-starts the account with a password of your own instead — see `deploy/README.md`, "First
-sign-in". Redeploying an existing host changes nothing: its accounts are kept.
+**First sign-in on a new host:** the account is `Admin`. On a fresh install `deploy.sh` makes a
+random password for it (`deploy/secrets/admin/initial_admin_password`) and prints it once at the
+end, on the terminal; sign in, set your own on the Accounts page, delete the file. A file that is
+set but unusable stops the core rather than falling back to `elastic` — see `deploy/README.md`,
+"First sign-in". Redeploying or upgrading an existing host changes nothing: its accounts are kept
+and no password is made.
 
 **Rollback later:** `deploy/deploy.sh --rollback` — back to the images before the last deploy
 (`ELASTICPRO_IMAGE_PREVIOUS` in `.env`, and after an `--upgrade` the nginx and Redis

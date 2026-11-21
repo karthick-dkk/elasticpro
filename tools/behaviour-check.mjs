@@ -20,7 +20,7 @@
 
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { findJsdom, bootApp, applyConfig, settleFor } from './lib/jsdom-app.mjs';
+import { findJsdom, jsdomMissing, bootApp, applyConfig, settleFor } from './lib/jsdom-app.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
@@ -36,9 +36,7 @@ let JSDOM;
 {
   const { entry, paths } = findJsdom([ROOT, process.cwd()]);
   if (!entry) {
-    console.log('behaviour-check: jsdom not found — skipping.');
-    console.log(`  install it in one of: ${paths.join(', ')}  (npm i jsdom)`);
-    process.exit(0);
+    jsdomMissing('behaviour-check', paths);
   }
   ({ JSDOM } = await import(pathToFileURL(entry).href));
 }
@@ -4214,6 +4212,67 @@ restoreConsole();
   }
 }
 
+// Requests › Cost (docs/JOBS.md "Query cost", 0.3.82): an administrator's tab, read from REQUEST_COST
+// every 30 s while open; per cluster and kind a sortable compact table, then the slowest requests;
+// a figure the core did not send stays "—" / "not reported"; leaving stops the read; no cluster is asked.
+{
+  const before = globalThis.fetch;
+  const csent = [];
+  const now = Date.now();
+  const S0 = await load('core/state.js');
+  const cl = S0.clusters();
+  const answer = { ok: true, keepHours: 24, hours: 24, since: now - 24 * 3600e3, now, rows: [
+    { cluster: cl[0].id, kind: 'poller:health', label: 'Poller · health', requests: 288, perHour: 12, avgMs: 85, p95Ms: 200, maxMs: 900, bytes: 288000, bytesKnown: 288, timeouts: 0, deferrals: 0 },
+    { cluster: cl[0].id, kind: 'job:logdelay.measure', label: 'Log delay measurement', requests: 24, perHour: 1, avgMs: 8200, p95Ms: 30000, maxMs: 30000, bytes: 9000000, bytesKnown: 24, timeouts: 2, deferrals: 0 },
+    { cluster: cl[cl.length - 1].id, kind: 'job:hosts.collect', label: 'Hosts collection', requests: 0, perHour: 0, avgMs: null, p95Ms: null, maxMs: null, bytes: null, bytesKnown: 0, timeouts: 0, deferrals: 3 },
+  ], top: [
+    { at: now - 600e3, cluster: cl[0].id, kind: 'job:logdelay.measure', label: 'Log delay measurement', method: 'POST', path: '/logstash-*/_search?filter_path', ms: 30000, bytes: null, status: 'timeout' },
+    { at: now - 900e3, cluster: cl[0].id, kind: 'poller:health', label: 'Poller · health', method: 'GET', path: '/_cluster/health', ms: 900, bytes: 1000, status: '200' },
+  ] };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    csent.push(body);
+    if (body.type === 'REQUEST_COST') return stubReply(answer);
+    return before(input, init);
+  };
+  const count = (t) => csent.filter((m) => m.type === t).length;
+  try {
+    await go('requests'); await settleFor(400);
+    const tab = doc.querySelector('nav.rq-tabs button[data-tab="cost"]');
+    ok(!!tab && tab.textContent.trim() === 'Cost', 'cost: no "Cost" tab on Jobs › Requests');
+    if (tab) {
+      tab.click(); await settleFor(600);
+      ok(window.location.hash === '#/jobs/requests/cost', `cost: the tab is not at #/jobs/requests/cost (${window.location.hash})`);
+      ok(count('REQUEST_COST') >= 1 && !csent.some((m) => m.type === 'ES'), 'cost: the tab did not read REQUEST_COST, or sent a cluster something');
+      const kinds = doc.getElementById('rc-kinds');
+      const rows = kinds ? [...kinds.querySelectorAll('tbody tr')] : [];
+      ok(rows.length === 3, `cost: ${rows.length} rows in By cluster and kind, not 3`);
+      const heads = kinds ? [...kinds.querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim()) : [];
+      ok(heads.join('|') === 'Cluster|Kind|Requests / h|Average|p95|Bytes|Timeouts|Deferrals', `cost: the columns read ${heads.join(' · ')}`);
+      const ld = rows.find((r) => r.dataset.kind === 'job:logdelay.measure');
+      ok(ld && /8\.2 s/.test(ld.textContent) && /30 s/.test(ld.textContent) && ld.cells[6].textContent === '2', `cost: the log delay row reads ${ld && ld.textContent}`);
+      const hosts = rows.find((r) => r.dataset.kind === 'job:hosts.collect');
+      ok(hosts && hosts.cells[3].textContent === '—' && hosts.cells[4].textContent === '—' && hosts.cells[7].textContent === '3', `cost: a kind with no request reads ${hosts && hosts.textContent} (unknown is not 0)`);
+      ok(/\b2 timeouts\b/.test(doc.getElementById('rc-line').textContent) && /3 deferrals/.test(doc.getElementById('rc-line').textContent), `cost: the line reads ${doc.getElementById('rc-line').textContent}`);
+      // Sortable like other Jobs tables: Average pressed puts the slowest first.
+      const avg = [...kinds.querySelectorAll('thead th')].find((t) => /Average/.test(t.textContent));
+      ok(avg && avg.hasAttribute('aria-sort'), 'cost: the Average column does not sort');
+      if (avg) { avg.click(); await settleFor(200); }
+      const first = doc.getElementById('rc-kinds').querySelector('tbody tr');
+      ok(first && first.dataset.kind === 'job:logdelay.measure', `cost: sorting by Average did not put the slowest first (${first && first.dataset.kind})`);
+      const top = doc.getElementById('rc-top');
+      const trs = top ? [...top.querySelectorAll('tbody tr')] : [];
+      ok(trs.length === 2 && /POST \/logstash-\*\/_search\?filter_path/.test(trs[0].textContent) && /not reported/.test(trs[0].textContent), `cost: the slowest requests read ${trs.map((t) => t.textContent).join(' | ')}`);
+      await go('overview');
+      const left = count('REQUEST_COST');
+      await settleFor(400);
+      ok(count('REQUEST_COST') === left, 'cost: REQUEST_COST is still read after leaving the page');
+    }
+  } finally {
+    globalThis.fetch = before;
+  }
+}
+
 // Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
 // run and draws what came back, and Run now asks first (a real run deletes). The real run is
 // never pressed here: against a bridge with a real data dir it would clean it.
@@ -5945,6 +6004,90 @@ consolePanels: {
       const ahb = ah ? [...ah.querySelectorAll('button')].map((b) => b.textContent) : [];
       ok(ahb.includes('Acknowledge all') && ahb.includes('Silence ▾'), `alerts: a group header has ${JSON.stringify(ahb)}`);
       ok(ah && [...ah.querySelectorAll('button.btn')].every((b) => b.classList.contains('ghost')), 'alerts: a group-header action is not quiet');
+    }
+
+    // UI-03/UI-04: hosted, an acknowledgement or a note the server did not take must not look
+    // saved — the row says "not saved" with Retry, and "Note added" is not shown.
+    {
+      const before = globalThis.fetch;
+      const shared = new Map();
+      let down = true;
+      globalThis.fetch = async (input, init) => {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        const reply = (o) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(o), json: async () => o });
+        if (body.type === 'WHOAMI') {
+          const r = await before(input, init); let j = {};
+          try { j = JSON.parse(await r.text()); } catch (_) { /* keep the empty answer */ }
+          return reply({ ...j, ok: true, edition: 'hosted' });
+        }
+        if (body.type === 'ACK_LIST') return reply({ ok: true, acks: Object.fromEntries(shared) });
+        if (body.type === 'ACK_SET') {
+          if (down) return reply({ ok: false, kind: 'worker_error', message: 'ElasticPro server did not answer: offline' });
+          const ack = { by: 'qa', at: Date.now(), record: body.record };
+          shared.set(body.key, ack);
+          return reply({ ok: true, key: body.key, ack });
+        }
+        return before(input, init);
+      };
+      const toasts = () => [...doc.querySelectorAll('.toast-wrap .toast')].map((t) => t.textContent).join(' | ');
+      const bravo = () => [...doc.querySelectorAll('#view .arow.single')].find((r) => /bravo-ci/.test(r.textContent));
+      try {
+        acks.forgetAcksPlace();
+        await acks.loadAcks();
+        ok(acks.acksOnServer() === true, 'alerts unsaved: the check could not put acknowledgements on a (stubbed) hosted server');
+        await go('alerts');
+        const ackBtn = bravo() && [...bravo().querySelectorAll('.arow-main button')].find((b) => b.textContent === 'Ack');
+        ok(!!ackBtn, 'alerts unsaved: bravo-ci has no Ack');
+        if (ackBtn) {
+          ackBtn.click(); await settleFor(200);
+          const row = () => [...doc.querySelectorAll('#view .arow')].find((r) => /bravo-ci/.test(r.textContent));
+          ok(row() && row().querySelector('.ack-unsaved') && /not saved/.test(row().querySelector('.ack-unsaved').textContent),
+            `alerts unsaved: an acknowledgement the server did not take is not marked "not saved": "${row() && row().textContent}"`);
+          ok(row() && row().querySelector('button.ack-retry'), 'alerts unsaved: no Retry beside "not saved"');
+          ok(/Acknowledgement not saved/.test(toasts()), `alerts unsaved: no notice that the acknowledgement was not saved: "${toasts()}"`);
+          // A note that does not save: no "Note added", and the notes panel says so with Retry.
+          // On a row of a group, where Note is a button of its own.
+          const noteRow = () => [...doc.querySelectorAll('#view .arow:not(.single)')].find((r) => r.querySelector('.arow-notes') && /atlas-prod/.test(r.closest('section') ? r.closest('section').textContent : ''));
+          const noteBtn = noteRow() && noteRow().querySelector('.arow-notes');
+          ok(!!noteBtn, 'alerts unsaved: no row of atlas-prod has a Note button');
+          if (noteBtn) {
+            noteBtn.click(); await settleFor(80);
+            const box = doc.getElementById('note-input');
+            ok(!!box, 'alerts unsaved: the notes panel did not open');
+            if (box) {
+              box.value = 'ticket 4412';
+              const add = [...doc.querySelectorAll('button')].find((b) => b.textContent === 'Add');
+              add.click(); await settleFor(200);
+              ok(!/Note added/.test(toasts()), `alerts unsaved: "Note added" shown for a note that did not save: "${toasts()}"`);
+              ok(/Note not saved/.test(toasts()), `alerts unsaved: no notice that the note was not saved: "${toasts()}"`);
+              const line = doc.querySelector('.ack-unsaved-line');
+              ok(line && line.querySelector('button.ack-retry'), 'alerts unsaved: the notes panel has no "not saved" line with Retry');
+              down = false;
+              if (line && line.querySelector('button.ack-retry')) { line.querySelector('button.ack-retry').click(); await settleFor(200); }
+              ok(!doc.querySelector('.ack-unsaved-line'), 'alerts unsaved: Retry in the notes panel left "not saved"');
+              ok([...shared.values()].some((a) => (a.record.notes || []).some((n) => n.text === 'ticket 4412')), 'alerts unsaved: Retry did not send the note');
+              down = true;
+              doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settleFor(60);
+            }
+          }
+          // Retry with the server back: saved, the mark gone, and both the acknowledgement and the note kept.
+          down = false;
+          const retry = row() && row().querySelector('button.ack-retry');
+          if (retry) { retry.click(); await settleFor(200); }
+          // Saved, it is an ordinary acknowledged alert: hidden while acknowledged ones are, never "not saved".
+          ok(acks.unsavedReason('b:slm-mode') === '' && (!row() || !row().querySelector('.ack-unsaved')),
+            `alerts unsaved: Retry with the server answering left "not saved": "${row() && row().textContent}"`);
+          ok(!row(), 'alerts unsaved: once saved, the acknowledged alert is still shown with acknowledged ones hidden');
+          ok(shared.has('b:slm-mode') && shared.get('b:slm-mode').record.acked === true && shared.get('b:slm-mode').record.unsaved === undefined,
+            `alerts unsaved: Retry did not send the acknowledgement (and only it): ${JSON.stringify(shared.get('b:slm-mode'))}`);
+        }
+      } finally {
+        globalThis.fetch = before;
+        acks.forgetAcksPlace();
+        await acks.loadAcks();
+        await acks.unacknowledge('b:slm-mode');
+        st.invalidateAlerts(); await go('alerts');
+      }
     }
 
     // The counts are filters.
@@ -7754,6 +7897,22 @@ await settleFor(300);
       if (fetchAnswer === 'busy') return stubReply({ ok: false, kind: 'already_running', runId: 'run-old', message: 'already running' });
       return stubReply({ ok: true, jobId: 'logdelay.measure', runId: 'run-1', started: true });
     }
+    // The not-measured line (0.3.82): the last finished measurement run, then its details —
+    // the same parts Jobs › run details show. Not a Fetch now poll (limit 5, no jobPolls).
+    if (body.type === 'JOBS_LIST' && body.limit === 5) {
+      lsent.push(body);
+      return stubReply({ ok: true, jobs: [], runs: [{ id: 'run-going', jobId: 'logdelay.measure', status: 'running' }, { id: 'ld-last', jobId: 'logdelay.measure', status: 'completed' }], next: null });
+    }
+    if (body.type === 'JOB_RUN_DETAIL') {
+      lsent.push(body);
+      const never = list[list.length - 1].id;
+      return stubReply({ ok: true, run: { id: body.runId, jobId: 'logdelay.measure', status: 'completed' }, detail: {
+        counts: { succeeded: 1, partial: 0, failed: 2, deferred: 0, skipped: 0 }, parts: [
+          { cluster: never, status: 'failed', code: 'INDEX_NOT_FOUND', message: 'no index matches logstash-*', elapsedMs: 400,
+            todo: { label: 'Set log index', text: "set the cluster's log index (Config › Clusters)", page: 'settings' } },
+          { cluster: 'not-a-cluster-you-see', status: 'failed', code: 'TIMEOUT', message: 'Request timed out after 30.0 s', elapsedMs: 30000 },
+          { cluster: list[0].id, status: 'succeeded', records: 12 }] } });
+    }
     if (body.type === 'JOBS_LIST') {
       lsent.push(body);
       jobPolls += 1;
@@ -7875,10 +8034,81 @@ await settleFor(300);
     }
     ok(!fleet.querySelector('polyline') && !fleet.querySelector('.ld-ring') && !fleet.querySelector('.ld-red') && !fleet.querySelector('.ld-day'), 'log delay: an overlay line or the old graphs are still drawn');
     ok([...g('ld-chart-delay').querySelectorAll('text')].every((t) => !/median|average/i.test(t.textContent)), 'log delay: a chart writes a statistic');
-    // The cluster × time heat map: one row per cluster, a cell per day, a never-measured cluster says so.
-    const heat = g('ld-heat');
-    ok(heat && heat.querySelectorAll('rect.ld-heat').length === 30 * (list.length - 1), `log delay: the heat map has ${heat && heat.querySelectorAll('rect.ld-heat').length} cells`);
-    ok(heat && /never measured/.test(heat.textContent), 'log delay: the heat map does not say a cluster was never measured');
+    // Late devices over the day (0.3.82, replaces the heat map): a row per cluster, a cell per 2-hour window of
+    // today (12), the window before the current one hatched "not measured" — never the earlier reading again.
+    {
+      const grid = g('ld-late-grid');
+      ok(grid && !g('ld-heat') && !view().querySelector('.ld-heatmap'), 'log delay: Late devices over the day is not drawn, or the heat map still is');
+      const headTxt = grid ? [...grid.querySelectorAll('thead th')].map((t) => t.textContent.trim()) : [];
+      ok(headTxt.join('|') === 'Cluster|Late now|vs yesterday|00|02|04|06|08|10|12|14|16|18|20|22|Measured', `log delay: the grid's heads read ${headTxt.join(' · ')}`);
+      const row0 = grid && grid.querySelector(`tbody tr[data-cluster="${list[0].id}"]`);
+      const cells = row0 ? [...row0.querySelectorAll('td.ld-gc')] : [];
+      ok(cells.length === 12, `log delay: the first cluster has ${cells.length} window cells, not 12`);
+      const begun = Math.floor((Date.now() - new Date().setHours(0, 0, 0, 0)) / 7200000) + 1;
+      const hatched = cells.filter((c) => c.classList.contains('ld-g-na'));
+      ok(hatched.length === (begun >= 2 ? 1 : 0) && hatched.every((c) => /not measured/.test(c.title) && !/\d/.test(c.textContent)),
+        `log delay: ${hatched.length} hatched cells for ${begun} begun windows (the fixture leaves the one before the current unmeasured)`);
+      ok(cells.filter((c) => c.classList.contains('ld-g-fut')).length === 12 - begun, 'log delay: windows not begun yet are not left blank');
+      // Measured counts the windows that ended (and the one in progress once it has a reading), never the 12 of the day.
+      ok(row0 && row0.querySelector('.ld-g-meas').textContent === `${begun - (begun >= 2 ? 1 : 0)}/${begun}`, `log delay: Measured reads ${row0 && row0.querySelector('.ld-g-meas').textContent}`);
+      ok(!cells.some((c) => c.classList.contains('ld-g-pend')), 'log delay: a window with a reading is drawn pending');
+      // The second cluster's window in progress has no reading yet: pending (light dots, no figure), not hatched, not in the denominator.
+      const row1 = grid && grid.querySelector(`tbody tr[data-cluster="${list[1].id}"]`);
+      ok(list.length < 3 || row1, 'log delay: the second cluster has no grid row');
+      const cells1 = row1 ? [...row1.querySelectorAll('td.ld-gc')] : [];
+      const pend = cells1.filter((c) => c.classList.contains('ld-g-pend'));
+      if (list.length >= 3) ok(pend.length === 1 && pend[0] === cells1[begun - 1] && /pending/.test(pend[0].title) && !pend[0].textContent.trim() && !pend[0].classList.contains('ld-g-na'),
+        `log delay: the window in progress with no reading is not one pending cell (${pend.length}; ${pend[0] && pend[0].title})`);
+      const m1 = begun - 1 - (begun >= 2 ? 1 : 0); const d1 = begun - 1;
+      if (list.length >= 3) ok(row1 && row1.querySelector('.ld-g-meas').textContent.trim() === (d1 ? `${m1}/${d1}` : '—'), `log delay: the second cluster's Measured reads ${row1 && row1.querySelector('.ld-g-meas').textContent} (the pending window counted?)`);
+      ok(![...grid.querySelectorAll('tbody tr')].some((tr) => /not measured today/.test(tr.textContent)), 'log delay: a row still says "not measured today"');
+      ok(grid.parentElement.parentElement.querySelector('.ld-g-legend .ld-g-pend') || view().querySelector('.ld-g-legend .ld-g-pend'), 'log delay: the legend has no pending key');
+      ok(row0 && /^▲ 1$/.test(row0.querySelector('.ld-g-vs').textContent.trim()), `log delay: vs yesterday reads "${row0 && row0.querySelector('.ld-g-vs').textContent}"`);
+      const shaded = cells.filter((c) => /ld-gs-\d/.test(c.className));
+      ok(shaded.length >= 1 && shaded.every((c) => c.getAttribute('role') === 'button'), 'log delay: a measured cell is not pressable');
+      ok(/never measured/.test(grid.querySelector(`tbody tr[data-cluster="${list[list.length - 1].id}"]`).textContent), 'log delay: the grid does not say a cluster was never measured');
+      ok(grid.querySelector('.ld-g-nm') && grid.querySelectorAll('th.ld-g-nm').length >= 2, 'log delay: the cluster column is not the sticky name column');
+      // The toggles: Above 60 min counts the critical ones only; Worst 10 / All N.
+      const lateNow0 = row0.querySelector('.ld-g-now').textContent;
+      const modeBtns = [...g('ld-grid-mode').querySelectorAll('button')];
+      ok(modeBtns.map((b) => b.textContent).join('|') === 'Late (30+ min)|Above 60 min' && modeBtns[0].getAttribute('aria-pressed') === 'true', `log delay: the grid's mode toggle reads ${modeBtns.map((b) => b.textContent).join(' / ')}`);
+      press(modeBtns[1]); await settleFor(120);
+      const row0c = g('ld-late-grid').querySelector(`tbody tr[data-cluster="${list[0].id}"]`);
+      const fxG = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list).byCluster[0];
+      ok(g('ld-grid-mode').querySelectorAll('button')[1].getAttribute('aria-pressed') === 'true' && row0c.querySelector('.ld-g-now').textContent === String(fxG.critical) && String(fxG.critical) !== lateNow0,
+        `log delay: Above 60 min did not count the critical devices (${row0c.querySelector('.ld-g-now').textContent} vs ${fxG.critical})`);
+      press(g('ld-grid-mode').querySelectorAll('button')[0]); await settleFor(120);
+      const rowsBtns = [...g('ld-grid-rows').querySelectorAll('button')];
+      ok(rowsBtns.map((b) => b.textContent).join('|') === `Worst 10|All ${list.length}` && rowsBtns[0].getAttribute('aria-pressed') === 'true', `log delay: the rows toggle reads ${rowsBtns.map((b) => b.textContent).join(' / ')}`);
+      press(rowsBtns[1]); await settleFor(120);
+      ok(g('ld-grid-rows').querySelectorAll('button')[1].getAttribute('aria-pressed') === 'true' && g('ld-late-grid').querySelectorAll('tbody tr').length === list.length, 'log delay: All N did not list every cluster');
+      press(g('ld-grid-rows').querySelectorAll('button')[0]); await settleFor(120);
+      const order = [...g('ld-late-grid').querySelectorAll('tbody tr')].map((tr) => tr.dataset.cluster);
+      ok(order[order.length - 1] === list[list.length - 1].id, `log delay: the never-measured cluster is not last (${order.join(', ')})`);
+      // A cell opens that cluster at that window: its board, with a line naming the window and the count.
+      const cell = [...g('ld-late-grid').querySelector(`tbody tr[data-cluster="${list[0].id}"]`).querySelectorAll('td.ld-gc[role="button"]')].pop();
+      const want = cell.textContent;
+      press(cell);
+      await waitFor(() => ldView() === 'cluster' && g('ld-focus-window'), 'log delay: a grid cell did not open its cluster at that window');
+      ok(location.hash === `#/log-delay/cluster/${encodeURIComponent(list[0].id)}` && new RegExp(`Opened at \\d\\d:\\d\\d–\\d\\d:\\d\\d from Late devices over the day: ${want} device`).test(g('ld-focus-window').textContent),
+        `log delay: the cluster opened from a cell reads "${(g('ld-focus-window') || {}).textContent}" (${location.hash})`);
+      location.hash = '#/log-delay';
+      await waitFor(() => ldView() === 'fleet' && g('ld-late-grid'), 'log delay: back on the Dashboard the grid did not draw');
+    }
+    // The line about the last run (replaces "How the last run read each cluster"): only the clusters the
+    // viewer may see, why, the fix, and the way to Jobs — from the run details JOB_RUN_DETAIL gives.
+    {
+      await waitFor(() => g('ld-not-measured'), 'log delay: the not-measured line did not draw');
+      const nm = g('ld-not-measured');
+      ok(!g('ld-last-read') && ![...view().querySelectorAll('section.card header h2')].some((x) => /How the last run read/.test(x.textContent)), 'log delay: the old last-run card is still drawn');
+      ok(/^1 of 3 clusters not measured in the last run/.test(nm.textContent), `log delay: the not-measured line reads "${nm.textContent}"`);
+      ok(lsent.some((m) => m.type === 'JOB_RUN_DETAIL' && m.runId === 'ld-last'), 'log delay: the line did not read the last finished run\'s details (not the one still going)');
+      const items = [...nm.querySelectorAll('.ld-nm-item')];
+      ok(items.length === 1 && items[0].dataset.cluster === list[list.length - 1].id && /no index matches logstash-\*/.test(items[0].textContent) && /set log index/.test(items[0].textContent),
+        `log delay: the line's clusters read ${items.map((x) => x.textContent).join(' | ')}`);
+      ok(!/not-a-cluster-you-see/.test(nm.textContent), 'log delay: the line names a cluster the viewer cannot see');
+      ok(nm.querySelector('a.ld-nm-jobs') && nm.querySelector('a.ld-nm-jobs').getAttribute('href') === '#/jobs' && /Run details in Jobs ›/.test(nm.textContent), 'log delay: no "Run details in Jobs ›" link');
+    }
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
     ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min · share|Change|Above 60 min|Other time zone|Devices|In last run|Worst device|',
@@ -7925,11 +8155,12 @@ await settleFor(300);
     ok(g('ld-tz-chip') && /^Time zone [+−]\d\d:\d\d$/.test(tzChipText()) && g('ld-tz-chip').tagName === 'BUTTON' && g('ld-tz-chip').getAttribute('aria-expanded') === 'false', `log delay: the fleet's time-zone chip reads "${tzChipText()}" (${g('ld-tz-chip') && g('ld-tz-chip').tagName})`);
     ok(!g('ld-zones') && !g('ld-tz-expand'), 'log delay: a Devices by time zone panel or a separate Expand button is drawn (the chip itself opens the counts)');
     ok(g('ld-tz-panel') && g('ld-tz-panel').hidden, 'log delay: the time-zone panel does not start hidden');
-    // The owner's order: tiles, the state bar, By cluster, then the charts; the heat map is Hourly Delay Status.
-    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-heat')].map((x) => x.id);
-    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-heat', `log delay: the Dashboard order is ${order.join(' › ')}`);
+    // The owner's order: tiles, the state bar, the charts, By cluster, then Late devices over the day and the not-measured line.
+    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-late-grid, #ld-not-measured')].map((x) => x.id);
+    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-late-grid|ld-not-measured', `log delay: the Dashboard order is ${order.join(' › ')}`);
     ok(g('ld-statebar') && g('ld-statebar').querySelectorAll('.ld-stack i').length >= 3 && /Silent \d/.test(g('ld-statebar').textContent), 'log delay: no state bar with a counted legend under the tiles');
-    ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'), 'log delay: the heat map is not titled Hourly Delay Status');
+    ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Late devices over the day') && ![...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'),
+      'log delay: the grid is not titled Late devices over the day');
     g('ld-tz-chip').click(); await settleFor(120);
     ok(g('ld-tz-chip').getAttribute('aria-expanded') === 'true', 'log delay: the open chip is not marked expanded');
     const tzEntries = () => [...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim());
@@ -9488,11 +9719,135 @@ async function backToList() {
   await go('overview');
 }
 
+// Edit cluster › Collection (0.3.82, docs/JOBS.md "Per-cluster switches"): every switch on and no
+// hours by default; unticking ILM and Hosts collection and choosing 22–06 (the "to" hour follows
+// the "from" one, two equal hours are refused in the dialog) writes only what is off into the
+// cluster's own entry; the core is told on the next PRIME; the dialog opens on it again.
+{
+  const st = await load('core/state.js');
+  const ce = await load('ui/config-editor.js');
+  const realFetch = globalThis.fetch;
+  let written = null;
+  const primes = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    if (body.type === 'PRIME') primes.push(body);
+    return realFetch(input, init);
+  };
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const dialog = () => doc.querySelector('.modal-overlay .modal');
+  const saveBtn = (d) => [...d.querySelectorAll('button')].find((b) => /^Save$/.test(b.textContent.trim()));
+  const within = (p, ms = 4000) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
+  const before = st.state.caller;
+  try {
+    st.state.caller = { name: 'collection-check', role: 'admin' };
+    const target = st.clusters()[0];
+    const editing = ce.editCluster(ce.rawClusterOf(target));
+    await settleFor(300);
+    let dlg = dialog();
+    ok(dlg && dlg.querySelector('fieldset.ce-collection'), 'collection: Edit cluster has no Collection section');
+    if (dlg && dlg.querySelector('fieldset.ce-collection')) {
+      const box = (k) => dlg.querySelector(`#ce-col-${k}`);
+      ok(['ilm', 'snapshots', 'logDelay', 'hosts'].every((k) => box(k) && box(k).checked), 'collection: a cluster without the key does not open with every switch on');
+      const from = dlg.querySelector('#ce-col-from'), to = dlg.querySelector('#ce-col-to');
+      ok(from.value === '' && to.disabled, 'collection: the hours do not start on "any time" with "to" held');
+      ok(/Heavy jobs only between/.test(dlg.textContent) && /server time · a hard rule/.test(dlg.textContent), 'collection: the hours row does not say what it is');
+      box('ilm').checked = false;
+      box('hosts').checked = false;
+      from.value = '22'; from.dispatchEvent(new window.Event('change', { bubbles: true }));
+      ok(!to.disabled && to.value === '6', `collection: choosing 22:00 did not offer 06:00 as the end (${to.value})`);
+      to.value = '22';
+      written = null;
+      press(saveBtn(dlg)); await settleFor(300);
+      ok(dialog() && /two different whole hours/.test((dlg.querySelector('.modal-msg') || {}).textContent || '') && written === null,
+        'collection: two equal hours were not refused in the dialog');
+      to.value = '6';
+      press(saveBtn(dlg)); await within(editing); await settleFor(600);
+      let entry = null;
+      try { entry = (JSON.parse(written).clusters || []).find((c) => c.name === target.name); } catch (_) { /* not JSON */ }
+      ok(entry && JSON.stringify(entry.collection) === JSON.stringify({ ilm: false, hosts: false, heavyHours: { from: 22, to: 6 } }),
+        `collection: the save wrote ${entry ? JSON.stringify(entry.collection) : String(written).slice(0, 200)}`);
+      const live = st.clusters().find((c) => c.name === target.name);
+      ok(live && live.collection && live.collection.ilm === false && live.collection.hosts === false, 'collection: the cluster on screen does not carry the switches after the save');
+      await settleFor(300);
+      ok(primes.some((m) => (m.clusters || []).some((c) => c.collection && c.collection.hosts === false && c.collection.heavyHours && c.collection.heavyHours.from === 22)),
+        'collection: the core was not told the switches (PRIME without them)');
+      // Opened again: as saved.
+      const again = ce.editCluster(ce.rawClusterOf(live || target));
+      await settleFor(300);
+      dlg = dialog();
+      ok(dlg && !dlg.querySelector('#ce-col-ilm').checked && dlg.querySelector('#ce-col-snapshots').checked && dlg.querySelector('#ce-col-from').value === '22'
+        && dlg.querySelector('#ce-col-to').value === '6', 'collection: the dialog does not open on what was saved');
+      if (dlg) press([...dlg.querySelectorAll('button')].find((b) => /^Cancel$/.test(b.textContent.trim())));
+      await within(again);
+    }
+    // Below admin: shown, not changed.
+    st.state.caller = { name: 'collection-op', role: 'operator' };
+    const viewing = ce.editCluster(ce.rawClusterOf(st.clusters()[0]));
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg && dlg.querySelector('#ce-col-ilm')) {
+      ok(dlg.querySelector('#ce-col-ilm').disabled && dlg.querySelector('#ce-col-from').disabled && /Set by an administrator/.test(dlg.querySelector('fieldset.ce-collection').textContent),
+        'collection: an operator may change the switches in the dialog');
+      press([...dlg.querySelectorAll('button')].find((b) => /^Cancel$/.test(b.textContent.trim())));
+    }
+    await within(viewing);
+  } finally {
+    globalThis.fetch = realFetch;
+    doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+    st.state.caller = before;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+// Jobs (0.3.82): a cluster whose hosts collection is switched off is a skipped run — amber words
+// that say where to turn it on, never a red "Error:".
+{
+  const realFetch = globalThis.fetch;
+  const now = Date.now();
+  const st = await load('core/state.js');
+  const c0 = st.clusters()[0] || { id: 'c1', name: 'c1' };
+  const offRun = { id: 'run-off', jobId: 'hosts.collect', owner: 'worker', trigger: 'timer', status: 'skipped', createdAt: now - 60e3, startedAt: null, endedAt: now - 60e3,
+    progress: null, done: null, total: null, records: null, clusters: [c0.id],
+    error: `${c0.id}: skipped — hosts collection switched off for this cluster (Edit cluster › Collection)`,
+    parts: { succeeded: 0, partial: 0, failed: 0, deferred: 0, skipped: 1 } };
+  const job = { id: 'hosts.collect', name: 'Hosts collection', kind: 'automatic', owner: 'worker', schedule: 'daily from 06:00', nextRun: 'hosts_daily', priority: 'medium',
+    pausable: true, requests: { min: 1, max: 2 }, report: null, detailsFor: 'user', clusterScoped: true,
+    state: { enabled: true, paused: false, pausedBy: null, pausedAt: null, current: null, activeRuns: 0, lastRun: offRun, nextRunAt: null, nextRunNote: null } };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'JOBS_LIST') {
+      return stubReply({ ok: true, role: 'core', jobs: [job], runs: [offRun], next: null, busy: [], governor: null, problems: [],
+        process: { core: { role: 'core', cpuPct: 3, memoryPct: 20, gate: { running: 0, queued: 0 } }, worker: { state: 'up', cpuPct: 5, memoryPct: 20 } } });
+    }
+    return realFetch(input, init);
+  };
+  const was = st.state.caller;
+  try {
+    st.state.caller = null;
+    await go('jobs'); await settleFor(600);
+    const all = panel('All jobs');
+    const sub = all && all.querySelector('tbody tr[data-sub="hosts.collect"]');
+    ok(sub && sub.querySelector('.jb-warn') && !sub.querySelector('.jb-err') && !/Error:/.test(sub.textContent)
+      && /skipped — hosts collection switched off for this cluster \(Edit cluster › Collection\)/.test(sub.textContent),
+      `jobs: a switched-off skip reads "${sub && sub.textContent}"`);
+    const row = all && all.querySelector('tbody tr[data-job="hosts.collect"]');
+    ok(row && !row.querySelector('td:nth-child(7) .pill.red'), 'jobs: a switched-off skip is drawn red');
+  } finally {
+    globalThis.fetch = realFetch;
+    st.state.caller = was;
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices › Summary (day buttons, Columns / Rows, tag1 chips, the "i", CSV, empty record), hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices › Summary (day buttons, Columns / Rows, tag1 chips, the "i", CSV, empty record), hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Edit cluster › Collection (switches, hours, only what is off saved), and Jobs (a switched-off skip in amber, strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

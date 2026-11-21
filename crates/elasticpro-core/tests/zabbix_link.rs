@@ -519,9 +519,56 @@ fn x_real_ip_is_believed_only_from_trusted_proxies() {
     assert_eq!(l.effective_source(Some("203.0.113.7"), nginx), Some("203.0.113.7".parse().unwrap()));
     assert_eq!(l.effective_source(Some("203.0.113.7"), direct), direct, "a direct caller cannot claim an address");
     assert_eq!(l.effective_source(None, nginx), nginx);
+    // Since 0.3.82: nothing trusted (no list, no default proxy that resolves) means the TCP peer.
+    // It used to mean "believe any peer's header", which let any container on the network write
+    // any address into the activity log and past allowedSources and a display's allowFrom.
     let open = core(&TempDir::new("zlink-proxy2"), ServerZbx::default());
-    assert_eq!(open.zabbix_link().effective_source(Some("203.0.113.7"), direct), Some("203.0.113.7".parse().unwrap()),
-               "without a trusted-proxy list, the header is believed (the X-Auth-User trust model)");
+    assert_eq!(open.zabbix_link().effective_source(Some("203.0.113.7"), direct), direct,
+               "without a trusted proxy, a header anyone can send is not believed");
+    assert_eq!(open.zabbix_link().effective_source(None, direct), direct);
+}
+
+#[tokio::test]
+async fn the_default_proxy_is_trusted_by_its_name_and_only_while_it_resolves_there() {
+    // `localhost` stands in for compose's `nginx`: a name, looked up, its address trusted.
+    let dir = TempDir::new("zlink-proxy-dns");
+    let c = core(&dir, ServerZbx { default_proxy: Some("localhost".into()), ..Default::default() });
+    let l = c.zabbix_link();
+    let nginx: Option<std::net::IpAddr> = Some("127.0.0.1".parse().unwrap());
+    let other: Option<std::net::IpAddr> = Some("172.19.0.9".parse().unwrap());
+    // Not looked up yet: the first header from it triggers the lookup (a miss), then it is believed.
+    assert!(l.proxy_addrs().is_empty());
+    assert_eq!(l.source_for(Some("203.0.113.7"), nginx).await, Some("203.0.113.7".parse().unwrap()));
+    assert!(l.proxy_addrs().contains(&"127.0.0.1".parse().unwrap()), "{:?}", l.proxy_addrs());
+    // Anyone else's header is still not believed, and their misses do not look it up each time.
+    assert_eq!(l.source_for(Some("203.0.113.7"), other).await, other);
+    // No header: the peer, whoever it is.
+    assert_eq!(l.source_for(None, other).await, other);
+    // Together with an operator's list (existing values keep working unchanged).
+    let both = core(&TempDir::new("zlink-proxy-both"), ServerZbx {
+        default_proxy: Some("localhost".into()), trusted_proxies: Some(vec!["10.5.0.0/16".into()]), ..Default::default() });
+    let edge: Option<std::net::IpAddr> = Some("10.5.1.1".parse().unwrap());
+    assert_eq!(both.zabbix_link().source_for(Some("198.51.100.4"), edge).await, Some("198.51.100.4".parse().unwrap()));
+    assert_eq!(both.zabbix_link().source_for(Some("198.51.100.4"), nginx).await, Some("198.51.100.4".parse().unwrap()));
+    // A name that does not resolve (outside compose) trusts nobody: the peer is the source.
+    let none = core(&TempDir::new("zlink-proxy-none"), ServerZbx {
+        default_proxy: Some("no-such-proxy.invalid".into()), ..Default::default() });
+    assert_eq!(none.zabbix_link().source_for(Some("203.0.113.7"), nginx).await, nginx);
+    assert!(none.zabbix_link().proxy_addrs().is_empty());
+    // The X-Auth-User trust is the operator's list only: the default proxy never vouches for a user.
+    assert!(!l.peer_is_trusted_proxy(nginx));
+}
+
+#[tokio::test]
+async fn a_request_arriving_while_the_proxy_is_looked_up_waits_for_the_answer() {
+    // Two requests through nginx at once, before the first lookup: the second must not be judged
+    // on the empty list while the first one's lookup is still running (it would show as nginx).
+    let c = core(&TempDir::new("zlink-proxy-wait"), ServerZbx { default_proxy: Some("localhost".into()), ..Default::default() });
+    let l = c.zabbix_link();
+    let nginx: Option<std::net::IpAddr> = Some("127.0.0.1".parse().unwrap());
+    let (a, b) = tokio::join!(l.source_for(Some("203.0.113.7"), nginx), l.source_for(Some("203.0.113.8"), nginx));
+    assert_eq!(a, Some("203.0.113.7".parse().unwrap()));
+    assert_eq!(b, Some("203.0.113.8".parse().unwrap()), "the second request waited for the lookup");
 }
 
 #[tokio::test]

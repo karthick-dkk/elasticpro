@@ -90,8 +90,8 @@ const PAGES = ['alerts', 'overview', 'indices',
   'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
   // Jobs (docs/JOBS.md "Jobs page"): its three tabs, with runs from tools/lib/jobs-fixture.mjs, and
-  // Requests — the Request Centre, Jobs › Requests since 0.3.71 — with its ElasticPro health tab.
-  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health',
+  // Requests — the Request Centre, Jobs › Requests since 0.3.71 — with its ElasticPro health and Cost tabs.
+  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health', 'jobs/requests/cost',
   'automation', 'accounts', 'settings',
   // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
   'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',

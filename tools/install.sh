@@ -351,6 +351,15 @@ if [ "$MODE" = hosted ]; then
     ok "Redis will run with the stack"
   fi
 
+  # A fresh install gets a random password for the first account instead of the public
+  # Admin/elastic (deploy/initial-admin.sh decides what "fresh" is, and never touches an install
+  # that has run before). A release from before 0.3.82 has no such script: Admin/elastic, as then.
+  ADMIN_MADE=0
+  if [ -x initial-admin.sh ]; then
+    out=$(./initial-admin.sh ensure) || die "could not make the first administrator's password"
+    if [ "$out" = made ]; then ADMIN_MADE=1; ok "Made a random password for the first administrator"; fi
+  fi
+
   if [ -n "$PUBLISHED" ]; then
     # .env as well as the environment: without this a later `docker compose up -d` on
     # this directory resolves the image to the default and spends twenty minutes
@@ -387,8 +396,33 @@ if [ "$MODE" = hosted ]; then
   info "and it will expire — replace deploy/tls/ before anyone relies on this."
   # The first account is made on first start rather than left for the first visitor to
   # name — whoever reached the page first would otherwise have become the administrator.
-  info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
-  info "until you do, anyone who reaches the sign-in page has the account."
+  if [ "$ADMIN_MADE" = 1 ]; then
+    # Shown only once the core says it made the first account with it (deploy.sh's rule), and
+    # then once, on the terminal only (initial-admin.sh): never into a captured log. The file
+    # is not removed here when the core has not said so: it may simply not have started yet.
+    used=0
+    for _ in $(seq 1 45); do
+      if docker compose logs core 2>/dev/null | grep -q 'created the first one, with the password from'; then used=1; break; fi
+      sleep 2
+    done
+    if [ "$used" = 1 ]; then
+      ./initial-admin.sh report >&2
+    else
+      warn "The core has not said yet that it made the first account from deploy/secrets/admin/initial_admin_password."
+      info "If it does, sign in as  Admin  with the password in that file. If this install already"
+      info "had accounts, the file is not used: sign in with those, and delete the file."
+    fi
+  elif [ -x initial-admin.sh ] && [ -s secrets/admin/initial_admin_password ]; then
+    info "Sign in as  Admin  with the password in deploy/secrets/admin/initial_admin_password"
+    info "(made by an earlier install, used only while there are no accounts), then delete it."
+  elif [ -x initial-admin.sh ]; then
+    info "No first-administrator password was made: this install has run before, so sign in with"
+    info "the accounts it has. If it has none (Docker could not say whether it was fresh), the core"
+    info "made  Admin / elastic : sign in with that and change it on the Accounts page at once."
+  else
+    info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
+    info "until you do, anyone who reaches the sign-in page has the account."
+  fi
   say ""
   info "For production, see deploy/PRODUCTION.md. In short:"
   info "  • a real certificate in deploy/tls/ (this one lasts 30 days)"

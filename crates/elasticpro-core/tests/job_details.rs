@@ -153,3 +153,24 @@ async fn two_overlapping_asks_send_one_read_and_a_slow_cluster_does_not_hold_the
     assert_eq!(third["searches"].as_array().unwrap().len(), 2, "{third}");
     assert_eq!(srv.hits().iter().filter(|h| h.path.starts_with("/_tasks")).count(), 1, "one read per cluster");
 }
+
+#[tokio::test]
+async fn request_cost_counts_what_was_sent_per_cluster_and_kind_for_an_administrator() {
+    let dir = TempDir::new("request-cost");
+    let srv = cluster().await;
+    let c = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, Role::All);
+    let s = admin(&c).await;
+    let res = c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "url": srv.url() }] })).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    assert_eq!(c.handle(json!({ "type": "SLOW_SEARCHES", "session": &s, "minMs": 30000 })).await["ok"], json!(true));
+    let cost = c.handle(json!({ "type": "REQUEST_COST", "session": &s })).await;
+    assert_eq!(cost["ok"], json!(true), "{cost}");
+    let row = cost["rows"].as_array().unwrap().iter().find(|r| r["kind"] == json!("core:slow-searches")).cloned()
+        .unwrap_or_else(|| panic!("the _tasks read is counted: {cost}"));
+    assert_eq!((row["cluster"].clone(), row["requests"].clone()), (json!("prod"), json!(1)), "{row}");
+    assert!(row["avgMs"].is_u64() && row["p95Ms"].is_u64(), "{row}");
+    assert!(cost["top"].as_array().unwrap().iter().any(|t| t["path"].as_str().is_some_and(|p| p.starts_with("/_tasks"))), "{cost}");
+    let u = user(&c, &s, "user1", "user").await;
+    assert_eq!(c.handle(json!({ "type": "REQUEST_COST", "session": &u })).await["kind"], json!("forbidden"), "an administrator's, like REQUEST_LOG");
+    assert_eq!(c.handle(json!({ "type": "REQUEST_COST" })).await["kind"], json!("unauthenticated"));
+}

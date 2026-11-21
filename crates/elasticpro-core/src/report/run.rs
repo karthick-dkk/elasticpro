@@ -560,6 +560,10 @@ impl Core {
         if self.volume_unreachable(cluster) {
             return Ok((Some(format!("{cluster} is unreachable: the file has what the record already held")), 0, 0));
         }
+        // Its heavy-job hours (Edit cluster › Collection) are a hard rule, a person's report too.
+        if let Some(why) = self.collection_for(cluster).heavy_closed_why(crate::volume::schedule::local_now()) {
+            return Ok((Some(format!("{cluster} not collected now — {why}: the file has what the record already held")), 0, 0));
+        }
         let stopped = |me: &Self| me.report_stop_asked(job_id).unwrap_or_default();
         let Some(_slot) = self.report_claim(cluster, job_id).await else { return Err(Box::new(JobEnd::stopped(stopped(self)))) };
         let Some(_permit) = self.report_permit(job_id).await else { return Err(Box::new(JobEnd::stopped(stopped(self)))) };
@@ -572,7 +576,7 @@ impl Core {
             self.report_progress(job_id, acc.0 + d, acc.1 + t + 1);
         };
         let to = p.to_date().min(today);
-        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false };
+        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false, final_margin_ms: 0 };
         let got = self.volume_collect(cluster, s, &opts).await
             .map_err(|e| Box::new(if self.volume_stopped() { JobEnd::held(e) } else { JobEnd::failed(e) }))?;
         if let Some(why) = got.interrupted {

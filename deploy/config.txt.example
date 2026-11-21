@@ -32,9 +32,10 @@ ALLOWED_UI_IPS=
 # Addresses taken out of every rate limit (the Zabbix server, an office or VPN range).
 RATE_EXEMPT_IPS=
 
-# Proxies whose X-Real-IP the core believes (normally the nginx container's network).
-# Set it: without it, source IPs in the activity log can be forged by anyone who reaches
-# the core directly.
+# Proxies whose X-Real-IP the core believes, besides the stack's own nginx (always trusted, by
+# its compose service name; nothing to set for it). Only for a proxy of your own that talks to
+# the core directly instead of through nginx. From anyone else the header is ignored and the
+# connection's own address is used.
 TRUSTED_PROXIES=
 
 # true only when an authenticating proxy in front of ElasticPro (oauth2-proxy, an IdP,

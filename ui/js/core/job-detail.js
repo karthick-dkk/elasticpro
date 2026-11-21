@@ -78,12 +78,22 @@ export function resultOf(run) {
  */
 export function troubleOf(run, nameOf = (id) => id) {
   if (!run || !run.error) return null;
+  const err = String(run.error);
+  const one = Array.isArray(run.clusters) && run.clusters.length === 1 ? run.clusters[0] : null;
+  // The core's words start with the cluster's id; shown, they start with its name.
+  const named = (id) => (id && err.startsWith(id) ? `${nameOf(id)}${err.slice(id.length)}` : err);
   if (run.status === 'deferred') {
     const d = run.deferred || null;
-    const who = d && d.cluster ? nameOf(d.cluster) : (Array.isArray(run.clusters) && run.clusters.length === 1 ? nameOf(run.clusters[0]) : null);
-    const why = d && d.reason ? d.reason : String(run.error);
+    const id = d && d.cluster ? d.cluster : one;
+    // A wait with words of its own (docs/JOBS.md): moved to the cluster's quietest hour, or
+    // waiting for its heavy-job hours — those words, still a warning.
+    if (/quietest hour|heavy jobs only/.test(err)) return { level: 'warn', text: `${named(id)} (a warning, not a failure)`, title: err };
+    const who = id ? nameOf(id) : null;
+    const why = d && d.reason ? d.reason : err;
     return { level: 'warn', text: who ? `${who} deferred — ${why}; retried automatically when it eases (a warning, not a failure)` : `Deferred — ${why}` };
   }
+  // Switched off for the cluster (Edit cluster › Collection): skipped on purpose, never an error.
+  if (run.status === 'skipped' && /switched off for this cluster/.test(err)) return { level: 'warn', text: named(one), title: err };
   return { level: 'err', text: `Error: ${run.error}`, title: String(run.error) };
 }
 
@@ -174,6 +184,83 @@ export function elapsedText(ms) {
 
 /** What the core's `todo.page` opens, among the app's pages (unknown: nothing to link). */
 export const TODO_PAGES = Object.freeze(['settings', 'reports', 'overview', 'shards']);
+
+/**
+ * A part's fix as a link: `{page, label, text, cluster}` when the core names a page among
+ * TODO_PAGES that the caller may open (`canOpen(page)`), `{label, text}` alone when not, null
+ * when there is none (or the core keeps it for an administrator). Jobs › Exceptions and the Log
+ * Delay page's not-measured line both link through it.
+ */
+export function todoTarget(p, canOpen = () => true) {
+  const t = p && p.todo;
+  if (!t || !t.label) return null;
+  if (!TODO_PAGES.includes(t.page) || !canOpen(t.page)) return { label: t.label, text: t.text || '' };
+  return { page: t.page, label: t.label, text: t.text || '', cluster: p.cluster };
+}
+
+/* ---------------------------- the Log Delay page's not-measured line ---------------------------- */
+
+/** The log delay measurement's job id (crates/elasticpro-core/src/jobs/mod.rs LOGDELAY_MEASURE). */
+export const LOGDELAY_JOB = 'logdelay.measure';
+
+/**
+ * Why a cluster's part of a run did not (fully) do its work, in a few words, from the part the
+ * run details keep (`code`, `message`, `elapsedMs`) — the one wording the Log Delay page's
+ * not-measured line uses: "no index matches logstash-*", "timed out (30 s)", "part read (2
+ * shards failed)", "busy — deferred", "credentials refused", "unreachable".
+ */
+export function partReason(p) {
+  if (!p) return '';
+  const msg = String(p.message || '');
+  const secs = num(p.elapsedMs) === null ? null : Math.round(num(p.elapsedMs) / 1000);
+  if (p.status === 'skipped') return msg ? `skipped — ${msg}` : 'skipped';
+  switch (p.code) {
+    case 'INDEX_NOT_FOUND': {
+      const named = /no index matches\s+(\S+)/i.exec(msg) || /no such index \[([^\]]+)\]/i.exec(msg) || /index_not_found[^[]*\[([^\]]+)\]/i.exec(msg);
+      return named ? `no index matches ${named[1]}` : 'no index matches the log index';
+    }
+    case 'TIMEOUT': return secs === null ? 'timed out' : `timed out (${secs} s)`;
+    case 'SHARD_FAILURE': {
+      const m = /(\d+) of \d+ shards? failed/i.exec(msg) || /(\d+) shards? failed/i.exec(msg);
+      return m ? `part read (${m[1]} shard${m[1] === '1' ? '' : 's'} failed)` : 'part read (shards failed)';
+    }
+    case 'BUSY': return 'busy — deferred';
+    case 'AUTH': return 'credentials refused';
+    case 'UNREACHABLE': return 'unreachable';
+    default:
+      if (p.status === 'deferred') return 'deferred';
+      if (p.status === 'partial') return msg ? `part read — ${msg.slice(0, 80)}` : 'part read';
+      return msg ? msg.slice(0, 80) : partWord(p.status).toLowerCase();
+  }
+}
+
+/** Run statuses with no measurement to read: still going or waiting, or nothing was attempted (paused, skipped). */
+const NOT_MEASURED_RUN = ['running', 'queued', 'pending', 'paused', 'skipped'];
+
+/**
+ * The last run of `jobId` that actually measured, in a JOBS_LIST answer (newest first); null
+ * when none has. A run still going keeps no details yet, and a paused or skipped one attempted
+ * nothing (no details): the one before it is the last run.
+ */
+export function lastFinishedRun(listRes, jobId = LOGDELAY_JOB) {
+  const runs = (listRes && Array.isArray(listRes.runs)) ? listRes.runs : [];
+  return runs.find((r) => r && r.jobId === jobId && !NOT_MEASURED_RUN.includes(r.status)) || null;
+}
+
+/**
+ * The Log Delay page's line about the last run: `{runId, total, missed: [{cluster, reason,
+ * fix}]}` from the run's details as JOB_RUN_DETAIL gives them (already narrowed to the caller's
+ * clusters), kept to the clusters `sees` lets through; null when every cluster was read, or
+ * when there are no details to say it from.
+ */
+export function notMeasured(detailRes, sees = () => true, canOpen = () => true) {
+  const d = detailRes && detailRes.detail;
+  if (!d || !d.counts) return null;
+  const missed = exceptionsOf(d).filter((p) => sees(p.cluster))
+    .map((p) => ({ cluster: p.cluster, status: p.status, reason: partReason(p), fix: todoTarget(p, canOpen) }));
+  if (!missed.length) return null;
+  return { runId: detailRes.run ? detailRes.run.id : null, total: total(d.counts), missed };
+}
 
 /**
  * The run's log as plain text, for Copy and Download .txt: one line each, "22:26:03.112 ERROR

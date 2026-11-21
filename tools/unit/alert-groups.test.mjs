@@ -237,6 +237,7 @@ test('filters: severity, text (title, cluster, items, notes) and the acknowledge
   const m = G.mergeAlerts(list, ctxFor(acks(rec)));
   assert.equal(G.filterAlerts(m).length, 2, 'acknowledged ones are hidden by default');
   assert.equal(G.filterAlerts(m, { showHandled: true }).length, 3);
+  assert.equal(G.filterAlerts(m, { keep: (x) => G.isHandled(x) }).length, 3, 'an acknowledgement that did not save stays shown');
   assert.equal(G.filterAlerts(m, { level: 'critical' }).length, 2);
   assert.equal(G.filterAlerts(m, { level: 'warning', showHandled: true }).length, 1);
   assert.equal(G.filterAlerts(m, { text: 'KESTREL' }).length, 1);

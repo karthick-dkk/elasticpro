@@ -14,6 +14,7 @@ import { alertHistory } from './alert-history.js';
 import { fieldVolumeSpikes, clearFieldVolume } from './field-volume.js';
 import { diskBalance, balanceHeadline, primaryAction } from './disk-balance.js';
 import { DEFAULTS, authHeaderFor, loadZabbixClusters, mergeZabbixClusters, zabbixDrift } from './config.js';
+import { isOff } from './collection.js';
 import { loadClusterMeta, slmExempt } from './cluster-kind.js';
 import { ZABBIX_ITEMS, fromZabbix } from './zabbix-metrics.js';
 import { bridge, subscribe } from './transport.js';
@@ -558,6 +559,10 @@ export function buildClusterData(id, prev, raw) {
   out.ilmOfIndexFailed = !!(out.ilmOfIndex && ilmOfIndices
     && (ilmOfIndices.stale === 'error' || (!ofNow && !ilmOfIndices.unknown)));
   out.appliedSlm = appliedSlm(out.slm) || prev.appliedSlm || null;
+  // Switched off for this cluster (Edit cluster › Collection, core/collection.js): never asked,
+  // so the pages say it is off and where — never "unknown", never 0.
+  const conf = (state.clients.get(id) || {}).c || (state.config ? clusters().find((x) => x.id === id) : null);
+  out.switchedOff = { ilm: isOff(conf, 'ilm'), snapshots: isOff(conf, 'snapshots') };
 
   return out;
 }
@@ -686,11 +691,11 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
         settled(cl.allocation()), settled(cl.nodes()),
         settled(cl.repositories()), settled(cl.slmPolicies()),
         z && z.slmStatus ? z.slmStatus : settled(cl.slmStatus()),
-        z && z.ilm ? z.ilm : settled(cl.ilmStatus()), settled(cl.ilmErrors(cl.c.logIndexPattern)),
+        z && z.ilm ? z.ilm : settled(cl.ilmStatus()), isOff(cl.c, 'ilm') ? skipped() : settled(cl.ilmErrors(cl.c.logIndexPattern)),
         settled(cl.json('GET', '/_nodes/settings?filter_path=nodes.*.settings.path.repo,nodes.*.name')),
         // What the cluster actually enforces, as opposed to what the config says it should.
         settled(cl.ilmPolicies()),
-        settled(cl.ilmPolicyOfIndices(cl.c.logIndexPattern || '*')),
+        isOff(cl.c, 'ilm') ? skipped() : settled(cl.ilmPolicyOfIndices(cl.c.logIndexPattern || '*')),
         // The real watermarks, so disk advice is not given against assumed thresholds.
         settled(cl.json('GET', '/_cluster/settings?include_defaults=true&flat_settings=true' +
           '&filter_path=**.disk.watermark**,**.allocation.enable,**.rebalance.enable')),
@@ -716,7 +721,7 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
   stampFetch(id, 'data', since());
   bus.emit('data', id);
 
-  if (withSnapshots && out.repos.length) await fetchSnapshotsDirect(id);
+  if (withSnapshots && out.repos.length && !isOff(cl.c, 'snapshots')) await fetchSnapshotsDirect(id);
   return out;
 }
 

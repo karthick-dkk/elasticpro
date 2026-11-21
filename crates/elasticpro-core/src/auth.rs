@@ -571,6 +571,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // the Jobs page is open): a user's, like JOBS_LIST; narrowed to their clusters in the
         // handler. Index names and query bodies are the same shape of fact a user reads on REST.
         "SLOW_SEARCHES" => Some(Role::User),
+        // What ElasticPro's requests cost each cluster, per kind, and the slowest of them
+        // (Jobs › Requests › Cost): the request log's figures, so an administrator's like
+        // REQUEST_LOG; narrowed to the caller's clusters in the handler.
+        "REQUEST_COST" => Some(Role::Admin),
         // The Jobs page's health lines (docs/HEALTH.md "History"): a user's, as the strip it draws
         // from; the ElasticPro health figures and the fleet-wide counts are narrowed in the handler.
         "HEALTH_HISTORY" => Some(Role::User),
@@ -1197,7 +1201,9 @@ pub fn read_initial_password_file(path: &std::path::Path) -> Result<String, Auth
 pub struct Seeded {
     /// The password came from the operator's [`INITIAL_PASSWORD_ENV`] file, not the source.
     pub from_override: bool,
-    /// Why the operator's override file was not used (the shipped password was used instead).
+    /// Why the operator's override file could not be used. When this is set NO account was
+    /// made: the core refuses to start (`Core::startup_refusal`) rather than open with the
+    /// shipped password an operator who set the file believes is not there.
     pub override_error: Option<String>,
     /// Why the accounts file could not be saved (the account exists for this run only).
     pub save_error: Option<String>,
@@ -1206,9 +1212,11 @@ pub struct Seeded {
 /// Create the first account when there are none; `None` when accounts already exist.
 ///
 /// `override_file`: the operator's [`INITIAL_PASSWORD_ENV`] file, if set. One that cannot
-/// be used falls back to the shipped password rather than to no account at all: an empty
-/// accounts store offers `BOOTSTRAP_ADMIN` to whoever asks first, which is the very race
-/// this replaces.
+/// be used (unreadable, empty, shorter than the minimum) makes nothing at all and says why
+/// in `override_error`: the caller refuses to start. Falling back to the shipped password
+/// instead left an install that was set up never to have it opening with it, which is the
+/// opposite of what the file was for. With no file set the shipped password is used, as
+/// before (an empty accounts store would offer `BOOTSTRAP_ADMIN` to whoever asks first).
 pub fn seed_first_account(users: &UserStore, override_file: Option<&std::path::Path>) -> Option<Seeded> {
     if !users.is_empty() {
         return None;
@@ -1221,7 +1229,7 @@ pub fn seed_first_account(users: &UserStore, override_file: Option<&std::path::P
         }
         Some(Err(e)) => {
             out.override_error = Some(e.to_string());
-            DEFAULT_PASSWORD.to_string()
+            return Some(out);
         }
         None => DEFAULT_PASSWORD.to_string(),
     };
@@ -1307,16 +1315,9 @@ impl UserStore {
             let _ = std::fs::create_dir_all(dir);
         }
         // Written beside the target and renamed: a crash mid-write must not leave an
-        // accounts file that locks everybody out.
-        let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, &body).map_err(|e| AuthError::Io(e.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, p).map_err(|e| AuthError::Io(e.to_string()))?;
-        Ok(())
+        // accounts file that locks everybody out. Private from its first byte.
+        crate::cluster_secrets::write_private(p, body.as_bytes())
+            .map_err(|e| AuthError::Io(format!("cannot write {}: {e}", p.display())))
     }
 
     pub fn add(&self, name: &str, password: &str, role: Role) -> Result<(), AuthError> {
@@ -1954,32 +1955,24 @@ impl Sessions {
     }
 
     /// Write the file; `at` is the clock the caller is on, remembered as the time of the write.
+    /// The marks go first (a `last_seen` moved while the file is being written sets `touched`
+    /// again, and the next write carries it) and come back when the write fails: a failed write
+    /// must not pass for a saved one, or idle expiry after a restart works from an older file
+    /// than the core believes it has.
     fn write_file(&self, at: u64) {
         let Some(p) = &self.path else { return };
-        self.last_saved.store(at, Ordering::Relaxed);
+        let saved_before = self.last_saved.swap(at, Ordering::Relaxed);
         self.touched.store(false, Ordering::Relaxed);
-        let Ok(body) = serde_json::to_string(&*self.map.read()) else { return };
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = p.with_extension("json.tmp");
-        let _ = std::fs::remove_file(&tmp);
-        let wrote = (|| -> std::io::Result<()> {
-            use std::io::Write as _;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
+        let wrote = serde_json::to_string(&*self.map.read()).map_err(std::io::Error::other).and_then(|body| {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
             }
-            let mut f = o.open(&tmp)?;
-            f.write_all(body.as_bytes())?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, p)
-        })();
+            crate::cluster_secrets::write_private(p, body.as_bytes())
+        });
         if let Err(e) = wrote {
-            let _ = std::fs::remove_file(&tmp);
+            // Whatever was to be written is still only in memory: the next touch tries again.
+            self.last_saved.store(saved_before, Ordering::Relaxed);
+            self.touched.store(true, Ordering::Relaxed);
             tracing::warn!(error = %e, "sessions could not be saved; they still work until the core restarts");
         }
     }
@@ -2304,15 +2297,8 @@ impl TokenStore {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, &body).map_err(|e| AuthError::Io(e.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, p).map_err(|e| AuthError::Io(e.to_string()))?;
-        Ok(())
+        crate::cluster_secrets::write_private(p, body.as_bytes())
+            .map_err(|e| AuthError::Io(format!("cannot write {}: {e}", p.display())))
     }
 
     pub fn list(&self) -> Vec<ApiToken> {
@@ -2722,17 +2708,69 @@ mod tests {
     }
 
     #[test]
-    fn a_short_operator_file_is_refused_and_the_shipped_password_used_instead() {
+    fn an_unusable_operator_file_makes_no_account_and_never_the_shipped_password() {
         let dir = scratch();
-        let over = dir.join("pw");
-        std::fs::write(&over, "short\n").unwrap();
-        assert!(matches!(read_initial_password_file(&over), Err(AuthError::Weak(_))));
+        let short = dir.join("short");
+        std::fs::write(&short, "short\n").unwrap();
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        let missing = dir.join("missing");
+        assert!(matches!(read_initial_password_file(&short), Err(AuthError::Weak(_))));
+        for (file, why) in [(&short, "at least"), (&empty, "at least"), (&missing, "cannot read")] {
+            let s = store();
+            let seeded = seed_first_account(&s, Some(file)).unwrap();
+            assert!(!seeded.from_override);
+            assert!(seeded.override_error.as_deref().unwrap().contains(why), "{file:?}: {:?}", seeded.override_error);
+            assert!(s.is_empty(), "{file:?}: nothing is made — the core refuses to start instead");
+            assert!(s.verify(DEFAULT_USER, DEFAULT_PASSWORD).is_err(), "{file:?}: never the shipped password");
+        }
+        // A store that already has accounts never reads the file: an unusable one is no reason
+        // to stop an install that is past its first start.
         let s = store();
-        let seeded = seed_first_account(&s, Some(&over)).unwrap();
-        assert!(!seeded.from_override);
-        assert!(seeded.override_error.as_deref().unwrap().contains("at least"));
-        assert!(s.verify(DEFAULT_USER, "short").is_err());
-        assert!(s.verify(DEFAULT_USER, DEFAULT_PASSWORD).is_ok(), "never an empty store");
+        seed_first_account(&s, None).unwrap();
+        assert!(seed_first_account(&s, Some(&missing)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_session_write_is_not_marked_saved() {
+        let dir = scratch();
+        // The file's folder is a plain file: every write fails.
+        std::fs::write(dir.join("blocker"), "x").unwrap();
+        let ss = Sessions::open(Some(dir.join("blocker").join("sessions.json")));
+        let before = ss.last_saved.load(Ordering::Relaxed);
+        ss.touched.store(true, Ordering::Relaxed);
+        ss.write_file(before + Sessions::PERSIST_EVERY + 5);
+        assert_eq!(ss.last_saved.load(Ordering::Relaxed), before, "the time of the last good write stays");
+        assert!(ss.touched.load(Ordering::Relaxed), "still to be written");
+        // And a write that works clears both.
+        let ok = Sessions::open(Some(dir.join("sessions.json")));
+        ok.touched.store(true, Ordering::Relaxed);
+        ok.write_file(before + 7);
+        assert_eq!(ok.last_saved.load(Ordering::Relaxed), before + 7);
+        assert!(!ok.touched.load(Ordering::Relaxed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_and_token_files_are_private_and_leave_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch();
+        let users = UserStore::open_with_rounds(Some(dir.join("users.json")), 1);
+        users.add("someone", "long-enough-pass", Role::User).unwrap();
+        let tokens = TokenStore::open(Some(dir.join("tokens.json")));
+        tokens.create("t", Role::User, None).unwrap();
+        for f in ["users.json", "tokens.json"] {
+            let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{f}");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        // A save that cannot happen says so, and leaves nothing behind either.
+        let blocked = UserStore::open_with_rounds(Some(dir.join("users.json").join("x.json")), 1);
+        assert!(matches!(blocked.add("other", "long-enough-pass", Role::User), Err(AuthError::Io(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

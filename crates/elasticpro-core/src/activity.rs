@@ -61,6 +61,8 @@ const POLLS: &[&str] = &[
     "JOBS_LIST", "JOB_SETTINGS_GET",
     // A run's details when its row is opened, and the slow searches every 30 s (reads).
     "JOB_RUN_DETAIL", "SLOW_SEARCHES",
+    // Requests › Cost, read every 30 s while it is open (a read).
+    "REQUEST_COST",
     // The Jobs page's health lines, read with it (a read).
     "HEALTH_HISTORY",
 ];

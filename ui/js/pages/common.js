@@ -1,4 +1,5 @@
 /** Shared page pieces. */
+import { offText } from '../core/collection.js';
 import { h, mount, activatable, reconcile } from '../lib/dom.js';
 import { sortTh, paintSortHeads } from '../lib/table-sort.js';
 import { healthClass, ago, dt, diskUseText, bytes } from '../lib/fmt.js';
@@ -514,6 +515,8 @@ export function snapshotCell(s, staleHours) {
  * and an old success is not overdue; a failed or partial one still shows as one.
  */
 export function snapshotCellFor(c, d, staleHours) {
+  // Switched off for the cluster (Edit cluster › Collection): never asked — "off", and where.
+  if (d && d.switchedOff && d.switchedOff.snapshots) return h('span.muted.snap-off', { title: `${offText('snapshots')}.` }, 'Off');
   const s = lastSnapshotOf(d || {});
   if (!slmExempt(c)) return snapshotCell(s, staleHours);
   if (!s) return h('span.cl-ulm', { title: ULM_WHY }, ulmLabel(c));

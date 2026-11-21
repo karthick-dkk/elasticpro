@@ -3,8 +3,10 @@
 #   cp .env.example .env            # then edit
 #   docker compose up -d --build
 #
-# Signing in is the app's own job now — the first run creates the account `Admin` with the
-# password `elastic`; change it on the Accounts page (README.md, "First sign-in"). Edge
+# Signing in is the app's own job now — the first run creates the account `Admin`. Installed with
+# deploy.sh or install.sh, its password is a random one made for this install
+# (secrets/admin/initial_admin_password, shown once); a stack started without one gets `elastic`
+# and a warning on every start. Change it on the Accounts page (README.md, "First sign-in"). Edge
 # authentication is optional: make-htpasswd.sh and the htpasswd mount are still here so
 # re-enabling auth_basic in nginx.conf is a two-line change, not a rebuild.
 # The core is reachable ONLY through nginx. Never publish port 8765.
@@ -81,6 +83,11 @@ services:
       # entrypoint below leaves ELASTICPRO_REDIS_URL unset. Redis is optional at run time; the
       # core's own disk cache ($ELASTICPRO_DATA_DIR/cache) works with no Redis at all.
       - ./secrets/redis:/run/elasticpro-secrets:ro
+      # The first administrator's password on a fresh install (deploy.sh / install.sh make it;
+      # deploy/initial-admin.sh). Read only while there are no accounts at all; missing is fine
+      # (the entrypoint then leaves ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE unset), as on every
+      # install from before 0.3.82. Only this folder, like the Redis one above.
+      - ./secrets/admin:/run/elasticpro-admin:ro
     # A bounded core is a core that fails loudly (OOM-killed, restarted, visible in
     # `docker compose ps`) instead of taking the host down with it — the failure mode the
     # unbounded scheduler work in Fleet at Scale is sized against, not a tuned ceiling.
@@ -94,7 +101,10 @@ services:
     # turn a secret file into part of an env var's value. If a future core release reads
     # an ELASTICPRO_REDIS_URL_FILE directly (the *_FILE convention the Vault/Zabbix secrets
     # already use — see hcvault.rs), this override can be dropped in favour of that.
-    entrypoint: ["sh", "-c", "if [ -s /run/elasticpro-secrets/redis_password ]; then pw=$$(sed -e 's|%|%25|g' -e 's|/|%2F|g' -e 's|@|%40|g' -e 's|:|%3A|g' -e 's|?|%3F|g' -e 's|#|%23|g' /run/elasticpro-secrets/redis_password); export ELASTICPRO_REDIS_URL=\"redis://:$${pw}@redis:6379/0\"; fi; exec elasticpro-bridge /app/ui 8765"]
+    # The same for the first administrator's password file: pointed at when it EXISTS (-e, not -s:
+    # an empty one must stop the core, never quietly mean "no file"), unless the variable is set
+    # already (an override of your own wins).
+    entrypoint: ["sh", "-c", "if [ -s /run/elasticpro-secrets/redis_password ]; then pw=$$(sed -e 's|%|%25|g' -e 's|/|%2F|g' -e 's|@|%40|g' -e 's|:|%3A|g' -e 's|?|%3F|g' -e 's|#|%23|g' /run/elasticpro-secrets/redis_password); export ELASTICPRO_REDIS_URL=\"redis://:$${pw}@redis:6379/0\"; fi; if [ -z \"$${ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE:-}\" ] && [ -e /run/elasticpro-admin/initial_admin_password ]; then export ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE=/run/elasticpro-admin/initial_admin_password; fi; exec elasticpro-bridge /app/ui 8765"]
     networks: [internal]
     logging:
       driver: json-file
@@ -166,7 +176,7 @@ services:
   redis:
     # One `apk upgrade` over redis:8-alpine, which clears the last zlib advisory.
     # Pulled rather than built, for the reason given on nginx above.
-    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.81}
+    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.82}
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -198,7 +208,7 @@ services:
     # inside a build container, and on a host whose Docker bridge could not resolve DNS the
     # install died there. Build it yourself with:
     #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
-    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.81}
+    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.82}
     restart: unless-stopped
     depends_on:
       core:

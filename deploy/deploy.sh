@@ -62,6 +62,10 @@
 #   5. waits for the core's health check. Not healthy in time: ELASTICPRO_IMAGE goes back to the
 #      previous image, the core is restarted on it, and the script fails.
 #
+# A fresh install (0.3.82): before anything starts, a random password for the first account is put
+# in secrets/admin/initial_admin_password (initial-admin.sh), and shown once at the end. An install
+# that has run before is never given one.
+#
 # The rest of the stack (nginx, Redis) is left running as it is; `--all` restarts it too.
 # One exception: when deploy/nginx/nginx.conf differs from the config the running nginx has,
 # nginx is recreated — a bind-mounted file is not picked up by a restart or a reload.
@@ -816,6 +820,33 @@ apply_config() {
   return 0
 }
 
+# --- the first administrator (0.3.82) --------------------------------------------------------
+# A fresh install (no core container, no core-data volume, no password file) gets a random
+# password for the first account, in secrets/admin/initial_admin_password, instead of the public
+# Admin/elastic. An install that has run before is never given one, and an existing file is never
+# replaced (initial-admin.sh says how it decides). Shown once at the end, on the terminal only,
+# and only when the core says it made the account with it.
+ADMIN_MADE=0
+admin_ensure() {
+  [ -x initial-admin.sh ] || return 0
+  if [ "$DRY" = 1 ]; then ./initial-admin.sh ensure --dry-run; return 0; fi
+  local out
+  out=$(./initial-admin.sh ensure) || fail "could not make the first administrator's password — nothing changed"
+  [ "$out" = made ] || return 0
+  ADMIN_MADE=1
+  say "== fresh install: made a random password for the first administrator (deploy/secrets/admin/initial_admin_password)"
+}
+admin_report() {
+  [ "$ADMIN_MADE" = 1 ] || return 0
+  if docker compose logs core 2>/dev/null | grep -q 'created the first one, with the password from'; then
+    ./initial-admin.sh report
+  else
+    # Not this core's first start after all: the file was never read. It was made by this run.
+    rm -f secrets/admin/initial_admin_password
+    say "! the core already had accounts, so the password made for a fresh install was not used and was removed"
+  fi
+}
+
 # --- 1. checks --------------------------------------------------------------------------
 # A dry --apply-config only validates and renders, which needs no Docker.
 docker compose version >/dev/null 2>&1 || { [ "$APPLY$DRY" = 11 ] || fail "Docker Compose v2 is needed (docker compose …)"; }
@@ -965,6 +996,7 @@ if [ -n "$UPGRADE" ]; then
   NOW=$(version_of "$CURRENT")
   # The target's own deploy.sh does the rest (it knows what that release changed).
   self_update "$TARGET" "$NOW"
+  admin_ensure
 
   # What changes: every released image not already at the target.
   PLAN=
@@ -1046,6 +1078,7 @@ if [ -n "$UPGRADE" ]; then
     sync_nginx
     say "  .env before this upgrade: $BACKUP${COMPOSE_BACKUP:+   ·   $COMPOSE before: $COMPOSE_BACKUP}   ·   undo: deploy/deploy.sh --rollback"
     docker compose ps
+    admin_report
     exit 0
   fi
   say "✗ core not healthy on $TARGET — last log lines:"
@@ -1060,6 +1093,7 @@ if [ -n "$UPGRADE" ]; then
   exit 1
 fi
 
+admin_ensure
 # config.txt in force before the core is switched: this deploy restarts it anyway.
 apply_config keep
 
@@ -1097,6 +1131,7 @@ if wait_healthy; then
   # This deploy restarts the core alone, so a db container the compose file no longer has stays.
   ! db_leftover || say "! a db container (PostgreSQL) is still there, but deploy/$COMPOSE no longer has the service — ElasticPro never used it. docker compose up -d --remove-orphans removes it (its db-data volume is kept)."
   docker compose ps
+  admin_report
   exit 0
 fi
 say "✗ core not healthy on $IMAGE — last log lines:"

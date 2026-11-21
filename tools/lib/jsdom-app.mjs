@@ -30,6 +30,24 @@ export function findJsdom(extraPaths = []) {
   return { entry: null, paths };
 }
 
+/**
+ * jsdom must be there: `--require-jsdom` was passed, or CI is set (any value but empty, 0 or
+ * false). A check that cannot run then FAILS instead of printing "skipping" and exiting 0,
+ * which has read as a pass before now.
+ */
+export function jsdomRequired(argv = process.argv, env = process.env) {
+  const ci = String(env.CI ?? '').trim().toLowerCase();
+  return argv.includes('--require-jsdom') || (ci !== '' && ci !== '0' && ci !== 'false');
+}
+
+/** What a check says, and how it exits, when jsdom is not found. */
+export function jsdomMissing(tool, paths) {
+  const required = jsdomRequired();
+  console.log(`${tool}: jsdom not found — ${required ? 'FAILED (required: CI is set or --require-jsdom was passed)' : 'skipping'}.`);
+  console.log(`  install it in one of: ${paths.join(', ')}  (npm i jsdom)`);
+  process.exit(required ? 1 : 0);
+}
+
 function settle(o) {
   const r = { ...o };
   setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0);

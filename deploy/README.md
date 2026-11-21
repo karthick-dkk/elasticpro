@@ -52,25 +52,41 @@ mkdir -p config ssh
 cp /path/to/config_cluster.json config/
 cp ~/.ssh/id_ed25519 ssh/                  # any keyFile the config refers to
 
-# 5. Up
+# 5. Up — with a random password for the first administrator (see "First sign-in")
+./initial-admin.sh ensure                  # fresh install only; never touches one that has run
 docker compose up -d --build
+./initial-admin.sh report                  # shows it once, on this terminal
 docker compose logs -f
 ```
 
 Open `https://<server>/`, sign in, and pick `/app/config/config_cluster.json` when the app
 asks for a config.
 
-**First sign-in.** A fresh install has one account, **`Admin`**, password **`elastic`** — the
-same on every install, like Zabbix's own `Admin`/`zabbix`. Change it on the Accounts page
-whenever you choose (at least 10 characters); until you do, anyone who reaches the sign-in page
-has the account, and the core says so in its log on every start. To start with a password of
-your own instead, put it in a file, mount it into the core and point
-`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` at it before the first start — a file, never the password
-in an environment variable; the 10-character minimum applies, and a file that is too short is
-refused (the shipped password is used instead and the log says why). An install that already
-has accounts is not changed by any of this: it keeps the accounts it has, whatever they are
-called. To go back to `Admin`/`elastic` on such an install, stop the core, remove `users.json`
-from the `core-data` volume and start it again — every account goes with it.
+**First sign-in.** A fresh install has one account, **`Admin`**. Installed with `deploy/deploy.sh`
+or `tools/install.sh` (0.3.82 and later), its password is **random, made for this install**: the
+script writes it to `deploy/secrets/admin/initial_admin_password` before the core first starts and
+prints it **once**, at the end, on the terminal only (never to stdout, so a captured deploy log does
+not hold it; with no terminal it names the file instead). Sign in with it, set your own on the
+Accounts page (at least 10 characters), then delete the file — the core reads it only while it has
+no accounts at all. "Fresh" means: no such file, no core container of this compose project, no
+`<project>_core-data` volume; anything that cannot be told counts as not fresh. An install that has
+run before is never given one, an existing file is never replaced, and a password the core did not
+use (it already had accounts) is removed again. The file is private from its first byte: as root it
+belongs to the core's uid 999 and stays `0600`; as the installing user it is `0640` with this
+install's group (`ELASTICPRO_GID`), which the core is given — the same as `secrets/redis/redis_password`.
+
+The compose file mounts `secrets/admin` read-only into the core and points
+`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` at the file when it exists. You can do the same by hand: put
+a password of your own on the first line of a file, mount it and point that setting at it before the
+first start — a file, never the password in an environment variable. **A file that is set but cannot
+be used — unreadable by the core, empty, or shorter than 10 characters — stops the core** (exit code
+78, the log names `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` and why); it never falls back to the
+shipped password. Only a core started with no file at all (a plain `docker compose up` on a clone,
+the dev bridge) still creates `Admin` / **`elastic`**, the same on every install, and says so in its
+log on every start until it is changed. An install that already has accounts is not changed by any of
+this: it keeps the accounts it has, and the file is not read. To start again from no accounts, stop
+the core, remove `users.json` from the `core-data` volume and start it again — every account goes
+with it.
 Jump-host key paths in the config should be `/app/ssh/<file>`.
 
 ## Logs — everything, in one place
@@ -140,6 +156,19 @@ Note that `docker compose ps` shows `8765/tcp` against the core. That is the ima
 a mapping would read `0.0.0.0:8765->8765/tcp`, as it does for nginx on 443.
 
 ## Updating
+
+**Upgrading to 0.3.82: who may set `X-Real-IP`.** The core now believes `X-Real-IP` only from
+the compose service `nginx` (by name) and from `TRUSTED_PROXIES`; before, an empty
+`TRUSTED_PROXIES` meant "from anyone". The shipped stack needs nothing — **as long as the front
+proxy's service in `docker-compose.yml` is still named `nginx`**, as shipped: the name is what is
+looked up. A compose file where you renamed it must list that service's address (or its network's
+range) in `TRUSTED_PROXIES`, or every user shows as the proxy's address. If a proxy of your own
+talks to the **core** directly (not through nginx) and the activity log, `allowedSources` or a
+display link's `allowFrom` should see the client's address, put that proxy's address in
+`TRUSTED_PROXIES` before upgrading. A proxy in front of nginx needs nothing (see "Rate limits
+and the whitelist"). Existing `TRUSTED_PROXIES` values keep working. Upgrades are not given a
+first-administrator password (that is for fresh installs), and a broken
+`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` only matters to a core with no accounts yet.
 
 To a published release (no build on this host):
 
@@ -373,7 +402,7 @@ or VPN range that people open the UI from, list it in `config.txt` and apply it:
 ```
 RATE_EXEMPT_IPS=192.0.2.10,10.20.0.0/16   # the Zabbix frontend, the office / VPN range
 ZABBIX_ALLOWED_SOURCES=192.0.2.10         # who may sign people in; never rate limited either
-TRUSTED_PROXIES=172.19.0.0/16             # the nginx container's network
+TRUSTED_PROXIES=                          # empty: only our nginx (see below)
 ```
 
 then `deploy/deploy.sh --apply-config`. `RATE_EXEMPT_IPS` is rendered into
@@ -385,9 +414,33 @@ The core's own sign-in budget skips every address named in the Zabbix link's
 `ZABBIX_ALLOWED_SOURCES`). Listing the Zabbix frontend there both restricts who may sign
 people in and removes its budget.
 
-`TRUSTED_PROXIES` is the address of nginx, so the core believes nginx's `X-Real-IP`, and
-nobody else's: that is the address both checks above see. Set it; without it the source
-addresses in the activity log can be forged by anyone who reaches the core directly.
+**Whose `X-Real-IP` the core believes (0.3.82).** Only a trusted proxy's: the compose service
+**`nginx`**, looked up by name (again every 30 s, and on a header from an address it does not
+know — compose gives nginx a new address whenever it recreates it; a lookup that fails keeps the
+addresses last confirmed for at most 90 s, then trusts nobody by name until one answers), plus any address or CIDR in
+`TRUSTED_PROXIES`. From anyone else the header is ignored and the TCP peer is the source. That
+address is what the activity log records, what `allowedSources` and a display link's `allowFrom`
+check, and what the per-source rate limits count. Nothing needs setting for the shipped stack, and
+no fixed network or address is involved (changing a compose network's addresses fails
+`docker compose up` on an existing install). Outside compose, where no `nginx` resolves and
+nothing is listed, the TCP peer is always the source. `TRUSTED_PROXIES` values you already have
+keep working as they are; they are added to nginx, not instead of it. (Before 0.3.82 an empty
+`TRUSTED_PROXIES` believed the header from any peer, so any container on the internal network could
+put any address in the activity log and past those checks.)
+
+- **A proxy of your own in front of nginx** (a load balancer, a TLS terminator): nothing to set in
+  the core — nginx sets `X-Real-IP` to the address it sees, which is then your proxy's. To record
+  the end user's address instead, configure nginx's `real_ip` module for your proxy; the core
+  still only believes nginx.
+- **A proxy of your own in front of the core instead of nginx**: put its address in
+  `TRUSTED_PROXIES`, or its `X-Real-IP` is ignored and every request looks like it came from it.
+- **The Zabbix frontend** calls the core directly on `ep_sso` (compose.sso.yml) or through nginx.
+  It sends no `X-Real-IP`; either way the source is the frontend's own address (directly: the TCP
+  peer; through nginx: nginx's header), which is what `allowedSources` should list. The end user's
+  browser address is not forwarded on this path, and does not need to be: every request is signed
+  with the shared secret, which is what decides it.
+- `X-Auth-User` (`PROXY_AUTH_HEADER`) is still believed only from an address in `TRUSTED_PROXIES`,
+  never from the `nginx` name: the shipped nginx blanks that header.
 
 ## Performance: how the core goes to Elasticsearch
 

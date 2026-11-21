@@ -219,16 +219,55 @@ test('devices behind: a day without totals is a gap, not zero; today is one seri
   assert.deepEqual([R.labelEvery(24), R.labelEvery(30), R.labelEvery(12), R.labelEvery(7)], [4, 5, 2, 1]);
 });
 
-test('heat map: a cell the core has no total for is unknown, never 0; a cluster never measured says so', () => {
-  const rows = R.heatRows([
-    { id: 'a', name: 'A', lastRunAt: 1, sparkline: [3, null, 0], windows: [{ stillLate: 2 }, { stillLate: null }] },
-    { id: 'b', name: 'B', lastRunAt: null, sparkline: [] },
-  ], 'last7');
-  assert.deepEqual(rows[0].cells, [3, null, 0]);
-  assert.equal(rows[1].never, true);
-  assert.deepEqual(R.heatRows([{ id: 'a', lastRunAt: 1, windows: [{ stillLate: 2 }, { stillLate: null }] }], 'today')[0].cells, [2, null]);
-  assert.deepEqual([R.heatStep(null), R.heatStep(0), R.heatStep(1), R.heatStep(3), R.heatStep(6), R.heatStep(40)], [-1, 0, 1, 2, 3, 4]);
-  assert.equal(R.HEAT_LEGEND.length, 5);
+test('late grid: a window with no measurement is missing, never an earlier reading carried forward', () => {
+  const w = (i, o) => ({ from: i * 7200000, to: (i + 1) * 7200000, label: `${String(i * 2).padStart(2, '0')}:00`, ...o });
+  const rows = R.lateGridRows([
+    { id: 'a', name: 'A', lastRunAt: 5, lateNow: 6, critical: 2, yesterdayWindow: { measured: true, lateAt: 2, criticalAt: 3 },
+      windows: [w(0, { measured: true, lateAt: 4, criticalAt: 1, stillLate: 4 }), w(1, { measured: false, lateAt: null, stillLate: 4 }), w(2, { measured: true, lateAt: 8, criticalAt: 2 })] },
+    { id: 'q', name: 'Quiet', lastRunAt: 5, lateNow: 1, critical: 0, windows: [w(0, { measured: true, lateAt: 1, criticalAt: 0 })] },
+    { id: 'n', name: 'Never', lastRunAt: null, windows: [] },
+    { id: 'o', name: 'Old core', lastRunAt: 5, lateNow: 9, windows: [w(0, { stillLate: 9 })] },
+  ], 2, 'late');
+  assert.deepEqual(rows.map((r) => r.id), ['o', 'a', 'q', 'n'], 'worst first by Late now; never measured last');
+  const a = rows[1];
+  assert.equal(a.cells.length, 12, 'one cell per window of the day at 2 h');
+  assert.deepEqual(a.cells.slice(0, 4).map((c) => [c.state, c.v]), [['measured', 4], ['missing', null], ['measured', 8], ['future', null]]);
+  assert.deepEqual([a.measured, a.begun, a.worst, a.lateNow, a.vs], [2, 3, 8, 6, 4]);
+  assert.equal(rows[0].cells[0].state, 'missing', 'a core that does not say `measured`: unknown, never its stillLate');
+  const crit = R.lateGridRows([{ id: 'a', lastRunAt: 5, lateNow: 6, critical: 2, yesterdayWindow: { measured: true, lateAt: 2, criticalAt: 3 },
+    windows: [w(0, { measured: true, lateAt: 4, criticalAt: 1 })] }], 2, 'critical')[0];
+  assert.deepEqual([crit.cells[0].v, crit.lateNow, crit.vs], [1, 2, -1]);
+  assert.equal(R.vsYesterday({ lastRunAt: 5, lateNow: 3, yesterdayWindow: { measured: false } }), null, 'yesterday not measured: unknown, not "="');
+  assert.deepEqual([R.vsText(4), R.vsText(-2), R.vsText(0), R.vsText(null)], ['▲ 4', '▼ 2', '=', '']);
+  assert.deepEqual([R.windowsPerDay(2), R.windowsPerDay(3), R.windowsPerDay(5), R.windowsPerDay(null)], [12, 8, 5, null]);
+  assert.deepEqual(R.windowHeads(4), ['00', '04', '08', '12', '16', '20']);
+});
+
+test('late grid: the window in progress with no reading is pending, not a miss, and not in Measured', () => {
+  const H = 3600000;
+  const w = (i, o) => ({ from: i * 2 * H, to: (i + 1) * 2 * H, label: `${String(i * 2).padStart(2, '0')}:00`, ...o });
+  // 05:00 now: 00 and 02 ended (02 not measured), 04 in progress with no reading yet.
+  const [r] = R.lateGridRows([{ id: 'a', lastRunAt: 3 * H, lateNow: 5, critical: 1,
+    windows: [w(0, { measured: true, lateAt: 4, complete: true }), w(1, { measured: false, complete: true }), w(2, { measured: false, complete: false })] }], 2);
+  assert.deepEqual(r.cells.slice(0, 4).map((c) => c.state), ['measured', 'missing', 'pending', 'future']);
+  assert.deepEqual([r.measured, r.done, r.begun], [1, 2, 3], 'the pending window is not in the denominator');
+  assert.equal(r.nextAt, 5 * H, 'next measurement: the last run plus the interval');
+  assert.equal(r.lastBeforeToday, false);
+  // A window in progress that already has a reading counts, as measured.
+  const [m] = R.lateGridRows([{ id: 'a', lastRunAt: 1, lateNow: 2, windows: [w(0, { measured: true, lateAt: 2, complete: false })] }], 2);
+  assert.deepEqual([m.cells[0].state, m.measured, m.done], ['measured', 1, 1]);
+  // From midnight until the first run: Late now is yesterday's last measurement, flagged; nothing is "missing".
+  const day = 10 * 24 * H;
+  const [y] = R.lateGridRows([{ id: 'a', lastRunAt: day - H, lateNow: 7, critical: 0, yesterdayWindow: { measured: true, lateAt: 6, criticalAt: 0 },
+    windows: [{ from: day, to: day + 2 * H, label: '00:00', measured: false, complete: false }] }], 2);
+  assert.deepEqual([y.cells[0].state, y.measured, y.done, y.lateNow, y.vs, y.lastBeforeToday], ['pending', 0, 0, 7, 1, true]);
+});
+
+test('late grid: each row is shaded on its own scale, its worst window darkest', () => {
+  assert.deepEqual([R.gridShade(null, 8), R.gridShade(0, 8), R.gridShade(1, 8), R.gridShade(4, 8), R.gridShade(8, 8)], [-1, 0, 1, 2, 4]);
+  assert.equal(R.gridShade(1, 1), 4, 'a quiet cluster\'s one late device is its worst: darkest');
+  assert.equal(R.lateAtWindow({ measured: true, lateAt: 0 }), 0, 'measured and none late is 0');
+  assert.equal(R.lateAtWindow(null), null);
 });
 
 test('device filters: the three levels, late, another time zone, silent (can\'t measure too); counts per chip', () => {

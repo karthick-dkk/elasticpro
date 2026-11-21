@@ -15,7 +15,7 @@ import { rowMenu, ICON, popover, toast } from '../ui/menu.js';
 import { confirmDialog, inputDialog } from '../ui/modal.js';
 import {
   loadAcks, loadCurrentUser, currentUser, setCurrentUser, ackFor, isAcked,
-  acknowledgeItems, unacknowledge, addNote, removeNote, pruneAcks, ackRecords,
+  acknowledgeItems, unacknowledge, addNote, removeNote, pruneAcks, ackRecords, unsavedReason, retrySave,
 } from '../core/acks.js';
 import { errorText } from '../core/error-codes.js';
 import {
@@ -202,14 +202,14 @@ function draw() {
   const mine = ui.cluster ? all.filter((m) => m.clusterId === ui.cluster) : all;
   const only = ui.cluster ? list.find((c) => c.id === ui.cluster) : null;
   const opts = { level: ui.level, text: ui.text, showHandled: ui.handled,
-    notesOf: (m) => allNotes(m).map((n) => n.text).join(' ') };
+    notesOf: (m) => allNotes(m).map((n) => n.text).join(' '), keep: (m) => !!unsavedOf(m) };
   // A cluster that cannot be reached is one line in one group, first whatever the grouping;
   // its other alerts are held behind that line and are in no group below (alert-groups.js).
   const split = splitUnreachable(mine);
   const down = filterDown(split.down, opts);
   const visible = filterAlerts(split.rest, opts);
   const groups = groupAlerts(visible, ui.group);
-  const hiddenHandled = ui.handled ? 0 : mine.filter(isHandled).length;
+  const hiddenHandled = ui.handled ? 0 : mine.filter((m) => isHandled(m) && !unsavedOf(m)).length;
   // What Collapse all folds: the Unreachable group and every group that has a header.
   const foldKeys = [...(down.length ? [DOWN_KEY] : []), ...groups.filter(hasHeader).map(groupKey)];
   const allCollapsed = foldKeys.length > 0 && foldKeys.every((k) => collapsed.has(k));
@@ -570,6 +570,8 @@ function heldList(dn) {
           x.detail ? ` · ${x.detail}` : ''),
         acked ? h('span.apill.grey', `acknowledged${x.ackedBy ? ` by ${x.ackedBy}` : ''}`)
           : x.heldState === 'silenced' ? h('span.apill.grey', 'silenced') : null,
+        unsavedPill(x),
+        unsavedOf(x) ? h('button.btn.sm.ack-retry', { type: 'button', title: `Send it to the server again — ${unsavedOf(x)}`, onclick: () => doRetry(x) }, 'Retry') : null,
         x.asOf
           ? h('span.muted.aheld-age', { title: `Worked out from data read ${ago(x.asOf)} · first seen ${dt(x.since)}` }, `as of ${dt(x.asOf)}`)
           : h('span.muted.aheld-age', { title: `Since ${dt(x.since)}` }, `${ageShort(Date.now() - x.since)} old`),
@@ -599,7 +601,7 @@ function alertRow(m, all, { single = false } = {}) {
   const siblingSig = expanded ? all.filter((x) => x.clusterId === m.clusterId).map((x) => `${x.key}@${Math.floor(x.since / 60000)}`).join(',') : '';
   const sig = [ui.group, single, m.level, m.title, m.count, m.detail, m.state, m.newSince, m.ackedBy, m.ackedAt, Math.floor(m.since / 60000),
     m.approxSince, itemSig(m), expanded, notes, sil ? sil.id || sil.until : '', siblingSig, expanded ? minute() : '',
-    expanded ? ackRecords().length : '', m.problemUrl || '', objId(m.cluster)].join('\u0001');
+    expanded ? ackRecords().length : '', m.problemUrl || '', objId(m.cluster), unsavedOf(m)].join('\u0001');
   return built.get(`row:${m.key}`, sig, () => buildRow(m, all, { expanded, notes, sil, single }));
 }
 
@@ -661,6 +663,7 @@ function buildRow(m, all, { expanded, notes, sil, single }) {
           m.detail ? h('span.arow-detail', ` · ${m.detail}`) : null,
           m.newSince ? [' ', h('span.apill.warn', `${m.newSince} new since acknowledged`)] : null,
           stateNote ? [' ', h('span.apill.grey', stateNote)] : null,
+          unsavedPill(m),
           m.stale ? [' ', h('span.apill.grey', { title: 'The reading is older than its dataset allows' }, 'stale reading')] : null),
         m.snapshot ? h('div.arow-sub.muted', `${dt(m.snapshot.at)} · ${m.snapshot.repo || ''}${m.snapshot.status ? ` · ${m.snapshot.status}` : ''}`) : null),
       h('span.arow-age', { title: ageTitle(m) }, ageText(m)),
@@ -668,6 +671,8 @@ function buildRow(m, all, { expanded, notes, sil, single }) {
       handled
         ? h('button.btn.sm', { type: 'button', title: 'Put it back on the open list', onclick: () => doUnack(m) }, 'Re-open')
         : h('button.btn.sm', { type: 'button', title: 'Mark as seen — it stays until the condition clears', onclick: () => doAck(m) }, 'Ack'),
+      unsavedOf(m) ? h('button.btn.sm.ack-retry', { type: 'button', title: `Send it to the server again — ${unsavedOf(m)}`,
+        onclick: () => doRetry(m) }, 'Retry') : null,
       notesBtn,
       moreMenu(m, g, sil),
       toggle),
@@ -779,11 +784,44 @@ async function ensureUser() {
 }
 
 /** Acknowledge what the alert lists now. Items that arrive later are not covered. */
-async function ackOne(m) { await acknowledgeItems(m.key, m.items.map((i) => i.id)); }
+async function ackOne(m) { return acknowledgeItems(m.key, m.items.map((i) => i.id)); }
+
+/**
+ * Why this alert's acknowledgement or notes did not save (hosted: the server refused them or
+ * did not answer), or ''. Such a record is this browser's only: it is marked, with Retry,
+ * rather than shown as if the team had it.
+ */
+function unsavedOf(m) {
+  for (const k of new Set([m.key, ...(m.keys || [])])) { const why = unsavedReason(k); if (why) return why; }
+  return '';
+}
+function unsavedPill(m) {
+  const why = unsavedOf(m);
+  return why ? [' ', h('span.apill.crit.ack-unsaved', { title: `Only in this browser — ${why}. Press Retry to send it again.` }, 'not saved')] : null;
+}
+function notSavedToast(what, why) {
+  toast(`${what} not saved — ${why}. Press Retry on the alert.`, 'err', 7000);
+}
+
+async function doRetry(m) {
+  let why = ''; let dropped = '';
+  for (const k of new Set([m.key, ...(m.keys || [])])) {
+    if (!unsavedReason(k)) continue;
+    const kept = await retrySave(k);
+    if (kept && kept.unsaved) why = kept.unsaved;
+    else if (kept && kept.dropped) dropped = kept.dropped;
+  }
+  if (why) toast(`Still not saved — ${why}`, 'err', 7000);
+  else if (dropped) toast(`Saved your notes. ${dropped}.`, 'warn', 7000);
+  else toast('Saved', 'ok', 2500);
+  bus.emit('alerts-changed');
+  draw();
+}
 
 async function doAck(m) {
   await ensureUser();
-  await ackOne(m);
+  const kept = await ackOne(m);
+  if (kept && kept.unsaved) notSavedToast('Acknowledgement', kept.unsaved);
   bus.emit('alerts-changed');   // the open counts (nav badge, top bar) drop it now
   draw();
 }
@@ -792,9 +830,11 @@ async function ackGroup(g) {
   const open = g.alerts.filter(isOpen);
   if (!open.length) return;
   await ensureUser();
-  for (const m of open) await ackOne(m);
+  let failed = 0; let why = '';
+  for (const m of open) { const kept = await ackOne(m); if (kept && kept.unsaved) { failed++; why = kept.unsaved; } }
   bus.emit('alerts-changed');
-  toast(`Acknowledged ${open.length} alert${open.length === 1 ? '' : 's'} in ${g.name}`, 'ok', 3000);
+  if (failed) notSavedToast(`${failed} of ${open.length} acknowledgement${open.length === 1 ? '' : 's'}`, why);
+  else toast(`Acknowledged ${open.length} alert${open.length === 1 ? '' : 's'} in ${g.name}`, 'ok', 3000);
   draw();
 }
 
@@ -804,7 +844,13 @@ async function doUnack(m) {
     { yes: 're-open' });
   if (!ok) return;
   // The merged record, and any a member had on its own key before alerts were merged.
-  for (const k of new Set([m.key, ...m.keys])) if (isAcked(k)) await unacknowledge(k);
+  let why = '';
+  for (const k of new Set([m.key, ...m.keys])) {
+    if (!isAcked(k)) continue;
+    const kept = await unacknowledge(k);
+    if (kept && kept.unsaved) why = kept.unsaved;
+  }
+  if (why) notSavedToast('Re-open', why);
   bus.emit('alerts-changed');
   draw();
 }
@@ -886,7 +932,13 @@ function openNotes(trigger, m) {
       },
     });
 
+    const why = unsavedOf(m);
     return h('div', { style: { display: 'grid', gap: '7px' } },
+      why
+        ? h('div.ack-unsaved-line', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '11.5px' } },
+            h('span.apill.crit', { title: why }, 'not saved'), h('span.muted', { style: { flex: '1' } }, why),
+            h('button.btn.sm.ack-retry', { type: 'button', onclick: async () => { await doRetry(m); ctx.rebuild(); } }, 'Retry'))
+        : null,
       rec.acked
         ? h('div.muted', { style: { fontSize: '11px' } }, `Acknowledged by ${rec.ackedBy || 'operator'} ${ago(rec.ackedAt)}`)
         : null,
@@ -900,7 +952,8 @@ function openNotes(trigger, m) {
                 title: 'Remove this note',
                 onclick: async () => {
                   if (await confirmDialog('Remove this note?', n.text, { yes: 'remove', danger: true })) {
-                    await removeNote(n.key, n.ts);
+                    const kept = await removeNote(n.key, n.ts);
+                    if (kept && kept.unsaved) notSavedToast('Removing the note', kept.unsaved);
                     ctx.rebuild();
                     draw();
                   }
@@ -928,8 +981,10 @@ function openNotes(trigger, m) {
 
 async function saveNote(m, text) {
   await ensureUser();
-  await addNote(m.key, text);
-  toast('Note added');
+  const kept = await addNote(m.key, text);
+  // "Note added" only when it was: a note the server did not take is marked, with Retry.
+  if (kept && kept.unsaved) notSavedToast('Note', kept.unsaved);
+  else if (kept) toast('Note added');
 }
 
 /** A read-only peek, so notes can be read without opening anything. */

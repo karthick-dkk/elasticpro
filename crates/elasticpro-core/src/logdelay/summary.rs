@@ -291,9 +291,53 @@ pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64
                 }
             }
         }
+        let at = measured_late(trackers, from, to);
         json!({ "from": from, "to": to, "label": time::window_label(from, to), "newlyLate": newly, "solved": solved, "stillLate": still,
-                "delay": delay, "critical": critical, "complete": now >= to })
+                "delay": delay, "critical": critical, "complete": now >= to,
+                "measured": at.is_some(), "lateAt": at.map(|a| a.late), "criticalAt": at.map(|a| a.critical) })
     }).collect()
+}
+
+/// Late devices at a window's own measurement (Log Delay › Late devices over the day).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtMeasurement {
+    /// In the delay band or above the critical line (`State::Delay` or `State::Critical`).
+    pub late: usize,
+    /// Above the critical line.
+    pub critical: usize,
+}
+
+/// The devices late at the measurement taken inside `[from, to)`: each device by its last
+/// reading inside the window. `None` when no device has a reading there — the window was not
+/// measured, and nothing earlier is carried into it (the old heat map did, so rows repeated).
+pub fn measured_late(trackers: &[&Tracker], from: i64, to: i64) -> Option<AtMeasurement> {
+    let mut seen = false;
+    let mut at = AtMeasurement { late: 0, critical: 0 };
+    for t in trackers {
+        for d in t.devices.values() {
+            // Points are chronological: skip the ones after the window, take the first inside it.
+            let Some(p) = d.recent.iter().rev().skip_while(|p| p.t >= to).take_while(|p| p.t >= from).next() else { continue };
+            seen = true;
+            match p.s {
+                State::Delay => at.late += 1,
+                State::Critical => { at.late += 1; at.critical += 1 }
+                _ => {}
+            }
+        }
+    }
+    seen.then_some(at)
+}
+
+/// The same window yesterday as the cluster's last run (the window holding `last_run − 1 day`),
+/// measured as `measured_late`: what "vs yesterday" compares the late count with. `None` before
+/// a first run.
+pub fn same_window_yesterday(t: &Tracker, every_hours: u64) -> Option<Value> {
+    let last = t.last_run_ms?;
+    let then = last - 86_400_000;
+    let (from, to) = time::windows(time::local_date(then), every_hours).into_iter().find(|(f, e)| then >= *f && then < *e)?;
+    let at = measured_late(&[t], from, to);
+    Some(json!({ "from": from, "to": to, "label": time::window_label(from, to), "measured": at.is_some(),
+                 "lateAt": at.map(|a| a.late), "criticalAt": at.map(|a| a.critical) }))
 }
 
 /// The daily totals summed over clusters for the range's days; a day no cluster has is
@@ -403,8 +447,9 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
             "worst": worst.map(|w| json!({ "device": w.device, "minutes": w.now_minutes, "state": w.state })),
             "levels": c.levels, "lastRunAt": c.tracker.last_run_ms,
             "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
-            // Today's windows per cluster: the Dashboard's cluster × time heat map for "Today".
+            // Today's windows per cluster: the Dashboard's Late devices over the day.
             "windows": windows(&[c.tracker.as_ref()], today, every_hours, now),
+            "yesterdayWindow": same_window_yesterday(&c.tracker, every_hours),
         }));
         rows.extend(crows);
     }
@@ -637,6 +682,26 @@ mod tests {
         assert_eq!(f["devices"][0]["tzOffsetMinutes"], Value::Null);
         assert!(!f["days"].as_array().unwrap().is_empty(), "{}", f["days"]);
         assert_eq!(f["windows"].as_array().unwrap().iter().map(|w| w["stillLate"].as_u64().unwrap()).max(), Some(1));
+    }
+
+    #[test]
+    fn a_window_without_a_measurement_is_not_measured_never_a_copy_of_an_earlier_one() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let (t0, _) = time::day_bounds(time::local_date(now));
+        let at = (t0 + 23 * H).max(now);
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        // Measured at 01:00 (one late, one critical) and 05:00 (only the critical one late); nothing at 02:00–04:00.
+        t.apply(t0 + H, vec![reading("a", Some(45.0), t0 + H, "z"), reading("b", Some(90.0), t0 + H, "z"), reading("c", Some(1.0), t0 + H, "z")], &l, 2 * H);
+        t.apply(t0 + 5 * H, vec![reading("a", Some(2.0), t0 + 5 * H, "z"), reading("b", Some(95.0), t0 + 5 * H, "z"), reading("c", Some(1.0), t0 + 5 * H, "z")], &l, 2 * H);
+        let ws = windows(&[&t], time::local_date(at), 2, at);
+        assert_eq!((ws[0]["measured"].clone(), ws[0]["lateAt"].clone(), ws[0]["criticalAt"].clone()), (json!(true), json!(2), json!(1)));
+        assert_eq!((ws[1]["measured"].clone(), ws[1]["lateAt"].clone()), (json!(false), Value::Null), "02:00–04:00: not measured, not 2 again");
+        assert_eq!(ws[1]["stillLate"], 2, "the episode count still carries, as before");
+        assert_eq!((ws[2]["measured"].clone(), ws[2]["lateAt"].clone(), ws[2]["criticalAt"].clone()), (json!(true), json!(1), json!(1)));
+        assert_eq!(measured_late(&[&t], t0 + 2 * H, t0 + 4 * H), None);
+        assert_eq!(same_window_yesterday(&t, 2).map(|y| y["measured"].clone()), Some(json!(false)), "nothing kept from yesterday");
+        assert_eq!(same_window_yesterday(&Tracker::default(), 2), None, "never run: unknown");
     }
 
     #[test]

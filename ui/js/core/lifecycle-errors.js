@@ -26,6 +26,7 @@
  */
 
 import { slmExempt, ulmLabel, ULM_WHY } from './cluster-kind.js';
+import { offText } from './collection.js';
 
 export const DEFAULT_LOG_PATTERN = 'logstash-*';
 
@@ -64,6 +65,8 @@ export function slmCoversPattern(policy, pattern) {
 
 /** { known, count, names, details } — see the header. `pattern` is the cluster's logIndexPattern. */
 export function ilmErrorsOf(d, pattern) {
+  // Switched off for the cluster: not asked, so not known — never "0 errors".
+  if (d && d.switchedOff && d.switchedOff.ilm) return { known: false, off: true, count: 0, names: [], details: {} };
   const mode = d && d.ilm && d.ilm.operation_mode;
   if (!mode) return { known: false, count: 0, names: [], details: {} };
   if (String(mode).toUpperCase() !== 'RUNNING') return { known: true, count: 0, names: [], details: {} };
@@ -208,6 +211,8 @@ export function lifecycleView(kind, d, pattern, cluster = null) {
     // running or not. A failing policy still shows its red dot (slmErrorsOf, drawn beside it).
     return { tone: 'grey', word: 'Not used', covered: null, why: `${ulmLabel(cluster)}. ${ULM_WHY}` };
   }
+  // ILM checks switched off for the cluster (Edit cluster › Collection): "Off", and where.
+  if (kind === 'ILM' && d && d.switchedOff && d.switchedOff.ilm) return { tone: 'grey', word: 'Off', covered: null, why: `${offText('ilm')}.` };
   const mode = kind === 'ILM' ? d && d.ilm && d.ilm.operation_mode : d && d.slmStatus && d.slmStatus.operation_mode;
   if (!mode) return { tone: 'grey', word: NOT_KNOWN, covered: null, why: `${kind} status has not been read.` };
   const word = modeWord(mode);

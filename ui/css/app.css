@@ -3079,7 +3079,7 @@ tr.jb-focus td { background: var(--accent-soft); }
    above the critical line, violet for another time zone, grey for silent — never red with yellow. The fills are the
    same in every theme; each theme mixes its own pill fill (-bg: 28 % of the fill with the surface) and ink (-ink:
    35 % of the fill with the text colour), so the pill text keeps AA on dark, dark-blue and warm too. The heat ramp
-   is one blue (--ld-hx) mixed with the surface at 7 / 24 / 45 / 70 / 100 %. */
+   is one blue (--ld-hx) mixed with the surface at 7 / 24 / 45 / 70 / 100 % (Late devices over the day). */
 :root {
   --ld-ok: #8fd19e; --ld-delay: #a9cbee; --ld-crit: #5b8fd1; --ld-tz: #a77fd6; --ld-silent: #9aa1ab; --ld-hx: #3f78c0;
   --ld-ok-bg: color-mix(in srgb, var(--ld-ok) 28%, var(--surface-1)); --ld-delay-bg: color-mix(in srgb, var(--ld-delay) 28%, var(--surface-1));
@@ -3194,17 +3194,37 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
 .ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }
 /* The cluster × time heat map. */
-.ld-heatmap .ld-heat { cursor: pointer; }
-.ld-heatmap .ld-heat:hover { stroke: var(--accent); stroke-width: 1.5; }
-.ld-heat-0, .ld-heat-key.ld-heat-0 { fill: var(--ld-heat-0); background: var(--ld-heat-0); }
-.ld-heat-1, .ld-heat-key.ld-heat-1 { fill: var(--ld-heat-1); background: var(--ld-heat-1); }
-.ld-heat-2, .ld-heat-key.ld-heat-2 { fill: var(--ld-heat-2); background: var(--ld-heat-2); }
-.ld-heat-3, .ld-heat-key.ld-heat-3 { fill: var(--ld-heat-3); background: var(--ld-heat-3); }
-.ld-heat-4, .ld-heat-key.ld-heat-4 { fill: var(--ld-heat-4); background: var(--ld-heat-4); }
-.ld-heat-unknown, .ld-heat-key.ld-heat-unknown { fill: var(--surface-2); background: repeating-linear-gradient(135deg, transparent 0 3px, var(--border) 3px 4px); opacity: .9; }
-.ld-key i.ld-heat-key { border: 1px solid var(--border); }
-.ld-heatmap .ld-heat-name { fill: var(--text-secondary); }
-.ld-heatmap .ld-heat-never { fill: var(--text-muted); font-style: italic; }
+/* Late devices over the day (0.3.82): a compact grid, the cluster column kept in view, one hue per
+   row on its own scale (--ld-heat-0…4, one blue mixed with the surface), a missing window hatched. */
+.ld-grid-wrap { overflow-x: auto; }
+.ld-grid { border-collapse: separate; border-spacing: 2px; width: 100%; font-size: 12px; }
+.ld-grid th, .ld-grid td { height: 28px; padding: 0 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ld-grid thead th { color: var(--text-secondary); font-weight: 600; font-size: 11px; text-align: center; }
+.ld-grid thead th.num { text-align: right; }
+.ld-grid .ld-g-nm { position: sticky; left: 0; z-index: 1; background: var(--surface-1); text-align: left; font-weight: 600; min-width: 130px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.ld-grid td.num { text-align: right; }
+.ld-grid .ld-g-up { color: var(--ld-crit-ink); font-weight: 600; }
+.ld-grid .ld-g-dn { color: var(--ld-ok-ink); font-weight: 600; }
+.ld-grid td.ld-gc { text-align: center; border-radius: 4px; min-width: 36px; }
+.ld-grid td.ld-gc[role="button"] { cursor: pointer; }
+.ld-grid td.ld-gc[role="button"]:hover, .ld-grid td.ld-gc[role="button"]:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -1px; }
+.ld-gs-0 { background: var(--ld-heat-0); color: var(--text-muted); }
+.ld-gs-1 { background: var(--ld-heat-1); color: var(--text-primary); }
+.ld-gs-2 { background: var(--ld-heat-2); color: var(--text-primary); }
+.ld-gs-3 { background: var(--ld-heat-3); color: #fff; }
+.ld-gs-4 { background: var(--ld-heat-4); color: #fff; font-weight: 700; }
+.ld-g-na { background: repeating-linear-gradient(135deg, var(--surface-2) 0 4px, transparent 4px 8px); color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border); }
+.ld-grid td.ld-g-fut { background: transparent; }
+.ld-g-pend { background-image: radial-gradient(var(--border) 1px, transparent 1.2px); background-size: 6px 6px; }
+.ld-grid .ld-g-ytag { font-size: 10px; }
+.ld-g-legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.ld-key i.ld-g-key { display: inline-block; width: 14px; height: 12px; border-radius: 3px; vertical-align: -2px; border: 1px solid var(--border); }
+/* The clusters the last run did not measure: one quiet line, only when there are some. */
+.ld-notmeasured { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 6px 12px; border: 1px solid var(--border); border-left: 3px solid var(--ld-crit); border-radius: 8px; background: var(--surface-1); font-size: 12px; }
+.ld-notmeasured .ld-nm-head { color: var(--text-primary); }
+.ld-notmeasured .ld-nm-item { color: var(--text-secondary); }
+.ld-notmeasured .ld-nm-jobs { margin-left: auto; }
+.ld-focus { display: flex; gap: 4px; align-items: baseline; flex-wrap: wrap; }
 /* The mini stacked bar of a cluster's states, in By cluster. */
 /* By cluster's States bar (0.3.81: its own class — sharing .ld-mini with the old per-cluster
    cards made it a column of zero-height pieces, an empty box). */
@@ -3468,3 +3488,10 @@ tr.slow-task > td { vertical-align: top; }
 .slow-detail-text.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; max-height: 320px; overflow: auto; }
 .slow-detail-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .slow-more { margin-top: 4px; }
+
+/* Jobs › Requests › Cost (pages/requests-cost.js). */
+.rc-line { font-size: 13px; color: var(--text-secondary); margin: 2px 0 8px; }
+.rc-line b { color: var(--text-primary); }
+.rc-wait { padding: 12px 0; }
+.rc-warn { color: var(--warning-ink); font-weight: 600; }
+#rc-top .rc-path { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }

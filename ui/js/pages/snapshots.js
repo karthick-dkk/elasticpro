@@ -24,6 +24,7 @@ import { pagerBar } from '../lib/pager.js';
 import { lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
 import { slmExempt, ulmLabel, ULM_WHY, clusterKindRev } from '../core/cluster-kind.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
+import { isOff, offText } from '../core/collection.js';
 import { listingTitle, listingEmptyText, repoOverview, openRepo } from '../core/snapshot-evidence.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, sortSnapshots,
@@ -172,6 +173,13 @@ function listingFreshness(c, d, repo) {
 }
 
 function clusterBlock(c) {
+  // Snapshots switched off for the cluster (Edit cluster › Collection): nothing is asked; the
+  // block says so and where, in place of "not read yet".
+  if (isOff(c, 'snapshots')) {
+    return h('section.lazy-block.snap-off', { style: { marginBottom: '10px' } },
+      h('h2', { style: { fontSize: '14px', margin: '0 0 4px' } }, c.name),
+      h('div.muted', { style: { fontSize: '12px' } }, `${offText('snapshots')}.`));
+  }
   if (!folded()) return clusterSection(c);
   const d = state.data.get(c.id) || {};
   const repos = d.repos || [];

@@ -35,31 +35,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Write a file whole, readable by this user only: a temporary file, synced, renamed over.
+/// Write a file whole, readable by this user only (`cluster_secrets::write_private`, the one
+/// private writer), making its folder first.
 pub(crate) fn write_private(p: &Path, body: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = p.with_extension("json.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let wrote = (|| -> std::io::Result<()> {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(0o600);
-        }
-        let mut f = o.open(&tmp)?;
-        f.write_all(body)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, p)
-    })();
-    wrote.map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })
+    crate::cluster_secrets::write_private(p, body).map_err(|e| e.to_string())
 }
 
 /// The shared-ack key suffix the wall uses to acknowledge "a node left" on a cluster

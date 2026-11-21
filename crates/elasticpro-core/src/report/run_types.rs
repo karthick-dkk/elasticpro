@@ -326,16 +326,32 @@ impl Core {
             ctl.halve(&w, None, now_ms());
         }
         // Which indices count on which day: the Daily record's rule.
+        // The daily volume run's, when it read the same list of this cluster a little while ago
+        // (volume::shared, docs/VOLUME.md "Shared reads"): not asked twice.
         let mut cat_req = collect::cat_request(&id, &ind);
         cat_req.origin = Some(hosts::ORIGIN.into());
         cat_req.timeout_ms = Some(timeout);
-        let cat = self.es_req(cat_req).await;
+        let cat_path = cat_req.path.clone();
+        let dest = self.shared_dest(&id);
+        let shared_cat = self.volume.shared.get(&id, &dest, &cat_path, now_ms() as u64);
+        let from_shared = shared_cat.is_some();
+        if from_shared {
+            let age = self.volume.shared.age_ms(&id, &cat_path, now_ms() as u64).unwrap_or(0);
+            tracing::info!(cluster = %id, age_s = age / 1000, "volume by host: the index list the daily volume run read is used, not asked again");
+        }
+        let cat = match shared_cat {
+            Some(rows) => json!({ "ok": true, "json": rows }),
+            None => self.es_req(cat_req).await,
+        };
         let Some(cat_json) = collect::cat_rows(&cat) else {
             out.error = Some(format!("_cat/indices: {}", indices::failure_reason(&cat)));
             return out;
         };
         drop(cat);
         let listing = collect::read_cat(&cat_json, &ind);
+        if !from_shared && crate::volume::shared::listing_shareable(&listing) {
+            self.volume.shared.put(&id, &dest, &cat_path, &cat_json, now_ms() as u64);
+        }
         let docs_of: HashMap<String, u64> = cat_json.as_array().into_iter().flatten().filter_map(|r| {
             let n = r.get("index")?.as_str()?.to_string();
             let d = match r.get("docs.count") {
@@ -347,7 +363,21 @@ impl Core {
         }).collect();
         drop(cat_json);
         let time = !listing.time_split.is_empty();
-        let fc = self.es_req(hosts::field_caps_request(&id, &ind, &s, &cfg.fields, time, timeout)).await;
+        let fc_req = hosts::field_caps_request(&id, &ind, &s, &cfg.fields, time, timeout);
+        let fc_path = fc_req.path.clone();
+        let fc = match (time, self.volume.shared.get(&id, &dest, &fc_path, now_ms() as u64)) {
+            (false, Some(j)) => {
+                tracing::info!(cluster = %id, "volume by host: the field mapping the daily volume run read is used, not asked again");
+                json!({ "ok": true, "json": j })
+            }
+            _ => {
+                let fc = self.es_req(fc_req).await;
+                if !time && ok(&fc) {
+                    self.volume.shared.put(&id, &dest, &fc_path, fc.get("json").unwrap_or(&Value::Null), now_ms() as u64);
+                }
+                fc
+            }
+        };
         if !ok(&fc) {
             out.error = Some(format!("_field_caps: {}", indices::failure_reason(&fc)));
             return out;
@@ -704,8 +734,10 @@ impl Core {
         let today = vsched::utc_day(now_ms());
         let days = period::month_so_far(today).days();
         let now = now_ms();
+        // A cluster switched off, or outside its heavy-job hours, is not waited for: the mail says
+        // which days it lacks (Edit cluster › Collection).
         self.report_schedule_clusters(s).iter().all(|id| {
-            self.volume_unreachable(id)
+            self.volume_unreachable(id) || self.hosts_not_now(id).is_some()
                 || (!self.reports.hosts_running.lock().contains(id) && self.hosts_missing(id, &days, now).is_empty())
         })
     }
@@ -741,6 +773,12 @@ impl Core {
     /// of the month so far — never held, interrupted, or failed fewer than three times — is
     /// collected, unless it is unreachable, red, already collecting, or was tried in the
     /// last 15 minutes (three tries a day at most). Whether or not the hosts mail is on.
+    ///
+    /// Per cluster (docs/JOBS.md "Per-cluster switches", "Quiet hours"): switched off (Edit
+    /// cluster › Collection), it is never asked — one `skipped` run a day says so; its heavy-job
+    /// hours are a hard rule — outside them it waits (one `deferred` run says until when), and a
+    /// window that leaves its place out runs it whenever the window is open; a cluster moved to
+    /// its quietest hour waits for that hour, and may start then even before `at`.
     /// Returns the clusters started. Public for the tests.
     #[doc(hidden)]
     pub async fn hosts_tick_at(self: &Arc<Self>, local: NaiveDateTime) -> Vec<String> {
@@ -755,9 +793,6 @@ impl Core {
             return vec![];
         }
         let at = self.hosts_at();
-        if local.time() < at {
-            return vec![];
-        }
         let raw = match self.volume_config().await {
             Ok(raw) => raw,
             Err(_) => return vec![],
@@ -774,16 +809,59 @@ impl Core {
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
-            if local.time() < spread::scheduled_at(&members, &id, at, spread::HOSTS_WINDOW_MS) {
+            let coll = spec.collection;
+            let planned = spread::scheduled_at(&members, &id, at, spread::HOSTS_WINDOW_MS);
+            let reached = local.time() >= planned;
+            // Moved to its quietest hour: nothing until then; from then on it may start.
+            let quiet = self.reports.hosts_quiet.lock().get(&id).copied();
+            if quiet.is_some_and(|t| local < t) {
                 continue;
+            }
+            let quiet_due = quiet.is_some();
+            // Switched off for this cluster: never asked; one skipped run a day says so.
+            if !coll.on(crate::collection::Switch::Hosts) {
+                if reached {
+                    self.jobs.skip_switched_off(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &id,
+                                                &crate::collection::off_text(crate::collection::Switch::Hosts), &local_day, crate::fleet::now_ms());
+                }
+                continue;
+            }
+            // Its heavy-job hours: a hard rule. A window that holds its place starts it there; one
+            // that leaves its place out starts it whenever the window is open.
+            let place_allowed = coll.heavy_hours.is_none_or(|h| h.contains(chrono::Timelike::hour(&planned)));
+            if let Some(why) = coll.heavy_closed_why(local) {
+                if (reached || !place_allowed) && !self.hosts_missing(&id, &days, now).is_empty() {
+                    self.hosts_wait_hours(&id, &coll, &why, local);
+                }
+                continue;
+            }
+            self.jobs.ease_signal(crate::jobs::HOSTS_COLLECT, &id, "hours");
+            if !(reached || !place_allowed || quiet_due) {
+                continue;
+            }
+            // Moved into a window that leaves its place out: never closer to UTC midnight than its
+            // place is (schedule::Shift, as the daily volume run) — a later moment of the window
+            // that is far enough is waited for; with none, a day that ended within the margin is
+            // not collected yet (a day file is written once).
+            let mut margin_ms = 0u64;
+            if let Some(h) = coll.heavy_hours.filter(|_| !place_allowed) {
+                match vsched::Shift::of(local, planned, h, None, &vsched::local_to_ms).0 {
+                    vsched::Shift::Hold => continue,
+                    vsched::Shift::Run { margin_ms: m } => margin_ms = m,
+                    vsched::Shift::NotDue | vsched::Shift::Closed => {}
+                }
             }
             if self.reports.hosts_running.lock().contains(&id) || self.volume_unreachable(&id) || self.report_cluster_red(&id) {
                 continue;
             }
             // Busy (docs/JOBS.md "Busy clusters"): no try is spent; one deferred run says why,
-            // and the first tick after it eases collects it. The other clusters carry on.
+            // and the first tick after it eases collects it — or, from the second wait of the
+            // day, the cluster's quietest hour does ("Quiet hours"). The other clusters carry on.
             if let Some(b) = self.cluster_busy(&id) {
-                self.jobs.defer(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &b, crate::fleet::now_ms());
+                if !self.jobs.waiting(crate::jobs::HOSTS_COLLECT, &id) {
+                    let note = self.hosts_note_deferral(&id, &b.reason, local);
+                    self.jobs.defer_with(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &b, note, crate::fleet::now_ms());
+                }
                 continue;
             }
             self.jobs.eased(crate::jobs::HOSTS_COLLECT, &id);
@@ -795,8 +873,13 @@ impl Core {
                     }
                 }
             }
-            let missing = self.hosts_missing(&id, &days, now);
+            let mut missing = self.hosts_missing(&id, &days, now);
+            if margin_ms > 0 {
+                let ended = |d: &NaiveDate| (*d + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX);
+                missing.retain(|d| ended(d) + margin_ms as i64 <= now);
+            }
             if missing.is_empty() {
+                self.reports.hosts_quiet.lock().remove(&id);
                 continue;
             }
             {
@@ -814,6 +897,7 @@ impl Core {
                     }
                 }
             }
+            self.reports.hosts_quiet.lock().remove(&id);
             let s = self.volume_resolve(raw.as_ref(), Some(&id), None).settings;
             self.hosts_start(id.clone(), s, missing, true, crate::jobs::Trigger::Timer, crate::jobs::RunMeta::default());
             started.push(id);
@@ -822,6 +906,51 @@ impl Core {
             tracing::info!(clusters = started.len(), "volume by host: the daily collection started");
         }
         started
+    }
+
+    /// A busy wait of `id`'s hosts collection begins: counted for the day, and from the second one
+    /// (owner rule: no third try at a busy hour) the cluster moves to its quietest hour when its
+    /// profile is known (docs/JOBS.md "Quiet hours"). Returns the deferred run's words then —
+    /// "waits for 03:00, this cluster's quietest hour" — and `None` to keep today's ("tried again
+    /// when it eases").
+    pub(crate) fn hosts_note_deferral(&self, id: &str, reason: &str, local: NaiveDateTime) -> Option<String> {
+        let day = day_key(local.date());
+        let n = {
+            let mut m = self.reports.hosts_deferrals.lock();
+            let e = m.entry(id.to_string()).or_insert((day.clone(), 0));
+            if e.0 != day {
+                *e = (day, 0);
+            }
+            e.1 += 1;
+            e.1
+        };
+        if n < 2 {
+            return None;
+        }
+        let (hour, when) = self.quiet_next(id, local)?;
+        self.reports.hosts_quiet.lock().insert(id.to_string(), when);
+        tracing::info!(cluster = %id, hour, waits = n, "volume by host: busy again today; moved to the cluster's quietest hour");
+        Some(format!("{id} is busy: {reason}; waits for {hour:02}:00, this cluster's quietest hour"))
+    }
+
+    /// Why `id`'s hosts collection must not ask it now, by anybody (docs/JOBS.md "Per-cluster
+    /// switches"): switched off for the cluster, or outside its heavy-job hours. `None`: it may.
+    pub(crate) fn hosts_not_now(&self, id: &str) -> Option<String> {
+        let coll = self.collection_for(id);
+        if !coll.on(crate::collection::Switch::Hosts) {
+            return Some(crate::collection::off_text(crate::collection::Switch::Hosts));
+        }
+        coll.heavy_closed_why(vsched::local_now()).map(|why| format!("not now — {why}"))
+    }
+
+    /// Outside `id`'s heavy-job hours: one deferred run for the wait, saying until when.
+    fn hosts_wait_hours(&self, id: &str, coll: &crate::collection::Collection, why: &str, local: NaiveDateTime) {
+        if self.jobs.waiting(crate::jobs::HOSTS_COLLECT, id) {
+            return;
+        }
+        let opens = coll.heavy_hours.map(|h| h.next_open(local).format("%H:%M").to_string()).unwrap_or_default();
+        let b = crate::jobs::load::Busy { cluster: id.to_string(), signal: "hours".into(), reason: why.to_string(), since: None };
+        self.jobs.defer_with(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &b, Some(format!("{id} waits for {opens}: {why}")), crate::fleet::now_ms());
     }
 
     /// Collect one cluster's missing days in the background, as a part of the hosts
@@ -847,7 +976,9 @@ impl Core {
                 Outcome::cancelled(&by, days)
             } else if let Some(b) = busy {
                 core.jobs.mark_waiting(crate::jobs::HOSTS_COLLECT, &id, part.id());
-                Outcome::deferred(format!("{id} is busy: {}; tried again when it eases", b.reason), days)
+                // The timer's: a wait like any other, so the second of the day moves to the quiet hour.
+                let note = if from_tick { core.hosts_note_deferral(&id, &b.reason, vsched::local_now()) } else { None };
+                Outcome::deferred(note.unwrap_or_else(|| format!("{id} is busy: {}; tried again when it eases", b.reason)), days)
             } else if let Some(e) = out.error {
                 Outcome::failed(e, days)
             } else if let Some(why) = out.interrupted {
@@ -893,6 +1024,9 @@ impl Core {
                 already.push(id);
             } else if self.volume_unreachable(&id) {
                 skipped.push(json!({ "clusterId": id, "reason": "unreachable" }));
+            } else if let Some(why) = self.hosts_not_now(&id) {
+                // Switched off, or outside its heavy-job hours (a hard rule, a person's run too).
+                skipped.push(json!({ "clusterId": id, "reason": why }));
             } else {
                 let missing = self.hosts_missing(&id, &days, now);
                 if missing.is_empty() {
@@ -1251,8 +1385,13 @@ impl Core {
         self.job_state(&job.id, "collecting");
         let total = job.cluster_ids.len() as u64;
         self.report_progress(&job.id, 0, total + 1);
+        // Switched off, or outside the heavy-job hours: not asked; the workbook has what the
+        // files already held and says why (a note, not a failure).
+        let not_now: HashMap<String, String> = job.cluster_ids.iter()
+            .filter_map(|id| self.hosts_not_now(id).map(|why| (id.clone(), why))).collect();
+        let to_collect: Vec<String> = job.cluster_ids.iter().filter(|id| !not_now.contains_key(*id)).cloned().collect();
         let (core, st2, job_id, again, settings2) = (self.clone(), stop.clone(), job.id.clone(), job.collect_again, settings.clone());
-        let (_, failed, stopped) = self.report_rounds(&job.id, &job.cluster_ids, &stop, move |id: String| {
+        let (_, failed, stopped) = self.report_rounds(&job.id, &to_collect, &stop, move |id: String| {
             let (core, s, stop, job_id, days) = (core.clone(), settings2.get(&id).cloned().unwrap_or_default(), st2.clone(), job_id.clone(), days.clone());
             async move {
                 let out = core.hosts_collect(id, s, days, HostsOpts { again, from_tick: false, stop, job: Some(job_id) }).await;
@@ -1282,7 +1421,7 @@ impl Core {
         let clusters: Vec<ClusterHosts> = job.cluster_ids.iter().map(|id| ClusterHosts {
             id: id.clone(), name: self.report_name(id), dir: HostsDir::new(store.root(), id),
             ind: settings.get(id).and_then(|s| Indices::from_settings(s).ok()),
-            failure: failed.iter().find(|(c, _)| c == id).map(|(_, r)| r.clone()),
+            failure: failed.iter().find(|(c, _)| c == id).map(|(_, r)| r.clone()).or_else(|| not_now.get(id).cloned()),
         }).collect();
         let name = Self::report_file_name("hosts", job, if job.format == Format::Xlsx { "xlsx" } else { "zip" });
         let Some(path) = self.reports.file_path(&job.id, &name) else { return JobEnd::failed("no data directory") };
@@ -1404,6 +1543,29 @@ mod tests {
         e.status = EntryStatus::Ok;
         e.data = Some(Body::from_value(&json!({ "health": { "json": { "status": status } } })));
         core.fleet.state.lock().entries.insert((id.to_string(), Dataset::Health), e);
+    }
+
+    /// Owner rule (docs/JOBS.md "Quiet hours"): the first busy wait of the day keeps today's words
+    /// (tried again when it eases); the second, with the cluster's quiet hours known, moves the
+    /// cluster to its quietest hour — never a third try at a busy hour. Unknown: as before.
+    #[tokio::test]
+    async fn a_cluster_busy_twice_in_a_day_waits_for_its_quietest_hour() {
+        let dir = std::env::temp_dir().join(format!("ep-quiet-{}-{}", std::process::id(), rand::random::<u32>()));
+        let core = Core::new_with_rounds(Some(dir.clone()), Edition::Portable, 1);
+        core.quiet_learn_for_tests("c", 3);
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let at = |h: u32| day.and_hms_opt(h, 0, 0).unwrap();
+        assert_eq!(core.hosts_note_deferral("c", "an answer took 9.0 s", at(8)), None, "the first wait: as before");
+        let n = core.hosts_note_deferral("c", "an answer took 9.0 s", at(9)).unwrap_or_default();
+        assert_eq!(n, "c is busy: an answer took 9.0 s; waits for 03:00, this cluster's quietest hour");
+        assert_eq!(core.reports.hosts_quiet.lock().get("c").copied(), Some(day.succ_opt().unwrap().and_hms_opt(3, 0, 0).unwrap()));
+        // A new day counts afresh.
+        assert_eq!(core.hosts_note_deferral("c", "slow", at(8) + chrono::Duration::days(1)), None);
+        // Nothing learned: today's behaviour, however many waits.
+        assert_eq!(core.hosts_note_deferral("u", "slow", at(8)), None);
+        assert_eq!(core.hosts_note_deferral("u", "slow", at(9)), None);
+        assert!(!core.reports.hosts_quiet.lock().contains_key("u"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

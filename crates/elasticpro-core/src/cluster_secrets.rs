@@ -140,8 +140,18 @@ fn temp_name(path: &Path) -> PathBuf {
 /// Write `bytes` to `path` so that no other user can read them at any moment: the temp file is
 /// created 0600 before a byte goes in (never written first and chmodded after, which left it
 /// readable per the umask in between), created new (an existing file of that name is an error,
-/// not something to write through), synced, then renamed over the target.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// not something to write through), synced, then renamed over the target. A failed write leaves
+/// no temp file behind. The one private writer: the accounts, tokens, cluster secrets and Play
+/// files all go through it (or [`write_atomic_mode`] for a mode of the file's own).
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(path, bytes, 0o600)
+}
+
+/// [`write_private`] with the final file's mode given: set on the temp file before a byte is
+/// written (the umask can only have made it narrower at creation, and is undone here), and a
+/// failure to set it is the write's failure, never ignored. For a file whose mode is someone
+/// else's to choose — the hosted cluster config is shared with the host user's group.
+pub(crate) fn write_atomic_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write as _;
     let tmp = temp_name(path);
     let mut opts = std::fs::OpenOptions::new();
@@ -149,10 +159,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(mode & 0o600);
     }
     let written = (|| {
         let mut f = opts.open(&tmp)?;
+        #[cfg(unix)]
+        if mode & 0o777 != 0o600 {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -486,6 +503,27 @@ mod tests {
         let d = std::env::temp_dir().join(format!("ep-cs-{}-{}", std::process::id(), rand::random::<u32>()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_private_writer_sets_the_final_mode_first_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        write_private(&d.join("a.json"), b"one").unwrap();
+        assert_eq!(mode(&d.join("a.json")), 0o600);
+        // A mode of the file's own (the shared cluster config), whatever the umask says.
+        write_atomic_mode(&d.join("b.json"), b"two", 0o660).unwrap();
+        assert_eq!(mode(&d.join("b.json")), 0o660);
+        assert_eq!(std::fs::read(d.join("b.json")).unwrap(), b"two");
+        // A write that fails is an error and leaves nothing beside the target.
+        std::fs::create_dir(d.join("c.json")).unwrap();
+        assert!(write_private(&d.join("c.json"), b"x").is_err(), "a directory cannot be replaced by a file");
+        let left: Vec<_> = std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -683,17 +683,112 @@ export function niceStep(max) {
 /** Which x labels to write so they never crowd: every 4th of 24+ buckets, every 2nd past 10, else all. */
 export const labelEvery = (n) => (n >= 24 ? Math.ceil(n / 6) : n > 10 ? 2 : 1);
 
+/* ------------------------------ Late devices over the day ------------------------------ */
+
 /**
- * The cluster × time heat map: one row per cluster with a "devices behind" count per bucket —
- * `sparkline` over the period's days, or today's per-cluster `windows` — `null` where the
- * cluster has no total (not measured: drawn as unknown, never 0).
+ * The two counts Late devices over the day offers (the toggle): devices late — the delay band
+ * and above the critical line, as By cluster's Late now and Change count them (`isLate`) — or
+ * above the critical line only.
  */
-export function heatRows(byCluster, period) {
-  return (byCluster || []).map((c) => ({
-    id: c.id, name: c.name || c.id, never: c.lastRunAt === null || c.lastRunAt === undefined,
-    cells: period === 'today' ? (c.windows || []).map((w) => (finite(w.stillLate) ? w.stillLate : null)) : (c.sparkline || []).map((v) => (finite(v) ? v : null)),
-  }));
+export const LATE_MODES = Object.freeze(['late', 'critical']);
+/** The clusters the grid shows before "All N", worst first. */
+export const GRID_WORST = 10;
+
+/** How many measurement windows a day has at the log-delay interval (12 at 2 h); null when not known. */
+export function windowsPerDay(everyHours) {
+  return finite(everyHours) && everyHours > 0 ? Math.ceil(24 / Math.min(24, everyHours)) : null;
 }
+
+/**
+ * Devices late at a window's own measurement (`lateAt`, `criticalAt` of the core's windows,
+ * 0.3.82): null when the window was not measured — never an earlier reading carried forward —
+ * or when the core is older and does not say (`measured` absent): unknown, not 0.
+ */
+export function lateAtWindow(w, mode = 'late') {
+  if (!w || w.measured !== true) return null;
+  const v = mode === 'critical' ? w.criticalAt : w.lateAt;
+  return finite(v) ? v : null;
+}
+
+/** A cluster's late count now on the toggle's terms: Late now (delay + critical) or Above the critical line; null never measured. */
+export function lateNowOf(c, mode = 'late') {
+  if (!c || c.lastRunAt === null || c.lastRunAt === undefined) return null;
+  const v = mode === 'critical' ? c.critical : c.lateNow;
+  return finite(v) ? v : null;
+}
+
+/**
+ * "vs yesterday": the late count now less the count at yesterday's measurement of the same
+ * window as the last run (`yesterdayWindow`); null when either is not known (yesterday's window
+ * not measured, a core before 0.3.82) — never shown as "=".
+ */
+export function vsYesterday(c, mode = 'late') {
+  const now = lateNowOf(c, mode);
+  const then = lateAtWindow(c && c.yesterdayWindow, mode);
+  return now === null || then === null ? null : now - then;
+}
+
+/** "▲ 18", "▼ 2", "=" — or '' when not known. */
+export const vsText = (d) => (!finite(d) ? '' : d > 0 ? `▲ ${countText(d)}` : d < 0 ? `▼ ${countText(-d)}` : '=');
+
+/**
+ * A cell's shade on its own cluster's scale (the owner's rule: the cluster's worst window is
+ * darkest, so a quiet cluster's rise still shows): 0 for none, else 1–4 by the share of the
+ * worst; −1 unknown.
+ */
+export function gridShade(v, worst) {
+  if (!finite(v)) return -1;
+  if (v <= 0 || !finite(worst) || worst <= 0) return 0;
+  return Math.max(1, Math.min(4, Math.ceil((v / worst) * 4)));
+}
+
+/**
+ * The grid's rows: one per cluster, a cell per window of today (`windowsPerDay`), each the
+ * devices late at that window's measurement (`lateAtWindow`); `state` 'measured', 'missing'
+ * (ended, not measured: hatched), 'pending' (the window in progress, `complete: false`, with no
+ * reading yet — runs are not aligned to windows, so this is not a miss) or 'future' (not begun).
+ * `measured` of `done` (the windows that ended, plus one in progress that already has a
+ * reading: a pending window is not in the denominator), the worst cell, Late now and vs
+ * yesterday on the same terms. Late now is the cluster's last measurement (its last run): when
+ * that was before today's first window (`lastBeforeToday`, from midnight until the first run)
+ * it is yesterday's last, and the board says so. `nextAt`: when the next measurement is due
+ * (the last run plus the interval), null when not known. Worst first: Late now, then the worst
+ * window, then the name; a cluster never measured last.
+ */
+export function lateGridRows(byCluster, everyHours, mode = 'late') {
+  const n = windowsPerDay(everyHours) || 0;
+  const rows = (byCluster || []).map((c) => {
+    const ws = Array.isArray(c.windows) ? c.windows : [];
+    const cells = Array.from({ length: n }, (_, i) => {
+      const w = ws[i];
+      if (!w) return { i, state: 'future', v: null, w: null };
+      const v = lateAtWindow(w, mode);
+      return { i, state: v !== null ? 'measured' : w.complete === false ? 'pending' : 'missing', v, w };
+    });
+    const vals = cells.filter((x) => x.state === 'measured').map((x) => x.v);
+    const never = c.lastRunAt === null || c.lastRunAt === undefined;
+    const dayStart = ws[0] && finite(ws[0].from) ? ws[0].from : null;
+    const next = !never && finite(c.lastRunAt) && finite(everyHours) && everyHours > 0 ? c.lastRunAt + everyHours * 3600000 : null;
+    return {
+      id: c.id, name: c.name || c.id, never,
+      lateNow: lateNowOf(c, mode), vs: vsYesterday(c, mode), cells,
+      measured: vals.length, begun: cells.filter((x) => x.state !== 'future').length,
+      done: cells.filter((x) => x.state === 'measured' || x.state === 'missing').length,
+      lastBeforeToday: !never && dayStart !== null && finite(c.lastRunAt) && c.lastRunAt < dayStart,
+      nextAt: next,
+      worst: vals.length ? Math.max(...vals) : null,
+    };
+  });
+  return rows.sort((a, b) => (a.never - b.never) || ((b.lateNow ?? -1) - (a.lateNow ?? -1)) || ((b.worst ?? -1) - (a.worst ?? -1))
+    || String(a.name).localeCompare(String(b.name)));
+}
+
+/** The grid's column heads: the hour each window starts ("00", "02", … at 2 h). */
+export function windowHeads(everyHours) {
+  const n = windowsPerDay(everyHours) || 0;
+  return Array.from({ length: n }, (_, i) => String((i * everyHours) % 24).padStart(2, '0'));
+}
+
 /**
  * A device's time zone: its own steady offset when it sits in another zone (`deviceTzOffset` of
  * an `other_tz` row), else its cluster's detected or set offset (`clusterTzOffset`); null for a
@@ -779,9 +874,6 @@ export function timeZoneCell(tz, offsetText) {
   return '—';
 }
 
-/** The heat ramp step of a count: 0 none, 1 one, 2 two–three, 3 four–six, 4 seven or more; −1 unknown. */
-export const HEAT_LEGEND = Object.freeze(['0', '1', '2–3', '4–6', '7+']);
-export const heatStep = (v) => (!finite(v) ? -1 : v === 0 ? 0 : v < 2 ? 1 : v < 4 ? 2 : v < 7 ? 3 : 4);
 
 /**
  * The device graph: points → x in [0,1000] over [from,to], y in [0,height] with a scale that

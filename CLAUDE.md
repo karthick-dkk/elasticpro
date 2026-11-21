@@ -39,11 +39,12 @@ cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 deploy/trial.sh                                       # hosted stack, four security properties
 ```
 
-`npm i jsdom` before any of it. `render-check` and `behaviour-check` print "jsdom not
-found — skipping" and exit 0 without it, which has looked like a pass before now; and
-part of `unit-check` builds DOM nodes, so those files fail outright when it is absent —
-which is how three of them went red on main while passing on every machine that already
-had it.
+`npm i jsdom` before any of it. Run by hand without it, `render-check` and `behaviour-check`
+print "jsdom not found — skipping" and exit 0, which has looked like a pass before now; with
+`CI` set (any value but empty, `0` or `false`) or `--require-jsdom` passed they FAIL instead, and
+`unit-check` stops with the list of files that need it (those files build DOM nodes and fail
+outright without it anyway — which is how three of them went red on main while passing on every
+machine that already had it). Pass `--require-jsdom` whenever a skip would mislead you.
 
 `tools/mock-es.mjs` is the fixture cluster. When a page looks like it contradicts itself,
 curl the raw mock endpoints before filing a bug — the fixture has been wrong before.

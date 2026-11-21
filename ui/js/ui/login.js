@@ -27,10 +27,19 @@ import { errorText } from '../core/error-codes.js';
 
 const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 
-/** What the core says about accounts on this build. */
+/**
+ * What the core says about accounts on this build.
+ *
+ * A server that does not answer is `unreachable` (with the reason), never "no sign-in
+ * needed": that read an outage as the portable build and drew an empty app (UI-05). Only a
+ * core too old to know WHOAMI at all (`bad_message`) still means "no accounts".
+ */
 export async function authState() {
   const res = await bridge({ type: 'WHOAMI' });
-  if (!res || res.ok !== true) return { required: false, bootstrap: false, caller: null };
+  if (res && res.ok !== true && res.kind === 'bad_message') return { required: false, bootstrap: false, caller: null };
+  if (!res || res.ok !== true) {
+    return { unreachable: true, required: false, bootstrap: false, caller: null, message: errorText(res, 'no answer from the server') };
+  }
   return {
     required: !!res.authRequired,
     bootstrap: !!res.needsBootstrap,
@@ -40,9 +49,15 @@ export async function authState() {
   };
 }
 
+/**
+ * Sign out. Resolves to the core's reply: only `ok` means the session ended. A failed reply
+ * leaves this page signed in, and the caller says "Not signed out — try again" instead of
+ * reloading as if it had worked (UI-01).
+ */
 export async function signOut() {
-  await bridge({ type: 'LOGOUT' });   // the server ends the session and clears the cookie
-  setSignedIn(false);
+  const res = await bridge({ type: 'LOGOUT' });   // the server ends the session and clears the cookie
+  if (res && res.ok === true) setSignedIn(false);
+  return res || { ok: false, message: 'no answer from the server' };
 }
 
 /**

@@ -200,8 +200,7 @@ named in the card's head, so the difference seen is the delay.
   (`lastRead.noDevice`) — they are in no bucket, so they are said, not dropped. The boards say it
   once (0.3.77): Dashboard and Summary one line summed over the clusters in view
   (`noDeviceTotal`, `noDeviceLine`: "12,404 documents in 9 clusters have no device name …"), each
-  cluster's count in the Dashboard's *How the last run read each cluster*; a cluster's board in its
-  "Last run read" line. A device name
+  cluster's count in its board's "Last run read" line. A device name
   longer than the keyword's `ignore_above` (256 by default) is not indexed as a keyword and
   cannot be in any aggregation: those documents count here too.
 * Per cluster, how the last run read it is kept with the tracker as `lastRead`:
@@ -210,6 +209,12 @@ named in the card's head, so the difference seen is the delay.
   ≥ `silentAfterHours` ago → `silent`; a silence record opens (`from` = last arrival). The
   first arrival after ends it with what came back (`burstDocs`, `burstMinutes`). A device not
   seen for 7 days is forgotten (its open period is kept unsolved).
+
+**Switched off for a cluster** (Edit cluster › Collection, docs/JOBS.md "Per-cluster switches"):
+the scheduled run does not ask that cluster — it is a `skipped` part of the run ("skipped — log delay
+switched off for this cluster (Edit cluster › Collection)"), never a failure, and the run keeps its
+interval; *Fetch now* for it is refused (`switched_off`) before anything starts. The Log Delay page
+says which clusters are switched off.
 
 ## Which devices — live, now, in the range (one definition)
 
@@ -380,13 +385,15 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
   "reduced": [ { "hours": 2, "n": 4 }, { "hours": 4, "n": 7 }, { "hours": 6, "n": 9 }, { "hours": 12, "n": 15 }, { "hours": 24, "n": 23 } ],
   "newlyLateToday": 6, "solvedToday": 4,
   "yesterday": { "newlyLate": 19, "solved": 23, "averageLastedMs": 6600000 },
-  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "delay": 21, "critical": 9, "complete": true } ],
+  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "delay": 21, "critical": 9, "complete": true,
+                 "measured": true, "lateAt": 28, "criticalAt": 9 } ],
   "days": [ { "day": "2026-11-04", "devices": 1284, "onTime": 1200, "little": 38, "delayed": 25, "critical": 12, "clockAhead": 0, "silent": 9,
               "unmeasured": 5, "started": 19, "solved": 23, "lateHours": 41.5, "medianMinutes": 4.1, "measured": 1270, "complete": true,
               "onTimeAll": 1238, "late": 37 } ],
   "byCluster": [ { "id": "client-a-prod", "name": "client-a-prod", "devices": 412, "measured": 410, "lateNow": 14, "delay": 9, "critical": 5, "silent": 1,
                    "unmeasured": 1, "otherTz": 2, "timeZone": { "…": "Time zones" }, "below": 396, "belowPct": 96.1, "latePct": 3.4, "belowPctPrevious": 95.2, "newToday": 3,
-                   "windows": [ { "…": "today's windows, this cluster alone (the heat map's Today)" } ], "fixes": [ { "…": "Finding + stepLabel, most devices first" } ],
+                   "windows": [ { "…": "today's windows, this cluster alone (Late devices over the day)" } ], "fixes": [ { "…": "Finding + stepLabel, most devices first" } ],
+                   "yesterdayWindow": { "from": 0, "to": 0, "label": "08:00–10:00", "measured": true, "lateAt": 5, "criticalAt": 1 },
                    "sparkline": [12, 9, null, 14], "sparklineDays": ["2026-10-06", "…"], "worst": { "device": "fw-dc1-07", "minutes": 94.0, "state": "critical" },
                    "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "lastRunAt": 1762249000000,
                    "counts": { "inLastRun": 401, "now": 412, "inRange": 418, "lastRead": { "…": "as lastRead" } }, "lastRead": { "at": 0, "devices": 401, "pages": 1, "complete": true, "truncated": false } } ],
@@ -396,8 +403,8 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
 
 Board figures (0.3.62): the five tiles = `totals` (`onTime` = below the delay line, `delay`,
 `critical`, `otherTz`, `silent` with `unmeasured` named under it); *Devices behind* = `days[]`
-(`delayed`, `critical`, `solved`) or, for Today, `windows[]` (`stillLate`, `solved`); the heat map
-= `byCluster[].sparkline` over `sparklineDays` (days) or `byCluster[].windows` (Today); *By
+(`delayed`, `critical`, `solved`) or, for Today, `windows[]` (`stillLate`, `solved`); *Late devices
+over the day* = `byCluster[].windows` (`measured`, `lateAt`, `criticalAt`) and `yesterdayWindow`; *By
 cluster* = `byCluster` (`timeZone`, a states bar from `below`/`delay`/`critical`/`otherTz`/`silent`/
 `unmeasured`, `lateNow` ("30+ min"), `latePct` ("Late share"), `critical`, `otherTz`, `devices`,
 `counts.inLastRun`, `worst`, the "i" from `fixes`; every column sorts, most delayed first by default,
@@ -585,7 +592,7 @@ else (no little-delay band, no median, percentile or average anywhere), an "i" o
 
 | route | view | |
 |---|---|---|
-| `#/log-delay` | **Dashboard**: the fleet (Main board) — five count tiles (Below N, N–M, Above M, Other time zone, Silent; each opens Devices on that level), *Devices behind* over the period, the cluster × time heat map, *By cluster* with a states bar and an "i" per cluster, how the last run read each cluster | `ui/js/logdelay/boards.js` |
+| `#/log-delay` | **Dashboard**: the fleet (Main board) — five count tiles (Below N, N–M, Above M, Other time zone, Silent; each opens Devices on that level), the three chart panels over the period, *By cluster* with a states bar and an "i" per cluster, *Late devices over the day*, the clusters the last run did not measure | `ui/js/logdelay/boards.js` |
 | `#/log-delay/cluster/<id>` | one cluster (Cluster board), under the Dashboard tab: the same tiles and chart, its devices (the delayed ones until *Show all devices*) | |
 | `#/log-delay/summary[/<cluster>]` | **Summary** (second tab; the fleet view of Reports › Log delay before 0.3.60, back on the owner's word): four tiles from `totals` (total devices; with delay now, split by the two late levels; with no delay and the on-time share; the shares without delay / delayed / silent / can't measure), *Delay reduced* (`reduced`, 2 h to 24 h, green bars), *Day by day* (`days[]` stacked: below the line, the delay band, above the critical line, another time zone, silent or can't measure; at least the last 7 days — `dayChartDays`: a shorter page range asks one more `LOGDELAY_SUMMARY` for the 7 days ending today (`maxDevices: 1`), a Custom range of 7+ days is its own days; the header says which ("Last 7 days · 11 Nov – 17 Nov"); each tick its own date; only this card widens) and *Delayed devices by cluster* (a ring per cluster from `byCluster` `delay`/`critical`/`latePct` — All clusters first, then worst first, never measured last as an empty ring; a ring opens the cluster on Dashboard; a ring above `LD_RING_RED_PCT` = **2 %** of its devices delayed draws its arcs in the theme's critical red — the delay band a lighter red — and its share in red ink, All clusters by the same rule, `ringAlert` in `core/logdelay-report.js`; at or below 2 % the level colours). One cluster chosen: its tiles, its days, its own ring. Documents without a device name: one summed line under the cards, not a note per cluster. The core's totals for every zone: no time-zone chip on this tab | `ui/js/logdelay/summary.js` |
 | `#/log-delay/devices[/<cluster>]` | **Devices**: the delayed devices of the period (the delay band and above the critical line) until *Show all devices* (never remembered, each visit starts on the delayed ones), a search box, level chips with counts over every device (a level that is not delayed shows every device's set; a chip pressed again lets go), zone and tag1 selects, CSV; each row ends in "i" and *Open in logs* | |
@@ -704,7 +711,7 @@ drawn on Live (Live's Fetch is the browser's).
   `ldHash(view, cluster, device, {tz})`): every view follows it — the tiles and By cluster are
   counted from the devices in that zone (`tileCounts`, `matchesZone`), Devices and Live list
   them, the chip reads "Time zone +08:00 · only these devices" and the panel gains "Show all time
-  zones". Devices behind and the heat map are the core's day totals for every zone; a note says
+  zones". Devices behind and Late devices over the day are the core's totals for every zone; a note says
   so while the filter is on. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" or
   "not detected · 41 % agree" (`timeZoneCell`). Live shows the time range (Last
   5 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
@@ -719,10 +726,43 @@ drawn on Live (Live's Fetch is the browser's).
   (`windows[]` `delay`, `critical`, `solved`; the split is each device's last stored state at the
   window's end, added in 0.3.62, `summary::windows`). No stacking, no overlay line; a bar's title is
   the bucket and its one value, a click opens Devices on that level. A bucket without a figure is
-  a hatched gap, never zero. Order: tiles, the state bar, the charts, By cluster, then the heat map
-  **Hourly Delay Status** (`heatRows`: one row per cluster from `byCluster[].sparkline` (days) or
-  `byCluster[].windows` (Today); a cell the core has no total for is hatched, a cluster never
-  measured says so).
+  a hatched gap, never zero. Order: tiles, the state bar, the charts, By cluster, then *Late
+  devices over the day* and the not-measured line (both below).
+* **Late devices over the day** (0.3.82, replaces the *Hourly Delay Status* heat map, which
+  carried a window's last reading into the windows after it — so whole rows looked the same):
+  one row per cluster, the name column kept in view while the grid scrolls sideways, then *Late
+  now*, *vs yesterday* ("▲ 18", "▼ 2", "="), one cell per measurement window of today — as many
+  as the interval gives (12 at 2 h, `windowsPerDay`) — and *Measured k/n*: of the windows that
+  ended so far (and the one in progress once it has a reading; "—" before the first ends). A cell is the devices
+  late at that window's own measurement (`lateAtWindow`): the core's `windows[].lateAt` (the delay
+  band and above the critical line, as By cluster's *Late now* and *Change* count late) or
+  `criticalAt` with the toggle on *Above 60 min*. The core counts each device by its last reading
+  inside the window (`summary::measured_late`); a window with no reading is `measured: false` and
+  drawn hatched "not measured" — never an earlier reading carried forward. The window in progress
+  (`complete: false`) with no reading yet is *pending*, light dots, its tooltip giving when the next
+  measurement is due (the last run plus the interval): runs are not aligned to windows, so this is
+  not a miss and is not counted in *Measured*. A window not begun yet is blank. *Late now* is the
+  last measurement (the last run); from midnight until today's first run that is yesterday's last,
+  marked "yday" with a tooltip saying so — no row reads "not measured today". *vs yesterday* is
+  Late now less the count at the measurement a day earlier of the same window as the last run
+  (`yesterdayWindow`, `vsYesterday`); unknown when that window was not measured. Rows are worst first (Late now, then the worst window); *Worst 10* by default, *All N*
+  on one click; a cluster never measured last, saying so. Each row is shaded on its own scale
+  (`gridShade`: its worst window darkest, one blue, light and dark themes alike) so a quiet
+  cluster's rise still shows. A cell opens the cluster's board at that window: a line on the
+  board names the window and its count (`lateAtWindow` of the cluster's own answer).
+* **Clusters not measured in the last run** (0.3.82, replaces the card *How the last run read
+  each cluster*): one line, only when the last finished log delay run did not fully measure every
+  cluster — "4 of 71 clusters not measured in the last run", then per cluster its name, why
+  (`partReason`: "no index matches logstash-*", "timed out (30 s)", "part read (2 shards
+  failed)", "busy — deferred", …) and its fix where the core names one ("set log index" opens the
+  cluster's settings), and *Run details in Jobs ›*. It is read from the same per-cluster results
+  Jobs keeps (`JOBS_LIST {jobId: "logdelay.measure"}`, the last run that measured — not one
+  still going, paused or skipped — then
+  `JOB_RUN_DETAIL`; `notMeasured` in `ui/js/core/job-detail.js`), so the two never disagree;
+  naming only clusters the viewer may see (the page keeps to the clusters it knows). Nothing is
+  shown when every cluster was read, or when the details cannot be read (a guest, a core before
+  0.3.81) — and so not to an administrator limited to some clusters: the run is fleet-wide, and a
+  run covering clusters they cannot see is not theirs to read (`run_view`, as Jobs). The per-cluster read counts stay on each cluster's board.
 * **The "i"** (`ui/js/logdelay/fix-popover.js` `fixButton`, `fixesFor`): one popover for every
   button, the core's own words (`DeviceRow.fix`, `byCluster[].fixes`, a device board's `finding`,
   Live's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,
@@ -734,8 +774,8 @@ drawn on Live (Live's Fetch is the browser's).
   for the delay band, blue #5b8fd1 above the critical line, violet #a77fd6 (dark #b994ec) for
   another time zone, grey for silent; the same fills in every theme, each theme mixing its pill
   fill (28 % of the fill with the surface) and ink (35 % with the text colour) so the pill text
-  keeps AA. Never red with yellow. The heat ramp is one blue (#3f78c0) at 7 / 24 / 45 / 70 /
-  100 % over the surface. The "back below the line" line stays green.
+  keeps AA. Never red with yellow. The grid's ramp (Late devices over the day) is one blue
+  (#3f78c0) at 7 / 24 / 45 / 70 / 100 % over the surface. The "back below the line" line stays green.
 * **One device row** (`ui/js/logdelay/rows.js`) for every device table — Devices, a cluster's
   devices, Live. A device Live measured is turned into a board row (`liveDeviceRow`; one silent in
   the range, `silentDeviceRow`); what one measurement cannot know reads unknown. The row's actions

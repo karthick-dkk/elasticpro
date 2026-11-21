@@ -174,6 +174,9 @@ pub const BUDGET_WINDOW_MS: u64 = 60_000;
 pub struct SpecLite {
     pub id: String,
     pub via: Option<String>,
+    /// Datasets switched off for this cluster (Edit cluster › Collection, `collection.rs`): never
+    /// fetched, neither by the poller nor for a person's ask.
+    pub off: Vec<Dataset>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -389,6 +392,14 @@ impl State {
             for ds in ALL {
                 let key = (s.id.clone(), ds);
                 if self.inflight.contains_key(&key) {
+                    continue;
+                }
+                // Switched off for this cluster (Edit cluster › Collection): never asked, a
+                // person's ask included — the page says it is switched off, and where.
+                if s.off.contains(&ds) {
+                    self.pending.remove(&key);
+                    // Whoever waits for it is answered now, with what the cache holds (nothing).
+                    self.waiters.remove(&key);
                     continue;
                 }
                 // A person asked. Still only health for a cluster that does not answer:
@@ -786,7 +797,7 @@ mod tests {
         Config { mode, ..cfg() }
     }
     fn specs(n: usize) -> Vec<SpecLite> {
-        (0..n).map(|i| SpecLite { id: format!("c{i:02}"), via: None }).collect()
+        (0..n).map(|i| SpecLite { id: format!("c{i:02}"), via: None, off: vec![] }).collect()
     }
     fn same(x: u64) -> u64 {
         x
@@ -881,9 +892,28 @@ mod tests {
     }
 
     #[test]
+    fn a_dataset_switched_off_for_a_cluster_is_never_planned_nor_asked() {
+        let mut st = active(0);
+        let s = vec![SpecLite { id: "a".into(), via: None, off: crate::collection::Switch::Ilm.datasets().to_vec() },
+                     SpecLite { id: "b".into(), via: None, off: vec![] }];
+        st.first_due.insert("a".into(), 0);
+        st.first_due.insert("b".into(), 0);
+        // A person's ask for it is dropped too, and whoever waits for it answered.
+        let k = ("a".to_string(), Dataset::IlmErrors);
+        st.pending.insert(k.clone(), 0);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.waiters.entry(k.clone()).or_default().push(tx);
+        let plan = st.plan(&s, 0, &HashSet::new(), &cfg());
+        assert!(!plan.iter().any(|c| c.cluster == "a" && matches!(c.dataset, Dataset::IlmErrors | Dataset::IlmAssign)), "{plan:?}");
+        assert!(plan.iter().any(|c| c.cluster == "a" && c.dataset == Dataset::Health), "everything else as before: {plan:?}");
+        assert!(plan.iter().any(|c| c.cluster == "b" && c.dataset == Dataset::IlmErrors), "another cluster keeps its ILM check: {plan:?}");
+        assert!(!st.pending.contains_key(&k) && !st.waiters.contains_key(&k));
+    }
+
+    #[test]
     fn a_jump_host_backing_off_skips_its_clusters() {
         let mut st = active(0);
-        let s = vec![SpecLite { id: "a".into(), via: Some("jh".into()) }, SpecLite { id: "b".into(), via: None }];
+        let s = vec![SpecLite { id: "a".into(), via: Some("jh".into()), off: vec![] }, SpecLite { id: "b".into(), via: None, off: vec![] }];
         st.first_due.insert("a".into(), 0);
         st.first_due.insert("b".into(), 0);
         let down: HashSet<String> = ["jh".to_string()].into();

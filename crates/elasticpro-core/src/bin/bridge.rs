@@ -122,18 +122,39 @@ async fn run() {
     let hosted = !bind.is_loopback();
     if hosted {
         tracing::warn!(bind = %bind, "hosted mode: accounts required — a fresh install creates the first one with a password of its own");
-        // effective_source() believes X-Real-IP from any peer until this is set, so anyone
-        // who can reach the core without going through nginx can write whatever they like
-        // into source.ip in the activity log (and past the Zabbix allowedSources check).
-        if std::env::var("ELASTICPRO_TRUSTED_PROXIES").map(|v| v.trim().is_empty()).unwrap_or(true) {
-            tracing::warn!("ELASTICPRO_TRUSTED_PROXIES is not set: X-Real-IP is trusted from any peer, so source.ip in the activity log can be forged by anyone who reaches the core directly; set it to the proxy's address(es)");
-        }
+        // X-Real-IP is believed only from the compose service `nginx` (looked up by name) and
+        // from ELASTICPRO_TRUSTED_PROXIES; from anyone else the TCP peer is the source. A proxy
+        // of your own in front of nginx is fine (nginx sets the header); one in front of the
+        // core instead of nginx has to be named in ELASTICPRO_TRUSTED_PROXIES.
+        tracing::info!(
+            listed = %std::env::var("ELASTICPRO_TRUSTED_PROXIES").unwrap_or_default(),
+            "X-Real-IP is believed from the proxy named {} and from ELASTICPRO_TRUSTED_PROXIES only",
+            elasticpro_core::zbx_link::DEFAULT_PROXY
+        );
     }
 
     // The dev bridge on loopback is a single person on their own machine, exactly like
     // the portable build; a non-loopback bind is the hosted deployment.
     let edition = if hosted { Edition::Hosted } else { Edition::Portable };
     let core = Core::new(data, edition);
+    // The trusted proxy's address, now and on a timer: compose gives nginx a new one whenever it
+    // recreates it, and an address it gave up must not stay trusted for long. Hosted only, and
+    // not in the report worker, which serves nobody.
+    if hosted && core.role() != elasticpro_core::worker::Role::Worker {
+        let c = core.clone();
+        tokio::spawn(async move {
+            loop {
+                c.zabbix_link().refresh_proxies(true).await;
+                tokio::time::sleep(elasticpro_core::zbx_link::PROXY_REFRESH).await;
+            }
+        });
+    }
+    // An initial-password file that was set but cannot be used: never serve with the shipped
+    // password the operator set the file to avoid. Before any port is opened.
+    if let Some(why) = core.startup_refusal() {
+        eprintln!("elasticpro-bridge: refusing to start: {why}");
+        std::process::exit(78);
+    }
     // What this process is (docs/WORKER.md): `core` serves people and the monitoring, `worker`
     // runs the batch work on an internal port, `all` (unset) is both, as before 0.3.54.
     let role = core.role();
@@ -293,10 +314,11 @@ async fn frame_ancestors(
     res
 }
 
-/// Where a server-to-server request came from, as the link's trust rules decide.
-fn source_of(app: &App, headers: &HeaderMap, peer: std::net::SocketAddr) -> Option<std::net::IpAddr> {
+/// Where a request came from, as the link's trust rules decide: X-Real-IP only from nginx
+/// (by name) or a proxy in ELASTICPRO_TRUSTED_PROXIES, else the TCP peer.
+async fn source_of(app: &App, headers: &HeaderMap, peer: std::net::SocketAddr) -> Option<std::net::IpAddr> {
     let real = headers.get("x-real-ip").and_then(|v| v.to_str().ok());
-    app.core.zabbix_link().effective_source(real, Some(peer.ip()))
+    app.core.zabbix_link().source_for(real, Some(peer.ip())).await
 }
 
 fn status(code: u16) -> axum::http::StatusCode {
@@ -312,7 +334,7 @@ async fn zabbix_sso(
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let source = source_of(&app, &headers, peer);
+    let source = source_of(&app, &headers, peer).await;
     let (code, out) = app.core.zabbix_sso_init_from(&body, sig, source);
     // A Zabbix sign-in is a sign-in like any other. The body is signed JSON naming a
     // Zabbix user and groups; only the account the core made of it goes in the record.
@@ -333,7 +355,7 @@ async fn zabbix_sso_role(
 ) -> axum::response::Response {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
     let claim = q.get("claim").map(String::as_str).unwrap_or("");
-    let r = app.core.zabbix_sso_role_from(claim.as_bytes(), sig, source_of(&app, &headers, peer));
+    let r = app.core.zabbix_sso_role_from(claim.as_bytes(), sig, source_of(&app, &headers, peer).await);
     let mut res = axum::response::Response::new(axum::body::Body::from(r.body));
     *res.status_mut() = status(r.status);
     let h = res.headers_mut();
@@ -355,7 +377,7 @@ async fn zabbix_cluster_secret(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let r = app.core.zabbix_cluster_secret_from(&body, sig, source_of(&app, &headers, peer));
+    let r = app.core.zabbix_cluster_secret_from(&body, sig, source_of(&app, &headers, peer).await);
     let mut res = axum::response::Response::new(axum::body::Body::from(r.body));
     *res.status_mut() = status(r.status);
     let h = res.headers_mut();
@@ -375,7 +397,7 @@ async fn zabbix_pair(
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let (code, out) = app.core.zabbix_pair(&body, sig, source_of(&app, &headers, peer));
+    let (code, out) = app.core.zabbix_pair(&body, sig, source_of(&app, &headers, peer).await);
     (status(code), Json(out))
 }
 
@@ -444,7 +466,7 @@ async fn bridge(
                     "message": "that API token is not valid, has expired, or has been revoked",
                 });
                 elasticpro_core::errors::stamp(&mut reply);
-                app.core.record_activity(&msg, None, "token", source_of(&app, &headers, peer), &reply);
+                app.core.record_activity(&msg, None, "token", source_of(&app, &headers, peer).await, &reply);
                 return Json(reply).into_response()
             }
         },
@@ -461,7 +483,7 @@ async fn bridge(
     };
 
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let source = source_of(&app, &headers, peer);
+    let source = source_of(&app, &headers, peer).await;
     // A reply holding cached fleet bodies is written with them as the text they are held
     // as (fleet::reply); everything else is the plain Value it always was.
     let mut reply = app.core.handle_reply_as_from_at(msg.clone(), caller.clone(), reauth, source).await;

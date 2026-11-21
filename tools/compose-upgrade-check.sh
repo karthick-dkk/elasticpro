@@ -18,6 +18,13 @@
 #   8. --upgrade puts the target release's own deploy.sh in place and runs it (0.3.79): not on a
 #      dry run, not with ELASTICPRO_NO_SELF_UPDATE=1, not when the fetched one does not parse,
 #      once (no loop), and the old script is kept as deploy.sh.previous.
+#   9. the first administrator (0.3.82): a fresh install (no core container, no core-data volume)
+#      gets a random password file, private, shown never on stdout; a dry run makes nothing; an
+#      install that has run before never gets one; an existing file is never replaced; a password
+#      the core did not use is removed; the compose file mounts it and points the core at it; an
+#      existing install where secrets/admin cannot be made still upgrades; a fresh install whose
+#      .env has no ELASTICPRO_GID gets this user's group (written to .env), and a group the user is
+#      not in is a clear error.
 #
 # The mirror's releases are made from today's deploy/docker-compose.yml: the target is it as
 # it is, an older release is it without the worker (and with the db it had then) and with its
@@ -169,7 +176,12 @@ case "$1 ${2:-}" in
       *" -q "*) ;;
       *) echo "name: shimproj" ;;
     esac ;;
-  "compose ps") case " $* " in *" -q "*) echo "shim-${*: -1}" ;; esac ;;
+  "compose ps")
+    # SHIM_FRESH=1: no container of this project has ever existed (ps -a finds none).
+    case " $* " in *" -a "*) [ "${SHIM_FRESH:-0}" = 1 ] && exit 0 ;; esac
+    case " $* " in *" -q "*) echo "shim-${*: -1}" ;; esac ;;
+  "compose logs") [ "${SHIM_SEEDED:-0}" = 1 ] && echo '{"fields":{"message":"no accounts existed: created the first one, with the password from ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE"}}' ;;
+  "volume ls") [ "${SHIM_FRESH:-0}" = 1 ] || echo shimproj_core-data ;;
   "inspect "*) echo healthy ;;
   "image inspect") grep -qxF "$3" "$SHIM_IMAGES"; exit $? ;;
   "pull "*) printf '%s\n' "${*: -1}" >> "$SHIM_IMAGES" ;;
@@ -218,6 +230,10 @@ case $OUT in *"shimproj_db-data is kept"*) ok "it says the volume shimproj_db-da
   && ok ".env: ELASTICPRO_DB_IMAGE removed, kept as ELASTICPRO_DB_IMAGE_PREVIOUS" || bad ".env after the upgrade: $(cat "$R/.env")"
 env_is ELASTICPRO_NGINX_IMAGE karthickdk02/elasticpro-nginx:9.9.0 && env_is ELASTICPRO_IMAGE karthickdk02/elasticpro-core:9.9.0 \
   && ok ".env: core and nginx on 9.9.0" || bad ".env images: $(cat "$R/.env")"
+
+[ ! -e "$R/secrets/admin/initial_admin_password" ] && ok "an install that has run before is given no first-administrator password" \
+  || bad "an existing install was given a first-administrator password file"
+case $OUT in *"first administrator"*) bad "an upgrade of an existing install talked about a first administrator: $OUT" ;; *) ok "and says nothing about one" ;; esac
 
 sleep 1    # the backups are named by the second
 real --rollback
@@ -277,5 +293,84 @@ case $LOG in *"pull -q karthickdk02/elasticpro-core:9.9.0"*) ok "and the upgrade
 
 selfrun ./deploy.sh --timeout 5 --upgrade=9.9.0
 case $OUT in *"is in place (the old one"*) bad "the same script was put in place again: $OUT" ;; *) ok "a script already the target's is kept as it is" ;; esac
+
+# --- 9. the first administrator on a fresh install (0.3.82) ------------------------------------
+echo "== deploy.sh on a fresh install: a random first-administrator password"
+grep -q -- '- ./secrets/admin:/run/elasticpro-admin:ro' deploy/docker-compose.yml && ok "the compose file mounts secrets/admin into the core, read-only" \
+  || bad "the compose file does not mount secrets/admin"
+grep -q -- '-e /run/elasticpro-admin/initial_admin_password ]; then export ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE=' deploy/docker-compose.yml \
+  && ok "the core is pointed at the file when it exists (an empty one stops it rather than meaning none)" || bad "the entrypoint does not point the core at the file"
+F=$T/fresh/deploy
+mkdir -p "$T/fresh"
+cp -R "$T/inst/deploy" "$F"; cp Cargo.toml "$T/fresh/"
+rm -rf "$F/secrets/admin"
+cp deploy/docker-compose.yml "$F/docker-compose.yml"
+printf 'ELASTICPRO_IMAGE=karthickdk02/elasticpro-core:9.9.0\nELASTICPRO_GID=%s\n' "$(id -g)" > "$F/.env"
+fresh() {
+  RC=0
+  : > "$T/shim.log"; printf '%s\n' karthickdk02/elasticpro-core:9.9.0 > "$T/images"
+  OUT=$(cd "$F" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_IMAGES="$T/images" "$@" 2>&1) || RC=$?
+  LOG=$(cat "$T/shim.log")
+}
+PWF=$F/secrets/admin/initial_admin_password
+fresh env SHIM_FRESH=1 ./deploy.sh --timeout 5 --image karthickdk02/elasticpro-core:9.9.0 --dry-run
+case $OUT in *"would: make a random first-administrator password"*) ok "a dry run says it would make one" ;; *) bad "the dry run did not say so (rc $RC): $OUT" ;; esac
+[ ! -e "$PWF" ] && ok "and makes nothing" || bad "a dry run made the password file"
+
+fresh env SHIM_FRESH=1 SHIM_SEEDED=1 ./deploy.sh --timeout 5 --image karthickdk02/elasticpro-core:9.9.0
+[ $RC = 0 ] && ok "the fresh deploy ran" || bad "the fresh deploy (rc $RC): $OUT"
+PW=$(head -1 "$PWF" 2>/dev/null || true)
+printf '%s' "$PW" | grep -Eq '^[0-9a-f]{24}$' && ok "a random 24-character password is in secrets/admin/initial_admin_password" || bad "no password in the file: '$PW'"
+mode=$(stat -c %a "$PWF" 2>/dev/null || stat -f %Lp "$PWF")
+if [ "$(id -u)" = 0 ]; then want=600; else want=640; fi
+[ "$mode" = "$want" ] && ok "the file is $mode (private; the core's group may read it)" || bad "the file is $mode, want $want"
+case $OUT in *"$PW"*) bad "the password was printed on stdout (captured logs would keep it)" ;; *) ok "the password is never printed on stdout" ;; esac
+case $OUT in *"made a random password for the first administrator"*) ok "it says it made one" ;; *) bad "no word that it made one: $OUT" ;; esac
+[ -n "$PW" ] && ! grep -rqF --exclude=initial_admin_password "$PW" "$F" && ok "and the password is in no other file here" || bad "the password is in another file"
+
+fresh env SHIM_FRESH=1 SHIM_SEEDED=1 ./deploy.sh --timeout 5 --image karthickdk02/elasticpro-core:9.9.0
+[ "$(head -1 "$PWF")" = "$PW" ] && ok "a second deploy keeps the file as it is (never regenerated)" || bad "the password file was replaced"
+case $OUT in *"made a random password"*) bad "a second deploy made another: $OUT" ;; *) ok "and makes no other" ;; esac
+
+rm -f "$PWF"
+fresh env SHIM_FRESH=1 ./deploy.sh --timeout 5 --image karthickdk02/elasticpro-core:9.9.0
+[ ! -e "$PWF" ] && case $OUT in *"was not used and was removed"*) true ;; *) false ;; esac \
+  && ok "a password the core did not take (it had accounts) is removed, and it says so" || bad "an unused password was kept or not reported: $OUT"
+
+# An install that has run before, where secrets/admin cannot be made (a root-owned secrets/ when
+# run as a normal user; here a plain file in the way, which stops root too): the upgrade goes on.
+B=$T/blocked/deploy
+mkdir -p "$T/blocked"
+cp -R "$T/inst/deploy" "$B"; rm -rf "$B/secrets/admin"; echo in-the-way > "$B/secrets/admin"
+RC=0; OUT=$(cd "$B" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" ./initial-admin.sh ensure 2>&1) || RC=$?
+[ $RC = 0 ] && [ -z "$OUT" ] && ok "an existing install where secrets/admin cannot be made: the step passes quietly (the upgrade goes on)" \
+  || bad "an existing install with secrets/admin blocked failed the step (rc $RC): $OUT"
+
+# A fresh install whose .env has no ELASTICPRO_GID (only install.sh wrote it; deploy.sh alone did not).
+N=$T/nogid/deploy
+mkdir -p "$T/nogid"
+cp -R "$F" "$N"; rm -rf "$N/secrets/admin"
+printf 'ELASTICPRO_IMAGE=karthickdk02/elasticpro-core:9.9.0\n' > "$N/.env"
+gidrun() {
+  RC=0; OUT=$(cd "$N" && env -u ELASTICPRO_GID PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_FRESH=1 ./initial-admin.sh ensure 2>&1) || RC=$?
+}
+gidrun
+NF=$N/secrets/admin/initial_admin_password
+if [ "$(id -u)" = 0 ]; then
+  [ $RC = 0 ] && [ "$(stat -c %u "$NF" 2>/dev/null || stat -f %u "$NF")" = 999 ] \
+    && ok "no ELASTICPRO_GID, as root: the file is the core's (uid 999)" || bad "no ELASTICPRO_GID, as root (rc $RC): $OUT"
+else
+  g=$(stat -c %g "$NF" 2>/dev/null || stat -f %g "$NF" 2>/dev/null || true)
+  [ $RC = 0 ] && [ "$g" = "$(id -g)" ] && grep -qx "ELASTICPRO_GID=$(id -g)" "$N/.env" \
+    && ok "no ELASTICPRO_GID: the file gets this user's group and ELASTICPRO_GID=$(id -g) goes into .env (the core's group)" \
+    || bad "no ELASTICPRO_GID (rc $RC, group $g): $OUT / $(cat "$N/.env")"
+  # A group this user is not in: a clear error, and no file the core could not read is left behind.
+  for other in 54321 54322 54323; do id -G | tr ' ' '\n' | grep -qx "$other" || break; done
+  rm -rf "$N/secrets/admin"
+  printf 'ELASTICPRO_IMAGE=karthickdk02/elasticpro-core:9.9.0\nELASTICPRO_GID=%s\n' "$other" > "$N/.env"
+  gidrun
+  [ $RC != 0 ] && [ ! -e "$NF" ] && case $OUT in *"not in it"*) true ;; *) false ;; esac \
+    && ok "ELASTICPRO_GID names a group this user is not in: a clear error, no file left" || bad "a group the user is not in (rc $RC): $OUT"
+fi
 
 [ $fail = 0 ] && echo "ok" || { echo "FAILED"; exit 1; }

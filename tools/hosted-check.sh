@@ -206,7 +206,9 @@ kill $PID; wait $PID 2>/dev/null || true
 
 echo "== hosted mode, allowed sources and a server frame-ancestors =="
 P4=$(free_port); OUT4=$(mktemp)
+# 127.0.0.1 plays the proxy here (in compose it is nginx, trusted by name with nothing set).
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_ALLOWED_SOURCES="10.99.0.0/16" ELASTICPRO_FRAME_ANCESTORS="https://zbx.example.com" \
+  ELASTICPRO_TRUSTED_PROXIES=127.0.0.1/32 \
   ELASTICPRO_ZABBIX_SSO_SECRET="allowed-sources-secret-0123456789abcdef" RUST_LOG=info "$BIN" ui "$P4" >"$OUT4" 2>&1 & PID4=$!; disown
 trap 'kill $PID $PID4 2>/dev/null || true; rm -f "$OUT" "$OUT4"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P4/"; do sleep 0.2; done
@@ -216,6 +218,17 @@ check "X-Real-IP inside it gets past the list" "$(code_of http://127.0.0.1:$P4/z
 CSP=$(curl -s -D - -o /dev/null "http://127.0.0.1:$P4/" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy"{print $2}')
 check "the server's frame-ancestors wins"      "$CSP" "frame-ancestors https://zbx.example.com"
 kill $PID4; wait $PID4 2>/dev/null || true
+rm -f "$OUT4"    # the next section's trap replaces this one's: deleted here, not left behind
+
+echo "== hosted mode, X-Real-IP from a peer that is not a trusted proxy =="
+PX=$(free_port); OUTX=$(mktemp)
+ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_ALLOWED_SOURCES="10.99.0.0/16" \
+  ELASTICPRO_ZABBIX_SSO_SECRET="allowed-sources-secret-0123456789abcdef" RUST_LOG=info "$BIN" ui "$PX" >"$OUTX" 2>&1 & PIDX=$!; disown
+trap 'kill $PID $PIDX 2>/dev/null || true; rm -f "$OUT" "$OUT4" "$OUTX"' EXIT
+until curl -s -o /dev/null "http://127.0.0.1:$PX/"; do sleep 0.2; done
+check "a header from an untrusted peer is ignored" "$(code_of http://127.0.0.1:$PX/zabbix/pair -H 'x-real-ip: 10.99.4.5' -d '{}')" "403"
+kill $PIDX; wait $PIDX 2>/dev/null || true
+rm -f "$OUTX"
 
 echo "== hosted mode, zabbix sign-in on =="
 SECRET="hosted-check-secret-0123456789abcdef"
@@ -417,6 +430,12 @@ check "and kept in the built-in store"             "$(python3 -c 'import json,sy
 rs() { python3 -c 'import json,sys;d=json.load(sys.stdin);a=d["kinds"]["alerts"];print(d.get("ok"),a["state"],a["store"]["queued"],a["store"]["writing"],"built-in store" in a["line"])'; }
 check "and queued for the store, saying so"         "$(cookie -d '{"type":"DATA_ROUTING_STATUS"}' | rs)" "True queued 1 False True"
 check "and nothing was written to a monitored cluster" "$(cookie -d '{"type":"REQUEST_LOG"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len([r for r in (d.get("recent") or [])+(d.get("inflight") or []) if str(r.get("method","GET")).upper()!="GET"]))')" "0"
+# Jobs › Requests › Cost (docs/JOBS.md "Query cost", 0.3.82): the request log's figures, so an
+# administrator's like REQUEST_LOG — read-only, never a caller-less request's, a user's or an operator's.
+check "REQUEST_COST needs a caller"                "$(post "$B5" -d '{"type":"REQUEST_COST"}' | field kind)" "unauthenticated"
+check "a user may not read the request costs"      "$(as_jar "$JUS" -d '{"type":"REQUEST_COST"}' | field kind)" "forbidden"
+check "nor an operator"                            "$(as_jar "$JOP" -d '{"type":"REQUEST_COST"}' | field kind)" "forbidden"
+check "an admin reads them, a day kept, no write"  "$(cookie -d '{"type":"REQUEST_COST"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("keepHours"),isinstance(d.get("rows"),list),isinstance(d.get("top"),list))')" "True 24 True True"
 # A page may report only what the pages raise: a flood of made-up keys is refused by name,
 # queues nothing and evicts nothing; the account is then over its budget (200 in 15 minutes).
 FLOOD=$(python3 -c 'import json;print(json.dumps({"type":"ALERT_EVENTS_PUT","events":[{"event":"raised","key":"hc-es:junk-%d"%i} for i in range(150)]}))')

@@ -11,14 +11,14 @@
  *   node tools/render-check.mjs --config path/to/config_cluster.json
  *   node tools/render-check.mjs --config path/to/config_cluster.json --direct   # the fallback path
  *
- * Needs jsdom (`npm i jsdom`); it exits 0 with a notice when jsdom is absent, so it can
- * sit in CI without making Node a build dependency of the app itself.
+ * Needs jsdom (`npm i jsdom`); it exits 0 with a notice when jsdom is absent — unless CI is
+ * set or `--require-jsdom` is passed, and then it fails (a skip has read as a pass before).
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { findJsdom, bootApp, applyConfig } from './lib/jsdom-app.mjs';
+import { findJsdom, jsdomMissing, bootApp, applyConfig } from './lib/jsdom-app.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
@@ -29,9 +29,7 @@ let JSDOM;
 {
   const { entry, paths } = findJsdom([ROOT, process.cwd()]);
   if (!entry) {
-    console.log('render-check: jsdom not found — skipping.');
-    console.log(`  install it in one of: ${paths.join(', ')}  (npm i jsdom)`);
-    process.exit(0);
+    jsdomMissing('render-check', paths);
   }
   ({ JSDOM } = await import(pathToFileURL(entry).href));
 }
@@ -105,7 +103,7 @@ const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/do
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
   // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST,
   // and Requests — the Request Centre, its own app page — with its ElasticPro health tab.
-  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health',
+  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health', 'jobs/requests/cost',
   'automation', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const { ldRoute, ldTab } = await load('core/logdelay-report.js');
@@ -159,6 +157,8 @@ for (const name of PAGES) {
         if (!rt || rt.dataset.tab !== 'health') errors.push(`${name}: the tab bar does not mark ElasticPro health as the one shown`);
         if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push(`${name}: no status strip with the core`);
         if (!view.querySelector('tr[data-check="core.memory"]')) errors.push(`${name}: no memory check`);
+      } else if (tab === 'cost') {
+        if (!rt || rt.dataset.tab !== 'cost') errors.push(`${name}: the tab bar does not mark Cost as the one shown`);
       } else if (!rt || rt.dataset.tab !== 'log') errors.push(`${name}: the Request Centre's tab bar does not mark Requests`);
     } else if (page === 'jobs') {
       // Jobs: the tab bar marks the tab shown, the strip is there, and the Jobs tab lists every job.

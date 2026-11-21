@@ -107,7 +107,7 @@ if any was, else `cancelled`, else `completed`; its `note` counts each.
 | `note` | anything else (a backup's file and size, housekeeping's bytes, a report's warning, what the volume backfill did — "Volume backfill" below) |
 | `cancelAsked` | `JOB_CANCEL` asked it to stop (it stops at its next safe point) |
 | `retryOf`, `attempt` | the run this one tries again, and which try (1 = the first retry); null / 0 otherwise |
-| `deferred` | a busy cluster's wait: `{cluster, signal, reason, since}`; null otherwise |
+| `deferred` | a busy cluster's wait: `{cluster, signal, reason, since}` — `signal` `hours` for a wait for the cluster's heavy-job hours ("Per-cluster switches"); null otherwise |
 | `scope` | what a person narrowed the run to (the log delay measurement's *Fetch now*: `{clusterIds: [one], devices: "late"\|"all", device}`); absent otherwise. `JOB_RETRY` runs the same scope again |
 | `stale` | role core: a worker run still open while the worker's heartbeat is late or never came — it may have ended with the worker. Never ended by the core, only marked |
 | `parts` | 0.3.81: how its clusters' parts ended, when the run reported parts — `{succeeded, partial, failed, deferred, skipped}`, which always add up to the clusters it worked on; absent otherwise. The parts themselves and the run's lines are its detail ("Run details" below) |
@@ -260,6 +260,61 @@ and up; read-only, not in the activity log (a poll).
   a person's confirmation (ask if one is wanted). The task reaper's own rule is unchanged.
 - `bad_request` for a `minMs` not offered. At most 200 searches are listed; `count` says how many
   there were.
+
+## Query cost (0.3.82)
+
+`REQUEST_COST` — what ElasticPro's requests cost each cluster, per kind of work, over the last
+24 clock hours, and the slowest of them: **Jobs › Requests › Cost** (`#/jobs/requests/cost`,
+`ui/js/pages/requests-cost.js`, pure half `ui/js/core/request-cost.js`). An administrator's,
+like `REQUEST_LOG` (a limited administrator reads only their clusters, `sink_view`); read-only,
+not in the activity log (a poll: the tab asks every 30 s while it is open, and nothing else
+does). Nothing is sent to a cluster.
+
+- **Where the figures come from** (`crates/elasticpro-core/src/request_cost.rs`): every request
+  the core finishes in its request log also goes into a cost book in memory — one bucket per clock
+  hour for 24 hours, per (cluster, kind) the requests sent, their total time, a latency histogram,
+  the bytes read, the timeouts and the deferrals; and per cluster its 10 slowest requests. Bounded
+  (24 buckets, at most 4,096 cells a bucket overflow included — past it every further cluster ×
+  kind shares one *Other kinds* cell of no cluster (`"cluster": ""`, "several clusters", read only
+  by a caller who sees every cluster) — and 10 requests a cluster for at most 1,024 clusters),
+  never written to disk: a restart starts again, and the answer's `since` / `hours` say how much it
+  covers. The report worker's requests come from its finished-request ring (`worker/requests.jsonl`,
+  the one the Request Centre merges), and a job's deferrals from the run log (each deferred run
+  holds one cluster back). The ring keeps the worker's last 5,000 requests: on a busy day it does
+  not reach back 24 hours, and then the rows the worker's requests add to carry `partialSince`
+  (the ring's oldest request) and the tab says "partial — worker kept requests since HH:MM" in the
+  row and its tooltip — those counts are fewer than the window's, never presented as the whole day.
+- **Kind**: the job a request belongs to (`job:logdelay.measure`, `job:hosts.collect`,
+  `job:volume.daily`, `job:report.run`, `job:history.mirror`, labelled with the job's name), a
+  poller dataset (`poller:health` → "Poller · health"), a page (`page:<page>`), the REST console,
+  or the origin itself (`request_cost::kind_of`, one definition).
+- **What counts**: a request that reached the cluster. One answered from the read cache, or by
+  somebody else's request already on its way, cost the cluster nothing and is not counted. A
+  *timeout* is ElasticPro giving up (`timeout`) or closing a request past its deadline (`reaped`).
+  A *deferral* is a request the gate held back before sending it (`overloaded`, `queue_timeout`)
+  or a job's cluster held back because it was busy (a deferred run).
+- **Figures**: requests per hour over the hours covered (at least one); average time; **p95** — the
+  first histogram step (25 ms, 50, 100, 200, 300, 500, 750 ms, 1 s, 1.5, 2, 3, 5, 7.5, 10, 15, 20,
+  30, 45 s, 1, 2, 5 min) at or above the 95th request, never above the slowest; bytes over the
+  requests whose answer size was reported (`bytesKnown` of them; `null`, "not reported", when
+  none was — never 0 B). A kind with deferrals and no request has no time (`null`, "—").
+- **Top 10**: the slowest requests in the window on the clusters the caller sees — time, kind,
+  cluster, method and path, time taken, bytes. The path keeps the query string's names and leaves
+  out their values (`clean_path`; a value can carry a secret or a whole query), then goes through
+  the run details' redaction.
+
+```json
+{ "ok": true, "keepHours": 24, "since": 1763591163112, "hours": 24.0, "now": 1763677563112,
+  "rows": [ { "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement", "requests": 24, "perHour": 1.0,
+              "avgMs": 8200, "p95Ms": 30000, "maxMs": 30000, "bytes": 9000000, "bytesKnown": 24, "timeouts": 2, "deferrals": 0, "partialSince": null } ],
+  "top": [ { "at": 1763676963112, "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement",
+             "method": "POST", "path": "/logstash-*/_search?filter_path", "ms": 30000, "bytes": null, "status": "timeout" } ] }
+```
+
+- **The tab**: one line (requests, clusters, the window, timeouts, deferrals), then *By cluster
+  and kind* (Cluster, Kind, Requests / h, Average, p95, Bytes, Timeouts, Deferrals; most requests
+  first, every column sorts like the other Jobs tables), then *Most expensive recent requests*.
+  Compact rows; an operator is not offered the tab (the Request Centre is the stop alone for them).
 
 ## `JOBS_LIST`
 
@@ -557,6 +612,86 @@ after it eases collects it. Other clusters carry on. A run already going is not 
 busy signal (the hosts collection slows itself, the volume collection asks one thing at a time).
 People's own requests are never held back by any of this. `JOBS_LIST {busy}` lists them, to whoever
 sees the cluster.
+
+### Per-cluster switches (0.3.82)
+
+Config › Clusters › **Edit cluster › Collection** (an administrator's; others see it read-only):
+what ElasticPro may ask one cluster for, and when its heavy jobs may run. One definition,
+`collection.rs`, read from the cluster's `ClusterSpec` by the poller, the jobs and the worker alike.
+
+| switch | holds back | where it shows |
+|---|---|---|
+| ILM checks | the poller's `ilm_errors` and `ilm_assign` | the Clusters page's ILM pill reads *Off* (its tooltip: where to turn it on); the Overview's ILM card *Off* |
+| Snapshots | the poller's `snapshots`, `snapshots_full`, `snapshot_status` | the Clusters page's snapshot cell *Off*; the Snapshots page's block for the cluster says so |
+| Log delay | the measurement, scheduled and *Fetch now* | a `skipped` part of each scheduled run; *Fetch now* is refused (`switched_off`); the Log Delay page says so |
+| Hosts collection | the hosts collection (volume by host), by the timer, *Run now* and a report | one `skipped` run a day; *Run now* skips it with the reason; Reports › Volume by host says so (days already held stay readable) |
+| Heavy jobs only between HH and HH | the daily volume collection (with its backfill) and the hosts collection | one `deferred` run per wait: "\<cluster\> waits for 22:00: heavy jobs only 22:00–06:00 for this cluster (Edit cluster › Collection)" |
+
+- **Never asked.** A switched-off dataset is never planned and a page's `CLUSTER_DATASET` for it is
+  answered at once with `switchedOff: "<switch>"` and the sentence (no request, no wait). A
+  switched-off job never sends the cluster anything. Jobs shows it as **skipped — … switched off for
+  this cluster (Edit cluster › Collection)**, in amber, with *When it is switched on again* as its
+  retry and a link to Config — never as a failure. A timer that looks every minute records one
+  skipped run per cluster and job a day (in memory: a restart may add one).
+- **The hours are a hard rule** (owner's decision): whole hours of the server's time zone (the
+  stack's `TZ`); `from` is the first hour in, `to` the first hour out, so `22–06` runs 22:00–05:59 and
+  crosses midnight. Outside them the heavy jobs send nothing — by the timer, by a person's *Run now*
+  (skipped with "not now — heavy jobs only …") or for a volume or hosts report (the file has what the
+  record already held, and says why). A timer waits: when the window holds the job's usual place
+  (the daily volume run's `collectAt` and spread, the hosts collection's place in 06:00–08:00) it
+  runs there, and a run that comes due outside the window waits for it to open.
+- **A window that leaves the usual place out** (00–06 or 22–06 with `collectAt` 06:00) moves the run
+  into the window (`volume::schedule::Shift`), once per **window session** — a window across midnight
+  is one session from 22:00 to 06:00, so 22:00 and the 00:00 after it never both run. Index days are
+  UTC days, and a day is made final when it is over; the usual place keeps a margin after UTC
+  midnight for late logs (06:00 IST is 00:30 UTC: 30 minutes). A moved run keeps the same margin: it
+  starts at the first moment of the window that lies at least that far past UTC midnight — with
+  Asia/Kolkata, 00:00 IST (18:30 UTC) and 22:00 IST (16:30 UTC) are far past it, so the run goes as the
+  window opens and makes yesterday's UTC day final exactly as the usual run would; today's UTC day is
+  still live and is never made final. When no moment of the session is far enough (a UTC server with
+  00–06 and `collectAt` 06:00: every moment is under 6 h past UTC midnight), the run goes as the
+  window opens but leaves a day that ended less than the margin ago **not final**: it is searched
+  again by the next run, which makes it final. The hosts collection follows the same rule and, then,
+  does not collect such a day yet (a day file is written once). The hosts mail does not wait for such a cluster. The scheduled
+  log delay measurement is not a heavy job and keeps its interval.
+- **Stored with the cluster.** A config-file cluster: its entry's `collection:` —
+  `{ilm: false, snapshots: false, logDelay: false, hosts: false, heavyHours: {from: 22, to: 6}}`, only
+  what is off written; nothing off is no key. A cluster from Zabbix: the ElasticPro overlay's
+  `collection` field (`ZABBIX_CLUSTER_SAVE`; everything on is a reset). Below admin a change is refused
+  (`collection_admin`) by `CLUSTER_SAVE` and `ZABBIX_CLUSTER_SAVE`; other edits keep the switches as
+  they are. It travels with the config file (export, import) and the backup's *Clusters* section.
+
+### Quiet hours (0.3.82)
+
+Each cluster's quietest hour of the day, learned from what the core already sees (`jobs::quiet`):
+
+- **From**: the poller's own light requests (`poller:*` — health every interval and the small
+  datasets), which go to every cluster round the clock, so their answer time is the cluster's load;
+  and, once a minute, whether the cluster is busy (`jobs::load::busy`, above). A job's heavy searches
+  are left out (they would teach that whatever hour the job runs in is busy).
+- **Kept**: per cluster, per hour of the day (server time), a running mean of the answer time and of
+  the busy minutes, each over at most 600 samples so the last few days count. Score = mean answer
+  ms + busy share × 10 s. An hour counts after 20 samples; the profile names a quiet hour only once 20
+  of the 24 hours count, and only among the hours the cluster's heavy-job window allows. Only 2xx
+  answers teach it (a cluster refusing fast in maintenance is not quiet). The core writes it to
+  `<data>/job-runs/quiet.json` every 10 minutes (beside `busy.json`) — so a restart keeps it, and the
+  worker, which has no poller, reads it there. A file a week old says nothing, to the worker and to
+  the core at start. A cluster missing from the configured list is forgotten only after 24 hours (a
+  Zabbix sync that failed at start does not wipe its clusters' profiles).
+- **Used** — rule (owner's decision): a cluster that defers twice in a day waits for its quiet hour
+  rather than a third try at a busy hour.
+  - The hosts collection: its first busy wait of the day is as before ("tried again when it eases");
+    the second (at the tick, or a collection that failed because the cluster turned busy) moves the
+    cluster to the next start of its quietest hour — the deferred run says "\<cluster\> is busy: …;
+    waits for 03:00, this cluster's quietest hour", and Jobs shows those words. The tick leaves the
+    cluster alone until then, and may start it then even before `UI_REPORT_HOSTS_AT`. Busy at the quiet
+    hour too: it waits for it to ease, as before. The waits and moves are in memory.
+  - The volume backfill: a timer run whose backfill paused for query pressure is run again at the
+    cluster's quietest hour (once a day; the run's note says "backfill tried again at 03:00, this
+    cluster's quietest hour"), instead of waiting for the next day's run.
+  - The log delay measurement has no catch-up run: it measures its own window each interval and is
+    not moved.
+- **Unknown** (a new cluster, the first day): no quiet hour, and every job behaves as before.
 
 ### `JOB_SETTINGS_*`
 

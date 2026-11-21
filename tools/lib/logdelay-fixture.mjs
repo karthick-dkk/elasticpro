@@ -110,16 +110,26 @@ function sumDays(lists) {
   return [...by.values()];
 }
 
-/** Today's measurement windows of 2 hours up to now (docs/LOGDELAY.md "windows"): newly late, solved, still late. */
+/**
+ * Today's measurement windows of 2 hours up to now (docs/LOGDELAY.md "windows"): newly late,
+ * solved, still late; and (0.3.82) whether the window was measured and the devices late at its
+ * measurement. The window before the current one is not measured (no run in it), so Late devices
+ * over the day has a hatched cell whenever two windows have begun. The second cluster's window in
+ * progress has no reading yet (0.3.82: a pending cell, not counted in Measured).
+ */
 function windowsOf(now, ci, late) {
   const d = new Date(now); d.setHours(0, 0, 0, 0);
   const out = [];
+  const begun = Math.floor((now - d.getTime()) / 7200000) + 1;
   for (let from = d.getTime(); from <= now; from += 2 * 3600000) {
     const to = from + 2 * 3600000;
     const k = Math.round((from - d.getTime()) / 7200000);
     const hh = (ms) => `${String(new Date(ms).getHours()).padStart(2, '0')}:${String(new Date(ms).getMinutes()).padStart(2, '0')}`;
     const still = Math.max(0, late - ((k + ci) % 3)); const critical = Math.min(still, (k + ci) % 2);
-    out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: still, delay: still - critical, critical, complete: now >= to });
+    // The second cluster has no reading yet in the window in progress (runs are not aligned to windows): pending, not missing.
+    const measured = k !== begun - 2 && !(ci === 1 && k === begun - 1);
+    out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: still, delay: still - critical, critical, complete: now >= to,
+      measured, lateAt: measured ? still : null, criticalAt: measured ? critical : null });
   }
   return out;
 }
@@ -187,6 +197,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       const tt = totalsOf(p.rows);
       return { id: p.c.id, name: p.c.name, devices: tt.devices, measured: tt.measured, lateNow: tt.late, delay: tt.delay, critical: tt.critical, silent: tt.silent, unmeasured: tt.unmeasured,
         windows: windowsOf(now, p.ci, tt.late), fixes: FINDINGS(p.c, p.rows),
+        yesterdayWindow: { from: now - DAY, to: now - DAY + 7200000, label: 'yesterday', measured: true, lateAt: Math.max(0, tt.late - 1), criticalAt: 0 },
         otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now),
         below: tt.devices - tt.late, belowPct: Math.round(((tt.devices - tt.late) / tt.devices) * 1000) / 10, latePct: Math.round((tt.late / tt.devices) * 1000) / 10,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),

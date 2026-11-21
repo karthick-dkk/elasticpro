@@ -34,6 +34,7 @@ pub mod collect;
 pub mod derive;
 pub mod schedule;
 pub mod settings;
+pub mod shared;
 pub mod store;
 pub(crate) mod run;
 
@@ -246,6 +247,12 @@ pub struct Volume {
     pub(crate) permits: std::sync::Arc<tokio::sync::Semaphore>,
     /// One tick at a time: a tick that is still deciding when the next fires does nothing.
     pub(crate) ticking: std::sync::atomic::AtomicBool,
+    /// A backfill paused for query pressure, moved to its cluster's quietest hour (docs/JOBS.md
+    /// "Quiet hours"): when, server local time. In memory.
+    pub(crate) backfill_quiet: parking_lot::Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>,
+    /// The index list and field mapping the daily volume collection read, for the hosts
+    /// collection of the same cluster to use (`shared`, docs/VOLUME.md "Shared reads").
+    pub(crate) shared: shared::SharedReads,
 }
 
 /// Clusters collected at once, timer and Refresh now together.
@@ -260,6 +267,8 @@ impl Volume {
             runs: parking_lot::Mutex::new(Default::default()),
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(PARALLEL_CLUSTERS)),
             ticking: std::sync::atomic::AtomicBool::new(false),
+            backfill_quiet: parking_lot::Mutex::new(Default::default()),
+            shared: shared::SharedReads::default(),
         }
     }
 }

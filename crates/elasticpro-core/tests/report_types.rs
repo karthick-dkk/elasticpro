@@ -578,3 +578,105 @@ async fn a_cluster_answering_429_shrinks_only_its_own_work_and_most_clusters_rej
         }
     }
 }
+
+fn local_at(t: &str) -> chrono::NaiveDateTime {
+    chrono::NaiveDateTime::parse_from_str(&format!("{} {t}", chrono::Local::now().date_naive()), "%Y-%m-%d %H:%M").unwrap()
+}
+
+async fn hosts_runs(c: &Arc<Core>, cluster: &str) -> Vec<Value> {
+    let l = c.handle(json!({ "type": "JOBS_LIST", "jobId": "hosts.collect", "limit": 200 })).await;
+    l["runs"].as_array().unwrap_or_else(|| panic!("{l}")).iter().filter(|r| r["clusters"] == json!([cluster])).cloned().collect()
+}
+
+async fn all_held(c: &Arc<Core>, id: &str) -> Value {
+    for _ in 0..400 {
+        let q = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": id, "period": "monthSoFar", "limit": 1 })).await;
+        if q["days"].as_array().is_some_and(|d| d.iter().all(|x| x["held"] == true)) {
+            return q;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": id, "period": "monthSoFar", "limit": 1 })).await
+}
+
+/// Per-cluster switches (docs/JOBS.md "Per-cluster switches"): a cluster whose hosts collection is
+/// switched off is never asked — one `skipped` run a day says so, never a failure, and a person's
+/// *Run now* skips it with the same words; a cluster with heavy-job hours 22–06 (across midnight)
+/// is not asked outside them — one `deferred` run says until when — and runs once they open.
+#[tokio::test]
+async fn a_switched_off_cluster_is_skipped_and_heavy_hours_across_midnight_hold_the_timer() {
+    let ms = elasticpro_core::report::period::month_so_far(today());
+    let fx: Fixture = Arc::new(Mutex::new(ms.days().iter().map(|d| (format!("logstash-linux-{}", dot(*d)), rows(2, Some("C1"), None))).collect()));
+    let off_es = cluster(fx.clone(), Arc::new(Mutex::new(Plan::default()))).await;
+    let night_es = cluster(fx, Arc::new(Mutex::new(Plan::default()))).await;
+    let dir = TempDir::new("report-hosts-switches");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "off", "url": off_es.url(), "collection": { "hosts": false } },
+        { "id": "night", "url": night_es.url(), "collection": { "heavyHours": { "from": 22, "to": 6 } } } ] })).await;
+    assert_eq!(p["ok"], true, "{p}");
+    // 08:00 and 08:01: both past their places in 06:00–08:00.
+    assert!(c.hosts_tick_at(local_at("08:00")).await.is_empty());
+    assert!(c.hosts_tick_at(local_at("08:01")).await.is_empty());
+    assert!(off_es.hits().is_empty() && night_es.hits().is_empty(), "nothing asked of either");
+    let off = hosts_runs(&c, "off").await;
+    assert_eq!(off.len(), 1, "one skipped run a day, not one a tick: {off:?}");
+    assert_eq!(off[0]["status"], "skipped");
+    assert!(off[0]["error"].as_str().unwrap_or("").contains("hosts collection switched off for this cluster (Edit cluster › Collection)"), "{}", off[0]);
+    if !ms.days().is_empty() {
+        let night = hosts_runs(&c, "night").await;
+        assert_eq!(night.len(), 1, "one wait, however many ticks: {night:?}");
+        assert_eq!(night[0]["status"], "deferred");
+        assert!(night[0]["error"].as_str().unwrap_or("").contains("night waits for 22:00: heavy jobs only 22:00–06:00 for this cluster (Edit cluster › Collection)"), "{}", night[0]);
+    }
+    // A person's Run now is held by the switch too.
+    let r = c.handle(json!({ "type": "JOB_RUN", "jobId": "hosts.collect", "clusterIds": ["off"] })).await;
+    let why = r["skipped"].as_array().and_then(|a| a.first()).map(|s| s["reason"].clone()).unwrap_or(Value::Null);
+    assert!(why.as_str().unwrap_or("").contains("switched off for this cluster"), "{r}");
+    assert!(off_es.hits().is_empty());
+    // 23:00, inside 22–06: the night cluster runs; the switched-off one still does not.
+    if !ms.days().is_empty() {
+        assert_eq!(c.hosts_tick_at(local_at("23:00")).await, vec!["night".to_string()]);
+        let q = all_held(&c, "night").await;
+        assert!(q["days"].as_array().unwrap().iter().all(|x| x["held"] == true), "{q}");
+        assert!(off_es.hits().is_empty());
+    }
+}
+
+/// Shared reads (docs/VOLUME.md "Shared reads"): the hosts collection of a cluster uses the index
+/// list and the field mapping its daily volume run read a moment before, instead of asking them
+/// again — and collects exactly what it collects from its own.
+#[tokio::test]
+async fn the_hosts_collection_uses_the_list_and_mapping_the_daily_volume_run_just_read() {
+    let ms = elasticpro_core::report::period::month_so_far(today());
+    if ms.days().is_empty() {
+        return; // the 1st of the month: no closed day to collect
+    }
+    let fx: Fixture = Arc::new(Mutex::new(ms.days().iter().map(|d| (format!("logstash-linux-{}", dot(*d)), rows(2, Some("C1"), None))).collect()));
+    let es = cluster(fx, Arc::new(Mutex::new(Plan { no_undated: true, ..Plan::default() }))).await;
+    let dir = TempDir::new("report-hosts-shared");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": es.url() }] })).await;
+    assert_eq!(p["ok"], true, "{p}");
+    let cats = |es: &GaugedServer| es.hits().iter().filter(|h| h.path.starts_with("/_cat/indices/")).count();
+    let caps = |es: &GaugedServer| es.hits().into_iter().filter(|h| h.path.contains("/_field_caps")).collect::<Vec<_>>();
+    assert_eq!(c.volume_tick_at(local_at("06:00")).await, vec!["prod".to_string()]);
+    for _ in 0..400 {
+        let r = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": "prod", "days": 14, "avgDays": 3 })).await;
+        if r["status"]["running"] == json!(false) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(cats(&es), 1, "the daily volume run read the list");
+    let fc = caps(&es);
+    assert_eq!(fc.len(), 1, "and the mapping, once");
+    assert!(fc[0].path.contains("ClientID"), "the hosts collection's wider question: {}", fc[0].path);
+    assert_eq!(c.hosts_tick_at(local_at("06:00")).await, vec!["prod".to_string()]);
+    let q = all_held(&c, "prod").await;
+    assert!(q["days"].as_array().unwrap().iter().all(|x| x["held"] == true), "{q}");
+    assert_eq!(q["total"], (ms.days().len() * 2) as u64, "the same rows as from its own reads");
+    assert_eq!(cats(&es), 1, "the hosts collection did not ask the list again");
+    assert_eq!(caps(&es).len(), 1, "nor the mapping");
+    assert!(!composites(&es).is_empty(), "its own pages it asked");
+}

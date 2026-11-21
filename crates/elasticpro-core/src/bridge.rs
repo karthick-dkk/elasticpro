@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 mod governor_api;
 mod job_controls;
 mod jobs_api;
+mod request_cost_api;
 mod slow_searches;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
 /// holds without widening any field.
@@ -116,19 +117,26 @@ pub fn serialize_config(raw: &Value, yaml: bool) -> String {
 /// half a file. 0600 for a file being created, but never a downgrade of one that already
 /// exists: forcing it unconditionally once locked the operator out of their own config
 /// file — the hosted stack deliberately shares it between the container and the host user.
+///
+/// The temp file has its final mode before a byte is written (no window in which it is
+/// readable per the umask), a failure to set that mode fails the save, and a failed save leaves
+/// no temp file: `cluster_secrets::write_atomic_mode`, the one private writer.
 pub(crate) async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String> {
-    let tmp = p.with_extension("tmp");
     if let Some(dir) = p.parent() {
         let _ = tokio::fs::create_dir_all(dir).await;
     }
-    tokio::fs::write(&tmp, text).await.map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     #[cfg(unix)]
-    {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-    }
-    tokio::fs::rename(&tmp, p).await.map_err(|e| format!("cannot replace {}: {e}", p.display()))
+        std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600)
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    let (path, bytes) = (p.to_path_buf(), text.as_bytes().to_vec());
+    tokio::task::spawn_blocking(move || crate::cluster_secrets::write_atomic_mode(&path, &bytes, mode))
+        .await
+        .map_err(|e| format!("cannot replace {}: {e}", p.display()))?
+        .map_err(|e| format!("cannot replace {}: {e}", p.display()))
 }
 
 /// The server's config file, found and parsed (`Core::locate_config`).
@@ -215,6 +223,10 @@ pub struct Core {
     /// What people did, for a SIEM and for the Accounts page. Owned here rather than by a
     /// transport so the desktop app, the bridge and the tests all feed the same record.
     activity: crate::activity::ActivityLog,
+    /// Why this core must not serve: set when the first account could not be made the way the
+    /// operator asked (an unusable ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE). The hosted binary
+    /// exits on it before opening its port.
+    startup_refusal: Option<String>,
     /// `--config <path>` or ELASTICPRO_CONFIG: a config file to offer when none is remembered.
     config_hint: Option<String>,
     /// The operator's write unlock. Session-only on purpose: never written to disk and
@@ -343,6 +355,9 @@ pub struct Core {
     /// *Slow searches now* (docs/JOBS.md "Slow searches"): each cluster's last task list read,
     /// kept `slow_searches::READ_EVERY_MS` so several open pages read a cluster once.
     pub(crate) slow_cache: parking_lot::Mutex<HashMap<String, slow_searches::SlowRead>>,
+    /// Role worker: the quiet hours as the core last wrote them (`jobs::quiet`), with the file's
+    /// modification time, read again when it changes.
+    pub(crate) quiet_file: parking_lot::Mutex<Option<(Option<std::time::SystemTime>, crate::jobs::quiet::QuietBook)>>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -526,6 +541,12 @@ pub struct RequestLog {
     /// Clusters where a read we sent was let go of before its answer, and when: where the
     /// ES task reaper looks.
     pub abandoned: HashMap<String, u64>,
+    /// What the finished requests cost, per cluster and kind, over the last day (Jobs ›
+    /// Requests › Cost, `REQUEST_COST`): bounded, in memory only (request_cost.rs).
+    pub cost: crate::request_cost::CostBook,
+    /// Each cluster's quiet hours, learned from the poller's answers (`jobs::quiet`): 24 slots a
+    /// cluster, written to `<data>/job-runs/quiet.json` by the minute task.
+    pub quiet: crate::jobs::quiet::QuietBook,
 }
 
 impl RequestLog {
@@ -590,6 +611,19 @@ impl RequestLog {
             self.abandoned.insert(r.cluster.clone(), crate::fleet::now_ms());
         }
         r.status = Some(status);
+        let now = crate::fleet::now_ms();
+        self.cost.add(&crate::request_cost::Sample {
+            cluster: &r.cluster, origin: &r.origin, method: &r.method, path: &r.path, started_at: r.started_at, ms,
+            bytes: r.bytes, status: r.status.as_deref().unwrap_or(""), sent: r.sent, cached: r.cached, shared: r.shared,
+        }, now);
+        // The poller's own light answers teach the cluster's quiet hours (jobs::quiet).
+        // Only a 2xx: a cluster in maintenance that refuses fast is not quiet.
+        let answered_2xx = ok && r.status.as_deref().and_then(|s| s.parse::<u16>().ok()).is_some_and(|s| (200..300).contains(&s));
+        if answered_2xx && r.sent && !r.cached && !r.shared && crate::jobs::quiet::learns_from(&r.origin) {
+            if let Some(h) = crate::jobs::quiet::local_hour(r.started_at) {
+                self.quiet.add_answer(&r.cluster, h, ms);
+            }
+        }
         self.recent.push_back(r);
         while self.recent.len() > REQUEST_LOG_KEEP {
             self.recent.pop_front();
@@ -834,13 +868,15 @@ impl Core {
         let users = UserStore::open_with_rounds(auth_path("users.json"), rounds);
         // A fresh install gets the first account rather than an empty state and a
         // bootstrap screen. It opens with the shipped password until the administrator
-        // changes it, and every start it still does says so.
+        // changes it, and every start it still does says so — unless the operator gave a
+        // password file, and then only with that file: one that cannot be used stops the start.
+        let mut startup_refusal = None;
         if edition.uses_accounts() && !batch_only {
             let override_file = std::env::var_os(auth::INITIAL_PASSWORD_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
             if let Some(seeded) = auth::seed_first_account(&users, override_file.as_deref()) {
-                Core::log_seeded(&seeded, override_file.as_deref());
+                startup_refusal = Core::log_seeded(&seeded, override_file.as_deref());
             } else if users.default_unchanged() {
                 // Nothing here rewrites an existing accounts file; it is said out loud
                 // on every start instead, until someone changes it.
@@ -900,6 +936,7 @@ impl Core {
         Arc::new(Core {
             edition,
             activity,
+            startup_refusal,
             users,
             sessions: Sessions::open(auth_path("sessions.json")),
             tokens,
@@ -971,6 +1008,7 @@ impl Core {
             load: crate::jobs::load::LoadView::default(),
             governor: Arc::new(crate::jobs::governor::Governor::default()),
             slow_cache: parking_lot::Mutex::new(HashMap::new()),
+            quiet_file: parking_lot::Mutex::new(None),
         })
     }
 
@@ -1058,14 +1096,8 @@ impl Core {
                 }
             }
         }
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, keep.to_string()).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            }
-            let _ = std::fs::rename(&tmp, &p);
+        if let Err(e) = crate::cluster_secrets::write_private(&p, keep.to_string().as_bytes()) {
+            tracing::warn!("cannot keep the applied cluster setup in {}: {e}", p.display());
         }
     }
 
@@ -1103,12 +1135,20 @@ impl Core {
     /// The one startup line that announces the first account. Its wording ("created the
     /// first one") is what the docs tell operators to grep for. Printed once, on the start
     /// that creates the account.
-    fn log_seeded(s: &auth::Seeded, override_file: Option<&std::path::Path>) {
+    /// Returns the reason to refuse to start, when there is one.
+    fn log_seeded(s: &auth::Seeded, override_file: Option<&std::path::Path>) -> Option<String> {
         if let Some(why) = &s.override_error {
-            tracing::error!(
-                "{} not used ({why}); the account was created with the shipped password instead",
-                auth::INITIAL_PASSWORD_ENV
+            let refusal = format!(
+                "{} is set to {} but that file cannot be used ({why}); no account was created and \
+                 the core will not start with the shipped password instead — put a password of at \
+                 least {} characters on the file's first line (readable by the core), or unset {}",
+                auth::INITIAL_PASSWORD_ENV,
+                override_file.map(|p| p.display().to_string()).unwrap_or_default(),
+                auth::MIN_PASSWORD,
+                auth::INITIAL_PASSWORD_ENV,
             );
+            tracing::error!("{refusal}");
+            return Some(refusal);
         }
         if let Some(why) = &s.save_error {
             tracing::error!("the first account could not be saved and lasts only until restart: {why}");
@@ -1129,6 +1169,13 @@ impl Core {
                  your own on the Accounts page"
             );
         }
+        None
+    }
+
+    /// Why this core must not serve, if it must not (see the field). The hosted binary exits
+    /// non-zero on it; tests read it.
+    pub fn startup_refusal(&self) -> Option<&str> {
+        self.startup_refusal.as_deref()
     }
 
     /// The account store, for tests that need an account the message API cannot make
@@ -1709,6 +1756,7 @@ impl Core {
             "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
             "JOB_RUN_DETAIL" => self.job_run_detail(&msg, caller.as_ref()).await,
             "SLOW_SEARCHES" => self.slow_searches(&msg, caller.as_ref()).await,
+            "REQUEST_COST" => self.request_cost(caller.as_ref()),
             // The job controls (docs/JOBS.md): run now, pause, resume, cancel, retry, create, settings.
             "JOB_RUN" | "JOB_PAUSE" | "JOB_RESUME" | "JOB_CANCEL" | "JOB_RETRY" | "JOB_CREATE" | "JOB_DELETE"
             | "JOB_SETTINGS_GET" | "JOB_SETTINGS_SET" => self.job_msg(&t, &msg, caller.as_ref()).await,
@@ -2926,6 +2974,7 @@ impl Core {
         let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
             .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
         let log_time_zone = get("logTimeZone").or_else(|| get("log_time_zone"));
+        let collection = crate::collection::Collection::from_value(entry.get("collection"));
         let changed_address;
         let credential;
         {
@@ -2969,6 +3018,7 @@ impl Core {
                 time_field,
                 delay_fields,
                 log_time_zone,
+                collection,
             });
         }
         self.read_cache.clear();
@@ -5283,6 +5333,7 @@ impl Core {
                     id: id.clone(), name: Some(name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: tls.clone(),
                     zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
                     log_time_zone: overlay::log_time_zone(ov),
+                    collection: overlay::collection(ov),
                 });
             }
             let mut row = json!({
@@ -5960,6 +6011,14 @@ impl Core {
     /// that run's id instead of measuring (and writing) the same hour twice at once. `scope`
     /// narrows it to some clusters or one device (*Fetch now*); the query is the same.
     pub(crate) async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger, scope: delay_sink::MeasureScope) -> SinkRun {
+        // Fetch now of clusters whose log delay is switched off (Edit cluster › Collection): refused,
+        // nothing begun — the page says it is switched off, and where.
+        if let Some(ids) = scope.clusters.as_ref().filter(|ids| !ids.is_empty()) {
+            if ids.iter().all(|id| !self.collection_for(id).on(crate::collection::Switch::LogDelay)) {
+                let message = crate::collection::off_text(crate::collection::Switch::LogDelay);
+                return SinkRun { body: json!({ "ok": false, "kind": "switched_off", "message": message }), skipped: None, error: None };
+            }
+        }
         let paced = matches!(trigger, crate::jobs::Trigger::Timer) && scope.is_full();
         let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
             Ok(r) => r,
@@ -6116,6 +6175,17 @@ impl Core {
             // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
             if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
                 break;
+            }
+            // Switched off for this cluster (Edit cluster › Collection): never asked — a skipped
+            // part, not a failure. The interval stays the run's.
+            if !self.collection_for(id).on(crate::collection::Switch::LogDelay) {
+                ld_part(run, id, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &crate::collection::off_text(crate::collection::Switch::LogDelay))));
+                if let Some(r) = run {
+                    if !one_cluster {
+                        r.progress(done as u64 + 1, targets.len() as u64);
+                    }
+                }
+                continue;
             }
             if paced {
                 let place = std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms));
