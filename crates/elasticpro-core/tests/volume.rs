@@ -868,3 +868,22 @@ async fn the_daily_run_waits_for_its_heavy_hours_across_midnight() {
     settle(&c, "prod").await;
     assert!(srv.connections() > 0, "asked once the hours opened");
 }
+
+/// A window that leaves the cluster's place out without crossing midnight (00–06, collectAt
+/// 06:00): the daily run is due whenever the window is open and it has not run today — so the
+/// 00:00 tick starts it, and it is not asked again that day.
+#[tokio::test]
+async fn a_window_that_ends_before_collect_at_runs_the_day_when_it_opens() {
+    let t = today();
+    let listing: Listing = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(t - Duration::days(1))), 100)]));
+    let srv = cluster(listing, false).await;
+    let dir = TempDir::new("volume-heavy-early");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "prod", "url": srv.url(), "collection": { "heavyHours": { "from": 0, "to": 6 } } }] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(c.volume_tick_at(local(t, "00:00")).await, vec!["prod".to_string()], "the window opened: the day's run");
+    settle(&c, "prod").await;
+    assert!(c.volume_tick_at(local(t, "03:00")).await.is_empty(), "once a day");
+    assert!(c.volume_tick_at(local(t, "06:00")).await.is_empty(), "nor at collectAt, outside the window");
+}

@@ -1117,7 +1117,7 @@ impl Core {
         drop(cat);
         let listing = collect::read_cat(&cat_json, &ind);
         if shared::listing_shareable(&listing) {
-            self.volume.shared.put(id, &cat_path, &cat_json, crate::fleet::now_ms());
+            self.volume.shared.put(id, &self.shared_dest(id), &cat_path, &cat_json, crate::fleet::now_ms());
         }
         drop(cat_json);
 
@@ -1247,10 +1247,15 @@ impl Core {
                     if hosts_on && !time {
                         r.path = crate::report::hosts::field_caps_path(&ind, s, &self.hosts_config().fields, false);
                     }
+                    let wide = hosts_on && !time;
                     let path = r.path.clone();
-                    let fc = self.volume_req(r, opts.stop).await;
-                    if hosts_on && !time && ok(&fc) {
-                        self.volume.shared.put(id, &path, fc.get("json").unwrap_or(&Value::Null), crate::fleet::now_ms());
+                    let mut fc = self.volume_req(r, opts.stop).await;
+                    if wide && ok(&fc) {
+                        self.volume.shared.put(id, &self.shared_dest(id), &path, fc.get("json").unwrap_or(&Value::Null), crate::fleet::now_ms());
+                    } else if wide && (opts.stop)().is_none() {
+                        // The wider question refused (a cluster's limit on the request line, say):
+                        // the volume rows' own, shorter one, so the hosts fields never cost them.
+                        fc = self.volume_req(tag(collect::field_caps_request(id, &ind, s, time)), opts.stop).await;
                     }
                     fc
                 }
@@ -1474,7 +1479,13 @@ impl Core {
                 started.push(id);
                 continue;
             }
-            if !schedule::is_due(local, volume_start_at(&members, &id, &r.settings), last) || self.volume_unreachable(&id) {
+            // Due: past its place and not run today — or, when its heavy-job window leaves its place
+            // out (00–06 with collectAt 06:00), whenever the window is open and it has not run
+            // today, as the hosts collection does (docs/JOBS.md "Per-cluster switches").
+            let start = volume_start_at(&members, &id, &r.settings);
+            let place_allowed = spec.collection.heavy_hours.is_none_or(|h| h.contains(chrono::Timelike::hour(&start)));
+            let due = if place_allowed { schedule::is_due(local, start, last) } else { last.is_none_or(|l| l < local.date()) };
+            if !due || self.volume_unreachable(&id) {
                 continue;
             }
             // Its heavy-job hours (Edit cluster › Collection): a hard rule. Not marked, so it

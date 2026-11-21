@@ -51,7 +51,9 @@ pub struct ClusterSpec {
     pub log_time_zone: Option<String>,
     /// The config's `collection` (a Zabbix cluster's: its overlay's): what may be asked of the
     /// cluster and when its heavy jobs may run (`collection::Collection`). Absent = all on.
-    #[serde(default, skip_serializing_if = "crate::collection::Collection::is_default")]
+    /// Checked as it is read (PRIME, primed.json): a value that does not pass `collection::check`
+    /// is everything on, no window.
+    #[serde(default, deserialize_with = "crate::collection::de_checked", skip_serializing_if = "crate::collection::Collection::is_default")]
     pub collection: crate::collection::Collection,
 }
 

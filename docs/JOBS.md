@@ -637,9 +637,14 @@ what ElasticPro may ask one cluster for, and when its heavy jobs may run. One de
   stack's `TZ`); `from` is the first hour in, `to` the first hour out, so `22–06` runs 22:00–05:59 and
   crosses midnight. Outside them the heavy jobs send nothing — by the timer, by a person's *Run now*
   (skipped with "not now — heavy jobs only …") or for a volume or hosts report (the file has what the
-  record already held, and says why). A timer waits: the daily volume run is not marked and runs when
-  the window opens; a hosts collection whose place in 06:00–08:00 is outside the window runs as soon
-  as the window is open that day. The hosts mail does not wait for such a cluster. The scheduled
+  record already held, and says why). A timer waits: when the window holds the job's usual place
+  (the daily volume run's `collectAt` and spread, the hosts collection's place in 06:00–08:00) it
+  runs there, and a run that comes due outside the window waits for it to open; when the window
+  leaves that place out (00–06 with `collectAt` 06:00), the job is due whenever the window is open
+  and it has not run that local day — so it runs as the window opens, once a day. Note that a window
+  ending at 06:00 IST can start a run at 05:30 IST, which is 00:00 UTC: right at the close of the UTC
+  day, so that run may count the day just ended while its last logs still arrive (the hosts
+  collection reads only closed days; the daily volume run reads the day again next time). The hosts mail does not wait for such a cluster. The scheduled
   log delay measurement is not a heavy job and keeps its interval.
 - **Stored with the cluster.** A config-file cluster: its entry's `collection:` —
   `{ilm: false, snapshots: false, logDelay: false, hosts: false, heavyHours: {from: 22, to: 6}}`, only
@@ -659,9 +664,12 @@ Each cluster's quietest hour of the day, learned from what the core already sees
 - **Kept**: per cluster, per hour of the day (server time), a running mean of the answer time and of
   the busy minutes, each over at most 600 samples so the last few days count. Score = mean answer
   ms + busy share × 10 s. An hour counts after 20 samples; the profile names a quiet hour only once 20
-  of the 24 hours count, and only among the hours the cluster's heavy-job window allows. The core
-  writes it to `<data>/job-runs/quiet.json` every 10 minutes (beside `busy.json`) — so a restart keeps
-  it, and the worker, which has no poller, reads it there. A file a week old says nothing.
+  of the 24 hours count, and only among the hours the cluster's heavy-job window allows. Only 2xx
+  answers teach it (a cluster refusing fast in maintenance is not quiet). The core writes it to
+  `<data>/job-runs/quiet.json` every 10 minutes (beside `busy.json`) — so a restart keeps it, and the
+  worker, which has no poller, reads it there. A file a week old says nothing, to the worker and to
+  the core at start. A cluster missing from the configured list is forgotten only after 24 hours (a
+  Zabbix sync that failed at start does not wipe its clusters' profiles).
 - **Used** — rule (owner's decision): a cluster that defers twice in a day waits for its quiet hour
   rather than a third try at a busy hour.
   - The hosts collection: its first busy wait of the day is as before ("tried again when it eases");

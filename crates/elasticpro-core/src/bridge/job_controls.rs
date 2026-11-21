@@ -553,6 +553,12 @@ impl Core {
         self.spec_for(cluster).map(|s| s.collection).unwrap_or_default()
     }
 
+    /// Where `cluster` is now — address and route — for the shared reads (`volume::shared`): an
+    /// answer read before the cluster moved is never used for it.
+    pub(crate) fn shared_dest(&self, cluster: &str) -> String {
+        self.spec_for(cluster).map(|s| format!("{}|{}", s.url, s.via.unwrap_or_default())).unwrap_or_default()
+    }
+
     /* ---------------------------------------- quiet hours ---------------------------------------- */
 
     /// `cluster`'s quietest hour (docs/JOBS.md "Quiet hours") among those its heavy-job window
@@ -600,7 +606,7 @@ impl Core {
             for id in &ids {
                 log.quiet.add_minute(id, hour, busy.contains_key(id));
             }
-            log.quiet.retain(&ids);
+            log.quiet.retain(&ids, now);
             (now.saturating_sub(log.quiet.saved_at) >= SAVE_EVERY_MS).then(|| {
                 log.quiet.saved_at = now;
                 serde_json::to_vec(&log.quiet).unwrap_or_default()
@@ -632,6 +638,11 @@ impl Core {
         }
         let Some(d) = self.data_dir.as_deref() else { return };
         if let Ok(Some(book)) = crate::worker::read_json_retry::<QuietBook>(&d.join(jobs::DIR).join(FILE)) {
+            // A week old says nothing (the same rule the worker reads it by): learned afresh.
+            if crate::fleet::now_ms().saturating_sub(book.saved_at) > crate::jobs::quiet::FRESH_MS {
+                tracing::info!("jobs: the quiet hours on disk are over a week old; learned afresh");
+                return;
+            }
             let n = book.clusters.len();
             self.requests.lock().quiet = book;
             tracing::info!(clusters = n, "jobs: quiet hours read back");

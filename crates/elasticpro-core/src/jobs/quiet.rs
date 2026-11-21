@@ -44,6 +44,9 @@ pub const SAVE_EVERY_MS: u64 = 10 * 60_000;
 pub const FRESH_MS: u64 = 7 * 24 * 3_600_000;
 /// The most clusters kept (far above any fleet; only a bound).
 pub const MAX_CLUSTERS: usize = 5_000;
+/// A cluster no longer configured is forgotten only after it has been missing this long: a
+/// Zabbix sync that failed at start must not wipe its clusters' profiles.
+pub const KEEP_ABSENT_MS: u64 = 24 * 3_600_000;
 
 /// One hour of the day.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -71,6 +74,9 @@ fn mean(n: &mut u32, avg: &mut f64, x: f64) {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub hours: [Hour; 24],
+    /// When the cluster was last among the configured ones (unix ms; 0 = not yet stamped).
+    #[serde(default)]
+    pub seen: u64,
 }
 
 impl Profile {
@@ -135,9 +141,14 @@ impl QuietBook {
         }
     }
 
-    /// Only the clusters configured now.
-    pub fn retain(&mut self, keep: &HashSet<String>) {
-        self.clusters.retain(|c, _| keep.contains(c));
+    /// The clusters configured now are stamped seen; one missing for `KEEP_ABSENT_MS` is dropped.
+    pub fn retain(&mut self, keep: &HashSet<String>, now: u64) {
+        for (c, p) in self.clusters.iter_mut() {
+            if keep.contains(c) || p.seen == 0 {
+                p.seen = now;
+            }
+        }
+        self.clusters.retain(|_, p| now.saturating_sub(p.seen) <= KEEP_ABSENT_MS);
     }
 
     pub fn quiet_hour(&self, cluster: &str, window: Option<crate::collection::Hours>) -> Option<u32> {
@@ -207,8 +218,13 @@ mod tests {
         b.add_answer("a", 1, 10);
         b.add_answer("", 1, 10);
         b.add_minute("b", 1, true);
-        b.retain(&["a".to_string()].into_iter().collect());
-        assert_eq!(b.clusters.keys().collect::<Vec<_>>(), vec!["a"]);
+        let keep: HashSet<String> = ["a".to_string()].into_iter().collect();
+        b.retain(&keep, 1_000);
+        assert_eq!(b.clusters.len(), 2, "a cluster missing from one list (a failed sync) is kept");
+        b.retain(&keep, 1_000 + KEEP_ABSENT_MS);
+        assert_eq!(b.clusters.len(), 2, "not yet a day");
+        b.retain(&keep, 2_000 + KEEP_ABSENT_MS);
+        assert_eq!(b.clusters.keys().collect::<Vec<_>>(), vec!["a"], "missing for a day: dropped");
         let text = serde_json::to_string(&b).unwrap();
         assert_eq!(serde_json::from_str::<QuietBook>(&text).unwrap(), b, "round-trips through quiet.json");
         assert!(learns_from("poller:health") && !learns_from("volume-hosts"));

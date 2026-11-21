@@ -199,6 +199,13 @@ impl Collection {
     }
 }
 
+/// `ClusterSpec.collection` as read from PRIME or primed.json: through `check`, so what does not
+/// pass is everything on, all day.
+pub fn de_checked<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Collection, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(Collection::from_value(Some(&v)))
+}
+
 /// A `collection` value as it is kept, or why it is refused: only the keys above, each switch a
 /// boolean (a `true` is dropped — on is the default), `heavyHours` `{from, to}` whole hours
 /// 0–23 that differ, or null to leave it out. An empty result is `{}`.
@@ -296,6 +303,11 @@ mod tests {
         assert_eq!(c.off_datasets().len(), 2);
         assert!(!c.is_default() && Collection::default().is_default());
         assert_eq!(Collection::from_value(Some(&json!({ "ilm": 3 }))), Collection::default(), "unreadable: as before");
+        // PRIME and primed.json read it through the check too.
+        let spec: crate::http::ClusterSpec = serde_json::from_value(json!({ "id": "a", "url": "http://a", "collection": { "heavyHours": { "from": 4, "to": 4 } } })).unwrap();
+        assert!(spec.collection.is_default(), "an invalid window is no window");
+        let spec: crate::http::ClusterSpec = serde_json::from_value(json!({ "id": "a", "url": "http://a", "collection": { "hosts": false } })).unwrap();
+        assert!(!spec.collection.on(Switch::Hosts));
         // It round-trips through ClusterSpec's serde unchanged.
         let back: Value = serde_json::to_value(&c).unwrap();
         assert_eq!(back, v);

@@ -617,7 +617,9 @@ impl RequestLog {
             bytes: r.bytes, status: r.status.as_deref().unwrap_or(""), sent: r.sent, cached: r.cached, shared: r.shared,
         }, now);
         // The poller's own light answers teach the cluster's quiet hours (jobs::quiet).
-        if r.sent && !r.cached && !r.shared && crate::jobs::quiet::learns_from(&r.origin) {
+        // Only a 2xx: a cluster in maintenance that refuses fast is not quiet.
+        let answered_2xx = ok && r.status.as_deref().and_then(|s| s.parse::<u16>().ok()).is_some_and(|s| (200..300).contains(&s));
+        if answered_2xx && r.sent && !r.cached && !r.shared && crate::jobs::quiet::learns_from(&r.origin) {
             if let Some(h) = crate::jobs::quiet::local_hour(r.started_at) {
                 self.quiet.add_answer(&r.cluster, h, ms);
             }

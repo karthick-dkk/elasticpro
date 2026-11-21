@@ -332,7 +332,8 @@ impl Core {
         cat_req.origin = Some(hosts::ORIGIN.into());
         cat_req.timeout_ms = Some(timeout);
         let cat_path = cat_req.path.clone();
-        let shared_cat = self.volume.shared.get(&id, &cat_path, now_ms() as u64);
+        let dest = self.shared_dest(&id);
+        let shared_cat = self.volume.shared.get(&id, &dest, &cat_path, now_ms() as u64);
         let from_shared = shared_cat.is_some();
         if from_shared {
             let age = self.volume.shared.age_ms(&id, &cat_path, now_ms() as u64).unwrap_or(0);
@@ -349,7 +350,7 @@ impl Core {
         drop(cat);
         let listing = collect::read_cat(&cat_json, &ind);
         if !from_shared && crate::volume::shared::listing_shareable(&listing) {
-            self.volume.shared.put(&id, &cat_path, &cat_json, now_ms() as u64);
+            self.volume.shared.put(&id, &dest, &cat_path, &cat_json, now_ms() as u64);
         }
         let docs_of: HashMap<String, u64> = cat_json.as_array().into_iter().flatten().filter_map(|r| {
             let n = r.get("index")?.as_str()?.to_string();
@@ -364,7 +365,7 @@ impl Core {
         let time = !listing.time_split.is_empty();
         let fc_req = hosts::field_caps_request(&id, &ind, &s, &cfg.fields, time, timeout);
         let fc_path = fc_req.path.clone();
-        let fc = match (time, self.volume.shared.get(&id, &fc_path, now_ms() as u64)) {
+        let fc = match (time, self.volume.shared.get(&id, &dest, &fc_path, now_ms() as u64)) {
             (false, Some(j)) => {
                 tracing::info!(cluster = %id, "volume by host: the field mapping the daily volume run read is used, not asked again");
                 json!({ "ok": true, "json": j })
@@ -372,7 +373,7 @@ impl Core {
             _ => {
                 let fc = self.es_req(fc_req).await;
                 if !time && ok(&fc) {
-                    self.volume.shared.put(&id, &fc_path, fc.get("json").unwrap_or(&Value::Null), now_ms() as u64);
+                    self.volume.shared.put(&id, &dest, &fc_path, fc.get("json").unwrap_or(&Value::Null), now_ms() as u64);
                 }
                 fc
             }

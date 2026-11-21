@@ -324,7 +324,11 @@ other uses instead of asking again (`volume::shared`):
 - **The field mapping**: with the hosts collection on for the cluster, the daily volume run asks the
   hosts collection's wider field list (its rows' fields and the hosts metadata fields). `_field_caps`
   answers each field on its own, so the volume rows resolve exactly as from their own question.
-- **Only when**: the same cluster and path, read within 2 hours and on the same UTC day, and no
+- **Fallback**: should the cluster refuse the wider mapping question (a limit on the request
+  line, say), the daily volume run asks its own shorter one at once — the hosts fields never cost the
+  volume rows.
+- **Only when**: the same cluster at the same address and route, the same path, read within 2 hours
+  and on the same UTC day, and no
   index of the pattern is split by time (a rollover between the two reads could add a write index —
   such a list, and a mapping asked with the time field, is never kept). Otherwise the hosts
   collection asks the cluster itself, as before. In memory, at most 4 MB an answer and 32 MB in all.

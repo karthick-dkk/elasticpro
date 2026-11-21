@@ -44,6 +44,9 @@ pub const MAX_BYTES: usize = 32 << 20;
 
 struct Read {
     at: u64,
+    /// Where the cluster was when it was read (address and route): an answer from before the
+    /// cluster moved is another cluster's, never used.
+    dest: String,
     day: NaiveDate,
     text: String,
 }
@@ -59,8 +62,8 @@ fn utc_day(ms: u64) -> NaiveDate {
 }
 
 impl SharedReads {
-    /// Keep `json`, the answer to `path` on `cluster` read at `now`.
-    pub fn put(&self, cluster: &str, path: &str, json: &Value, now: u64) {
+    /// Keep `json`, the answer to `path` on `cluster` (at `dest`, `Core::shared_dest`) read at `now`.
+    pub fn put(&self, cluster: &str, dest: &str, path: &str, json: &Value, now: u64) {
         let text = json.to_string();
         let mut m = self.m.lock();
         m.retain(|_, r| now.saturating_sub(r.at) <= SHARE_MS);
@@ -69,18 +72,19 @@ impl SharedReads {
             m.remove(&key);
             return;
         }
-        m.insert(key, Read { at: now, day: utc_day(now), text });
+        m.insert(key, Read { at: now, dest: dest.to_string(), day: utc_day(now), text });
         while m.values().map(|r| r.text.len()).sum::<usize>() > MAX_BYTES {
             let Some(oldest) = m.iter().min_by_key(|(_, r)| r.at).map(|(k, _)| k.clone()) else { break };
             m.remove(&oldest);
         }
     }
 
-    /// The answer to `path` on `cluster`, when one is kept that may be used at `now`.
-    pub fn get(&self, cluster: &str, path: &str, now: u64) -> Option<Value> {
+    /// The answer to `path` on `cluster`, when one is kept that may be used at `now` — read at
+    /// the same `dest` (a cluster whose address or route changed since is asked again).
+    pub fn get(&self, cluster: &str, dest: &str, path: &str, now: u64) -> Option<Value> {
         let m = self.m.lock();
         let r = m.get(&(cluster.to_string(), path.to_string()))?;
-        if now < r.at || now - r.at > SHARE_MS || utc_day(now) != r.day {
+        if r.dest != dest || now < r.at || now - r.at > SHARE_MS || utc_day(now) != r.day {
             return None;
         }
         serde_json::from_str(&r.text).ok()
@@ -116,27 +120,28 @@ mod tests {
     fn kept_for_two_hours_of_the_same_utc_day_and_bounded() {
         let s = SharedReads::default();
         let rows = json!([{ "index": "logstash-2026.11.20", "status": "open", "docs.count": "5" }]);
-        s.put("a", "/_cat/indices/x", &rows, T);
-        assert_eq!(s.get("a", "/_cat/indices/x", T + 60_000), Some(rows.clone()), "the same answer, as it was read");
-        assert_eq!(s.get("b", "/_cat/indices/x", T), None, "another cluster's is not this one's");
-        assert_eq!(s.get("a", "/_cat/indices/y", T), None, "another question is not this one");
-        assert_eq!(s.get("a", "/_cat/indices/x", T + SHARE_MS + 1), None, "past two hours: asked again");
+        s.put("a", "d", "/_cat/indices/x", &rows, T);
+        assert_eq!(s.get("a", "d", "/_cat/indices/x", T + 60_000), Some(rows.clone()), "the same answer, as it was read");
+        assert_eq!(s.get("b", "d", "/_cat/indices/x", T), None, "another cluster's is not this one's");
+        assert_eq!(s.get("a", "d", "/_cat/indices/y", T), None, "another question is not this one");
+        assert_eq!(s.get("a", "d", "/_cat/indices/x", T + SHARE_MS + 1), None, "past two hours: asked again");
         assert_eq!(s.age_ms("a", "/_cat/indices/x", T + 5_000), Some(5_000));
+        assert_eq!(s.get("a", "elsewhere", "/_cat/indices/x", T + 5_000), None, "the cluster moved: asked again");
         // Read at 23:30 UTC, asked for at 00:10: a new UTC day — a new index — asked again.
         let late = T - 3_600_000;
-        s.put("a", "/p", &rows, late);
-        assert_eq!(s.get("a", "/p", late + 40 * 60_000), None);
+        s.put("a", "d", "/p", &rows, late);
+        assert_eq!(s.get("a", "d", "/p", late + 40 * 60_000), None);
         // Too big for one, and the whole bound.
         let big = Value::String("x".repeat(MAX_ONE + 1));
-        s.put("a", "/big", &big, T);
-        assert_eq!(s.get("a", "/big", T), None);
+        s.put("a", "d", "/big", &big, T);
+        assert_eq!(s.get("a", "d", "/big", T), None);
         let chunk = Value::String("y".repeat(MAX_ONE - 10));
         for i in 0..12 {
-            s.put("c", &format!("/c{i}"), &chunk, T + i);
+            s.put("c", "d", &format!("/c{i}"), &chunk, T + i);
         }
         assert!(s.bytes() <= MAX_BYTES, "{}", s.bytes());
-        assert_eq!(s.get("c", "/c0", T + 20), None, "the oldest went first");
-        assert!(s.get("c", "/c11", T + 20).is_some());
+        assert_eq!(s.get("c", "d", "/c0", T + 20), None, "the oldest went first");
+        assert!(s.get("c", "d", "/c11", T + 20).is_some());
     }
 
     #[test]
