@@ -206,7 +206,9 @@ kill $PID; wait $PID 2>/dev/null || true
 
 echo "== hosted mode, allowed sources and a server frame-ancestors =="
 P4=$(free_port); OUT4=$(mktemp)
+# 127.0.0.1 plays the proxy here (in compose it is nginx, trusted by name with nothing set).
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_ALLOWED_SOURCES="10.99.0.0/16" ELASTICPRO_FRAME_ANCESTORS="https://zbx.example.com" \
+  ELASTICPRO_TRUSTED_PROXIES=127.0.0.1/32 \
   ELASTICPRO_ZABBIX_SSO_SECRET="allowed-sources-secret-0123456789abcdef" RUST_LOG=info "$BIN" ui "$P4" >"$OUT4" 2>&1 & PID4=$!; disown
 trap 'kill $PID $PID4 2>/dev/null || true; rm -f "$OUT" "$OUT4"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P4/"; do sleep 0.2; done
@@ -216,6 +218,15 @@ check "X-Real-IP inside it gets past the list" "$(code_of http://127.0.0.1:$P4/z
 CSP=$(curl -s -D - -o /dev/null "http://127.0.0.1:$P4/" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-security-policy"{print $2}')
 check "the server's frame-ancestors wins"      "$CSP" "frame-ancestors https://zbx.example.com"
 kill $PID4; wait $PID4 2>/dev/null || true
+
+echo "== hosted mode, X-Real-IP from a peer that is not a trusted proxy =="
+PX=$(free_port); OUTX=$(mktemp)
+ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_ALLOWED_SOURCES="10.99.0.0/16" \
+  ELASTICPRO_ZABBIX_SSO_SECRET="allowed-sources-secret-0123456789abcdef" RUST_LOG=info "$BIN" ui "$PX" >"$OUTX" 2>&1 & PIDX=$!; disown
+trap 'kill $PID $PIDX 2>/dev/null || true; rm -f "$OUT" "$OUTX"' EXIT
+until curl -s -o /dev/null "http://127.0.0.1:$PX/"; do sleep 0.2; done
+check "a header from an untrusted peer is ignored" "$(code_of http://127.0.0.1:$PX/zabbix/pair -H 'x-real-ip: 10.99.4.5' -d '{}')" "403"
+kill $PIDX; wait $PIDX 2>/dev/null || true
 
 echo "== hosted mode, zabbix sign-in on =="
 SECRET="hosted-check-secret-0123456789abcdef"

@@ -448,7 +448,11 @@ function summarise(g) {
  * The alerts a filter bar leaves: severity, text, and whether acknowledged or silenced
  * ones are shown. `notesOf(mergedAlert)` supplies note text for the search.
  */
-export function filterAlerts(merged, { level = 'all', text = '', showHandled = false, notesOf = () => '' } = {}) {
+/**
+ * `keep(m)`: shown even when handled ones are hidden — an acknowledgement that did not save
+ * (hosted) stays on screen, marked "not saved" with Retry, instead of vanishing as if it had.
+ */
+export function filterAlerts(merged, { level = 'all', text = '', showHandled = false, notesOf = () => '', keep = () => false } = {}) {
   const t = String(text || '').trim().toLowerCase();
   return merged.filter((m) => {
     if (isHeld(m)) return false;   // held alerts are listed under their cluster's unreachable line, never here
@@ -456,7 +460,7 @@ export function filterAlerts(merged, { level = 'all', text = '', showHandled = f
     if (level === 'critical' && m.level !== 'critical') return false;
     if (level === 'high' && m.level !== 'high') return false;
     if (level === 'warning' && rank(m.level) > 1) return false;
-    if (!showHandled && isHandled(m)) return false;
+    if (!showHandled && isHandled(m) && !keep(m)) return false;
     if (t) {
       const hay = [m.title, m.count, m.detail, m.cluster && m.cluster.name, ...m.items.map((i) => `${i.label} ${i.value}`), notesOf(m)]
         .join(' ').toLowerCase();

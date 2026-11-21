@@ -19,6 +19,7 @@ import { tap } from 'node:test/reporters';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { findJsdom, jsdomRequired } from './lib/jsdom-app.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIR = path.join(ROOT, 'tools', 'unit');
@@ -29,6 +30,18 @@ const files = fs.existsSync(DIR)
 if (!files.length) {
   console.log('unit-check: no test files in tools/unit — nothing to run.');
   process.exit(0);
+}
+
+// A few files build DOM nodes and import jsdom. Without it they fail outright; say why up front,
+// and with CI set or --require-jsdom stop here with that reason instead of a page of stack traces.
+const domFiles = files.filter((f) => /from 'jsdom'|import\('jsdom'\)/.test(fs.readFileSync(f, 'utf8')));
+if (domFiles.length && !findJsdom([ROOT, process.cwd()]).entry) {
+  const names = domFiles.map((f) => path.basename(f)).join(', ');
+  if (jsdomRequired()) {
+    console.error(`unit-check: jsdom not found — FAILED (required: CI is set or --require-jsdom was passed); ${domFiles.length} file(s) need it: ${names}  (npm i jsdom)`);
+    process.exit(1);
+  }
+  console.error(`unit-check: jsdom not found — ${domFiles.length} file(s) that build DOM nodes will fail: ${names}  (npm i jsdom)`);
 }
 
 let failed = 0;

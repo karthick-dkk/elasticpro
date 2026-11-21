@@ -1009,7 +1009,7 @@ module signs with — is set from **Config → Zabbix** and kept in `<data dir>/
 | `syncSecs` | `ELASTICPRO_ZABBIX_SYNC_SECS` | 300 (30–86400) |
 | CSP `frame-ancestors` | `ELASTICPRO_FRAME_ANCESTORS` (the source list, verbatim) | the `zabbixUrl` origin while a sign-in secret is set, else `'none'` |
 | pairing callback address | `ELASTICPRO_PUBLIC_URL` | the admin's browser address (`epUrl`) |
-| trusted proxies for `X-Real-IP` | `ELASTICPRO_TRUSTED_PROXIES` (IPs/CIDRs) | unset = believe any peer's header (the `X-Auth-User` trust model) |
+| trusted proxies for `X-Real-IP` | `ELASTICPRO_TRUSTED_PROXIES` (IPs/CIDRs), added to the compose service `nginx` (looked up by name) | unset = only `nginx`; where it does not resolve, nobody: the TCP peer (0.3.82; before, any peer's header) |
 
 `ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE` (default `Elasticsearch Cluster by HTTP EP`) and the write
 token (`ELASTICPRO_ZABBIX_API_WRITE_TOKEN_FILE`) stay server-only. The template name is a setting
@@ -1080,8 +1080,8 @@ string is the sign-in secret.
 
 `/sso/zabbix` itself is unchanged on the wire; its secret now comes from the resolution function,
 and it also honours `allowedSources` (403) and a per-source budget of 120/min (429). The source is
-`X-Real-IP` (set by our nginx) — believed from any peer unless `ELASTICPRO_TRUSTED_PROXIES` names the
-proxies — else the TCP peer.
+`X-Real-IP` (set by our nginx) — believed only from the compose service `nginx` (by name, looked up
+again every 30 s and on a miss) and from `ELASTICPRO_TRUSTED_PROXIES` — else the TCP peer.
 
 **Framing.** The core sets `Content-Security-Policy: frame-ancestors …` on every response;
 nginx no longer sets one (a second CSP header would be enforced too and override the pairing).
@@ -1344,7 +1344,7 @@ one newest document each). Anything else: `{ok: false, kind: "forbidden", playOn
 "a display link only shows Play…"}`. It never writes (`allowWrites` is dropped before
 `Writes::decide`). The caller is rebuilt from the link at every request, so revoking it, its
 expiry, or switching links off ends every TV on it at once; `allowFrom` is checked on every
-request against the address `source_of` decides (X-Real-IP only from `ELASTICPRO_TRUSTED_PROXIES`).
+request against the address `source_of` decides (X-Real-IP only from `nginx` and `ELASTICPRO_TRUSTED_PROXIES`).
 A link keeps its five newest sessions (a TV that reloads makes a new one); a display-link session
 unused for a day is ended by housekeeping, like a Zabbix frame's.
 

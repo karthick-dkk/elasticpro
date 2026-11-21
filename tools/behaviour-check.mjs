@@ -20,7 +20,7 @@
 
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { findJsdom, bootApp, applyConfig, settleFor } from './lib/jsdom-app.mjs';
+import { findJsdom, jsdomMissing, bootApp, applyConfig, settleFor } from './lib/jsdom-app.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
@@ -36,9 +36,7 @@ let JSDOM;
 {
   const { entry, paths } = findJsdom([ROOT, process.cwd()]);
   if (!entry) {
-    console.log('behaviour-check: jsdom not found — skipping.');
-    console.log(`  install it in one of: ${paths.join(', ')}  (npm i jsdom)`);
-    process.exit(0);
+    jsdomMissing('behaviour-check', paths);
   }
   ({ JSDOM } = await import(pathToFileURL(entry).href));
 }
@@ -5945,6 +5943,90 @@ consolePanels: {
       const ahb = ah ? [...ah.querySelectorAll('button')].map((b) => b.textContent) : [];
       ok(ahb.includes('Acknowledge all') && ahb.includes('Silence ▾'), `alerts: a group header has ${JSON.stringify(ahb)}`);
       ok(ah && [...ah.querySelectorAll('button.btn')].every((b) => b.classList.contains('ghost')), 'alerts: a group-header action is not quiet');
+    }
+
+    // UI-03/UI-04: hosted, an acknowledgement or a note the server did not take must not look
+    // saved — the row says "not saved" with Retry, and "Note added" is not shown.
+    {
+      const before = globalThis.fetch;
+      const shared = new Map();
+      let down = true;
+      globalThis.fetch = async (input, init) => {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        const reply = (o) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(o), json: async () => o });
+        if (body.type === 'WHOAMI') {
+          const r = await before(input, init); let j = {};
+          try { j = JSON.parse(await r.text()); } catch (_) { /* keep the empty answer */ }
+          return reply({ ...j, ok: true, edition: 'hosted' });
+        }
+        if (body.type === 'ACK_LIST') return reply({ ok: true, acks: Object.fromEntries(shared) });
+        if (body.type === 'ACK_SET') {
+          if (down) return reply({ ok: false, kind: 'worker_error', message: 'ElasticPro server did not answer: offline' });
+          const ack = { by: 'qa', at: Date.now(), record: body.record };
+          shared.set(body.key, ack);
+          return reply({ ok: true, key: body.key, ack });
+        }
+        return before(input, init);
+      };
+      const toasts = () => [...doc.querySelectorAll('.toast-wrap .toast')].map((t) => t.textContent).join(' | ');
+      const bravo = () => [...doc.querySelectorAll('#view .arow.single')].find((r) => /bravo-ci/.test(r.textContent));
+      try {
+        acks.forgetAcksPlace();
+        await acks.loadAcks();
+        ok(acks.acksOnServer() === true, 'alerts unsaved: the check could not put acknowledgements on a (stubbed) hosted server');
+        await go('alerts');
+        const ackBtn = bravo() && [...bravo().querySelectorAll('.arow-main button')].find((b) => b.textContent === 'Ack');
+        ok(!!ackBtn, 'alerts unsaved: bravo-ci has no Ack');
+        if (ackBtn) {
+          ackBtn.click(); await settleFor(200);
+          const row = () => [...doc.querySelectorAll('#view .arow')].find((r) => /bravo-ci/.test(r.textContent));
+          ok(row() && row().querySelector('.ack-unsaved') && /not saved/.test(row().querySelector('.ack-unsaved').textContent),
+            `alerts unsaved: an acknowledgement the server did not take is not marked "not saved": "${row() && row().textContent}"`);
+          ok(row() && row().querySelector('button.ack-retry'), 'alerts unsaved: no Retry beside "not saved"');
+          ok(/Acknowledgement not saved/.test(toasts()), `alerts unsaved: no notice that the acknowledgement was not saved: "${toasts()}"`);
+          // A note that does not save: no "Note added", and the notes panel says so with Retry.
+          // On a row of a group, where Note is a button of its own.
+          const noteRow = () => [...doc.querySelectorAll('#view .arow:not(.single)')].find((r) => r.querySelector('.arow-notes') && /atlas-prod/.test(r.closest('section') ? r.closest('section').textContent : ''));
+          const noteBtn = noteRow() && noteRow().querySelector('.arow-notes');
+          ok(!!noteBtn, 'alerts unsaved: no row of atlas-prod has a Note button');
+          if (noteBtn) {
+            noteBtn.click(); await settleFor(80);
+            const box = doc.getElementById('note-input');
+            ok(!!box, 'alerts unsaved: the notes panel did not open');
+            if (box) {
+              box.value = 'ticket 4412';
+              const add = [...doc.querySelectorAll('button')].find((b) => b.textContent === 'Add');
+              add.click(); await settleFor(200);
+              ok(!/Note added/.test(toasts()), `alerts unsaved: "Note added" shown for a note that did not save: "${toasts()}"`);
+              ok(/Note not saved/.test(toasts()), `alerts unsaved: no notice that the note was not saved: "${toasts()}"`);
+              const line = doc.querySelector('.ack-unsaved-line');
+              ok(line && line.querySelector('button.ack-retry'), 'alerts unsaved: the notes panel has no "not saved" line with Retry');
+              down = false;
+              if (line && line.querySelector('button.ack-retry')) { line.querySelector('button.ack-retry').click(); await settleFor(200); }
+              ok(!doc.querySelector('.ack-unsaved-line'), 'alerts unsaved: Retry in the notes panel left "not saved"');
+              ok([...shared.values()].some((a) => (a.record.notes || []).some((n) => n.text === 'ticket 4412')), 'alerts unsaved: Retry did not send the note');
+              down = true;
+              doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settleFor(60);
+            }
+          }
+          // Retry with the server back: saved, the mark gone, and both the acknowledgement and the note kept.
+          down = false;
+          const retry = row() && row().querySelector('button.ack-retry');
+          if (retry) { retry.click(); await settleFor(200); }
+          // Saved, it is an ordinary acknowledged alert: hidden while acknowledged ones are, never "not saved".
+          ok(acks.unsavedReason('b:slm-mode') === '' && (!row() || !row().querySelector('.ack-unsaved')),
+            `alerts unsaved: Retry with the server answering left "not saved": "${row() && row().textContent}"`);
+          ok(!row(), 'alerts unsaved: once saved, the acknowledged alert is still shown with acknowledged ones hidden');
+          ok(shared.has('b:slm-mode') && shared.get('b:slm-mode').record.acked === true && shared.get('b:slm-mode').record.unsaved === undefined,
+            `alerts unsaved: Retry did not send the acknowledgement (and only it): ${JSON.stringify(shared.get('b:slm-mode'))}`);
+        }
+      } finally {
+        globalThis.fetch = before;
+        acks.forgetAcksPlace();
+        await acks.loadAcks();
+        await acks.unacknowledge('b:slm-mode');
+        st.invalidateAlerts(); await go('alerts');
+      }
     }
 
     // The counts are filters.

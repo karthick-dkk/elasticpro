@@ -11,14 +11,14 @@
  *   node tools/render-check.mjs --config path/to/config_cluster.json
  *   node tools/render-check.mjs --config path/to/config_cluster.json --direct   # the fallback path
  *
- * Needs jsdom (`npm i jsdom`); it exits 0 with a notice when jsdom is absent, so it can
- * sit in CI without making Node a build dependency of the app itself.
+ * Needs jsdom (`npm i jsdom`); it exits 0 with a notice when jsdom is absent — unless CI is
+ * set or `--require-jsdom` is passed, and then it fails (a skip has read as a pass before).
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { findJsdom, bootApp, applyConfig } from './lib/jsdom-app.mjs';
+import { findJsdom, jsdomMissing, bootApp, applyConfig } from './lib/jsdom-app.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui');
@@ -29,9 +29,7 @@ let JSDOM;
 {
   const { entry, paths } = findJsdom([ROOT, process.cwd()]);
   if (!entry) {
-    console.log('render-check: jsdom not found — skipping.');
-    console.log(`  install it in one of: ${paths.join(', ')}  (npm i jsdom)`);
-    process.exit(0);
+    jsdomMissing('render-check', paths);
   }
   ({ JSDOM } = await import(pathToFileURL(entry).href));
 }

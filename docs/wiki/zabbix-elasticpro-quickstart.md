@@ -194,7 +194,7 @@ The module uses this as *this Zabbix's address* when it pairs. ElasticPro only a
 
 ## Step 4 — ElasticPro: enter the Zabbix URL and make a pairing code
 
-**4a. Sign in as an ElasticPro administrator.** If this ElasticPro has never been signed in to, it has one account, `Admin`, with the password `elastic` — the same on every install. Open `https://<elasticpro-host>/`, sign in with it, and change the password on the Accounts page (at least 10 characters) before anyone else reaches the page: until you do, anyone who can load the page has the account, and the core says so in its log on every start. An install whose administrator already changed it, or that was given its own first password through `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE`, signs in with that instead.
+**4a. Sign in as an ElasticPro administrator.** If this ElasticPro has never been signed in to, it has one account, `Admin`. Installed with `deploy.sh` or `install.sh` (0.3.82 and later), its password is the random one the installer printed at the end (also in `deploy/secrets/admin/initial_admin_password` until you delete it); a core started without one has `elastic`, the same on every install. Open `https://<elasticpro-host>/`, sign in, and set your own password on the Accounts page (at least 10 characters). An install whose administrator already changed it, or that was given its own first password through `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE`, signs in with that instead.
 
 > Open ElasticPro at the address **the Zabbix web host** can reach (`https://<elasticpro-host>`), not through `localhost` or an SSH tunnel. The address in your browser bar is the one the pairing code tells Zabbix to call back.
 {.is-warning}

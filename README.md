@@ -29,8 +29,9 @@ curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/i
   | bash -s -- --hosted --yes            # --listen 9443 if something already holds 443
 ```
 
-Then open `https://<server>/` and sign in as `Admin` / `elastic` — change the password on first
-use. Add `--cache` for the Redis-backed fleet cache. The installer pulls the published image
+Then open `https://<server>/` and sign in as `Admin` with the random password the installer
+printed at the end (it is also in `deploy/secrets/admin/initial_admin_password` until you delete
+it) — set your own on the Accounts page. Add `--cache` for the Redis-backed fleet cache. The installer pulls the published image
 for the release and compiles only when there is none.
 
 Zabbix modules: every release attaches `elasticpro-zabbix-modules-<ver>.tar.gz` (and its `.sha256`)

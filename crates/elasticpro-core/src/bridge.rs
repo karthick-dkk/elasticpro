@@ -116,19 +116,26 @@ pub fn serialize_config(raw: &Value, yaml: bool) -> String {
 /// half a file. 0600 for a file being created, but never a downgrade of one that already
 /// exists: forcing it unconditionally once locked the operator out of their own config
 /// file — the hosted stack deliberately shares it between the container and the host user.
+///
+/// The temp file has its final mode before a byte is written (no window in which it is
+/// readable per the umask), a failure to set that mode fails the save, and a failed save leaves
+/// no temp file: `cluster_secrets::write_atomic_mode`, the one private writer.
 pub(crate) async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String> {
-    let tmp = p.with_extension("tmp");
     if let Some(dir) = p.parent() {
         let _ = tokio::fs::create_dir_all(dir).await;
     }
-    tokio::fs::write(&tmp, text).await.map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     #[cfg(unix)]
-    {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-    }
-    tokio::fs::rename(&tmp, p).await.map_err(|e| format!("cannot replace {}: {e}", p.display()))
+        std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600)
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    let (path, bytes) = (p.to_path_buf(), text.as_bytes().to_vec());
+    tokio::task::spawn_blocking(move || crate::cluster_secrets::write_atomic_mode(&path, &bytes, mode))
+        .await
+        .map_err(|e| format!("cannot replace {}: {e}", p.display()))?
+        .map_err(|e| format!("cannot replace {}: {e}", p.display()))
 }
 
 /// The server's config file, found and parsed (`Core::locate_config`).
@@ -215,6 +222,10 @@ pub struct Core {
     /// What people did, for a SIEM and for the Accounts page. Owned here rather than by a
     /// transport so the desktop app, the bridge and the tests all feed the same record.
     activity: crate::activity::ActivityLog,
+    /// Why this core must not serve: set when the first account could not be made the way the
+    /// operator asked (an unusable ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE). The hosted binary
+    /// exits on it before opening its port.
+    startup_refusal: Option<String>,
     /// `--config <path>` or ELASTICPRO_CONFIG: a config file to offer when none is remembered.
     config_hint: Option<String>,
     /// The operator's write unlock. Session-only on purpose: never written to disk and
@@ -834,13 +845,15 @@ impl Core {
         let users = UserStore::open_with_rounds(auth_path("users.json"), rounds);
         // A fresh install gets the first account rather than an empty state and a
         // bootstrap screen. It opens with the shipped password until the administrator
-        // changes it, and every start it still does says so.
+        // changes it, and every start it still does says so — unless the operator gave a
+        // password file, and then only with that file: one that cannot be used stops the start.
+        let mut startup_refusal = None;
         if edition.uses_accounts() && !batch_only {
             let override_file = std::env::var_os(auth::INITIAL_PASSWORD_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
             if let Some(seeded) = auth::seed_first_account(&users, override_file.as_deref()) {
-                Core::log_seeded(&seeded, override_file.as_deref());
+                startup_refusal = Core::log_seeded(&seeded, override_file.as_deref());
             } else if users.default_unchanged() {
                 // Nothing here rewrites an existing accounts file; it is said out loud
                 // on every start instead, until someone changes it.
@@ -900,6 +913,7 @@ impl Core {
         Arc::new(Core {
             edition,
             activity,
+            startup_refusal,
             users,
             sessions: Sessions::open(auth_path("sessions.json")),
             tokens,
@@ -1058,14 +1072,8 @@ impl Core {
                 }
             }
         }
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, keep.to_string()).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            }
-            let _ = std::fs::rename(&tmp, &p);
+        if let Err(e) = crate::cluster_secrets::write_private(&p, keep.to_string().as_bytes()) {
+            tracing::warn!("cannot keep the applied cluster setup in {}: {e}", p.display());
         }
     }
 
@@ -1103,12 +1111,20 @@ impl Core {
     /// The one startup line that announces the first account. Its wording ("created the
     /// first one") is what the docs tell operators to grep for. Printed once, on the start
     /// that creates the account.
-    fn log_seeded(s: &auth::Seeded, override_file: Option<&std::path::Path>) {
+    /// Returns the reason to refuse to start, when there is one.
+    fn log_seeded(s: &auth::Seeded, override_file: Option<&std::path::Path>) -> Option<String> {
         if let Some(why) = &s.override_error {
-            tracing::error!(
-                "{} not used ({why}); the account was created with the shipped password instead",
-                auth::INITIAL_PASSWORD_ENV
+            let refusal = format!(
+                "{} is set to {} but that file cannot be used ({why}); no account was created and \
+                 the core will not start with the shipped password instead — put a password of at \
+                 least {} characters on the file's first line (readable by the core), or unset {}",
+                auth::INITIAL_PASSWORD_ENV,
+                override_file.map(|p| p.display().to_string()).unwrap_or_default(),
+                auth::MIN_PASSWORD,
+                auth::INITIAL_PASSWORD_ENV,
             );
+            tracing::error!("{refusal}");
+            return Some(refusal);
         }
         if let Some(why) = &s.save_error {
             tracing::error!("the first account could not be saved and lasts only until restart: {why}");
@@ -1129,6 +1145,13 @@ impl Core {
                  your own on the Accounts page"
             );
         }
+        None
+    }
+
+    /// Why this core must not serve, if it must not (see the field). The hosted binary exits
+    /// non-zero on it; tests read it.
+    pub fn startup_refusal(&self) -> Option<&str> {
+        self.startup_refusal.as_deref()
     }
 
     /// The account store, for tests that need an account the message API cannot make

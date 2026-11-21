@@ -14,10 +14,16 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 /** A hosted core in miniature: WHOAMI, and the three ACK messages over a Map. */
 const server = new Map();
 const sent = [];
+/** Set to a reply to make the next ACK_SETs fail with it (a refusal, an unreachable core). */
+let failSet = null;
 globalThis.fetch = async (url, init) => {
   const msg = JSON.parse(init.body);
   sent.push(msg.type);
   let out;
+  if (msg.type === 'ACK_SET' && failSet) {
+    out = failSet;
+    return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(out) };
+  }
   switch (msg.type) {
     case 'WHOAMI': out = { ok: true, edition: 'hosted' }; break;
     case 'ACK_LIST': out = { ok: true, acks: Object.fromEntries(server) }; break;
@@ -73,4 +79,25 @@ test('pruning never rewrites a shared record: it clears one only when its cluste
   assert.equal(server.has('c3:health'), false);
   assert.equal(server.has('c2:disk'), true);
   assert.equal(acks.ackClusterOf('prod:eu:disk', ['prod', 'prod:eu']), 'prod:eu', 'the longest id wins');
+});
+
+test('an acknowledgement or a note the server did not take is marked not saved, kept, and retried', async () => {
+  failSet = { ok: false, kind: 'worker_error', message: 'ElasticPro server did not answer: offline' };
+  const rec = await acks.acknowledge('c9:heap', { by: 'x' });
+  assert.match(rec.unsaved, /did not answer/, 'the record says it is not saved');
+  assert.match(acks.unsavedReason('c9:heap'), /did not answer/);
+  assert.equal(server.has('c9:heap'), false);
+  const n = await acks.addNote('c9:heap', 'ticket 77');
+  assert.ok(n.unsaved, 'a note that failed is not saved either');
+  // A reload of the server's list keeps it shown (marked) rather than losing the note.
+  await acks.loadAcks();
+  assert.ok(acks.unsavedReason('c9:heap'));
+  assert.equal(acks.noteCount('c9:heap'), 1);
+  // Retry, with the server back: saved, the mark gone, and the mark itself never sent.
+  failSet = null;
+  const kept = await acks.retrySave('c9:heap');
+  assert.equal(kept.unsaved, undefined);
+  assert.equal(acks.unsavedReason('c9:heap'), '');
+  assert.equal(server.get('c9:heap').record.unsaved, undefined, 'the mark is not stored');
+  assert.equal(server.get('c9:heap').record.notes[0].text, 'ticket 77');
 });

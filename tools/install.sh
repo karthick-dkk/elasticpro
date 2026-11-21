@@ -351,6 +351,15 @@ if [ "$MODE" = hosted ]; then
     ok "Redis will run with the stack"
   fi
 
+  # A fresh install gets a random password for the first account instead of the public
+  # Admin/elastic (deploy/initial-admin.sh decides what "fresh" is, and never touches an install
+  # that has run before). A release from before 0.3.82 has no such script: Admin/elastic, as then.
+  ADMIN_MADE=0
+  if [ -x initial-admin.sh ]; then
+    out=$(./initial-admin.sh ensure) || die "could not make the first administrator's password"
+    if [ "$out" = made ]; then ADMIN_MADE=1; ok "Made a random password for the first administrator"; fi
+  fi
+
   if [ -n "$PUBLISHED" ]; then
     # .env as well as the environment: without this a later `docker compose up -d` on
     # this directory resolves the image to the default and spends twenty minutes
@@ -387,8 +396,15 @@ if [ "$MODE" = hosted ]; then
   info "and it will expire — replace deploy/tls/ before anyone relies on this."
   # The first account is made on first start rather than left for the first visitor to
   # name — whoever reached the page first would otherwise have become the administrator.
-  info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
-  info "until you do, anyone who reaches the sign-in page has the account."
+  if [ "$ADMIN_MADE" = 1 ]; then
+    # Shown once, on the terminal only (initial-admin.sh): never into a captured log.
+    ./initial-admin.sh report >&2
+  elif [ -x initial-admin.sh ]; then
+    info "Sign in with the administrator account this install already has."
+  else
+    info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
+    info "until you do, anyone who reaches the sign-in page has the account."
+  fi
   say ""
   info "For production, see deploy/PRODUCTION.md. In short:"
   info "  • a real certificate in deploy/tls/ (this one lasts 30 days)"

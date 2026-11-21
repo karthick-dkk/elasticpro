@@ -193,7 +193,9 @@ async fn config_write_then_read_round_trips() {
     assert!(res["lastModified"].as_u64().unwrap() > 0);
 
     // the .tmp staging file must not be left behind
-    assert!(!dir.join("config_cluster.tmp").exists(), "atomic write left its temp file");
+    let left: Vec<_> = std::fs::read_dir(&dir.0).unwrap().filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
+    assert!(left.is_empty(), "atomic write left its temp file: {left:?}");
 }
 
 #[cfg(unix)]
@@ -208,6 +210,14 @@ async fn a_written_config_is_readable_only_by_its_owner() {
 
     let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the config may hold a sealed credential; 0600, got {mode:o}");
+
+    // An existing file keeps its own mode (the hosted config is shared with the host user's
+    // group), set before the new text goes in — never narrowed, never widened.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+    let r = core(&dir).handle(json!({ "type": "CONFIG_WRITE", "path": path, "text": "{\"version\":2}" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o660, "got {mode:o}");
 }
 
 #[tokio::test]

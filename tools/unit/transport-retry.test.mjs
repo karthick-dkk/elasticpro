@@ -56,3 +56,15 @@ test('a write is not sent again after a 502: the core may have acted before it w
   assert.deepEqual(await T.bridge({ type: 'ES', method: 'GET', path: '/_cat/health' }), { ok: true, read: 1 });
   assert.equal(reads.length, 2);
 });
+
+test('a *_PUT message is a change: not sent again after a 502 (ALERT_EVENTS_PUT, NOTIFY_PUT, PLAY_SHARE_PUT)', async () => {
+  for (const type of ['ALERT_EVENTS_PUT', 'NOTIFY_PUT', 'PLAY_SHARE_PUT']) {
+    assert.equal(T.readsOnly({ type }), false, type);
+    const calls = serve(reply(502, NGINX(502, 'Bad Gateway')), reply(200, { ok: true }));
+    const r = await T.bridge({ type });
+    assert.equal(calls.length, 1, `${type} was sent again`);
+    assert.equal(r.errorCode, 'EP-607');
+  }
+  // A read whose name merely contains PUT somewhere else is still a read.
+  assert.equal(T.readsOnly({ type: 'PUTS_LIST' }), true);
+});

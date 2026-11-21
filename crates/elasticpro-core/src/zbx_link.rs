@@ -128,9 +128,27 @@ pub struct ServerZbx {
     /// `ELASTICPRO_PUBLIC_URL`: the address the Zabbix module should call back, when the
     /// admin's browser does not see the one the module can reach.
     pub public_url: Option<String>,
-    /// `ELASTICPRO_TRUSTED_PROXIES`: peers whose `X-Real-IP` is believed. Unset = any peer's.
+    /// `ELASTICPRO_TRUSTED_PROXIES`: peers (IPs/CIDRs) whose `X-Real-IP` is believed, besides
+    /// `default_proxy`. Unset = only `default_proxy`'s; with neither, nobody's: the TCP peer is
+    /// the source. (Before 0.3.82 unset meant any peer's.)
     pub trusted_proxies: Option<Vec<String>>,
+    /// A host name whose addresses are trusted proxies too, looked up by DNS and again when it
+    /// moves: [`DEFAULT_PROXY`] (the compose service `nginx`) on the hosted binary, so the shipped
+    /// stack trusts its own nginx with no setting and no fixed address. `None` in tests.
+    pub default_proxy: Option<String>,
 }
+
+/// The proxy the hosted stack trusts with nothing configured: the compose service in front of
+/// the core. Its address changes whenever compose recreates it, so it is a name, looked up.
+pub const DEFAULT_PROXY: &str = "nginx";
+/// A miss (a header from a peer not trusted) looks the name up again at most this often, so a
+/// caller sending headers cannot turn the core into a DNS flood.
+const PROXY_LOOKUP_GAP: Duration = Duration::from_secs(5);
+/// How long one lookup may take.
+const PROXY_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often the hosted binary looks the name up regardless (`ZbxLink::refresh_proxies`): the
+/// bound on how long an address the proxy has given up stays trusted.
+pub const PROXY_REFRESH: Duration = Duration::from_secs(30);
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -159,6 +177,7 @@ impl ServerZbx {
             frame_ancestors: env("ELASTICPRO_FRAME_ANCESTORS"),
             public_url: env("ELASTICPRO_PUBLIC_URL"),
             trusted_proxies: env("ELASTICPRO_TRUSTED_PROXIES").map(|v| list(&v)),
+            default_proxy: Some(DEFAULT_PROXY.to_string()),
         }
     }
 
@@ -449,6 +468,9 @@ pub struct ZbxLink {
     seen: Mutex<HashMap<String, Instant>>,
     hits: Mutex<HashMap<String, VecDeque<Instant>>>,
     writing: Mutex<()>,
+    /// The addresses `server.default_proxy` resolved to at the last lookup, and when that was.
+    proxy_addrs: RwLock<Vec<IpAddr>>,
+    proxy_looked_up: Mutex<Option<Instant>>,
 }
 
 impl ZbxLink {
@@ -464,6 +486,8 @@ impl ZbxLink {
             seen: Mutex::new(HashMap::new()),
             hits: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
+            proxy_addrs: RwLock::new(Vec::new()),
+            proxy_looked_up: Mutex::new(None),
         }
     }
 
@@ -564,7 +588,8 @@ impl ZbxLink {
     }
 
     /// The TCP peer is one of `ELASTICPRO_TRUSTED_PROXIES`. False when none is named: an
-    /// unset list trusts no peer to vouch for a user (unlike X-Real-IP, which it believes).
+    /// unset list trusts no peer to vouch for a user. Only the operator's list: the shipped nginx
+    /// blanks `X-Auth-User`, so it is never a reason to believe one.
     pub fn peer_is_trusted_proxy(&self, peer: Option<IpAddr>) -> bool {
         match &self.server.trusted_proxies {
             Some(list) => peer.is_some_and(|p| source_allowed(list, canon(p))),
@@ -572,18 +597,69 @@ impl ZbxLink {
         }
     }
 
-    /// The source a request came from: `X-Real-IP` when the peer is a trusted proxy (any
-    /// peer, when `ELASTICPRO_TRUSTED_PROXIES` is unset — the same trust nginx's `X-Auth-User`
-    /// gets), else the TCP peer.
+    /// The peer may vouch for the client's address: it is in `ELASTICPRO_TRUSTED_PROXIES`, or
+    /// it is one of the addresses the default proxy's name resolved to.
+    fn proxy_vouches(&self, peer: IpAddr) -> bool {
+        let p = canon(peer);
+        self.server.trusted_proxies.as_ref().is_some_and(|list| source_allowed(list, p))
+            || self.proxy_addrs.read().contains(&p)
+    }
+
+    /// The source a request came from: `X-Real-IP` when the peer is a trusted proxy (the
+    /// default proxy by name, or one in `ELASTICPRO_TRUSTED_PROXIES`), else the TCP peer. A
+    /// header from anyone else is ignored — it used to be believed from any peer while the
+    /// list was unset, so any container on the network could put any address in the activity
+    /// log and past `allowedSources` and a display link's `allowFrom`.
     pub fn effective_source(&self, real_ip: Option<&str>, peer: Option<IpAddr>) -> Option<IpAddr> {
         let hdr = real_ip.and_then(|h| h.trim().parse::<IpAddr>().ok()).map(canon);
-        match &self.server.trusted_proxies {
-            Some(list) => match peer {
-                Some(p) if source_allowed(list, p) => hdr.or(Some(canon(p))),
-                p => p.map(canon),
-            },
-            None => hdr.or(peer.map(canon)),
+        match peer {
+            Some(p) if self.proxy_vouches(p) => hdr.or(Some(canon(p))),
+            p => p.map(canon),
         }
+    }
+
+    /// [`Self::effective_source`], after looking the default proxy up again when a header came
+    /// from a peer that is not (yet) trusted — nginx recreated by compose has a new address.
+    /// Looked up at most every few seconds however many such requests arrive.
+    pub async fn source_for(&self, real_ip: Option<&str>, peer: Option<IpAddr>) -> Option<IpAddr> {
+        if real_ip.is_some() && self.server.default_proxy.is_some() && peer.is_some_and(|p| !self.proxy_vouches(p)) {
+            self.refresh_proxies(false).await;
+        }
+        self.effective_source(real_ip, peer)
+    }
+
+    /// Look the default proxy's name up and trust what it resolves to now (nothing, when it
+    /// does not resolve: outside compose, or nginx is down — the TCP peer is then the source).
+    /// `force` skips the minimum gap: the hosted binary's timer calls it every
+    /// [`PROXY_REFRESH`], so an address nginx gave up is not trusted for long.
+    pub async fn refresh_proxies(&self, force: bool) {
+        let Some(name) = self.server.default_proxy.clone() else { return };
+        {
+            let mut last = self.proxy_looked_up.lock();
+            if !force && last.is_some_and(|t| t.elapsed() < PROXY_LOOKUP_GAP) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let found: Vec<IpAddr> = match tokio::time::timeout(PROXY_LOOKUP_TIMEOUT, tokio::net::lookup_host((name.as_str(), 0))).await {
+            Ok(Ok(addrs)) => {
+                let mut v: Vec<IpAddr> = addrs.map(|a| canon(a.ip())).collect();
+                v.sort();
+                v.dedup();
+                v
+            }
+            _ => Vec::new(),
+        };
+        let mut now = self.proxy_addrs.write();
+        if *now != found {
+            tracing::info!(proxy = %name, addresses = ?found, "trusted proxy for X-Real-IP");
+            *now = found;
+        }
+    }
+
+    /// The addresses the default proxy is trusted at now. Tests and the hosted binary's start line.
+    pub fn proxy_addrs(&self) -> Vec<IpAddr> {
+        self.proxy_addrs.read().clone()
     }
 
     /// Named in `allowedSources` — trusted by the administrator, not merely "not refused":

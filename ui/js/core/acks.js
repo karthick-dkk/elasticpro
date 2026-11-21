@@ -48,6 +48,8 @@ async function serverKeeps() {
 
 /** Where they are kept now: true the server, false this browser, null not asked yet. */
 export function acksOnServer() { return onServer; }
+/** For the checks: forget where they are kept, so the next use asks WHOAMI again. */
+export function forgetAcksPlace() { onServer = null; }
 
 /** A reply saying the server does not have these messages (an older core): IndexedDB then. */
 function unsupported(res) {
@@ -70,17 +72,36 @@ function fromServer(key, a) {
   return rec;
 }
 
-/** Keep one record where this edition keeps them; the server's answer (who, when) wins. */
+/**
+ * Keep one record where this edition keeps them; the server's answer (who, when) wins.
+ *
+ * Hosted, a record the server refused or never got comes back marked `unsaved` (the reason):
+ * it is shown in this browser only, so the page must say "not saved" and offer Retry rather
+ * than look like the team's record (UI-03/UI-04). The mark itself is never sent or stored.
+ */
 async function persist(rec) {
+  const { unsaved: _was, ...clean } = rec;
   if (await serverKeeps()) {
-    const { key, ...record } = rec;
+    const { key, ...record } = clean;
     const res = await bridge({ type: 'ACK_SET', key, record });
     if (res && res.ok && res.ack) return fromServer(key, res.ack);
-    if (!unsupported(res)) return rec;          // refused or unreachable: this session only
+    if (!unsupported(res)) {
+      return { ...clean, unsaved: String((res && res.message) || 'the server did not answer') };
+    }
     onServer = false;
   }
-  try { await idb.putAck(rec); } catch (_) { /* memory-only for this session */ }
-  return rec;
+  try { await idb.putAck(clean); } catch (_) { /* memory-only for this session */ }
+  return clean;
+}
+
+/** Why this key's record is not saved (hosted: the server refused it or did not answer), or ''. */
+export function unsavedReason(key) { return String((cache.get(key) || {}).unsaved || ''); }
+
+/** Send a record that did not save again, as it is now. Resolves to the record kept. */
+export async function retrySave(key) {
+  const rec = cache.get(key);
+  if (!rec || !rec.unsaved) return rec || null;
+  return save(rec);
 }
 
 /** Forget one record where this edition keeps them. */
@@ -97,8 +118,12 @@ export async function loadAcks() {
   if (await serverKeeps()) {
     const res = await bridge({ type: 'ACK_LIST' });
     if (res && res.ok) {
+      // What did not save stays shown, marked, until it is retried: the server's list does
+      // not have it, and dropping it would lose what the person wrote without a word.
+      const pending = [...cache.values()].filter((r) => r.unsaved);
       cache.clear();
       for (const [key, a] of Object.entries(res.acks || {})) cache.set(key, fromServer(key, a));
+      for (const r of pending) cache.set(r.key, r);
       loaded = true; rev++;
       return cache;
     }
