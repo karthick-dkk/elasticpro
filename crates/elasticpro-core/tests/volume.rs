@@ -636,9 +636,18 @@ async fn a_scheduled_run_the_stop_ended_is_run_after_the_stop() {
     let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": clusters })).await;
     assert_eq!(r["ok"], true, "{r}");
 
-    // Four clusters start 15 min apart around collectAt (06:00 ± 30 min, jobs::spread): none
-    // before 05:30, and by 06:30 every one's place has come.
-    assert!(c.volume_tick_at(local(t, "05:29")).await.is_empty(), "nobody's place yet");
+    // Four clusters start 7½ min apart in the half hour from collectAt (06:00, jobs::spread):
+    // never before it, and by 06:30 every one's place has come. Volume shows each one's own
+    // start as its next run, the time the tick uses.
+    assert!(c.volume_tick_at(local(t, "05:59")).await.is_empty(), "never before collectAt");
+    let mut nexts = vec![];
+    for id in ids {
+        let d = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": id })).await;
+        nexts.push(d["status"]["nextRunAt"].as_i64());
+    }
+    nexts.sort();
+    nexts.dedup();
+    assert!(nexts.len() == 4 || nexts == vec![None], "four starts, or none shown off hosted: {nexts:?}");
     assert_eq!(c.volume_tick_at(local(t, "06:30")).await.len(), 4, "all four due");
     // Two hold the permits and have sent `_cat`; the other two wait. Then the stop.
     wait_for("two runs to reach their cluster", || servers.iter().filter(|s| cats(s) > 0).count() == 2).await;

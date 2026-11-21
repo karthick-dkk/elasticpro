@@ -153,9 +153,10 @@ impl Core {
                         return bad("not_found", format!("no cluster {unknown:?}"));
                     }
                 }
-                self.job_spawn(job, "the scheduled log delay measurement", trigger, meta, "nothing to do", |core, t| async move {
+                // Refused while the timer's run is open: said for how long when it is pacing.
+                self.delay_sink_busy(self.job_spawn(job, "the scheduled log delay measurement", trigger, meta, "nothing to do", |core, t| async move {
                     core.run_delay_sink(t, scope).await;
-                })
+                }))
             }
             jobs::HOUSEKEEPING => {
                 let caller = caller.cloned().unwrap_or(Caller { name: by.clone(), role: Role::Admin, must_change: false, scope: None, play: None });

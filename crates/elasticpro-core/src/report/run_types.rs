@@ -726,8 +726,14 @@ impl Core {
         }
         let at = self.hosts_at();
         let local = vsched::local_now();
-        let begun_today = (local.time() >= at).then_some(local.date());
-        vsched::local_to_ms(vsched::next_run(local, at, begun_today))
+        // The next cluster's own start (jobs::spread::scheduled_at, what the tick waits for):
+        // inside the two hours, the next one still to come; after them, tomorrow's first.
+        let Some((t, tomorrow)) = spread::next_start(&self.spread_members(), at, spread::HOSTS_WINDOW_MS, local.time()) else {
+            let begun_today = (local.time() >= at).then_some(local.date());
+            return vsched::local_to_ms(vsched::next_run(local, at, begun_today));
+        };
+        let day = if tomorrow { local.date() + chrono::Duration::days(1) } else { local.date() };
+        vsched::local_to_ms(day.and_time(t))
     }
 
     /// One tick of the daily hosts collection at the given server local time: from the hosts
@@ -764,11 +770,11 @@ impl Core {
         specs.sort_by(|a, b| a.id.cmp(&b.id));
         // Each cluster at its own place in the two hours from `at` (jobs::spread, docs/JOBS.md
         // "Spread"), so the fleet does not start, and retry, in the same minute.
-        let members: Vec<spread::Member> = specs.iter().map(|s| spread::Member::new(&s.id, s.via.as_deref())).collect();
+        let members = self.spread_members();
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
-            if local.time() < spread::start_at(at, spread::offset_ms(&members, &id, spread::HOSTS_WINDOW_MS) as i64) {
+            if local.time() < spread::scheduled_at(&members, &id, at, spread::HOSTS_WINDOW_MS) {
                 continue;
             }
             if self.reports.hosts_running.lock().contains(&id) || self.volume_unreachable(&id) || self.report_cluster_red(&id) {

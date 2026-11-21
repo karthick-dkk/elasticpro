@@ -5879,6 +5879,33 @@ impl Core {
     ///
     /// Unlike `delay_sink_blocker` this applies to a disarmed config too: pressing "Run
     /// now" is asking for a run, and a run with no destination still has nowhere to go.
+    /// Why the timer's paced run must end before its next cluster (jobs::spread): disarmed, the
+    /// emergency stop, or a refusal that came up since it began. Read from the live config, not
+    /// the run's copy. Worded as who stopped it (`Outcome::cancelled` says "cancelled by …").
+    fn delay_sink_halt(&self) -> Option<String> {
+        let live = self.delay_sink.read().config.clone();
+        if !live.enabled {
+            return Some("the admin switch (the measurement was disarmed while the run waited)".into());
+        }
+        if self.volume_stopped() {
+            return Some("the emergency stop".into());
+        }
+        self.delay_sink_refusal(&live).map(|n| format!("a refusal that came up while the run waited ({})", n.text()))
+    }
+
+    /// A person refused as "already running" while the timer's run spreads its clusters is told
+    /// for about how long (the pacing lasts up to 10 min: jobs::spread::measure_spread_ms).
+    pub(crate) fn delay_sink_busy(&self, mut v: Value) -> Value {
+        let now = delay_sink::now_ms();
+        let until = self.delay_sink.read().state.pacing_until.filter(|u| *u > now);
+        if let (Some(u), Some(m)) = (until, v["message"].as_str().map(String::from)) {
+            let min = (u - now + 59_999) / 60_000;
+            v["message"] = json!(format!("{m} — the scheduled run is measuring its clusters one after another; its last one starts in about {min} min"));
+            v["pacingUntil"] = json!(u);
+        }
+        v
+    }
+
     fn delay_sink_refusal(&self, cfg: &SinkConfig) -> Option<SinkNote> {
         if let Some(r) = cfg.refusal() {
             return Some(SinkNote::general(r));
@@ -5936,7 +5963,7 @@ impl Core {
         let paced = matches!(trigger, crate::jobs::Trigger::Timer) && scope.is_full();
         let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
             Ok(r) => r,
-            Err(busy) => return SinkRun { body: busy.answer("the scheduled log delay measurement"), skipped: None, error: None },
+            Err(busy) => return SinkRun { body: self.delay_sink_busy(busy.answer("the scheduled log delay measurement")), skipped: None, error: None },
         };
         if !scope.is_full() {
             run.scope(scope.to_json());
@@ -5964,6 +5991,9 @@ impl Core {
         }
         let outcome = if let Some(by) = run.cancel_asked() {
             crate::jobs::Outcome::cancelled(&by, out.body["measured"].as_u64())
+        } else if let Some(by) = out.body["halted"].as_str() {
+            // Ended before its next cluster by a disarm, the stop or a refusal: as a cancel ends.
+            crate::jobs::Outcome::cancelled(by, out.body["measured"].as_u64())
         } else if let Some(n) = &out.skipped {
             run.clusters(&note_ids(n));
             crate::jobs::Outcome::skipped(n.text())
@@ -6074,6 +6104,10 @@ impl Core {
         let targets: Vec<String> = if paced { crate::jobs::spread::order(&members) } else { targets };
         let spread_ms = crate::jobs::spread::measure_spread_ms(cfg.every_hours.clamp(1, 24) * 3_600_000);
         let begun = std::time::Instant::now();
+        let mut halted: Option<(String, usize)> = None;
+        if paced {
+            self.delay_sink.write().state.pacing_until = Some(now + spread_ms as i64);
+        }
         if let Some(r) = run {
             r.window(from_ms, to_ms);
         }
@@ -6085,11 +6119,21 @@ impl Core {
             }
             if paced {
                 let place = std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms));
-                // A second at a time, so a cancel (or the stop) is heard while it waits.
-                while begun.elapsed() < place && self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_none() {
+                // A second at a time, so a cancel, the emergency stop or a disarm is heard while it waits.
+                while begun.elapsed() < place && self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_none() && self.delay_sink_halt().is_none() {
                     tokio::time::sleep(place.saturating_sub(begun.elapsed()).min(std::time::Duration::from_secs(1))).await;
                 }
                 if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
+                    break;
+                }
+                // Asked again before every cluster: the run was decided up to ten minutes ago, and
+                // an admin's disarm, the emergency stop or a new refusal ends it here, like a
+                // cancel. The clusters it did not reach are skipped, not failed.
+                if let Some(why) = self.delay_sink_halt() {
+                    for left in &targets[done..] {
+                        ld_part(run, left, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &why)));
+                    }
+                    halted = Some((why, targets.len() - done));
                     break;
                 }
             }
@@ -6231,6 +6275,9 @@ impl Core {
                 done_part(applied.rows.len() as u64);
             }
         }
+        if paced {
+            self.delay_sink.write().state.pacing_until = None;
+        }
         // The recommended fixes, from what is now stored and what the poller last read.
         self.logdelay_refresh_fixes(now, cfg.every_hours);
 
@@ -6268,6 +6315,9 @@ impl Core {
                              scope.device.as_ref().map(|d| format!(", device {d}")).unwrap_or_default()),
             });
         }
+        if let Some((why, left)) = &halted {
+            notes.push(format!("stopped by {why}: {left} cluster(s) not reached"));
+        }
         if !truncated.is_empty() {
             notes.push(format!("{} cluster(s) have more than {max_devices} devices in the window: the first {max_devices} by name were measured, \
                                 the rest not (raise Max devices per run): {}", truncated.len(), truncated.join(", ")));
@@ -6281,7 +6331,8 @@ impl Core {
             body: json!({ "ok": ok, "measured": measured, "read": read_total, "pages": pages, "failed": failed, "writeFailed": write_failed, "failedClusters": failed_ids, "clusters": targets.len(),
                           "opened": opened, "solved": solved, "index": index, "destination": cfg.destination,
                           "window": { "from": from_ms, "to": to_ms }, "maxDevices": max_devices, "truncated": truncated,
-                          "scope": (!full).then(|| scope.to_json()), "note": (!notes.is_empty()).then(|| notes.join("; ")) }),
+                          "scope": (!full).then(|| scope.to_json()), "note": (!notes.is_empty()).then(|| notes.join("; ")),
+                          "halted": halted.as_ref().map(|(why, _)| why.clone()) }),
             skipped: None, error: first_error,
         }, touched)
     }

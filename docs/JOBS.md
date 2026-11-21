@@ -526,7 +526,7 @@ fixed place in its job's window, worked out in one place (`jobs::spread`):
 | job | window |
 |---|---|
 | `hosts.collect` | the two hours from `UI_REPORT_HOSTS_AT` (06:00–08:00 by default). Its retries (15 min after a failed try, three tries a day) follow from each cluster's own start, so they are spread too |
-| `volume.daily` | 30 minutes either side of each cluster's `collectAt` (never into the day before or after). *Refresh now* starts at once |
+| `volume.daily` | the 30 minutes from each cluster's `collectAt`, never before it (with `collectAt` just after UTC midnight an earlier start would close the day before too soon for its late logs) and never into the next day. *Refresh now* starts at once |
 | `logdelay.measure` | the timer's own run reads its clusters one after another in the spread's order, each started no sooner than its place in the first quarter of the interval, at most 10 minutes, so a run still ends well inside `everyHours`. A cluster that took longer than its slot is followed at once. *Run now* and *Fetch now* read at once |
 
 Why: production saw twelve clusters deferred or timed out between 08:03 and 08:11 UTC, the

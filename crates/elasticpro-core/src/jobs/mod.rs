@@ -231,7 +231,7 @@ pub static REGISTRY: [Descriptor; 13] = [
     },
     Descriptor {
         id: VOLUME_DAILY, name: "Daily volume collection", kind: JobKind::Automatic, owner: Owner::Worker,
-        schedule: "once a day around each cluster's collectAt (within 30 min either side, a fixed place per cluster), server local time (volume settings)",
+        schedule: "once a day in the 30 min after each cluster's collectAt (a fixed place per cluster, never before collectAt), server local time (volume settings)",
         next_run: NextRun::VolumeDaily, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     Descriptor {

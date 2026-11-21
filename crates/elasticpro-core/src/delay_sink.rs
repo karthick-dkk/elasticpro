@@ -334,6 +334,9 @@ pub struct SinkState {
     pub last_failed: usize,
     pub consecutive_failures: u32,
     pub next_due_at: Option<i64>,
+    /// While the timer's run spreads its clusters (`jobs::spread`): when its last cluster may
+    /// start, epoch ms — what a person refused as "already running" is told. Never stored.
+    pub pacing_until: Option<i64>,
 }
 
 /// What one caller may read of the scheduled measurement: the one place its notes, state and

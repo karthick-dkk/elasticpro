@@ -13,8 +13,9 @@
 //!    it (the cluster with the most company behind its jump host goes first; ties keep the
 //!    hash order). A cluster reached directly shares a jump host with nobody.
 //! 2. **Place.** The cluster at position `i` of `n` starts `i / n` of the way through the
-//!    window (`offset_ms`), or, for a window centred on a time, at the middle of the `i`-th of
-//!    `n` equal slices (`centred_offset_ms`): one cluster alone keeps the time it was given.
+//!    window (`offset_ms`): the first, and one cluster alone, keep the time they were given;
+//!    nobody starts before it. `scheduled_at` is that time, for the tick and for the "next run"
+//!    the pages show alike, so the two cannot differ.
 //!
 //! The same fleet gives the same places every day and after every restart. Adding or removing a
 //! cluster moves the others' places a little; nothing is stored.
@@ -27,8 +28,10 @@ use std::collections::VecDeque;
 /// The daily hosts collection starts its clusters across two hours from `UI_REPORT_HOSTS_AT`
 /// (06:00–08:00 by default).
 pub const HOSTS_WINDOW_MS: u64 = 2 * 3_600_000;
-/// The daily volume run starts each cluster within half an hour either side of its `collectAt`.
-pub const VOLUME_HALF_WINDOW_MS: u64 = 30 * 60_000;
+/// The daily volume run starts each cluster within the half hour from its `collectAt`. Never
+/// before it: with `collectAt` just after UTC midnight (06:00 IST is 00:30 UTC) a start before
+/// it would read the day before as final with too little time for its late logs.
+pub const VOLUME_WINDOW_MS: u64 = 30 * 60_000;
 /// The scheduled log delay measurement reads its clusters one after another; on the timer's run
 /// their starts are spread over the first quarter of its interval, at most ten minutes, so a
 /// run still ends well inside its interval (`measure_spread_ms`).
@@ -116,12 +119,20 @@ pub fn offset_ms(members: &[Member], id: &str, window_ms: u64) -> u64 {
     }
 }
 
-/// How far from the window's centre `id` starts, in `(-half_ms, half_ms)`: the middle of its
-/// slice of `[-half_ms, half_ms]`. `0` for one cluster alone (and for one not among `members`).
-pub fn centred_offset_ms(members: &[Member], id: &str, half_ms: u64) -> i64 {
-    match position(members, id) {
-        Some((i, n)) => ((2 * i as u64 + 1).saturating_mul(half_ms) / n as u64) as i64 - half_ms as i64,
-        None => 0,
+/// When `id`'s share of a daily job starts: `base` (the job's time) plus its place in a window
+/// of `window_ms` (`offset_ms`), within the day. The one answer the tick and the pages' "next
+/// run" both use.
+pub fn scheduled_at(members: &[Member], id: &str, base: NaiveTime, window_ms: u64) -> NaiveTime {
+    start_at(base, offset_ms(members, id, window_ms) as i64)
+}
+
+/// The next start of any of `members` after `now` today (`scheduled_at`); the first of
+/// tomorrow's when every one of today's has come. `None` without members.
+pub fn next_start(members: &[Member], base: NaiveTime, window_ms: u64, now: NaiveTime) -> Option<(NaiveTime, bool)> {
+    let times: Vec<NaiveTime> = members.iter().map(|m| scheduled_at(members, &m.id, base, window_ms)).collect();
+    match times.iter().filter(|t| **t > now).min() {
+        Some(t) => Some((*t, false)),
+        None => times.iter().min().map(|t| (*t, true)),
     }
 }
 
@@ -188,21 +199,34 @@ mod tests {
             let o = offset_ms(&m, &c.id, HOSTS_WINDOW_MS);
             assert!(o < HOSTS_WINDOW_MS, "{}: {o}", c.id);
             assert!(seen.insert(o / 60_000), "{}: one cluster a slot", c.id);
-            let k = centred_offset_ms(&m, &c.id, VOLUME_HALF_WINDOW_MS);
-            assert!(k > -(VOLUME_HALF_WINDOW_MS as i64) && k < VOLUME_HALF_WINDOW_MS as i64, "{}: {k}", c.id);
+            let base = NaiveTime::from_hms_opt(0, 30, 0).unwrap();
+            let at = scheduled_at(&m, &c.id, base, VOLUME_WINDOW_MS);
+            assert!(at >= base && at < NaiveTime::from_hms_opt(1, 0, 0).unwrap(), "{}: {at} never before collectAt", c.id);
         }
         // 32 clusters over two hours: 3¾ minutes apart, the first at the window's start.
         let first = &order(&m)[0];
         assert_eq!(offset_ms(&m, first, HOSTS_WINDOW_MS), 0);
         // One cluster alone keeps its time; one not in the fleet is not moved.
         let one = fleet(&[("prod", None)]);
-        assert_eq!((offset_ms(&one, "prod", HOSTS_WINDOW_MS), centred_offset_ms(&one, "prod", VOLUME_HALF_WINDOW_MS)), (0, 0));
-        assert_eq!((offset_ms(&m, "nobody", HOSTS_WINDOW_MS), centred_offset_ms(&m, "nobody", VOLUME_HALF_WINDOW_MS)), (0, 0));
-        // Two: a quarter of the window either side of the centre.
+        assert_eq!(offset_ms(&one, "prod", HOSTS_WINDOW_MS), 0);
+        assert_eq!(offset_ms(&m, "nobody", HOSTS_WINDOW_MS), 0);
+        // Two: the start of the window and its middle.
         let two = fleet(&[("a", None), ("b", None)]);
-        let mut ks = [centred_offset_ms(&two, "a", 1_000), centred_offset_ms(&two, "b", 1_000)];
+        let mut ks = [offset_ms(&two, "a", 1_000), offset_ms(&two, "b", 1_000)];
         ks.sort();
-        assert_eq!(ks, [-500, 500]);
+        assert_eq!(ks, [0, 500]);
+    }
+
+    #[test]
+    fn the_next_start_is_the_ticks_own() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let four = fleet(&[("a", None), ("b", None), ("c", None), ("d", None)]);
+        let starts: Vec<NaiveTime> = order(&four).iter().map(|id| scheduled_at(&four, id, t(6, 0), VOLUME_WINDOW_MS)).collect();
+        assert_eq!(starts, vec![t(6, 0), NaiveTime::from_hms_opt(6, 7, 30).unwrap(), t(6, 15), NaiveTime::from_hms_opt(6, 22, 30).unwrap()], "in order, 7½ min apart");
+        assert_eq!(next_start(&four, t(6, 0), VOLUME_WINDOW_MS, t(5, 0)), Some((t(6, 0), false)));
+        assert_eq!(next_start(&four, t(6, 0), VOLUME_WINDOW_MS, t(6, 10)), Some((t(6, 15), false)), "inside the window: the next cluster's");
+        assert_eq!(next_start(&four, t(6, 0), VOLUME_WINDOW_MS, t(7, 0)), Some((t(6, 0), true)), "all begun: tomorrow's first");
+        assert_eq!(next_start(&[], t(6, 0), VOLUME_WINDOW_MS, t(5, 0)), None);
     }
 
     #[test]
