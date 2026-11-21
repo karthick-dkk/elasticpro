@@ -310,6 +310,30 @@ indices. The backfill fills such days on later runs, gently.
 - **Requests per run, per cluster**, on top of the ones above: at most `backfillPerRun` searches
   and as many thread-pool readings. `backfillDays: 0` is exactly the collection before 0.3.75.
 
+### Shared reads (0.3.82)
+
+The daily volume run and the hosts collection of one cluster ask it two identical things — the log
+indices (`_cat/indices` over the volume pattern) and their field mapping (`_field_caps`) — and by
+default both start from 06:00, each cluster at the same place of its window. What one read, the
+other uses instead of asking again (`volume::shared`):
+
+- **The index list**, by its exact request path (both build it with one function from the same
+  settings). The daily volume run always reads it fresh — its sizes are figures it keeps — and leaves
+  it for the hosts collection, which uses it only for which indices count on which day and to split
+  its pages, never for a figure.
+- **The field mapping**: with the hosts collection on for the cluster, the daily volume run asks the
+  hosts collection's wider field list (its rows' fields and the hosts metadata fields). `_field_caps`
+  answers each field on its own, so the volume rows resolve exactly as from their own question.
+- **Only when**: the same cluster and path, read within 2 hours and on the same UTC day, and no
+  index of the pattern is split by time (a rollover between the two reads could add a write index —
+  such a list, and a mapping asked with the time field, is never kept). Otherwise the hosts
+  collection asks the cluster itself, as before. In memory, at most 4 MB an answer and 32 MB in all.
+- **Not shared: the heavy searches.** The day search (a `terms` top-N per field with sums) and the
+  hosts pages (an exact `composite` of index × host with metadata) are different questions with
+  different answers — terms counts are approximate across shards, a composite's exact — so neither is
+  computed from the other: every figure and day file stays as it was. What drops is two requests per
+  cluster and day.
+
 ### Store
 
 `<data>/volume/<escaped cluster id>/YYYY-MM.json.gz`: `{version:1, days:{"2026-10-20": Day}}`,

@@ -45,6 +45,7 @@ import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { bus, clusters } from '../core/state.js';
+import { isOff, offText } from '../core/collection.js';
 import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, timeZoneChipText, zoneChipShown, devicesByZone, countText } from '../core/logdelay-report.js';
 import { BOARD_RANGES, LIVE_RANGES, BOARD_MAX_DAYS, rangeLabel, rangeDays, normaliseRange, browserZone, zonedParts, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
@@ -439,8 +440,25 @@ function draw() {
   if (!host || !host.isConnected || isSnapshotMode()) return;
   P.begin();
   try {
-    mount(host, bar(), tools(), body());
+    const off = offNote();
+    // One cluster chosen whose log delay is switched off: the note, nothing measured to show.
+    mount(host, bar(), tools(), off, off && off.dataset.only === '1' ? null : body());
   } finally { P.end(); }
+}
+
+/**
+ * Log delay switched off (Edit cluster › Collection, core/collection.js): the cluster chosen, or
+ * the ones among all, are never measured — said here, and where to turn it on, rather than shown
+ * as clusters with no data. Null when none is.
+ */
+function offNote() {
+  const sel = pickId();
+  const list = clusters().filter((c) => (sel ? c.id === sel : true) && isOff(c, 'logDelay'));
+  if (!list.length) return null;
+  const only = !!sel;
+  const text = only ? `${offText('logDelay')}: it is not measured while it is off.`
+    : `${offText('logDelay')}: ${list.map((c) => c.name).join(', ')} — not measured while it is off.`;
+  return h('div.muted.ld-off', { dataset: { only: only ? '1' : '0' }, style: { fontSize: '12px', margin: '4px 0' } }, text);
 }
 
 function snapshotNotice() {

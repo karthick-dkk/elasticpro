@@ -169,6 +169,12 @@ fn req(cluster: &str, method: &str, path: String, body: Option<String>, timeout_
 /// `_field_caps` for the volume rows (source host, event size, forwarded size), the metadata
 /// fields and their `.keyword`, and the time field when some index is split by time.
 pub fn field_caps_request(cluster: &str, ind: &Indices, s: &VolumeSettings, fields: &[String], time: bool, timeout_ms: u64) -> EsRequest {
+    req(cluster, "GET", field_caps_path(ind, s, fields, time), None, timeout_ms)
+}
+
+/// That request's path: the one question the daily volume run asks too when the hosts collection
+/// is on for the cluster, so one answer serves both (`volume::shared`).
+pub fn field_caps_path(ind: &Indices, s: &VolumeSettings, fields: &[String], time: bool) -> String {
     let mut names = collect::field_caps_fields(s, time);
     for f in fields {
         for n in [f.clone(), format!("{f}.keyword")] {
@@ -177,7 +183,7 @@ pub fn field_caps_request(cluster: &str, ind: &Indices, s: &VolumeSettings, fiel
             }
         }
     }
-    req(cluster, "GET", format!("/{}/_field_caps?fields={}&ignore_unavailable=true", ind.expr(), names.join(",")), None, timeout_ms)
+    format!("/{}/_field_caps?fields={}&ignore_unavailable=true", ind.expr(), names.join(","))
 }
 
 /* ------------------------------------------ pages ------------------------------------------ */

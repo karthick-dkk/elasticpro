@@ -9706,11 +9706,135 @@ async function backToList() {
   await go('overview');
 }
 
+// Edit cluster › Collection (0.3.82, docs/JOBS.md "Per-cluster switches"): every switch on and no
+// hours by default; unticking ILM and Hosts collection and choosing 22–06 (the "to" hour follows
+// the "from" one, two equal hours are refused in the dialog) writes only what is off into the
+// cluster's own entry; the core is told on the next PRIME; the dialog opens on it again.
+{
+  const st = await load('core/state.js');
+  const ce = await load('ui/config-editor.js');
+  const realFetch = globalThis.fetch;
+  let written = null;
+  const primes = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    if (body.type === 'PRIME') primes.push(body);
+    return realFetch(input, init);
+  };
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const dialog = () => doc.querySelector('.modal-overlay .modal');
+  const saveBtn = (d) => [...d.querySelectorAll('button')].find((b) => /^Save$/.test(b.textContent.trim()));
+  const within = (p, ms = 4000) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
+  const before = st.state.caller;
+  try {
+    st.state.caller = { name: 'collection-check', role: 'admin' };
+    const target = st.clusters()[0];
+    const editing = ce.editCluster(ce.rawClusterOf(target));
+    await settleFor(300);
+    let dlg = dialog();
+    ok(dlg && dlg.querySelector('fieldset.ce-collection'), 'collection: Edit cluster has no Collection section');
+    if (dlg && dlg.querySelector('fieldset.ce-collection')) {
+      const box = (k) => dlg.querySelector(`#ce-col-${k}`);
+      ok(['ilm', 'snapshots', 'logDelay', 'hosts'].every((k) => box(k) && box(k).checked), 'collection: a cluster without the key does not open with every switch on');
+      const from = dlg.querySelector('#ce-col-from'), to = dlg.querySelector('#ce-col-to');
+      ok(from.value === '' && to.disabled, 'collection: the hours do not start on "any time" with "to" held');
+      ok(/Heavy jobs only between/.test(dlg.textContent) && /server time · a hard rule/.test(dlg.textContent), 'collection: the hours row does not say what it is');
+      box('ilm').checked = false;
+      box('hosts').checked = false;
+      from.value = '22'; from.dispatchEvent(new window.Event('change', { bubbles: true }));
+      ok(!to.disabled && to.value === '6', `collection: choosing 22:00 did not offer 06:00 as the end (${to.value})`);
+      to.value = '22';
+      written = null;
+      press(saveBtn(dlg)); await settleFor(300);
+      ok(dialog() && /two different whole hours/.test((dlg.querySelector('.modal-msg') || {}).textContent || '') && written === null,
+        'collection: two equal hours were not refused in the dialog');
+      to.value = '6';
+      press(saveBtn(dlg)); await within(editing); await settleFor(600);
+      let entry = null;
+      try { entry = (JSON.parse(written).clusters || []).find((c) => c.name === target.name); } catch (_) { /* not JSON */ }
+      ok(entry && JSON.stringify(entry.collection) === JSON.stringify({ ilm: false, hosts: false, heavyHours: { from: 22, to: 6 } }),
+        `collection: the save wrote ${entry ? JSON.stringify(entry.collection) : String(written).slice(0, 200)}`);
+      const live = st.clusters().find((c) => c.name === target.name);
+      ok(live && live.collection && live.collection.ilm === false && live.collection.hosts === false, 'collection: the cluster on screen does not carry the switches after the save');
+      await settleFor(300);
+      ok(primes.some((m) => (m.clusters || []).some((c) => c.collection && c.collection.hosts === false && c.collection.heavyHours && c.collection.heavyHours.from === 22)),
+        'collection: the core was not told the switches (PRIME without them)');
+      // Opened again: as saved.
+      const again = ce.editCluster(ce.rawClusterOf(live || target));
+      await settleFor(300);
+      dlg = dialog();
+      ok(dlg && !dlg.querySelector('#ce-col-ilm').checked && dlg.querySelector('#ce-col-snapshots').checked && dlg.querySelector('#ce-col-from').value === '22'
+        && dlg.querySelector('#ce-col-to').value === '6', 'collection: the dialog does not open on what was saved');
+      if (dlg) press([...dlg.querySelectorAll('button')].find((b) => /^Cancel$/.test(b.textContent.trim())));
+      await within(again);
+    }
+    // Below admin: shown, not changed.
+    st.state.caller = { name: 'collection-op', role: 'operator' };
+    const viewing = ce.editCluster(ce.rawClusterOf(st.clusters()[0]));
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg && dlg.querySelector('#ce-col-ilm')) {
+      ok(dlg.querySelector('#ce-col-ilm').disabled && dlg.querySelector('#ce-col-from').disabled && /Set by an administrator/.test(dlg.querySelector('fieldset.ce-collection').textContent),
+        'collection: an operator may change the switches in the dialog');
+      press([...dlg.querySelectorAll('button')].find((b) => /^Cancel$/.test(b.textContent.trim())));
+    }
+    await within(viewing);
+  } finally {
+    globalThis.fetch = realFetch;
+    doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+    st.state.caller = before;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+// Jobs (0.3.82): a cluster whose hosts collection is switched off is a skipped run — amber words
+// that say where to turn it on, never a red "Error:".
+{
+  const realFetch = globalThis.fetch;
+  const now = Date.now();
+  const st = await load('core/state.js');
+  const c0 = st.clusters()[0] || { id: 'c1', name: 'c1' };
+  const offRun = { id: 'run-off', jobId: 'hosts.collect', owner: 'worker', trigger: 'timer', status: 'skipped', createdAt: now - 60e3, startedAt: null, endedAt: now - 60e3,
+    progress: null, done: null, total: null, records: null, clusters: [c0.id],
+    error: `${c0.id}: skipped — hosts collection switched off for this cluster (Edit cluster › Collection)`,
+    parts: { succeeded: 0, partial: 0, failed: 0, deferred: 0, skipped: 1 } };
+  const job = { id: 'hosts.collect', name: 'Hosts collection', kind: 'automatic', owner: 'worker', schedule: 'daily from 06:00', nextRun: 'hosts_daily', priority: 'medium',
+    pausable: true, requests: { min: 1, max: 2 }, report: null, detailsFor: 'user', clusterScoped: true,
+    state: { enabled: true, paused: false, pausedBy: null, pausedAt: null, current: null, activeRuns: 0, lastRun: offRun, nextRunAt: null, nextRunNote: null } };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'JOBS_LIST') {
+      return stubReply({ ok: true, role: 'core', jobs: [job], runs: [offRun], next: null, busy: [], governor: null, problems: [],
+        process: { core: { role: 'core', cpuPct: 3, memoryPct: 20, gate: { running: 0, queued: 0 } }, worker: { state: 'up', cpuPct: 5, memoryPct: 20 } } });
+    }
+    return realFetch(input, init);
+  };
+  const was = st.state.caller;
+  try {
+    st.state.caller = null;
+    await go('jobs'); await settleFor(600);
+    const all = panel('All jobs');
+    const sub = all && all.querySelector('tbody tr[data-sub="hosts.collect"]');
+    ok(sub && sub.querySelector('.jb-warn') && !sub.querySelector('.jb-err') && !/Error:/.test(sub.textContent)
+      && /skipped — hosts collection switched off for this cluster \(Edit cluster › Collection\)/.test(sub.textContent),
+      `jobs: a switched-off skip reads "${sub && sub.textContent}"`);
+    const row = all && all.querySelector('tbody tr[data-job="hosts.collect"]');
+    ok(row && !row.querySelector('td:nth-child(7) .pill.red'), 'jobs: a switched-off skip is drawn red');
+  } finally {
+    globalThis.fetch = realFetch;
+    st.state.caller = was;
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices › Summary (day buttons, Columns / Rows, tag1 chips, the "i", CSV, empty record), hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, Overview button, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices › Summary (day buttons, Columns / Rows, tag1 chips, the "i", CSV, empty record), hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Edit cluster › Collection (switches, hours, only what is off saved), and Jobs (a switched-off skip in amber, strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

@@ -24,6 +24,8 @@ impl Core {
         if self.health.started.swap(true, Ordering::SeqCst) {
             return;
         }
+        // The quiet hours the last run learned (docs/JOBS.md "Quiet hours").
+        self.quiet_load();
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
@@ -44,6 +46,8 @@ impl Core {
     fn health_sample_now(&self, now: u64) {
         // Role core: the busy clusters for the worker, which has no poller (docs/JOBS.md).
         self.publish_busy(now);
+        // And each cluster's busy minute into its quiet-hours profile.
+        self.quiet_minute(now);
         let n = self.health.samples.fetch_add(1, Ordering::SeqCst);
         let worker = self.health_worker(now);
         let own_p95 = self.health.times.lock().window(1, now).own.p95_ms;

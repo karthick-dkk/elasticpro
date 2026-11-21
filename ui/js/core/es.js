@@ -79,7 +79,10 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // cluster with these and no others (auth.rs DelayShape).
                                      ...(c.timeField ? { timeField: c.timeField } : {}),
                                      ...(c.delayFields ? { delayFields: c.delayFields } : {}),
-                                     ...(c.logTimeZone ? { logTimeZone: c.logTimeZone } : {}) })),
+                                     ...(c.logTimeZone ? { logTimeZone: c.logTimeZone } : {}),
+                                     // The collection switches (Edit cluster › Collection): the
+                                     // poller and the jobs never ask what is switched off.
+                                     ...(c.collection && Object.keys(c.collection).length ? { collection: c.collection } : {}) })),
     jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
   });
 }

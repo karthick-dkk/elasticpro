@@ -15,6 +15,7 @@ pub mod bridge;
 pub mod cluster_meta;
 pub mod cluster_save;
 pub mod cluster_secrets;
+pub mod collection;
 pub mod config_diff;
 pub mod crypto;
 pub mod data_routing;

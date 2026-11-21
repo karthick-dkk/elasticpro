@@ -10,6 +10,7 @@
 import { pickConfigPath, readConfigText, savedConfigPath, rememberConfigPath } from './platform.js';
 import { bridge } from './transport.js';
 import { managedDefaults } from './managed.js';
+import { collectionOf } from './collection.js';
 import { VOLUME_DEFAULTS, cloneVolume, effectiveVolume } from './volume-config.js';
 
 export const CONFIG_FILE_TYPES = [
@@ -230,6 +231,9 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       // The zone the arrival time is stamped in (docs/LOGDELAY.md "Time zones"): UTC, an IANA
       // name, or '' = detect from the devices. The core reads it off PRIME (es.js).
       logTimeZone: c.logTimeZone || c.log_time_zone || '',
+      // What may be asked of the cluster and when its heavy jobs may run (Edit cluster ›
+      // Collection, core/collection.js): only what is switched off; the core reads it off PRIME.
+      collection: collectionOf(c),
       snapshotRepos: c.snapshotRepos || null,
       // Capacity planning: how long logs are meant to stay on the cluster and in the
       // repository. "30d", "90 days", "3M", "6 months", "1y" or a bare number of days.
@@ -423,6 +427,7 @@ export function zabbixEntry(z) {
     tags: ['zabbix', ...tags.filter((t) => String(t).toLowerCase() !== 'zabbix')], enabled: z.enabled !== false };
   for (const k of ['note', 'liveRetention', 'snapshotRetention', 'backupCapacity', 'tls', 'logTimeZone']) if (z[k]) e[k] = z[k];
   for (const k of ['volumeWindowDays', 'volumeTopDays', 'volumeHeadroomPercent']) if (Number.isFinite(z[k])) e[k] = z[k];
+  if (z.collection && typeof z.collection === 'object') e.collection = z.collection;
   return e;
 }
 

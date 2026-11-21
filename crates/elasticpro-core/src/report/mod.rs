@@ -79,6 +79,12 @@ pub struct Reports {
     /// The timer's attempts per cluster today: (local day, attempts, last at ms). Kept in
     /// `<data>/job-runs/hosts-tries.json` too, so a restart does not reset the three a day.
     pub(crate) hosts_attempts: parking_lot::Mutex<std::collections::HashMap<String, (String, u32, i64)>>,
+    /// The busy waits the timer met per cluster today: (local day, waits). The second in a day
+    /// moves the cluster to its quietest hour (docs/JOBS.md "Quiet hours"). In memory.
+    pub(crate) hosts_deferrals: parking_lot::Mutex<std::collections::HashMap<String, (String, u32)>>,
+    /// A cluster moved to its quietest hour: when (server local time) the timer may start it
+    /// again. In memory.
+    pub(crate) hosts_quiet: parking_lot::Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>,
     /// The waits before a failed page is asked again (2 s, 10 s, 30 s); the tests shorten them.
     pub(crate) backoff_ms: parking_lot::Mutex<[u64; 3]>,
     /// The hosts job watchdog in ms instead of `UI_REPORT_HOSTS_MAX_MINUTES` (the tests).
@@ -190,6 +196,7 @@ impl Reports {
                           // The tries the hosts collection made today, as its process last wrote them
                           // (only the process that runs it reads them back).
                           hosts_attempts: parking_lot::Mutex::new(tries),
+                          hosts_deferrals: Default::default(), hosts_quiet: Default::default(),
                           backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]), watchdog_ms: Default::default() };
         if !failed.is_empty() {
             tracing::warn!(jobs = failed.len(), "volume report: jobs running when the core stopped were marked failed");

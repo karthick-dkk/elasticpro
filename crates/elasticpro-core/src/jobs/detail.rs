@@ -202,6 +202,15 @@ impl Part {
     /// A cluster that did not succeed, `error` saying why: its code, retry and what to do
     /// worked out here, once. A deferral is a busy cluster's unless its text says otherwise.
     pub fn not_ok(job: &str, cluster: &str, status: PartStatus, error: &str, records: Option<u64>, elapsed_ms: Option<u64>) -> Part {
+        // Switched off for this cluster (Edit cluster › Collection): not an error at all — no
+        // code, and the one place that turns it back on.
+        if crate::collection::is_off_text(error) {
+            return Part {
+                cluster: cluster.into(), status, code: None, message: Some(redact(error)), records, elapsed_ms,
+                retry: Some(format!("When it is switched on again ({})", crate::collection::WHERE)),
+                todo: todo("Edit cluster", "switched off for this cluster: turn it on in Edit cluster › Collection (Config › Clusters)", "settings"),
+            };
+        }
         let mut code = ErrorCode::of(error);
         if status == PartStatus::Deferred && code == ErrorCode::Other {
             code = ErrorCode::Busy;

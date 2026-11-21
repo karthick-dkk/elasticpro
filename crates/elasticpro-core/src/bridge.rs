@@ -355,6 +355,9 @@ pub struct Core {
     /// *Slow searches now* (docs/JOBS.md "Slow searches"): each cluster's last task list read,
     /// kept `slow_searches::READ_EVERY_MS` so several open pages read a cluster once.
     pub(crate) slow_cache: parking_lot::Mutex<HashMap<String, slow_searches::SlowRead>>,
+    /// Role worker: the quiet hours as the core last wrote them (`jobs::quiet`), with the file's
+    /// modification time, read again when it changes.
+    pub(crate) quiet_file: parking_lot::Mutex<Option<(Option<std::time::SystemTime>, crate::jobs::quiet::QuietBook)>>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -541,6 +544,9 @@ pub struct RequestLog {
     /// What the finished requests cost, per cluster and kind, over the last day (Jobs ›
     /// Requests › Cost, `REQUEST_COST`): bounded, in memory only (request_cost.rs).
     pub cost: crate::request_cost::CostBook,
+    /// Each cluster's quiet hours, learned from the poller's answers (`jobs::quiet`): 24 slots a
+    /// cluster, written to `<data>/job-runs/quiet.json` by the minute task.
+    pub quiet: crate::jobs::quiet::QuietBook,
 }
 
 impl RequestLog {
@@ -610,6 +616,12 @@ impl RequestLog {
             cluster: &r.cluster, origin: &r.origin, method: &r.method, path: &r.path, started_at: r.started_at, ms,
             bytes: r.bytes, status: r.status.as_deref().unwrap_or(""), sent: r.sent, cached: r.cached, shared: r.shared,
         }, now);
+        // The poller's own light answers teach the cluster's quiet hours (jobs::quiet).
+        if r.sent && !r.cached && !r.shared && crate::jobs::quiet::learns_from(&r.origin) {
+            if let Some(h) = crate::jobs::quiet::local_hour(r.started_at) {
+                self.quiet.add_answer(&r.cluster, h, ms);
+            }
+        }
         self.recent.push_back(r);
         while self.recent.len() > REQUEST_LOG_KEEP {
             self.recent.pop_front();
@@ -994,6 +1006,7 @@ impl Core {
             load: crate::jobs::load::LoadView::default(),
             governor: Arc::new(crate::jobs::governor::Governor::default()),
             slow_cache: parking_lot::Mutex::new(HashMap::new()),
+            quiet_file: parking_lot::Mutex::new(None),
         })
     }
 
@@ -2959,6 +2972,7 @@ impl Core {
         let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
             .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
         let log_time_zone = get("logTimeZone").or_else(|| get("log_time_zone"));
+        let collection = crate::collection::Collection::from_value(entry.get("collection"));
         let changed_address;
         let credential;
         {
@@ -3002,6 +3016,7 @@ impl Core {
                 time_field,
                 delay_fields,
                 log_time_zone,
+                collection,
             });
         }
         self.read_cache.clear();
@@ -5316,6 +5331,7 @@ impl Core {
                     id: id.clone(), name: Some(name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: tls.clone(),
                     zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
                     log_time_zone: overlay::log_time_zone(ov),
+                    collection: overlay::collection(ov),
                 });
             }
             let mut row = json!({
@@ -5993,6 +6009,14 @@ impl Core {
     /// that run's id instead of measuring (and writing) the same hour twice at once. `scope`
     /// narrows it to some clusters or one device (*Fetch now*); the query is the same.
     pub(crate) async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger, scope: delay_sink::MeasureScope) -> SinkRun {
+        // Fetch now of clusters whose log delay is switched off (Edit cluster › Collection): refused,
+        // nothing begun — the page says it is switched off, and where.
+        if let Some(ids) = scope.clusters.as_ref().filter(|ids| !ids.is_empty()) {
+            if ids.iter().all(|id| !self.collection_for(id).on(crate::collection::Switch::LogDelay)) {
+                let message = crate::collection::off_text(crate::collection::Switch::LogDelay);
+                return SinkRun { body: json!({ "ok": false, "kind": "switched_off", "message": message }), skipped: None, error: None };
+            }
+        }
         let paced = matches!(trigger, crate::jobs::Trigger::Timer) && scope.is_full();
         let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
             Ok(r) => r,
@@ -6149,6 +6173,17 @@ impl Core {
             // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
             if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
                 break;
+            }
+            // Switched off for this cluster (Edit cluster › Collection): never asked — a skipped
+            // part, not a failure. The interval stays the run's.
+            if !self.collection_for(id).on(crate::collection::Switch::LogDelay) {
+                ld_part(run, id, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &crate::collection::off_text(crate::collection::Switch::LogDelay))));
+                if let Some(r) = run {
+                    if !one_cluster {
+                        r.progress(done as u64 + 1, targets.len() as u64);
+                    }
+                }
+                continue;
             }
             if paced {
                 let place = std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms));

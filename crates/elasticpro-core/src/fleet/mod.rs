@@ -315,7 +315,7 @@ impl Core {
 
     async fn fleet_tick(self: &Arc<Self>) {
         let all = self.all_specs();
-        let specs: Vec<SpecLite> = all.iter().map(|s| SpecLite { id: s.id.clone(), via: s.via.clone().filter(|v| !v.is_empty()) }).collect();
+        let specs: Vec<SpecLite> = all.iter().map(|s| SpecLite { id: s.id.clone(), via: s.via.clone().filter(|v| !v.is_empty()), off: s.collection.off_datasets() }).collect();
         let patterns: HashMap<String, Option<String>> = all.iter().map(|s| (s.id.clone(), s.log_index_pattern.clone())).collect();
         let keep: HashSet<String> = specs.iter().map(|s| s.id.clone()).collect();
         let backing_off: HashSet<String> = {
@@ -821,6 +821,17 @@ impl Core {
         let max_age_ms = msg.get("maxAgeSec").and_then(Value::as_u64).unwrap_or(cfg.interval(ds)) * 1000;
         let key = (id.clone(), ds);
         let now = now_ms();
+        // Switched off for this cluster (Edit cluster › Collection, collection.rs): never asked.
+        // The page is told so, and where — not handed an "unknown" it would show as a gap.
+        let off = self.spec_for(&id).and_then(|s| crate::collection::Switch::ALL.into_iter()
+            .find(|w| !s.collection.on(*w) && w.datasets().contains(&ds)));
+        if let Some(w) = off {
+            let reach = self.fleet.state.lock().reach.get(&id).cloned().unwrap_or_default();
+            let entry = serde_json::to_value(Entry::never(cfg.stale_after_ms(ds), None)).unwrap_or(Value::Null);
+            return json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
+                           "waited": false, "timedOut": false, "switchedOff": w.key(),
+                           "message": crate::collection::off_text(w) }).into();
+        }
         let rx = {
             let mut st = self.fleet.state.lock();
             st.last_activity = now;

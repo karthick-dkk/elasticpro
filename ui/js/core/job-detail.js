@@ -78,12 +78,22 @@ export function resultOf(run) {
  */
 export function troubleOf(run, nameOf = (id) => id) {
   if (!run || !run.error) return null;
+  const err = String(run.error);
+  const one = Array.isArray(run.clusters) && run.clusters.length === 1 ? run.clusters[0] : null;
+  // The core's words start with the cluster's id; shown, they start with its name.
+  const named = (id) => (id && err.startsWith(id) ? `${nameOf(id)}${err.slice(id.length)}` : err);
   if (run.status === 'deferred') {
     const d = run.deferred || null;
-    const who = d && d.cluster ? nameOf(d.cluster) : (Array.isArray(run.clusters) && run.clusters.length === 1 ? nameOf(run.clusters[0]) : null);
-    const why = d && d.reason ? d.reason : String(run.error);
+    const id = d && d.cluster ? d.cluster : one;
+    // A wait with words of its own (docs/JOBS.md): moved to the cluster's quietest hour, or
+    // waiting for its heavy-job hours — those words, still a warning.
+    if (/quietest hour|heavy jobs only/.test(err)) return { level: 'warn', text: `${named(id)} (a warning, not a failure)`, title: err };
+    const who = id ? nameOf(id) : null;
+    const why = d && d.reason ? d.reason : err;
     return { level: 'warn', text: who ? `${who} deferred — ${why}; retried automatically when it eases (a warning, not a failure)` : `Deferred — ${why}` };
   }
+  // Switched off for the cluster (Edit cluster › Collection): skipped on purpose, never an error.
+  if (run.status === 'skipped' && /switched off for this cluster/.test(err)) return { level: 'warn', text: named(one), title: err };
   return { level: 'err', text: `Error: ${run.error}`, title: String(run.error) };
 }
 

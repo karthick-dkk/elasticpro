@@ -15,6 +15,7 @@ import { empty } from '../pages/common.js';
 import { utcDay, monthName } from '../core/volume-daily.js';
 import { HOSTS_PAGE, hostsQuery, hostsOf, monthRange, sortKey } from '../core/report-types.js';
 import { amber } from './cells.js';
+import { isOff, offText } from '../core/collection.js';
 import { tableSort, sortTh } from '../lib/table-sort.js';
 
 const FIXED = [
@@ -200,5 +201,11 @@ export function hostsSection({ cluster, picker }) {
   if (pickerSlot && (pickerSlot.childNodes.length !== 1 || markupSig(pickerSlot.firstChild) !== markupSig(pick))) mount(pickerSlot, pick);
   if (v.state === 'idle') { v.state = 'loading'; setTimeout(fetchRows, 0); }
   paintTable();
+  // Switched off for this cluster (Edit cluster › Collection): nothing new is collected; the days
+  // already held stay readable, and the line says why no more come and where to turn it on.
+  if (isOff(cluster, 'hosts')) {
+    return h('div.hv-wrap', h('div.muted.hv-off', { style: { fontSize: '12px', margin: '0 0 6px' } },
+      `${offText('hosts')}: nothing new is collected; the days already held are below.`), root);
+  }
   return root;
 }

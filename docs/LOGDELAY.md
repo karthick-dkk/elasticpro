@@ -210,6 +210,12 @@ named in the card's head, so the difference seen is the delay.
   first arrival after ends it with what came back (`burstDocs`, `burstMinutes`). A device not
   seen for 7 days is forgotten (its open period is kept unsolved).
 
+**Switched off for a cluster** (Edit cluster › Collection, docs/JOBS.md "Per-cluster switches"):
+the scheduled run does not ask that cluster — it is a `skipped` part of the run ("skipped — log delay
+switched off for this cluster (Edit cluster › Collection)"), never a failure, and the run keeps its
+interval; *Fetch now* for it is refused (`switched_off`) before anything starts. The Log Delay page
+says which clusters are switched off.
+
 ## Which devices — live, now, in the range (one definition)
 
 The one query above is every measurement's: the timer's, `DELAY_SINK_RUN` and *Fetch now*. The

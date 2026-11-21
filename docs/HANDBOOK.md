@@ -138,6 +138,23 @@ logs sit at, at least 60 % agreeing and steady over 3 runs). The log delay is me
 offset is taken out, so an IST cluster whose logs are on time no longer shows 330 minutes. An
 unknown zone is refused when saved.
 
+`collection:` per cluster (Edit cluster › **Collection**, an administrator's; docs/JOBS.md
+"Per-cluster switches"): untick *ILM checks*, *Snapshots*, *Log delay* or *Hosts collection* and
+ElasticPro never asks that cluster for it — the pages say it is switched off and where, Jobs shows
+"skipped — switched off for this cluster", never a failure. *Heavy jobs only between HH and HH*
+(server time; 22–06 crosses midnight) is a hard rule for the daily volume collection with its
+backfill and the hosts collection, by the timer and by Run now; the log delay measurement keeps its
+interval. Only what is off is written:
+
+```yaml
+clusters:
+  - name: acme-prod
+    url: https://es-acme:9200
+    collection: { ilm: false, heavyHours: { from: 22, to: 6 } }   # no ILM checks; heavy jobs 22:00–06:00
+```
+
+A cluster from Zabbix keeps the same switches in ElasticPro (its overlay); Zabbix is not changed.
+
 `defaults: { tls: insecure }` (Config → Defaults → Certificates) is one switch for everything:
 every cluster whatever its own `tls:`, every jump host's SSH key, and the Zabbix API certificate
 are accepted without checking. Nothing is pinned by it, so setting it back to `auto` brings the

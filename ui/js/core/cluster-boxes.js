@@ -13,6 +13,7 @@
  * say, and the page writes what would fix it.
  */
 
+import { offText } from './collection.js';
 import { ilmPolicyState, ilmErrorsOf, slmCoverage, logsOf, NOT_KNOWN } from './lifecycle-errors.js';
 
 /* ----------------------------------- nodes ----------------------------------- */
@@ -72,6 +73,11 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
  */
 export function ilmCard(d, pattern) {
   const notKnown = (why) => ({ tone: 'grey', text: NOT_KNOWN, title: why });
+  // Switched off for the cluster (Edit cluster › Collection): never asked; the card says so and where.
+  if (d && d.switchedOff && d.switchedOff.ilm) {
+    const why = `${offText('ilm')}.`;
+    return { known: false, state: 'off', pill: { tone: 'grey', text: 'Off', title: why }, headline: 'Switched off', why };
+  }
   const mode = d && d.ilm && d.ilm.operation_mode;
   if (!mode) return { known: false, state: 'unknown', pill: notKnown('ILM status has not been read.'), headline: NOT_KNOWN, why: 'ILM status has not been read.' };
   const running = String(mode).toUpperCase() === 'RUNNING';

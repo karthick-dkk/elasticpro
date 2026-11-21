@@ -40,9 +40,9 @@ pub const MAX_ENTRIES: usize = 5000;
 
 /// Every field an overlay may set: the Edit dialog's for a config-file cluster, but the address
 /// (and the credential, which has its own store, and the type, which is `cluster_meta`'s).
-pub const FIELDS: [&str; 13] = [
+pub const FIELDS: [&str; 14] = [
     "name", "via", "tls", "enabled", "tags", "note", "liveRetention", "snapshotRetention", "backupCapacity",
-    "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "logTimeZone",
+    "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "logTimeZone", "collection",
 ];
 /// The fields the core applies to what it polls. The rest are the pages' and the reports'
 /// (`logTimeZone` the log delay measurement's: `logdelay::tz`).
@@ -167,6 +167,12 @@ pub fn check_field(field: &str, v: &Value) -> Result<Value, String> {
             crate::logdelay::tz::LogTimeZone::Detect => Err("logTimeZone: detect is the default — use \"Use Zabbix's value\" (reset) for it".into()),
             z => Ok(json!(z.setting())),
         },
+        // The collection switches (collection.rs): only what is switched off is kept; all on is
+        // the absence of an override (reset it).
+        "collection" => match crate::collection::check(v)? {
+            x if x.as_object().is_some_and(|m| m.is_empty()) => Err("collection: everything on is the default — reset it".into()),
+            x => Ok(x),
+        },
         _ => Err(format!("{field}: not a field ElasticPro keeps for a Zabbix cluster")),
     }
 }
@@ -249,6 +255,9 @@ pub fn below_admin_refusal(set: &BTreeMap<String, Value>, reset: &[String], own:
     if set.get("tls").and_then(Value::as_str) == Some("insecure") {
         return Some(refusal("tls_insecure", "only an administrator turns certificate checks off (tls: insecure)"));
     }
+    if set.contains_key("collection") || reset.iter().any(|r| r == "collection") {
+        return Some(refusal("collection_admin", "only an administrator changes a cluster's collection switches (Edit cluster › Collection)"));
+    }
     let moves = DESTINATION.iter().any(|k| set.contains_key(*k) || reset.iter().any(|r| r == k));
     if own && moves {
         return Some(refusal("credential_destination",
@@ -293,6 +302,11 @@ pub fn log_time_zone(ov: Option<&Overlay>) -> Option<String> {
     ov.and_then(|o| o.text("logTimeZone")).map(String::from)
 }
 
+/// The collection switches set in ElasticPro for a Zabbix cluster, for its spec.
+pub fn collection(ov: Option<&Overlay>) -> crate::collection::Collection {
+    crate::collection::Collection::from_value(ov.and_then(|o| o.get("collection")))
+}
+
 /// The tags a Zabbix cluster has without an overlay: its client.
 pub fn zabbix_tags(client: Option<&str>) -> Vec<String> {
     client.filter(|c| !c.trim().is_empty()).map(|c| vec![c.to_string()]).unwrap_or_default()
@@ -307,7 +321,7 @@ pub fn row_fields(ov: Option<&Overlay>, zabbix_name: &str, zabbix_via: Option<&s
     let mut m = Map::new();
     let pick = |k: &str| ov.and_then(|o| o.get(k)).cloned();
     m.insert("tags".into(), pick("tags").unwrap_or_else(|| json!(zabbix_tags(client))));
-    for k in ["note", "liveRetention", "snapshotRetention", "backupCapacity", "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "tls", "logTimeZone"] {
+    for k in ["note", "liveRetention", "snapshotRetention", "backupCapacity", "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "tls", "logTimeZone", "collection"] {
         m.insert(k.into(), pick(k).unwrap_or(Value::Null));
     }
     m.insert("enabled".into(), json!(enabled(ov)));
@@ -526,6 +540,16 @@ mod tests {
         assert_eq!(log_time_zone(Some(&Overlay { fields: [("logTimeZone".to_string(), json!("Asia/Kolkata"))].into(), ..Default::default() })), Some("Asia/Kolkata".into()));
         assert_eq!(log_time_zone(None), None);
         assert!(row_fields(None, "h", None, None).contains_key("logTimeZone"), "the row says it (null = not set)");
+        assert_eq!(check_field("collection", &json!({ "snapshots": false, "ilm": true })).unwrap(), json!({ "snapshots": false }));
+        assert!(check_field("collection", &json!({ "ilm": true })).unwrap_err().contains("reset"));
+        assert!(check_field("collection", &json!({ "heavyHours": { "from": 1, "to": 1 } })).is_err());
+        let ov = Overlay { fields: [("collection".to_string(), json!({ "hosts": false }))].into(), ..Default::default() };
+        assert!(!collection(Some(&ov)).on(crate::collection::Switch::Hosts));
+        assert_eq!(row_fields(Some(&ov), "h", None, None)["collection"], json!({ "hosts": false }));
+        let mut set = BTreeMap::new();
+        set.insert("collection".to_string(), json!({ "hosts": false }));
+        assert_eq!(below_admin_refusal(&set, &[], false).map(|r| r.kind), Some("collection_admin"));
+        assert_eq!(below_admin_refusal(&BTreeMap::new(), &["collection".to_string()], false).map(|r| r.kind), Some("collection_admin"));
         assert_eq!(parse_change(None, None).unwrap_err().kind, "bad_message", "nothing to change");
         assert_eq!(parse_change(Some(&json!({ "name": "a" })), Some(&json!(["name"]))).unwrap_err().kind, "bad_message");
         for (k, v) in [("name", json!("")), ("name", json!("x".repeat(129))), ("tls", json!("maybe")), ("enabled", json!("yes")),

@@ -60,7 +60,7 @@ export const SORTS = {
   jdk:      { label: 'JDK',           get: (r) => { const j = jvmSummary(r.d.nodes).text; return j === 'unknown' ? null : j; } },
   snapshot: { label: 'Last snapshot', get: (r) => { const s = lastSnapshotOf(r.d); return s ? s.start : null; } },
   alerts:   { label: 'Open alerts',   get: (r) => (alertCounts || alertsByCluster()).get(r.c.id) || 0 },
-  ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(lifecycleView('ILM', r.d, logPattern(r)), ilmErrorsOf(r.d, logPattern(r)).count) },
+  ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(lifecycleView('ILM', r.d, logPattern(r), r.c), ilmErrorsOf(r.d, logPattern(r)).count) },
   slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(lifecycleView('SLM', r.d, logPattern(r), r.c), slmErrorsOf(r.d, logPattern(r)).count) },
   repo:     { label: 'Repository',    get: (r) => (Array.isArray(r.d.repos) ? r.d.repos.map((x) => x.name).join(', ') : null) },
   reqs:     { label: 'Our reqs/5m',   get: (r) => ((requestLoad.clusters[r.c.id] || {}).last5m || 0) },
@@ -619,8 +619,8 @@ const CELLS = {
   // (lifecycle-errors.js — the one definition). Click opens the cluster's Overview.
   ilm: (r) => {
     const { d } = r;
-    return h('td', d.ilm
-      ? lifecycleButton(r, 'ILM', lifecycleView('ILM', d, logPattern(r)), ilmErrorsOf(d, logPattern(r)), ilmErrorTitle)
+    return h('td', d.ilm || (d.switchedOff && d.switchedOff.ilm)
+      ? lifecycleButton(r, 'ILM', lifecycleView('ILM', d, logPattern(r), r.c), ilmErrorsOf(d, logPattern(r)), ilmErrorTitle)
       : h('span.muted', '\u2013'));
   },
   slm: (r) => {

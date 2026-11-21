@@ -152,6 +152,10 @@ impl Core {
                     if let Some(unknown) = ids.iter().find(|id| self.spec_for(id).is_none()) {
                         return bad("not_found", format!("no cluster {unknown:?}"));
                     }
+                    // Switched off for the cluster (Edit cluster › Collection): never asked.
+                    if !ids.is_empty() && ids.iter().all(|id| !self.collection_for(id).on(crate::collection::Switch::LogDelay)) {
+                        return bad("switched_off", crate::collection::off_text(crate::collection::Switch::LogDelay));
+                    }
                 }
                 // Refused while the timer's run is open: said for how long when it is pacing.
                 self.delay_sink_busy(self.job_spawn(job, "the scheduled log delay measurement", trigger, meta, "nothing to do", |core, t| async move {
@@ -538,6 +542,99 @@ impl Core {
         let body = serde_json::to_vec(&load::Published { at: now, busy }).unwrap_or_default();
         if let Err(e) = crate::volume::store::write_atomic(&d.join(jobs::DIR).join(load::PUBLISHED), &body) {
             tracing::warn!(error = %e, "jobs: the busy clusters could not be published for the worker");
+        }
+    }
+
+    /* ------------------------------------ collection switches ------------------------------------ */
+
+    /// What may be asked of `cluster` and when its heavy jobs may run (Edit cluster › Collection,
+    /// `collection.rs`): its spec's, everything on for a cluster the core does not know.
+    pub(crate) fn collection_for(&self, cluster: &str) -> crate::collection::Collection {
+        self.spec_for(cluster).map(|s| s.collection).unwrap_or_default()
+    }
+
+    /* ---------------------------------------- quiet hours ---------------------------------------- */
+
+    /// `cluster`'s quietest hour (docs/JOBS.md "Quiet hours") among those its heavy-job window
+    /// allows; `None` while its profile is not known. Role worker reads what the core wrote.
+    pub(crate) fn quiet_hour(&self, cluster: &str) -> Option<u32> {
+        use crate::jobs::quiet::{QuietBook, FILE, FRESH_MS};
+        let window = self.collection_for(cluster).heavy_hours;
+        if self.role != ProcessRole::Worker {
+            return self.requests.lock().quiet.quiet_hour(cluster, window);
+        }
+        let path = self.data_dir.as_deref()?.join(jobs::DIR).join(FILE);
+        let seen = crate::worker::mtime(&path);
+        let mut cache = self.quiet_file.lock();
+        if cache.as_ref().is_none_or(|(t, _)| *t != seen) {
+            let book = crate::worker::read_json_retry::<QuietBook>(&path).ok().flatten().unwrap_or_default();
+            *cache = Some((seen, book));
+        }
+        let (_, book) = cache.as_ref()?;
+        if crate::fleet::now_ms().saturating_sub(book.saved_at) > FRESH_MS {
+            return None;
+        }
+        book.quiet_hour(cluster, window)
+    }
+
+    /// When a heavy job of `cluster` that found it busy moves to: the next start of its quietest
+    /// hour after `local`, with the hour. `None` while the profile is unknown (behave as before).
+    pub(crate) fn quiet_next(&self, cluster: &str, local: chrono::NaiveDateTime) -> Option<(u32, chrono::NaiveDateTime)> {
+        let h = self.quiet_hour(cluster)?;
+        Some((h, crate::collection::next_hour_start(local, h)))
+    }
+
+    /// The minute task's part (role core or all, the processes with the poller): each cluster's
+    /// busy minute into its profile, the profile bounded to the clusters configured, and written to
+    /// `<data>/job-runs/quiet.json` every `SAVE_EVERY_MS` for the worker and the next start.
+    pub(crate) fn quiet_minute(&self, now: u64) {
+        use crate::jobs::quiet::{local_hour, FILE, SAVE_EVERY_MS};
+        if self.role == ProcessRole::Worker {
+            return;
+        }
+        let Some(hour) = local_hour(now) else { return };
+        let busy = self.busy_now();
+        let ids: std::collections::HashSet<String> = self.all_specs().into_iter().map(|s| s.id).collect();
+        let body = {
+            let mut log = self.requests.lock();
+            for id in &ids {
+                log.quiet.add_minute(id, hour, busy.contains_key(id));
+            }
+            log.quiet.retain(&ids);
+            (now.saturating_sub(log.quiet.saved_at) >= SAVE_EVERY_MS).then(|| {
+                log.quiet.saved_at = now;
+                serde_json::to_vec(&log.quiet).unwrap_or_default()
+            })
+        };
+        if let (Some(body), Some(d)) = (body, self.data_dir.as_deref()) {
+            if let Err(e) = crate::volume::store::write_atomic(&d.join(jobs::DIR).join(FILE), &body) {
+                tracing::warn!(error = %e, "jobs: the quiet hours could not be written");
+            }
+        }
+    }
+
+    /// Tests only: a learned profile for `cluster` whose quietest hour is `quiet`.
+    #[doc(hidden)]
+    pub fn quiet_learn_for_tests(&self, cluster: &str, quiet: u32) {
+        let mut log = self.requests.lock();
+        for h in 0..24 {
+            for _ in 0..crate::jobs::quiet::MIN_SAMPLES {
+                log.quiet.add_answer(cluster, h, if h == quiet { 40 } else { 400 });
+            }
+        }
+    }
+
+    /// At start (role core or all): the quiet hours as the last run left them.
+    pub(crate) fn quiet_load(&self) {
+        use crate::jobs::quiet::{QuietBook, FILE};
+        if self.role == ProcessRole::Worker {
+            return;
+        }
+        let Some(d) = self.data_dir.as_deref() else { return };
+        if let Ok(Some(book)) = crate::worker::read_json_retry::<QuietBook>(&d.join(jobs::DIR).join(FILE)) {
+            let n = book.clusters.len();
+            self.requests.lock().quiet = book;
+            tracing::info!(clusters = n, "jobs: quiet hours read back");
         }
     }
 

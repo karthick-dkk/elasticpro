@@ -49,6 +49,10 @@ pub struct ClusterSpec {
     /// absent = detect from the devices (`logdelay::tz::LogTimeZone`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_time_zone: Option<String>,
+    /// The config's `collection` (a Zabbix cluster's: its overlay's): what may be asked of the
+    /// cluster and when its heavy jobs may run (`collection::Collection`). Absent = all on.
+    #[serde(default, skip_serializing_if = "crate::collection::Collection::is_default")]
+    pub collection: crate::collection::Collection,
 }
 
 #[derive(Clone, Debug, Deserialize)]

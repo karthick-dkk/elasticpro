@@ -11,6 +11,7 @@
 //! alone until the health probe says it is back).
 
 use super::backfill;
+use super::shared;
 use super::collect::{self, Indices, RowResolution, Split};
 use super::derive::{self, Totals};
 use super::schedule::{self, day_key, month_key, parse_day};
@@ -813,6 +814,8 @@ impl Core {
                     "tooSoon"
                 } else if self.volume_unreachable(&id) {
                     "unreachable"
+                } else if self.collection_for(&id).heavy_closed_why(schedule::local_now()).is_some() {
+                    "hours"
                 } else {
                     *r = RunState { running: true, done: 0, total: 0, asked_at: Some(now) };
                     "started"
@@ -822,6 +825,11 @@ impl Core {
                 "already" => already.push(id),
                 "tooSoon" => too_soon.push(id),
                 "unreachable" => skipped.push(json!({ "clusterId": id, "reason": "unreachable" })),
+                // Its heavy-job hours are a hard rule, a person's run too (Edit cluster › Collection).
+                "hours" => {
+                    let why = self.collection_for(&id).heavy_closed_why(schedule::local_now()).unwrap_or_default();
+                    skipped.push(json!({ "clusterId": id, "reason": format!("not now — {why}") }));
+                }
                 _ => {
                     let r = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg));
                     let prune = self.volume_prunes(&r);
@@ -926,9 +934,16 @@ impl Core {
                             Some(e) => Outcome::failed(e.clone(), Some(c.searched)),
                             None => Outcome::completed(Some(c.searched)),
                         };
-                        // The run log says what the backfill did (docs/JOBS.md "Volume backfill").
+                        // The run log says what the backfill did (docs/JOBS.md "Volume backfill"),
+                        // and, the timer's run paused for pressure, where it moved (quiet hours).
                         let b = c.backfill.as_ref();
-                        o.with_note(b.and_then(backfill::Status::note))
+                        let moved = (scheduled.is_some() && b.is_some_and(|b| b.paused.is_some()))
+                            .then(|| core.volume_move_backfill(&id)).flatten();
+                        let note = match (b.and_then(backfill::Status::note), moved) {
+                            (Some(n), Some(m)) => Some(format!("{n}; {m}")),
+                            (n, m) => n.or(m),
+                        };
+                        o.with_note(note)
                             .with_count(crate::jobs::COUNT_BACKFILLED, b.map_or(0, |b| b.filled))
                             .with_count(crate::jobs::COUNT_BACKFILL_PAUSED, b.is_some_and(|b| b.paused.is_some()) as u64)
                     }
@@ -938,6 +953,46 @@ impl Core {
                 r.running = false;
             }
         });
+    }
+
+    /// The daily run's backfill paused for query pressure (docs/VOLUME.md "Backfill"): with the
+    /// cluster's quiet hours known, it is tried again at its quietest hour (the next one, within
+    /// a day) rather than on tomorrow's run (docs/JOBS.md "Quiet hours"). Once a day. Returns the run's words for it.
+    fn volume_move_backfill(&self, id: &str) -> Option<String> {
+        let local = schedule::local_now();
+        let (hour, when) = self.quiet_next(id, local)?;
+        self.volume.backfill_quiet.lock().insert(id.to_string(), when);
+        Some(format!("backfill tried again at {hour:02}:00, this cluster's quietest hour"))
+    }
+
+    /// A backfill moved to `id`'s quietest hour whose hour has come: its run started now (a run of
+    /// the daily job by the timer, outside the schedule), when the cluster may be asked — inside
+    /// its heavy-job hours, reachable, not busy, not running. A cluster still busy then waits for
+    /// tomorrow's daily run, as before. Returns whether it started.
+    fn volume_quiet_backfill_due(self: &Arc<Self>, id: &str, coll: &crate::collection::Collection, s: &VolumeSettings, local: NaiveDateTime) -> bool {
+        let due = self.volume.backfill_quiet.lock().get(id).is_some_and(|t| *t <= local);
+        if !due || !coll.heavy_open(local) {
+            return false;
+        }
+        self.volume.backfill_quiet.lock().remove(id);
+        if self.volume_unreachable(id) || self.cluster_busy(id).is_some() {
+            return false;
+        }
+        let begin = {
+            let mut runs = self.volume.runs.lock();
+            let r = runs.entry(id.to_string()).or_default();
+            !r.running && {
+                *r = RunState { running: true, done: 0, total: 0, asked_at: Some(crate::fleet::now_ms()) };
+                true
+            }
+        };
+        if !begin {
+            return false;
+        }
+        tracing::info!(cluster = %id, "volume daily: the backfill's run at the cluster's quietest hour");
+        let part = self.jobs.join(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, id, crate::fleet::now_ms());
+        self.volume_spawn(id.to_string(), s.clone(), false, None, Some(part));
+        true
     }
 
     pub(crate) fn volume_progress(&self, id: &str, done: u64, total: u64) {
@@ -1041,8 +1096,12 @@ impl Core {
         let in_window = |d: NaiveDate| window.is_some_and(|(f, t)| d >= f && d <= t);
         let mut kinds: BTreeMap<NaiveDate, backfill::Kind> = BTreeMap::new();
 
-        // 1. Sizes per day, from the names; the indices split by time apart.
-        let cat = self.volume_req(tag(collect::cat_request(id, &ind)), opts.stop).await;
+        // 1. Sizes per day, from the names; the indices split by time apart. Always read fresh
+        // (the sizes are figures this keeps), and kept for the hosts collection of the same
+        // cluster (volume::shared, docs/VOLUME.md "Shared reads").
+        let cat_req = tag(collect::cat_request(id, &ind));
+        let cat_path = cat_req.path.clone();
+        let cat = self.volume_req(cat_req, opts.stop).await;
         let Some(cat_json) = collect::cat_rows(&cat) else {
             let (e, interrupted) = match (opts.stop)() {
                 Some(reason) => (format!("{reason} before _cat/indices answered"), Some(reason)),
@@ -1057,6 +1116,9 @@ impl Core {
         };
         drop(cat);
         let listing = collect::read_cat(&cat_json, &ind);
+        if shared::listing_shareable(&listing) {
+            self.volume.shared.put(id, &cat_path, &cat_json, crate::fleet::now_ms());
+        }
         drop(cat_json);
 
         // 1b. The days the time-split indices have documents on: one histogram over all of
@@ -1174,9 +1236,24 @@ impl Core {
         } else if rows.is_some() {
             rows
         } else {
+            // With the hosts collection on for the cluster, its wider question: one answer for
+            // both (volume::shared) — `_field_caps` answers each field on its own, so the rows
+            // resolve exactly as from the shorter one.
             let fc = match &fc_failed {
                 Some(_) => Value::Null,
-                None => self.volume_req(tag(collect::field_caps_request(id, &ind, s, time)), opts.stop).await,
+                None => {
+                    let mut r = tag(collect::field_caps_request(id, &ind, s, time));
+                    let hosts_on = self.collection_for(id).on(crate::collection::Switch::Hosts);
+                    if hosts_on && !time {
+                        r.path = crate::report::hosts::field_caps_path(&ind, s, &self.hosts_config().fields, false);
+                    }
+                    let path = r.path.clone();
+                    let fc = self.volume_req(r, opts.stop).await;
+                    if hosts_on && !time && ok(&fc) {
+                        self.volume.shared.put(id, &path, fc.get("json").unwrap_or(&Value::Null), crate::fleet::now_ms());
+                    }
+                    fc
+                }
             };
             if ok(&fc) {
                 Some(collect::resolve_rows(fc.get("json").unwrap_or(&Value::Null), s))
@@ -1391,9 +1468,26 @@ impl Core {
             let r = self.volume_resolve(raw.as_ref(), Some(&id), None);
             let prev = store.read_state(&id).last_scheduled_day;
             let last = prev.as_deref().and_then(parse_day);
+            // A backfill moved to the cluster's quietest hour (docs/JOBS.md "Quiet hours"): its
+            // run goes when that hour comes, outside the daily schedule.
+            if self.volume_quiet_backfill_due(&id, &spec.collection, &r.settings, local) {
+                started.push(id);
+                continue;
+            }
             if !schedule::is_due(local, volume_start_at(&members, &id, &r.settings), last) || self.volume_unreachable(&id) {
                 continue;
             }
+            // Its heavy-job hours (Edit cluster › Collection): a hard rule. Not marked, so it
+            // waits, with one deferred run saying until when, and runs when the window opens.
+            if let Some(why) = spec.collection.heavy_closed_why(local) {
+                if !self.jobs.waiting(crate::jobs::VOLUME_DAILY, &id) {
+                    let opens = spec.collection.heavy_hours.map(|h| h.next_open(local).format("%H:%M").to_string()).unwrap_or_default();
+                    let b = crate::jobs::load::Busy { cluster: id.clone(), signal: "hours".into(), reason: why.clone(), since: None };
+                    self.jobs.defer_with(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, &b, Some(format!("{id} waits for {opens}: {why}")), crate::fleet::now_ms());
+                }
+                continue;
+            }
+            self.jobs.ease_signal(crate::jobs::VOLUME_DAILY, &id, "hours");
             // Busy (docs/JOBS.md "Busy clusters"): not marked, so it waits, with one deferred
             // run saying why, and is collected on the first tick after it eases; the other
             // clusters carry on.

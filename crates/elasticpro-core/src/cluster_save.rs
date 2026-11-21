@@ -256,6 +256,15 @@ fn validate(incoming: &Value, raw: &Value) -> Result<Map<String, Value>, Refusal
             Err(why) => return Err(Refusal::new("bad_message", why)),
         }
     }
+    // The collection switches (collection.rs): only what is switched off is kept; nothing
+    // switched off is no key at all.
+    if let Some(v) = c.get("collection").cloned() {
+        match crate::collection::check(&v) {
+            Ok(x) if x.as_object().is_some_and(|m| m.is_empty()) => { c.remove("collection"); }
+            Ok(x) => { c.insert("collection".into(), x); }
+            Err(why) => return Err(Refusal::new("bad_message", why)),
+        }
+    }
     if c.get("tags").is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_string))) {
         return Err(Refusal::new("bad_message", "tags must be a list of words"));
     }
@@ -330,6 +339,12 @@ pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dy
     let insecure = |c: &Value| c.get("tls").and_then(Value::as_str).is_some_and(|t| t.trim().eq_ignore_ascii_case("insecure"));
     let newly_insecure = !admin && insecure(&Value::Object(entry.clone())) && !pos.is_some_and(|i| insecure(&list[i]));
     let insecure_refused = || Refusal::new("tls_insecure", "only an administrator turns certificate checks off (tls: insecure)");
+    // What may be asked of the cluster, and when (Edit cluster › Collection), is an
+    // administrator's: a customer's hours are a hard rule. Below admin the switches stay as they were.
+    let switches = |c: &Value| crate::collection::Collection::from_value(c.get("collection"));
+    if !admin && switches(&Value::Object(entry.clone())) != pos.map(|i| switches(&list[i])).unwrap_or_default() {
+        return Err(Refusal::new("collection_admin", "only an administrator changes a cluster's collection switches (Edit cluster › Collection)"));
+    }
     let (action, was, before) = match pos {
         Some(i) => {
             let old = list[i].clone();
@@ -498,6 +513,23 @@ mod tests {
         // Already insecure (an admin's decision): an operator's other edits keep it as it is.
         apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200", "via": "jumpa", "tls": "insecure", "note": "n" }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap();
         assert_eq!(raw["clusters"][1]["tls"], json!("insecure"));
+    }
+
+    #[test]
+    fn the_collection_switches_are_kept_checked_and_an_administrators() {
+        let mut raw = json!({ "clusters": [ { "name": "Gamma", "url": "https://gamma:9200" } ] });
+        let off = json!({ "name": "Gamma", "url": "https://gamma:9200", "collection": { "ilm": false, "hosts": true, "heavyHours": { "from": 22, "to": 6 } } });
+        assert_eq!(apply(&mut raw, &off, Some("Gamma"), ALL, NONE_KEPT, OPERATOR).unwrap_err().kind, "collection_admin");
+        apply(&mut raw, &off, Some("Gamma"), ALL, NONE_KEPT, ADMIN).unwrap();
+        assert_eq!(raw["clusters"][0]["collection"], json!({ "ilm": false, "heavyHours": { "from": 22, "to": 6 } }), "only what is off is written");
+        // An operator's other edits keep the switches as they are.
+        let kept = json!({ "name": "Gamma", "url": "https://gamma:9200", "note": "n", "collection": { "ilm": false, "heavyHours": { "from": 22, "to": 6 } } });
+        apply(&mut raw, &kept, Some("Gamma"), ALL, NONE_KEPT, OPERATOR).unwrap();
+        let bad = json!({ "name": "Gamma", "url": "https://gamma:9200", "collection": { "heavyHours": { "from": 4, "to": 4 } } });
+        assert_eq!(apply(&mut raw, &bad, Some("Gamma"), ALL, NONE_KEPT, ADMIN).unwrap_err().kind, "bad_message");
+        let all_on = json!({ "name": "Gamma", "url": "https://gamma:9200", "collection": { "ilm": true } });
+        apply(&mut raw, &all_on, Some("Gamma"), ALL, NONE_KEPT, ADMIN).unwrap();
+        assert!(raw["clusters"][0].get("collection").is_none(), "everything on is no key");
     }
 
     #[test]

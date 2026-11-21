@@ -28,6 +28,7 @@ import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMet
 import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel, DESTINATION_FIELDS } from '../core/zabbix-overlay.js';
 import { zoneOptions, timeZoneText, knownZone, ZONE_HINT } from '../core/log-tz.js';
 import { zoneOf, loadLevels } from '../core/delay-levels.js';
+import { SWITCHES, WHERE as COLLECTION_WHERE, collectionOf, collectionValue, hoursText } from '../core/collection.js';
 
 /**
  * The "Log time zone" select (docs/LOGDELAY.md "Time zones"): Detect from devices (what detection
@@ -333,6 +334,53 @@ function kindSection(c, { editable = true } = {}) {
 }
 
 /**
+ * Edit cluster › Collection (docs/JOBS.md "Per-cluster switches"): what ElasticPro may ask this
+ * cluster for — ILM checks, snapshots, log delay, hosts collection, each on unless unticked — and
+ * the hours its heavy jobs (daily volume with its backfill, hosts collection) may run in, server
+ * time, a hard rule. An administrator's (`editable`); others see it as it is. Compact: one row of
+ * switches, one row for the hours.
+ * → { node, read() → { value: null | {…}, changed } | { error } }
+ */
+function collectionSection(c, { editable = true } = {}) {
+  const v0 = collectionOf(c || {});
+  const boxes = SWITCHES.map((sw) => {
+    const box = h('input', { id: `ce-col-${sw.key}`, type: 'checkbox', checked: v0[sw.key] !== false, disabled: !editable });
+    return h('label', { title: `Unticked: ${sw.holds} is never asked of this cluster; Jobs says "skipped — switched off", never a failure.`,
+      style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '12.5px', cursor: editable ? 'pointer' : 'default' } }, box, sw.label);
+  });
+  const hourOpts = Array.from({ length: 24 }, (_, i) => [String(i), `${String(i).padStart(2, '0')}:00`]);
+  const h0 = v0.heavyHours;
+  const from = select('ce-col-from', h0 ? String(h0.from) : '', [['', 'any time'], ...hourOpts]);
+  const to = select('ce-col-to', h0 ? String(h0.to) : '', [['', '—'], ...hourOpts]);
+  from.disabled = !editable;
+  to.disabled = !editable || !h0;
+  from.style.width = to.style.width = 'auto';
+  from.addEventListener('change', () => {
+    to.disabled = !editable || !from.value;
+    if (from.value && !to.value) to.value = String((Number(from.value) + 8) % 24);
+    if (!from.value) to.value = '';
+  });
+  const node = h('fieldset.ce-collection', { style: { border: '1px solid var(--border)', borderRadius: '6px', padding: '8px 10px', display: 'grid', gap: '6px', margin: 0 } },
+    h('legend', { style: { fontSize: '12px', padding: '0 4px' } }, 'Collection'),
+    h('div', { style: { display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap' } }, ...boxes),
+    h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', fontSize: '12.5px' } },
+      h('span', 'Heavy jobs only between'), from, h('span', 'and'), to,
+      h('span.muted', { style: { fontSize: '11.5px' },
+        title: 'Daily volume (with its backfill) and the hosts collection send nothing outside these hours, by the timer or Run now. Server time (the stack\'s TZ). The log delay measurement keeps its interval.' },
+        'server time · a hard rule')),
+    editable ? null : h('div.muted', { style: { fontSize: '11.5px' } }, 'Set by an administrator.'));
+  const read = () => {
+    const off = SWITCHES.filter((sw) => !$(`#ce-col-${sw.key}`).checked).map((sw) => sw.key);
+    const hours = from.value ? { from: from.value, to: to.value } : null;
+    let value;
+    try { value = collectionValue({ off, hours }); } catch (e) { return { error: e.message }; }
+    const changed = JSON.stringify(value || {}) !== JSON.stringify(v0);
+    return { value, changed };
+  };
+  return { node, read };
+}
+
+/**
  * A Zabbix cluster: everything else about it is Zabbix's, so the dialog opens on its type,
  * ULM and SLM only (hosted; CLUSTER_META_SET, an admin's). Returns whether it was saved.
  */
@@ -388,6 +436,8 @@ export async function editCluster(existing = null) {
   // Hosted, the type is the server's (CLUSTER_META_SET, an admin's); desktop, the entry's keys.
   const kindEditable = !onServer || roleMayWrite();
   const kind = kindSection(onScreen || (existing ? { ...existing, id: null } : null), { editable: kindEditable });
+  // What may be asked of it and when (Edit cluster › Collection): an administrator's.
+  const coll = collectionSection(c, { editable: roleMayWrite() });
   const choice0 = initialCredentialChoice({ keptOwn, fileOwn, anonymous });
   // Set by a save that made the default (or found one made meanwhile): a retry after the
   // config save failed does not try again — PROMOTE would refuse, CREDENTIAL_SET replace.
@@ -486,6 +536,7 @@ export async function editCluster(existing = null) {
       field('Note', text('ce-note', c.note || '')),
       field('Log time zone', logTimeZoneSelect('ce-ltz', c.logTimeZone || c.log_time_zone || '', keptId), ZONE_HINT)),
     kind.node,
+    coll.node,
     // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
     // number on the volume report is sized with. They were in the config schema with no
     // way to set them short of hand-editing the file.
@@ -541,6 +592,10 @@ export async function editCluster(existing = null) {
             if (!knownZone(ltz)) return ctx.msg(`Log time zone: ${ltz} is not a time zone this browser knows (UTC, or an IANA name such as Asia/Kolkata).`);
             next.logTimeZone = ltz;
           } else delete next.logTimeZone;
+          // The collection switches: only what is off is written; everything on is no key.
+          const collRead = coll.read();
+          if (collRead.error) return ctx.msg(collRead.error);
+          if (collRead.changed) { if (collRead.value) next.collection = collRead.value; else delete next.collection; }
           // Type, ULM and SLM: the server's store (hosted, an admin's) or the entry's own keys.
           const kindRead = kind.read();
           if (kindRead.error) return ctx.msg(kindRead.error);
@@ -807,6 +862,13 @@ export async function editZabbixCluster(c) {
       radio('own', 'Its own credential, set here'), own);
   };
 
+  // The collection switches: kept in ElasticPro (the overlay's `collection`), an administrator's.
+  // Everything on, all day, is no override at all — saved as a reset.
+  const coll = collectionSection(c, { editable: admin });
+  {
+    const was0 = collectionValue({ off: SWITCHES.filter((sw) => collectionOf(c)[sw.key] === false).map((sw) => sw.key), hours: collectionOf(c).heavyHours || null });
+    defs.push({ key: 'collection', read: () => { const r = coll.read(); return r.error ? was0 : r.value; }, was: was0 });
+  }
   const body = [
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
       textField('name', 'Name', 'ce-name', c.name, { placeholder: zv.name || '', zabbix: zv.name || '', zabbixText: zv.name || '' }),
@@ -828,6 +890,7 @@ export async function editZabbixCluster(c) {
       def('logTimeZone', 'Log time zone', ltzSel, { read: () => (ltzSel.value && ltzSel.value !== 'detect' ? ltzSel.value : null),
         put: () => { ltzSel.value = 'detect'; }, zabbixText: '', hint: ZONE_HINT })),
     kind.node,
+    coll.node,
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       numField('volumeWindowDays', 'Volume window (days)', 'ce-volwin', overridden.has('volumeWindowDays') ? c.volumeWindowDays : null, String(d.volumeWindowDays),
         `1–90, empty uses ${d.volumeWindowDays}.`),
@@ -859,6 +922,8 @@ export async function editZabbixCluster(c) {
         if (effTop > effWin) return ctx.msg(`Heaviest days counted (${effTop}) cannot be more than the volume window (${effWin} days).`);
         const kindRead = kind.read();
         if (kindRead.error) return ctx.msg(kindRead.error);
+        const collRead = coll.read();
+        if (collRead.error) return ctx.msg(collRead.error);
         const change = overlayChange(entries);
         // The credential, an admin's: typed, kept, forgotten — asked before anything is sent.
         const choice = admin && onServer ? (checked('ce-cred-own') ? 'own' : 'zabbix') : null;

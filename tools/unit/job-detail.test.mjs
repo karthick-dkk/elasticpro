@@ -42,6 +42,21 @@ test('a deferral under the row is amber words, never "Error:"', () => {
   assert.equal(D.troubleOf({ status: 'completed', error: null }), null);
 });
 
+test('a wait for the quietest hour or the heavy-job hours keeps its words; a switched-off skip is no error', () => {
+  const quiet = D.troubleOf({ status: 'deferred', error: "c-ussc is busy: an answer took 9.0 s; waits for 03:00, this cluster's quietest hour",
+    deferred: { cluster: 'c-ussc', signal: 'slow', reason: 'an answer took 9.0 s' }, clusters: ['c-ussc'] }, (id) => id.replace('c-', ''));
+  assert.equal(quiet.level, 'warn');
+  assert.equal(quiet.text, "ussc is busy: an answer took 9.0 s; waits for 03:00, this cluster's quietest hour (a warning, not a failure)");
+  const hours = D.troubleOf({ status: 'deferred', error: 'c-n waits for 22:00: heavy jobs only 22:00–06:00 for this cluster (Edit cluster › Collection)',
+    deferred: { cluster: 'c-n', signal: 'hours', reason: 'heavy jobs only 22:00–06:00 for this cluster (Edit cluster › Collection)' }, clusters: ['c-n'] }, (id) => id.replace('c-', ''));
+  assert.match(hours.text, /^n waits for 22:00: heavy jobs only 22:00–06:00/);
+  const off = D.troubleOf({ status: 'skipped', error: 'c-x: skipped — hosts collection switched off for this cluster (Edit cluster › Collection)', clusters: ['c-x'] },
+    (id) => id.replace('c-', ''));
+  assert.equal(off.level, 'warn');
+  assert.equal(off.text, 'x: skipped — hosts collection switched off for this cluster (Edit cluster › Collection)');
+  assert.ok(!/Error/.test(off.text));
+});
+
 test('the summary grid adds up and says what is not known as —', () => {
   const run = { id: 'be9229a1', trigger: 'timer', status: 'completed', startedAt: Date.UTC(2026, 10, 19, 22, 26, 3), endedAt: Date.UTC(2026, 10, 19, 22, 27, 34), records: 16238 };
   const detail = { counts: counts({ succeeded: 67, partial: 1, failed: 3 }), window: [Date.UTC(2026, 10, 19, 20, 26), Date.UTC(2026, 10, 19, 22, 26)] };

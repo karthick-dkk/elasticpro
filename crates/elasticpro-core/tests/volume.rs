@@ -836,3 +836,35 @@ async fn backfill_off_asks_every_unfinished_day_at_once() {
     assert!(!srv.hits().iter().any(|h| h.path.starts_with("/_cat/thread_pool")), "no pressure reading without a backfill");
     assert_eq!(daily["status"]["backfill"], Value::Null, "off: no backfill status");
 }
+
+/// Heavy-job hours (docs/JOBS.md "Per-cluster switches"), a hard rule: a cluster allowed 22–06
+/// only (across midnight) is not asked at its 06:00 collectAt nor at noon — one deferred run says
+/// it waits for 22:00, however many ticks — and runs at 22:00. A person's Refresh now outside the
+/// hours is skipped with the reason (checked against the real clock, so only when it is closed).
+#[tokio::test]
+async fn the_daily_run_waits_for_its_heavy_hours_across_midnight() {
+    let t = today();
+    let listing: Listing = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(t - Duration::days(1))), 100)]));
+    let srv = cluster(listing, false).await;
+    let dir = TempDir::new("volume-heavy-hours");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "prod", "url": srv.url(), "collection": { "heavyHours": { "from": 22, "to": 6 } } }] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(c.volume_tick_at(local(t, "06:00")).await.is_empty(), "06:00 is the first hour outside 22–06");
+    assert!(c.volume_tick_at(local(t, "12:00")).await.is_empty());
+    assert_eq!(srv.connections(), 0, "nothing asked outside the hours");
+    let l = c.handle(json!({ "type": "JOBS_LIST", "jobId": "volume.daily" })).await;
+    let waits: Vec<&Value> = l["runs"].as_array().unwrap().iter().filter(|r| r["status"] == json!("deferred")).collect();
+    assert_eq!(waits.len(), 1, "one wait, however many ticks: {l}");
+    assert!(waits[0]["error"].as_str().unwrap_or("").contains("prod waits for 22:00: heavy jobs only 22:00–06:00 for this cluster (Edit cluster › Collection)"), "{}", waits[0]);
+    let hour = chrono::Timelike::hour(&chrono::Local::now().naive_local());
+    if (6..21).contains(&hour) {
+        let now = c.handle(json!({ "type": "VOLUME_RUN", "clusterIds": ["prod"] })).await;
+        assert!(now["skipped"][0]["reason"].as_str().unwrap_or("").contains("heavy jobs only 22:00–06:00"), "{now}");
+        assert_eq!(srv.connections(), 0);
+    }
+    assert_eq!(c.volume_tick_at(local(t, "22:00")).await, vec!["prod".to_string()]);
+    settle(&c, "prod").await;
+    assert!(srv.connections() > 0, "asked once the hours opened");
+}
