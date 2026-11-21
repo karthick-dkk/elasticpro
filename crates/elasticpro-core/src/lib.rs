@@ -37,6 +37,7 @@ pub mod notify;
 pub mod plan_templates;
 pub mod play;
 pub mod report;
+pub mod request_cost;
 pub mod silences;
 pub mod saved_queries;
 pub mod settings;

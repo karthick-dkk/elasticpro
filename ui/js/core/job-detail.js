@@ -176,6 +176,79 @@ export function elapsedText(ms) {
 export const TODO_PAGES = Object.freeze(['settings', 'reports', 'overview', 'shards']);
 
 /**
+ * A part's fix as a link: `{page, label, text, cluster}` when the core names a page among
+ * TODO_PAGES that the caller may open (`canOpen(page)`), `{label, text}` alone when not, null
+ * when there is none (or the core keeps it for an administrator). Jobs › Exceptions and the Log
+ * Delay page's not-measured line both link through it.
+ */
+export function todoTarget(p, canOpen = () => true) {
+  const t = p && p.todo;
+  if (!t || !t.label) return null;
+  if (!TODO_PAGES.includes(t.page) || !canOpen(t.page)) return { label: t.label, text: t.text || '' };
+  return { page: t.page, label: t.label, text: t.text || '', cluster: p.cluster };
+}
+
+/* ---------------------------- the Log Delay page's not-measured line ---------------------------- */
+
+/** The log delay measurement's job id (crates/elasticpro-core/src/jobs/mod.rs LOGDELAY_MEASURE). */
+export const LOGDELAY_JOB = 'logdelay.measure';
+
+/**
+ * Why a cluster's part of a run did not (fully) do its work, in a few words, from the part the
+ * run details keep (`code`, `message`, `elapsedMs`) — the one wording the Log Delay page's
+ * not-measured line uses: "no index matches logstash-*", "timed out (30 s)", "part read (2
+ * shards failed)", "busy — deferred", "credentials refused", "unreachable".
+ */
+export function partReason(p) {
+  if (!p) return '';
+  const msg = String(p.message || '');
+  const secs = num(p.elapsedMs) === null ? null : Math.round(num(p.elapsedMs) / 1000);
+  if (p.status === 'skipped') return msg ? `skipped — ${msg}` : 'skipped';
+  switch (p.code) {
+    case 'INDEX_NOT_FOUND': {
+      const named = /no index matches\s+(\S+)/i.exec(msg) || /no such index \[([^\]]+)\]/i.exec(msg) || /index_not_found[^[]*\[([^\]]+)\]/i.exec(msg);
+      return named ? `no index matches ${named[1]}` : 'no index matches the log index';
+    }
+    case 'TIMEOUT': return secs === null ? 'timed out' : `timed out (${secs} s)`;
+    case 'SHARD_FAILURE': {
+      const m = /(\d+) of \d+ shards? failed/i.exec(msg) || /(\d+) shards? failed/i.exec(msg);
+      return m ? `part read (${m[1]} shard${m[1] === '1' ? '' : 's'} failed)` : 'part read (shards failed)';
+    }
+    case 'BUSY': return 'busy — deferred';
+    case 'AUTH': return 'credentials refused';
+    case 'UNREACHABLE': return 'unreachable';
+    default:
+      if (p.status === 'deferred') return 'deferred';
+      if (p.status === 'partial') return msg ? `part read — ${msg.slice(0, 80)}` : 'part read';
+      return msg ? msg.slice(0, 80) : partWord(p.status).toLowerCase();
+  }
+}
+
+/**
+ * The last finished run of `jobId` in a JOBS_LIST answer (newest first); null when none has
+ * ended. A run still going keeps no details yet, so the one before it is the last run.
+ */
+export function lastFinishedRun(listRes, jobId = LOGDELAY_JOB) {
+  const runs = (listRes && Array.isArray(listRes.runs)) ? listRes.runs : [];
+  return runs.find((r) => r && r.jobId === jobId && !['running', 'queued', 'pending'].includes(r.status)) || null;
+}
+
+/**
+ * The Log Delay page's line about the last run: `{runId, total, missed: [{cluster, reason,
+ * fix}]}` from the run's details as JOB_RUN_DETAIL gives them (already narrowed to the caller's
+ * clusters), kept to the clusters `sees` lets through; null when every cluster was read, or
+ * when there are no details to say it from.
+ */
+export function notMeasured(detailRes, sees = () => true, canOpen = () => true) {
+  const d = detailRes && detailRes.detail;
+  if (!d || !d.counts) return null;
+  const missed = exceptionsOf(d).filter((p) => sees(p.cluster))
+    .map((p) => ({ cluster: p.cluster, status: p.status, reason: partReason(p), fix: todoTarget(p, canOpen) }));
+  if (!missed.length) return null;
+  return { runId: detailRes.run ? detailRes.run.id : null, total: total(d.counts), missed };
+}
+
+/**
  * The run's log as plain text, for Copy and Download .txt: one line each, "22:26:03.112 ERROR
  * demo INDEX_NOT_FOUND …", and where lines were left out between the first and the last, a
  * line that says how many.

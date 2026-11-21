@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 mod governor_api;
 mod job_controls;
 mod jobs_api;
+mod request_cost_api;
 mod slow_searches;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
 /// holds without widening any field.
@@ -537,6 +538,9 @@ pub struct RequestLog {
     /// Clusters where a read we sent was let go of before its answer, and when: where the
     /// ES task reaper looks.
     pub abandoned: HashMap<String, u64>,
+    /// What the finished requests cost, per cluster and kind, over the last day (Jobs ›
+    /// Requests › Cost, `REQUEST_COST`): bounded, in memory only (request_cost.rs).
+    pub cost: crate::request_cost::CostBook,
 }
 
 impl RequestLog {
@@ -601,6 +605,11 @@ impl RequestLog {
             self.abandoned.insert(r.cluster.clone(), crate::fleet::now_ms());
         }
         r.status = Some(status);
+        let now = crate::fleet::now_ms();
+        self.cost.add(&crate::request_cost::Sample {
+            cluster: &r.cluster, origin: &r.origin, method: &r.method, path: &r.path, started_at: r.started_at, ms,
+            bytes: r.bytes, status: r.status.as_deref().unwrap_or(""), sent: r.sent, cached: r.cached, shared: r.shared,
+        }, now);
         self.recent.push_back(r);
         while self.recent.len() > REQUEST_LOG_KEEP {
             self.recent.pop_front();
@@ -1732,6 +1741,7 @@ impl Core {
             "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
             "JOB_RUN_DETAIL" => self.job_run_detail(&msg, caller.as_ref()).await,
             "SLOW_SEARCHES" => self.slow_searches(&msg, caller.as_ref()).await,
+            "REQUEST_COST" => self.request_cost(caller.as_ref()),
             // The job controls (docs/JOBS.md): run now, pause, resume, cancel, retry, create, settings.
             "JOB_RUN" | "JOB_PAUSE" | "JOB_RESUME" | "JOB_CANCEL" | "JOB_RETRY" | "JOB_CREATE" | "JOB_DELETE"
             | "JOB_SETTINGS_GET" | "JOB_SETTINGS_SET" => self.job_msg(&t, &msg, caller.as_ref()).await,

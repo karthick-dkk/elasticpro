@@ -571,6 +571,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // the Jobs page is open): a user's, like JOBS_LIST; narrowed to their clusters in the
         // handler. Index names and query bodies are the same shape of fact a user reads on REST.
         "SLOW_SEARCHES" => Some(Role::User),
+        // What ElasticPro's requests cost each cluster, per kind, and the slowest of them
+        // (Jobs › Requests › Cost): the request log's figures, so an administrator's like
+        // REQUEST_LOG; narrowed to the caller's clusters in the handler.
+        "REQUEST_COST" => Some(Role::Admin),
         // The Jobs page's health lines (docs/HEALTH.md "History"): a user's, as the strip it draws
         // from; the ElasticPro health figures and the fleet-wide counts are narrowed in the handler.
         "HEALTH_HISTORY" => Some(Role::User),

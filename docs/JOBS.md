@@ -261,6 +261,56 @@ and up; read-only, not in the activity log (a poll).
 - `bad_request` for a `minMs` not offered. At most 200 searches are listed; `count` says how many
   there were.
 
+## Query cost (0.3.82)
+
+`REQUEST_COST` — what ElasticPro's requests cost each cluster, per kind of work, over the last
+24 clock hours, and the slowest of them: **Jobs › Requests › Cost** (`#/jobs/requests/cost`,
+`ui/js/pages/requests-cost.js`, pure half `ui/js/core/request-cost.js`). An administrator's,
+like `REQUEST_LOG` (a limited administrator reads only their clusters, `sink_view`); read-only,
+not in the activity log (a poll: the tab asks every 30 s while it is open, and nothing else
+does). Nothing is sent to a cluster.
+
+- **Where the figures come from** (`crates/elasticpro-core/src/request_cost.rs`): every request
+  the core finishes in its request log also goes into a cost book in memory — one bucket per clock
+  hour for 24 hours, per (cluster, kind) the requests sent, their total time, a latency histogram,
+  the bytes read, the timeouts and the deferrals; and per cluster its 10 slowest requests. Bounded
+  (24 buckets, at most 4,096 cells a bucket — past it a cluster's further kinds share one *Other
+  kinds* cell — and 10 requests a cluster), never written to disk: a restart starts again, and
+  the answer's `since` / `hours` say how much it covers. The report worker's requests come from its
+  finished-request ring (`worker/requests.jsonl`, the one the Request Centre merges), and a job's
+  deferrals from the run log (each deferred run holds one cluster back).
+- **Kind**: the job a request belongs to (`job:logdelay.measure`, `job:hosts.collect`,
+  `job:volume.daily`, `job:report.run`, `job:history.mirror`, labelled with the job's name), a
+  poller dataset (`poller:health` → "Poller · health"), a page (`page:<page>`), the REST console,
+  or the origin itself (`request_cost::kind_of`, one definition).
+- **What counts**: a request that reached the cluster. One answered from the read cache, or by
+  somebody else's request already on its way, cost the cluster nothing and is not counted. A
+  *timeout* is ElasticPro giving up (`timeout`) or closing a request past its deadline (`reaped`).
+  A *deferral* is a request the gate held back before sending it (`overloaded`, `queue_timeout`)
+  or a job's cluster held back because it was busy (a deferred run).
+- **Figures**: requests per hour over the hours covered (at least one); average time; **p95** — the
+  first histogram step (25 ms, 50, 100, 200, 300, 500, 750 ms, 1 s, 1.5, 2, 3, 5, 7.5, 10, 15, 20,
+  30, 45 s, 1, 2, 5 min) at or above the 95th request, never above the slowest; bytes over the
+  requests whose answer size was reported (`bytesKnown` of them; `null`, "not reported", when
+  none was — never 0 B). A kind with deferrals and no request has no time (`null`, "—").
+- **Top 10**: the slowest requests in the window on the clusters the caller sees — time, kind,
+  cluster, method and path, time taken, bytes. The path keeps the query string's names and leaves
+  out their values (`clean_path`; a value can carry a secret or a whole query), then goes through
+  the run details' redaction.
+
+```json
+{ "ok": true, "keepHours": 24, "since": 1763591163112, "hours": 24.0, "now": 1763677563112,
+  "rows": [ { "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement", "requests": 24, "perHour": 1.0,
+              "avgMs": 8200, "p95Ms": 30000, "maxMs": 30000, "bytes": 9000000, "bytesKnown": 24, "timeouts": 2, "deferrals": 0 } ],
+  "top": [ { "at": 1763676963112, "cluster": "mh", "kind": "job:logdelay.measure", "label": "Log delay measurement",
+             "method": "POST", "path": "/logstash-*/_search?filter_path", "ms": 30000, "bytes": null, "status": "timeout" } ] }
+```
+
+- **The tab**: one line (requests, clusters, the window, timeouts, deferrals), then *By cluster
+  and kind* (Cluster, Kind, Requests / h, Average, p95, Bytes, Timeouts, Deferrals; most requests
+  first, every column sorts like the other Jobs tables), then *Most expensive recent requests*.
+  Compact rows; an operator is not offered the tab (the Request Centre is the stop alone for them).
+
 ## `JOBS_LIST`
 
 `JOBS_LIST {before?, limit?, jobId?}` — any signed-in user from **user** up (not guest: runs

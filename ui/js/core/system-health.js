@@ -14,6 +14,7 @@ export const HEALTH_POLL_MS = 5000;
 export const REQUEST_TABS = Object.freeze([
   { id: 'log', label: 'Requests' },
   { id: 'health', label: 'ElasticPro health' },
+  { id: 'cost', label: 'Cost' },
 ]);
 
 const known = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
@@ -25,11 +26,11 @@ const known = (v) => v !== null && v !== undefined && Number.isFinite(Number(v))
 export function tabOfHash(hash) {
   const path = String(hash || '').replace(/^#\/?/, '').split('?')[0].split('/');
   const rest = path[0] === 'jobs' && path[1] === 'requests' ? path.slice(2) : path[0] === 'requests' ? path.slice(1) : null;
-  return rest && rest[0] === 'health' ? 'health' : 'log';
+  return rest && (rest[0] === 'health' || rest[0] === 'cost') ? rest[0] : 'log';
 }
 
 /** The hash for a tab. */
-export const tabHash = (id) => (id === 'health' ? '#/jobs/requests/health' : '#/jobs/requests');
+export const tabHash = (id) => (id === 'health' || id === 'cost' ? `#/jobs/requests/${id}` : '#/jobs/requests');
 
 /** The pill class for a level. */
 export function levelTone(level) {

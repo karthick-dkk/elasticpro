@@ -4,8 +4,9 @@
  *
  *   Dashboard  five count tiles (the three configured levels, another time zone, silent), the
  *              state bar, three chart panels over the period (the delay band, above the critical
- *              line, resolved delays — one y scale), By cluster with an "i" per cluster, the
- *              cluster × time heat map (Hourly Delay Status); the same for one cluster
+ *              line, resolved delays — one y scale), By cluster with an "i" per cluster, Late
+ *              devices over the day (a cluster × measurement-window grid), and one line naming
+ *              the clusters the last run did not measure; the same for one cluster
  *   Summary    the fleet view of Reports › Log delay before 0.3.60: four tiles, Delay reduced, Day
  *              by day, a ring per cluster (drawn by logdelay/summary.js from the same answer)
  *   Devices    every device, searched and filtered by level, zone and tag1, each row with its
@@ -33,7 +34,9 @@ import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
 import { state, clusters } from '../core/state.js';
-import { navigateTo } from '../core/intent.js';
+import { navigateTo, canOpenPage } from '../core/intent.js';
+import { jobsList, jobRunDetail } from '../core/es.js';
+import { LOGDELAY_JOB, lastFinishedRun, notMeasured } from '../core/job-detail.js';
 import { refreshReports } from '../core/reports.js';
 import { rememberLevels } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
@@ -41,7 +44,8 @@ import {
   LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
   minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
-  DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
+  DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
+  lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER, noDeviceTotal, noDeviceLine,
 } from '../core/logdelay-report.js';
@@ -71,6 +75,9 @@ const S = {
   // delay band and above the critical line (delay-levels.js isLate) — or 'all'. Never remembered:
   // each visit starts on the delayed devices (boardsReset).
   devSet: 'delayed', cdSet: 'delayed',
+  // Late devices over the day: late (the delay band and above) or above the critical line only;
+  // the worst GRID_WORST clusters or every one; the window a cell opened a cluster at.
+  gridMode: 'late', gridAll: false, focusWin: null,
   q: { name: '', field: '', value: '', cluster: '', from: '', to: '' },
   qFor: '',
   range: null,           // {from, to} the device page was narrowed to by Show
@@ -93,6 +100,7 @@ export function boardsReset() {
   S.cache.clear(); S.search = null; S.range = null; S.devFilter = ''; S.cdFilter = '';
   S.devAll = false; S.cdAll = false; S.devState = 'all'; S.devZone = ''; S.devTag = '';
   S.devSet = 'delayed'; S.cdSet = 'delayed';
+  S.gridMode = 'late'; S.gridAll = false; S.focusWin = null;
   for (const el of inputs.values()) el.value = '';
   B.clear();
 }
@@ -478,40 +486,109 @@ function chartPanels(res, period, b, scopeId) {
 }
 
 /**
- * The cluster × time heat map: one row per cluster, one cell per bucket, the ramp by devices
- * behind; a cell the core has no total for is hatched (unknown), a cluster never measured says
- * so. A cell opens its cluster.
+ * Late devices over the day (0.3.82, replaces the heat map): one row per cluster — the name
+ * kept in view, Late now, vs yesterday — then a cell per measurement window of today with the
+ * devices late at that window's measurement (lateGridRows). A window with no measurement is
+ * hatched "not measured", never an earlier reading carried forward; one not begun yet is blank.
+ * Each row is shaded on its own scale (its worst window darkest), one hue. A cell opens the
+ * cluster at that window.
  */
-function heatMap(res, period, b, id) {
-  const rows = heatRows(res.byCluster, period);
-  const series = behindSeries(res, period);
-  const n = Math.max(series.length, ...rows.map((r) => r.cells.length));
-  if (!rows.length || !n) return h('div.tbl-empty', 'No cluster measured in this period.');
-  const W = 1100, hL = 150, hT = 4, ch = 28, cw = (W - hL - 6) / n;
-  const every = labelEvery(n);
-  const kids = [];
-  rows.forEach((r, ri) => {
-    const yy = hT + ri * ch;
-    const lab = svg('text', { x: hL - 8, y: yy + ch / 2 + 3.5, 'text-anchor': 'end', class: 'ld-heat-name' }, r.name.length > 22 ? `${r.name.slice(0, 21)}…` : r.name);
-    lab.append(svg('title', {}, r.name));
-    kids.push(lab);
+function lateGrid(res, b) {
+  const every = finite(res.everyHours) ? res.everyHours : null;
+  const n = windowsPerDay(every) || 0;
+  const all = lateGridRows(res.byCluster, every, S.gridMode);
+  const rows = S.gridAll ? all : all.slice(0, GRID_WORST);
+  const heads = windowHeads(every);
+  const what = S.gridMode === 'critical' ? b.high.toLowerCase() : b.late;
+  if (!all.length || !n) return h('div.tbl-empty', !n ? 'The measurement interval is not known, so the day’s windows are not either.' : 'No cluster you can see is measured.');
+  const tr = (r) => {
+    const today = r.begun > 0 && r.measured === 0;
+    const kids = [h('th.ld-g-nm', { scope: 'row' }, link(clusterHref(r.id), r.name, { title: `${r.name} · log delay details` }))];
     if (r.never) {
-      kids.push(svg('text', { x: hL + 6, y: yy + ch / 2 + 3.5, class: 'ld-heat-never' }, LD_NEVER_MEASURED));
-      return;
+      kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED)));
+      return h('tr', { dataset: { cluster: r.id } }, ...kids);
     }
-    for (let i = 0; i < n; i++) {
-      const v = r.cells[i]; const s = heatStep(v);
-      const label = series[i] ? series[i].label : `#${i + 1}`;
-      const cell = svg('rect', { x: hL + i * cw + 1, y: yy + 1, width: Math.max(1, cw - 2), height: ch - 2, rx: 3,
-        class: `ld-heat ld-heat-${s < 0 ? 'unknown' : s}`, dataset: null, role: 'link', tabindex: -1,
-        onclick: () => { location.hash = clusterHref(r.id); } });
-      cell.append(svg('title', {}, `${r.name} · ${label} · ${s < 0 ? 'not measured' : `${countText(v)} ${b.late} (devices behind)`} · opens the cluster`));
-      kids.push(cell);
+    if (today) kids.push(h('td.ld-g-today', { colspan: 2 }, h('span.muted', 'not measured today')));
+    else {
+      kids.push(h('td.num.ld-g-now', { title: `devices ${what} now` }, countText(r.lateNow)));
+      kids.push(h(`td.num.ld-g-vs${finite(r.vs) && r.vs > 0 ? '.ld-g-up' : finite(r.vs) && r.vs < 0 ? '.ld-g-dn' : ''}`,
+        { title: finite(r.vs) ? 'now against yesterday’s measurement of the same window as the last run' : 'yesterday’s same window was not measured: not known' },
+        finite(r.vs) ? vsText(r.vs) : h('span.muted', '—')));
     }
+    for (const c of r.cells) {
+      const label = c.w && c.w.label ? c.w.label : `${heads[c.i]}:00`;
+      if (c.state === 'future') { kids.push(h('td.ld-gc.ld-g-fut', { title: `${label} · not begun yet` })); continue; }
+      if (c.state === 'missing') { kids.push(h('td.ld-gc.ld-g-na', { title: `${r.name} · ${label} · not measured — no run in this window (never a copy of an earlier one)` }, '·')); continue; }
+      const shade = gridShade(c.v, r.worst);
+      const open = () => openAtWindow(r.id, c.w);
+      kids.push(h(`td.ld-gc.ld-gs-${shade}`, {
+        role: 'button', tabindex: 0, dataset: { win: String(c.i) },
+        title: `${r.name} · ${label} · ${countText(c.v)} device${c.v === 1 ? '' : 's'} ${what} at that window’s measurement · opens the cluster`,
+        onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } },
+      }, countText(c.v)));
+    }
+    kids.push(h('td.num.ld-g-meas', { title: `windows of today measured · ${countText(r.begun)} of ${countText(n)} begun so far` }, `${r.measured}/${n}`));
+    return h('tr', { dataset: { cluster: r.id } }, ...kids);
+  };
+  return [
+    h('div.ld-grid-wrap', h('table.ld-grid#ld-late-grid',
+      h('thead', h('tr', h('th.ld-g-nm', 'Cluster'), h('th.num', 'Late now'), h('th.num', 'vs yesterday'), ...heads.map((x) => h('th', x)), h('th.num', 'Measured'))),
+      h('tbody', ...rows.map(tr)))),
+    h('div.ld-foot.ld-g-legend',
+      h('span', 'Shade = this cluster’s own scale (its worst window is darkest), so a quiet cluster’s rise still shows'),
+      h('span.ld-key', h('i.ld-g-key.ld-gs-0'), '0'), h('span.ld-key', h('i.ld-g-key.ld-gs-2'), 'some'), h('span.ld-key', h('i.ld-g-key.ld-gs-4'), 'its worst'),
+      h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run in that window')),
+  ];
+}
+
+/** A cell of Late devices over the day pressed: that cluster's board, opened at that window (clusterView says which). */
+function openAtWindow(id, w) {
+  S.focusWin = w ? { cluster: id, from: w.from, label: w.label || '', mode: S.gridMode } : null;
+  location.hash = clusterHref(id);
+}
+
+/** The grid's two toggles: Late / Above the critical line, Worst 10 / All N. */
+function gridToggles(b, total) {
+  const seg = (id, items, cur, set) => h(`div.seg#${id}`, { role: 'group' }, ...items.map(([v, text]) => h('button.btn.sm', {
+    type: 'button', dataset: { v: String(v) }, 'aria-pressed': String(cur === v), onclick: () => { set(v); repaint(); } }, text)));
+  return [
+    seg('ld-grid-mode', [['late', `Late (${b.lateShort})`], ['critical', b.high]], S.gridMode, (v) => { S.gridMode = v; }),
+    seg('ld-grid-rows', [[false, `Worst ${GRID_WORST}`], [true, `All ${countText(total)}`]], S.gridAll, (v) => { S.gridAll = v; }),
+  ];
+}
+
+/**
+ * The line about the last run (0.3.82, replaces "How the last run read each cluster"): shown
+ * only when it did not fully measure every cluster — "k of N clusters not measured in the last
+ * run", then each cluster with why and its fix — from the same per-cluster results Jobs › run
+ * details keep (JOB_RUN_DETAIL of the last finished log delay run), so the two never disagree.
+ * Kept to the clusters this viewer may see. Nothing when every cluster was read, or when the
+ * details cannot be read (a guest, a core before 0.3.81).
+ */
+function notMeasuredLine(ent) {
+  if (!ent || ent.state !== 'ok' || !ent.res || ent.res.none) return null;
+  const sees = (id) => clusters().some((c) => c.id === id);
+  const nm = notMeasured(ent.res, sees, canOpenPage);
+  if (!nm) return null;
+  const item = (m) => h('span.ld-nm-item', { dataset: { cluster: m.cluster, status: m.status } },
+    h('b', nameOf(m.cluster)), ` · ${m.reason}`,
+    m.fix && m.fix.page ? [' · ', h('a', { href: '#', title: m.fix.text, onclick: (e) => { e.preventDefault(); navigateTo(m.fix.page, null, { cluster: m.fix.cluster }); } }, m.fix.label.toLowerCase())] : null);
+  return h('div.ld-notmeasured#ld-not-measured', { role: 'status' },
+    h('b.ld-nm-head', `${countText(nm.missed.length)} of ${countText(nm.total)} cluster${nm.total === 1 ? '' : 's'} not measured in the last run`),
+    ...nm.missed.map(item),
+    canOpenPage('jobs') ? h('a.ld-nm-jobs', { href: '#/jobs', title: 'Jobs › Log delay measurement: its last run’s details' }, 'Run details in Jobs ›') : null);
+}
+
+/** The last finished log delay run's details, read again whenever the clusters' last run changes. */
+function lastRunDetail(lastRunAt) {
+  return need(`ldrun|${lastRunAt}`, async () => {
+    const list = await jobsList({ jobId: LOGDELAY_JOB, limit: 5 });
+    if (!list || !list.ok) return list || { ok: false, message: 'no answer' };
+    const run = lastFinishedRun(list);
+    if (!run) return { ok: true, none: true };
+    const d = await jobRunDetail(run.id);
+    return d && d.ok ? d : (d || { ok: false, message: 'no answer' });
   });
-  for (let i = 0; i < n; i += every) kids.push(svg('text', { x: hL + i * cw + cw / 2, y: hT + rows.length * ch + 14, 'text-anchor': 'middle' }, series[i] ? series[i].label : ''));
-  return h('div.ld-chartbox', svg('svg', { class: 'ld-chart ld-heatmap', viewBox: `0 0 ${W} ${hT + rows.length * ch + 22}`, role: 'img', id,
-    'aria-label': `Devices behind per cluster and ${period === 'today' ? 'window' : 'day'}` }, ...kids));
 }
 
 /**
@@ -550,8 +627,6 @@ function stateBar(c, b) {
 
 /* ------------------------------------ the dashboard ------------------------------------ */
 
-const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || ''}`;
-
 function fleetView() {
   const ids = pickId() ? [pickId()] : [];
   const q = winQuery();
@@ -577,16 +652,21 @@ function fleetView() {
 
   const notice = B.get('fleet:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
-  const noDevNote = B.get('fleet:nodevice', rid, () => noDeviceNote(res.byCluster, 'Each cluster’s count: How the last run read each cluster, below.'));
+  const noDevNote = B.get('fleet:nodevice', rid, () => noDeviceNote(res.byCluster, 'Each cluster’s count: its board’s “Last run read” line.'));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
-    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and the heat map are the core’s day totals for every zone.`)
+    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and Late devices over the day are the core’s totals for every zone.`)
     : null));
   const winNote = B.get('fleet:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   const charts = B.get('fleet:charts', `${rid}|${S.pk}|${scopeId}|${S.tz}`, () => chartPanels(res, S.period, b, scopeId));
-  const heat = B.get('fleet:heat', `${rid}|${S.period}`, () => card('Hourly Delay Status', `devices behind per cluster, ${periodWords(S.period, res)} · a cell opens the cluster`,
-    heatMap(res, S.period, b, 'ld-heat'),
-    [legend(...HEAT_LEGEND.map((tx, i) => h('span.ld-key', h(`i.ld-heat-key.ld-heat-${i}`), tx)), h('span.ld-key', h('i.ld-heat-key.ld-heat-unknown'), 'not measured'))]));
+  const gridDay = finite(res.now) ? dayText(zonedText(res.now, S.zone, { seconds: false }).slice(0, 10)) : '';
+  const grid = B.get('fleet:grid', `${rid}|${S.gridMode}|${S.gridAll}`, () => {
+    const el = card('Late devices over the day',
+      `today${gridDay ? ` ${gridDay}` : ''} · per ${finite(res.everyHours) ? `${res.everyHours}-hour` : 'measurement'} window · devices late at the window’s measurement · worst clusters first`,
+      lateGrid(res, b), gridToggles(b, (res.byCluster || []).length));
+    el.id = 'ld-grid-card';
+    return el;
+  });
 
   const clusterCard = B.get('fleet:clusters', `${rid}|${sortSig(sorts.clusters)}|${S.tz}|${S.clAll}|${S.clPage}`, () => {
     // A cluster never measured has no figures: unknown, so it sorts last either way.
@@ -670,21 +750,15 @@ function fleetView() {
           ['critical', b.high, 1], anyZone ? ['otherTz', 'Other time zone', 1] : null, ['devices', 'Devices', 1], ['lastRun', 'In last run', 1], ['worst', 'Worst device'], [null, '']].filter(Boolean)),
         h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: anyZone ? 13 : 12 }, empty('No cluster you can see is measured.')))])))), foot]);
   });
-  const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', '',
-    h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',
-      h('thead', h('tr', h('th', 'Cluster'), h('th', 'Read'), h('th.num', 'Devices read'), h('th.num', 'Without a device name'))),
-      h('tbody', ...(res.byCluster || []).filter((c) => c.lastRunAt !== null && c.lastRunAt !== undefined).map((c) => h('tr', { dataset: { cluster: c.id } },
-        h('td', link(clusterHref(c.id), c.name || nameOf(c.id))),
-        h('td', { class: c.lastRead && (c.lastRead.truncated || !c.lastRead.complete) ? 'ld-crit' : null }, lastReadText(c.lastRead)),
-        h('td.num', c.lastRead ? countText(c.lastRead.devices) : '—'),
-        h('td.num', { title: 'documents in the last run’s window with no device name: in no device’s figures' }, noDeviceText(c.lastRead)))))))));
+  const runEnt = lastRunDetail(lastRunOf(res.byCluster));
+  const nmLine = B.get('fleet:notmeasured', `${entSig(runEnt)}|${clusters().length}`, () => notMeasuredLine(runEnt));
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  // The owner's order (prototype v22): tiles, the state bar with its legend, By cluster, Devices behind, the heat map.
   const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
-  // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, Hourly Delay Status.
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, heat, noDevNote, readCard, neverNote];
+  // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, then
+  // Late devices over the day (0.3.82) and the line about clusters the last run did not measure.
+  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, grid, nmLine, noDevNote, neverNote];
 }
 
 /* ------------------------------------ the summary ------------------------------------ */
@@ -705,7 +779,7 @@ function summaryView(clusterId) {
   const notice = B.get('sum:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('sum:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
   // Documents without a device name: one line under the cards, summed (the owner, 0.3.77).
-  const noDevNote = B.get('sum:nodevice', rid, () => noDeviceNote(res.byCluster, clusterId ? '' : 'Each cluster’s count: Dashboard › How the last run read each cluster.'));
+  const noDevNote = B.get('sum:nodevice', rid, () => noDeviceNote(res.byCluster, clusterId ? '' : 'Each cluster’s count: its board’s “Last run read” line.'));
   const winNote = B.get('sum:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
   const tzNote = B.get('sum:tz', `${S.tz}`, () => (S.tz === null ? null
     : h('div.muted.ld-note#ld-sum-tz-note', `Summary counts every time zone (the core’s totals): the time-zone filter — ${tzWords()} — applies to Dashboard and Devices.`)));
@@ -756,6 +830,17 @@ function clusterView(id) {
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
   const winNote = B.get('cl:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(res.lastRunAt, res.now));
   const charts = B.get('cl:charts', `${rid}|${S.pk}|${S.tz}`, () => chartPanels(res, S.period, b, id));
+  const fw = S.focusWin && S.focusWin.cluster === id ? S.focusWin : null;
+  const focusNote = B.get('cl:focus', `${rid}|${fw ? `${fw.from}|${fw.mode}` : '-'}`, () => {
+    if (!fw) return null;
+    const w = (res.windows || []).find((x) => x && x.from === fw.from);
+    const v = lateAtWindow(w, fw.mode);
+    return h('div.ld-note.ld-focus#ld-focus-window',
+      `Opened at ${fw.label || 'a window'} from Late devices over the day: `,
+      h('b', v === null ? 'not measured' : `${countText(v)} device${v === 1 ? '' : 's'} ${fw.mode === 'critical' ? b.high.toLowerCase() : b.late}`),
+      v === null ? ' — no run in that window.' : ' at that window’s measurement.', ' ',
+      h('button.linkish', { type: 'button', 'aria-label': 'Dismiss', onclick: () => { S.focusWin = null; repaint(); } }, '×'));
+  });
 
   const f = res.fields || {};
   const extras = Array.isArray(f.extras) ? f.extras : [];
@@ -783,7 +868,7 @@ function clusterView(id) {
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
     `${S.cdSet === 'delayed' ? `${countText(cdLate)} delayed of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [cdBtn, filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  return [head, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard];
+  return [head, focusNote, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */
