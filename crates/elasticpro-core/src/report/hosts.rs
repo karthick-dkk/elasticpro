@@ -220,9 +220,13 @@ pub fn pool_request(cluster: &str, timeout_ms: u64) -> EsRequest {
     req(cluster, "GET", "/_cat/thread_pool/search?format=json&h=node_name,active,queue,queue_size,rejected".into(), None, timeout_ms)
 }
 
-/// The search one page is: the pattern in the path, the day in the query.
-pub fn page_request(cluster: &str, ind: &Indices, body: &Value, timeout_ms: u64) -> EsRequest {
-    req(cluster, "POST", format!("/{}/{}", ind.expr(), collect::SEARCH_QS), Some(body.to_string()), timeout_ms)
+/// The search one page is: the pattern in the path, the day in the query. A closed `day` goes
+/// with the request cache (`collect::search_qs`, the volume's rule), today never; the body
+/// carries the cluster-side `timeout` from `timeout_ms` (`EsRequest::with_search_timeout`), so
+/// the cluster stops a page just before we stop waiting for it.
+pub fn page_request(cluster: &str, ind: &Indices, body: &Value, timeout_ms: u64, day: NaiveDate, today: NaiveDate) -> EsRequest {
+    req(cluster, "POST", format!("/{}/{}", ind.expr(), collect::search_qs(day, today)), Some(body.to_string()), timeout_ms)
+        .with_search_timeout()
 }
 
 /// One row: a day × index × source host, as Elasticsearch answered it.
@@ -1219,6 +1223,22 @@ mod tests {
     fn row(index: &str, host: Option<&str>, docs: u64, client: Option<&str>, branch: Option<&str>) -> HostRow {
         HostRow { index: index.into(), host: host.map(String::from), docs, event_bytes: Some(docs * 10), sub_bytes: None,
                   event_missing: 0, meta: vec![client.map(String::from), None, branch.map(String::from)] }
+    }
+
+    #[test]
+    fn a_page_of_a_closed_day_is_cached_and_stops_on_the_cluster_before_the_client_does() {
+        let ind = Indices::from_settings(&VolumeSettings::default()).unwrap();
+        let q = json!({ "terms": { "_index": ["logstash-a-2026.11.01"] } });
+        let body = composite_body(&q, &resolved(), 1000, None);
+        let (day, today) = (parse_day("2026-11-01").unwrap(), parse_day("2026-11-02").unwrap());
+        let r = page_request("c", &ind, &body, 30_000, day, today);
+        assert!(r.path.ends_with("&request_cache=true"), "{}", r.path);
+        let b: Value = serde_json::from_str(r.body.as_deref().unwrap()).unwrap();
+        assert_eq!((b["timeout"].as_str(), b["size"].as_u64(), b.get("terminate_after")), (Some("25000ms"), Some(0), None));
+        assert!(!page_request("c", &ind, &body, 30_000, today, today).path.contains("request_cache"), "today is never cached");
+        // The cluster's own time-out is a partial answer: asked again, not taken for the end.
+        let timed = json!({ "timed_out": true, "aggregations": { "h": { "buckets": [] } } });
+        assert!(read_page(&timed, &resolved(), 10).is_err());
     }
 
     #[test]

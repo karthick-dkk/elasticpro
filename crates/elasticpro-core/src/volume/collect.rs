@@ -334,6 +334,25 @@ pub fn field_caps_request(cluster: &str, ind: &Indices, s: &VolumeSettings, time
 
 pub const SEARCH_QS: &str = "_search?ignore_unavailable=true&allow_no_indices=true";
 
+/// A day that is over: before today's UTC date (the date index names are written in,
+/// `schedule`). Its documents no longer change, so its figures are final once read whole
+/// (`apply_search`) and a search over it may be answered from the shard request cache.
+pub fn is_closed(d: NaiveDate, today: NaiveDate) -> bool {
+    d < today
+}
+
+/// `SEARCH_QS`, and for a search over closed days only (`is_closed` of its last day) the
+/// shard request cache: the answer cannot change, so a second ask (a backfill, Collect again,
+/// a hosts report of the same day) costs the cluster nothing. Never for today. Elasticsearch
+/// caches only `size: 0` searches, which every one of ours is.
+pub fn search_qs(last_day: NaiveDate, today: NaiveDate) -> String {
+    if is_closed(last_day, today) {
+        format!("{SEARCH_QS}&request_cache=true")
+    } else {
+        SEARCH_QS.to_string()
+    }
+}
+
 /// The time field between the start of `from` and the end of `to`, UTC days: exactly the
 /// buckets of a `date_histogram` with `calendar_interval: 1d` in UTC. One definition for
 /// the histogram that finds the days and the search that counts each one.
@@ -345,17 +364,17 @@ pub fn utc_days_range(time_field: &str, from: NaiveDate, to: NaiveDate) -> Value
 }
 
 /// The one search per run that finds which UTC days the time-split indices have documents
-/// on, between `from` and `to`.
-pub fn histogram_request(cluster: &str, ind: &Indices, split: &[String], from: NaiveDate, to: NaiveDate) -> EsRequest {
+/// on, between `from` and `to`. Cached only when `to` is closed (`search_qs`).
+pub fn histogram_request(cluster: &str, ind: &Indices, split: &[String], from: NaiveDate, to: NaiveDate, today: NaiveDate) -> EsRequest {
     let body = json!({
         "size": 0, "track_total_hits": false,
         "query": { "bool": { "filter": [ { "terms": { "_index": split } }, utc_days_range(&ind.time_field, from, to) ] } },
         "aggs": { "days": { "date_histogram": { "field": ind.time_field, "calendar_interval": "1d", "time_zone": "UTC",
                                                 "min_doc_count": 1, "format": "yyyy-MM-dd" } } },
     });
-    let mut r = req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(body.to_string()));
+    let mut r = req(cluster, "POST", format!("/{}/{}", ind.expr(), search_qs(to, today)), Some(body.to_string()));
     r.timeout_ms = Some(SEARCH_TIMEOUT_MS);
-    r
+    r.with_search_timeout()
 }
 
 /// The days a histogram answer has documents on.
@@ -384,18 +403,21 @@ pub fn day_query(dated: &[&str], split: &[&str], time_field: &str, d: NaiveDate)
 /// One day's search. Under the legacy format with days from the names it names the day's
 /// indices in the path (`logstash-*-2026.10.20`), as it always has; otherwise it names the
 /// pattern and says in the query which indices, and for the time-split ones which day.
-pub fn search_request(cluster: &str, ind: &Indices, d: NaiveDate, group: &DayGroup, body: &Value) -> EsRequest {
+/// A closed day goes with the request cache (`search_qs`), today never; the body carries the
+/// cluster-side `timeout` from `SEARCH_TIMEOUT_MS` (`EsRequest::with_search_timeout`).
+pub fn search_request(cluster: &str, ind: &Indices, d: NaiveDate, group: &DayGroup, body: &Value, today: NaiveDate) -> EsRequest {
+    let qs = search_qs(d, today);
     let mut r = if let (Some(f), true) = (ind.legacy_format(), group.time_split.is_empty()) {
-        req(cluster, "POST", format!("/{}/{SEARCH_QS}", f.for_day(d)), Some(body.to_string()))
+        req(cluster, "POST", format!("/{}/{qs}", f.for_day(d)), Some(body.to_string()))
     } else {
         let dated: Vec<&str> = group.index_source.keys().map(String::as_str).collect();
         let split: Vec<&str> = group.time_split.keys().map(String::as_str).collect();
         let mut b = body.clone();
         b["query"] = day_query(&dated, &split, &ind.time_field, d);
-        req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(b.to_string()))
+        req(cluster, "POST", format!("/{}/{qs}", ind.expr()), Some(b.to_string()))
     };
     r.timeout_ms = Some(SEARCH_TIMEOUT_MS);
-    r
+    r.with_search_timeout()
 }
 
 /* ------------------------------------ _cat/indices ------------------------------------ */
@@ -632,7 +654,7 @@ pub fn needs_search(day: &Day, group: Option<&DayGroup>, in_split: bool) -> bool
 /// A day with time-split documents that this run's split does not show: the split could
 /// not be worked out (its reason), or some time-split indices are closed.
 pub fn not_searched_why(day: &Day, group: Option<&DayGroup>, split: &Split, today: NaiveDate) -> Option<String> {
-    let date = parse_day(&day.day).filter(|d| *d < today)?;
+    let date = parse_day(&day.day).filter(|d| is_closed(*d, today))?;
     if day.is_final || !day.live || split.has(date) {
         return None;
     }
@@ -953,7 +975,7 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
     // one that could not count the time-split part.
     let partial = partial_answer(res).or_else(|| group.split_missing.as_ref()
         .map(|why| format!("the indices split by time were not counted: {why}; asked again on the next run")));
-    day.is_final = partial.is_none() && parse_day(&day.day).is_some_and(|d| d < today);
+    day.is_final = partial.is_none() && parse_day(&day.day).is_some_and(|d| is_closed(d, today));
     day.error = partial;
 }
 
@@ -1299,9 +1321,9 @@ mod pattern_tests {
         assert!(!field_caps_request("c", &f, &s, false).path.contains("@timestamp"));
         let l = read_cat(&cat(), &f);
         let body = json!({ "size": 0 });
-        let r = search_request("c", &f, d("2026-10-20"), &l.group_for(d("2026-10-20"), &Split::None), &body);
-        assert_eq!(r.path, "/logstash-*-2026.10.20/_search?ignore_unavailable=true&allow_no_indices=true");
-        assert_eq!(r.body.as_deref(), Some(r#"{"size":0}"#), "no query added");
+        let r = search_request("c", &f, d("2026-10-20"), &l.group_for(d("2026-10-20"), &Split::None), &body, d("2026-10-20"));
+        assert_eq!(r.path, "/logstash-*-2026.10.20/_search?ignore_unavailable=true&allow_no_indices=true", "today: never the request cache");
+        assert_eq!(r.body, Some(format!(r#"{{"size":0,"timeout":"{}ms"}}"#, crate::http::search_timeout_ms(SEARCH_TIMEOUT_MS))), "no query added; the cluster-side timeout from the client's");
         assert_eq!((r.origin.as_deref(), r.class), (Some("volume-daily"), crate::gate::Class::Background));
         // A day's aggregation may take longer than the listing: under the gate's 115 s ceiling.
         assert_eq!(r.timeout_ms, Some(SEARCH_TIMEOUT_MS));
@@ -1323,14 +1345,39 @@ mod pattern_tests {
     }
 
     #[test]
+    fn closed_days_are_cached_today_never_and_every_search_stops_on_the_cluster_first() {
+        let today = d("2026-10-29");
+        assert!(is_closed(d("2026-10-28"), today) && !is_closed(today, today) && !is_closed(d("2026-10-30"), today));
+        assert_eq!(search_qs(d("2026-10-28"), today), format!("{SEARCH_QS}&request_cache=true"));
+        assert_eq!(search_qs(today, today), SEARCH_QS, "today's documents still arrive");
+        let p = pattern("logstash-*", DayFrom::Name);
+        let l = read_cat(&cat(), &p);
+        let body = search_body(&[], 25);
+        for (day, cached) in [(d("2026-10-20"), true), (today, false)] {
+            let r = search_request("c", &p, day, &l.group_for(day, &Split::None), &body, today);
+            assert_eq!(r.path.contains("request_cache=true"), cached, "{day}: {}", r.path);
+            let b: Value = serde_json::from_str(r.body.as_deref().unwrap()).unwrap();
+            // Cacheable at all only as a size-0 search; exact counts, never cut short.
+            assert_eq!((b["size"].clone(), b["track_total_hits"].clone(), b.get("terminate_after")), (json!(0), json!(true), None));
+            assert_eq!(b["timeout"], json!(format!("{}ms", crate::http::search_timeout_ms(SEARCH_TIMEOUT_MS))), "under the client's limit");
+        }
+        let h = histogram_request("c", &p, &l.split_open(), d("2026-10-01"), today, today);
+        let hb: Value = serde_json::from_str(h.body.as_deref().unwrap()).unwrap();
+        assert_eq!((hb["size"].clone(), hb["timeout"].is_string()), (json!(0), true));
+        // A search the cluster cut at its timeout is a partial answer: kept, not final, asked again.
+        let timed = json!({ "timed_out": true, "_shards": { "total": 2, "failed": 0 }, "hits": { "total": { "value": 3 } } });
+        assert!(partial_answer(&timed).unwrap().contains("timed out"));
+    }
+
+    #[test]
     fn a_pattern_day_search_names_its_indices_and_the_utc_day() {
         let p = pattern("logstash-*", DayFrom::Name);
         let l = read_cat(&cat(), &p);
         let split = Split::Known { days: [d("2026-10-20")].into_iter().collect(), complete: false };
         let g = l.group_for(d("2026-10-20"), &split);
         assert_eq!(g.time_split.keys().collect::<Vec<_>>(), vec!["logstash-linux-2026.10"], "open ones only");
-        let r = search_request("c", &p, d("2026-10-20"), &g, &json!({ "size": 0 }));
-        assert_eq!(r.path, "/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true");
+        let r = search_request("c", &p, d("2026-10-20"), &g, &json!({ "size": 0 }), d("2026-10-29"));
+        assert_eq!(r.path, "/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true&request_cache=true", "a closed day: cached");
         let b: Value = serde_json::from_str(r.body.as_deref().unwrap()).unwrap();
         let should = &b["query"]["bool"]["should"];
         assert_eq!(should[0], json!({ "terms": { "_index": ["logstash-linux-2026.10.20", "logstash-win-2026.10.20"] } }));
@@ -1342,7 +1389,9 @@ mod pattern_tests {
         assert_eq!(day_query(&["a"], &[], "t", d("2026-10-20")), json!({ "terms": { "_index": ["a"] } }));
         assert_eq!(day_query(&[], &["b"], "t", d("2026-10-20"))["bool"]["filter"][0], json!({ "terms": { "_index": ["b"] } }));
         // The histogram: the same UTC days, one request over every open time-split index.
-        let h = histogram_request("c", &p, &l.split_open(), d("2026-10-01"), d("2026-10-29"));
+        let h = histogram_request("c", &p, &l.split_open(), d("2026-10-01"), d("2026-10-29"), d("2026-10-29"));
+        assert!(!h.path.contains("request_cache"), "a range up to today is not closed");
+        assert!(histogram_request("c", &p, &l.split_open(), d("2026-09-01"), d("2026-09-30"), d("2026-10-29")).path.ends_with("&request_cache=true"));
         let hb: Value = serde_json::from_str(h.body.as_deref().unwrap()).unwrap();
         assert_eq!(hb["aggs"]["days"]["date_histogram"], json!({ "field": "@timestamp", "calendar_interval": "1d",
             "time_zone": "UTC", "min_doc_count": 1, "format": "yyyy-MM-dd" }));

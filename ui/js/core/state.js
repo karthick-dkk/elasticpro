@@ -686,7 +686,7 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
         settled(cl.allocation()), settled(cl.nodes()),
         settled(cl.repositories()), settled(cl.slmPolicies()),
         z && z.slmStatus ? z.slmStatus : settled(cl.slmStatus()),
-        z && z.ilm ? z.ilm : settled(cl.ilmStatus()), settled(cl.ilmErrors()),
+        z && z.ilm ? z.ilm : settled(cl.ilmStatus()), settled(cl.ilmErrors(cl.c.logIndexPattern)),
         settled(cl.json('GET', '/_nodes/settings?filter_path=nodes.*.settings.path.repo,nodes.*.name')),
         // What the cluster actually enforces, as opposed to what the config says it should.
         settled(cl.ilmPolicies()),

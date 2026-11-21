@@ -429,8 +429,11 @@ pub(crate) fn to_ms(v: Option<&Value>) -> Option<i64> {
 
 /// The one search a run sends, page by page: the cluster's own pattern, a body from
 /// `logdelay::measure::page_body` (the device composite, the newest document of each with the
-/// extra columns). Never a write.
-pub fn search_request_for(cluster_id: &str, pattern: &str, body: Value) -> EsRequest {
+/// extra columns). Never a write. `timeout_ms` is the client's limit for the page; the body
+/// carries the cluster's, a little under it (`EsRequest::with_search_timeout`), so a page the
+/// cluster cannot finish in time comes back `timed_out` (asked again, `measure::read_page`)
+/// instead of running on after we gave up.
+pub fn search_request_for(cluster_id: &str, pattern: &str, body: Value, timeout_ms: u64) -> EsRequest {
     EsRequest {
         cluster_id: cluster_id.to_string(),
         url: None,
@@ -438,12 +441,13 @@ pub fn search_request_for(cluster_id: &str, pattern: &str, body: Value) -> EsReq
         path: format!("/{pattern}/_search?ignore_unavailable=true&allow_no_indices=true"),
         body: Some(body.to_string()),
         auth_header: None,
-        timeout_ms: Some(60_000),
+        timeout_ms: Some(timeout_ms),
         allow_writes: false,
         origin: Some("delay-sink".into()),
         class: crate::gate::Class::Background,
         ..Default::default()
     }
+    .with_search_timeout()
 }
 
 /// The one write this job sends, to the sink cluster.
@@ -662,9 +666,15 @@ mod tests {
 
     #[test]
     fn the_search_never_asks_to_write() {
-        let r = search_request_for("prod", "logstash-*", json!({ "size": 0 }));
+        let r = search_request_for("prod", "logstash-*", json!({ "size": 0 }), 30_000);
         assert!(!r.allow_writes);
         assert!(r.path.starts_with("/logstash-*/_search"));
+        assert!(!r.path.contains("request_cache"), "the window ends now: never cached");
+        // The cluster stops a page a little before we stop waiting for it; no count is cut short.
+        assert_eq!(r.body.as_deref(), Some(r#"{"size":0,"timeout":"25000ms"}"#));
+        let page = search_request_for("prod", "logstash-*", json!({}), crate::logdelay::collect::PAGE_TIMEOUT_MS);
+        let ceiling = crate::gate::Limits::default().max_timeout_ms.min(crate::logdelay::collect::PAGE_TIMEOUT_MS);
+        assert_eq!(page.body, Some(format!(r#"{{"timeout":"{}ms"}}"#, crate::http::search_timeout_ms(ceiling))));
         assert!(bulk_request(&cfg(), String::new()).allow_writes);
     }
 
