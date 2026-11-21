@@ -168,9 +168,15 @@ bodies and header values. No container log is read.
 **Redacted on capture, in one place** (`detail::redact`): every kept line and every part's
 message loses a URL's userinfo (`https://user:pass@host` → `https://***@host`), the value after
 `Basic` / `Bearer` / `ApiKey`, and the value of an `Authorization`, API-key, password, secret or
-token field, and is cut to 300 characters. The run adds its own: `run.start job=… trigger=…`, one line per part (`ERROR` failed,
-`WARN` partial / deferred / skipped, `INFO` succeeded) and `run.end status=… ok= partial= failed=
-deferred= skipped= records= took=`. Each line: `at` (ms), `level`, `cluster` (when the line names
+token field, and is cut to 300 characters.
+
+**What ships in 0.3.81** — the run's own lines only: `run.start job=… trigger=…`, one line per
+part (`ERROR` failed, `WARN` partial / deferred / skipped, `INFO` succeeded), `run.cancel asked
+by …` (a job line written by `Jobs::cancel`) and `run.end status=… ok= partial= failed= deferred=
+skipped= records= took=`. No other code writes target `jobline` yet; a later job line is one
+`tracing::…!(target: "jobline", …)` at a point worth reading. The capture layer has its own filter
+(`capture::wanted`), outside `RUST_LOG`: `RUST_LOG=warn` does not drop job lines, and an event that
+is not a job line is never read. Each line: `at` (ms), `level`, `cluster` (when the line names
 one), `run` (true for the run's own start and end lines, which name no cluster), `text` (at most
 300 characters). **Narrowed on read**: a line naming a cluster the caller may not see is dropped
 for them, and a line naming no cluster is shown to a limited caller only when it is one of the
@@ -227,7 +233,10 @@ and up; read-only, not in the activity log (a poll).
 - Per cluster, one `GET /_tasks?actions=*search*&detailed` (`tasks::SEARCH_TASKS_PATH`, beside
   `TASKS_PATH`; one definition each), background class through the core's gate like every
   background read, at most 4 clusters at a time, 10 s each. A cluster is read **at most once in
-  25 s** however many people ask (its answer is kept that long); the page asks every 30 s and only
+  25 s** however many people ask (its answer is kept that long): it is marked in flight under
+  the lock before its read goes out, so a second caller meanwhile shares that read. The answer
+  comes within 4 s from what is read by then; clusters still being read are in `reading`
+  (`[{cluster, name}]`) and the page asks again 5 s later. The page asks every 30 s and only
   while Jobs › Jobs is open.
 - A cluster the governor's signals call busy, or the poller cannot reach, is **not read**, and so
   is one with no credential here: each is in `notRead` with why ("not read: busy: …"). Unknown is

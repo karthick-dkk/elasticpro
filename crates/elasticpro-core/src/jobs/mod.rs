@@ -691,8 +691,9 @@ impl Jobs {
     }
 
     /// Keep a finished run's detail: a file beside the run log, written once (or in memory
-    /// without a data directory).
-    fn store_detail(&self, owner: Owner, id: &str, d: detail::RunDetail) {
+    /// without a data directory). Called under the log's lock, before the finished run is saved
+    /// or can be read: whoever sees the run ended finds its detail already there.
+    fn store_detail(&self, inner: &mut Inner, owner: Owner, id: &str, d: detail::RunDetail) {
         match self.detail_dir(owner) {
             Some(dir) => {
                 let body = match serde_json::to_vec(&d) {
@@ -704,7 +705,6 @@ impl Jobs {
                 }
             }
             None => {
-                let mut inner = self.inner.lock();
                 inner.mem_details.retain(|(o, i, _)| !(*o == owner && i == id));
                 inner.mem_details.push_back((owner, id.to_string(), d));
                 while inner.mem_details.len() > MEM_DETAILS {
@@ -833,6 +833,8 @@ impl Jobs {
             self.save(inner, owner);
         }
         tracing::info!(target: "audit", job = %job, run = %run_id, user = %by, "job: cancel asked");
+        // A job line (docs/JOBS.md "Run details"): the run's own log says who asked it to stop.
+        tracing::warn!(target: "jobline", run = %run_id, "run.cancel asked by {by}: it stops at its next safe point");
         true
     }
 
@@ -860,18 +862,18 @@ impl Jobs {
             parts: Some(detail::PartCounts { deferred: 1, ..Default::default() }),
         };
         let error = rec.error.clone().unwrap_or_default();
+        // Its detail first — the one cluster, deferred (a warning, not a failure), and why.
+        let mut c = detail::Collecting::default();
+        c.part(detail::Part::not_ok(job, &b.cluster, detail::PartStatus::Deferred, &error, None, None));
+        c.line(detail::Line { at: now, level: "WARN".into(), cluster: Some(b.cluster.clone()), run: false,
+                              text: format!("{} deferred — {}; retried automatically when it eases (a warning, not a failure)", b.cluster, b.reason) });
+        self.store_detail(inner, owner, &id, c.finish());
         if let Some(f) = inner.logs.get_mut(&owner) {
             f.push(rec);
         }
         self.save(inner, owner);
         inner.waiting.insert(key, id.clone());
         drop(guard);
-        // Its detail: the one cluster, deferred (a warning, not a failure), and why.
-        let mut c = detail::Collecting::default();
-        c.part(detail::Part::not_ok(job, &b.cluster, detail::PartStatus::Deferred, &error, None, None));
-        c.line(detail::Line { at: now, level: "WARN".into(), cluster: Some(b.cluster.clone()), run: false,
-                              text: format!("{} deferred — {}; retried automatically when it eases (a warning, not a failure)", b.cluster, b.reason) });
-        self.store_detail(owner, &id, c.finish());
         tracing::info!(job, cluster = %b.cluster, reason = %b.reason, "job: deferred, the cluster is busy");
         Some(id)
     }
@@ -1117,6 +1119,11 @@ impl Jobs {
                 }
             }
         }
+        // The detail before the finished run is saved or let go of: never a gap where the run
+        // reads ended and its detail is not there yet.
+        if let Some(c) = gathered.take() {
+            self.store_detail(inner, owner, id, c.finish());
+        }
         let mut keep = None;
         if last {
             if let Some(f) = inner.logs.get_mut(&owner) {
@@ -1126,9 +1133,6 @@ impl Jobs {
         }
         self.save(inner, owner);
         drop(guard);
-        if let Some(c) = gathered.take() {
-            self.store_detail(owner, id, c.finish());
-        }
         if let Some(keep) = keep {
             self.prune_details(owner, &keep, now);
         }

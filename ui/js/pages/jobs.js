@@ -650,12 +650,17 @@ function rowRun(jobId, last) {
   return picked || last;
 }
 
-async function loadDetail(runId) {
-  if (!runId || details.has(runId)) return;
-  details.set(runId, { res: null, error: null, loading: true });
+async function loadDetail(run) {
+  const runId = run && run.id;
+  if (!runId) return;
+  const had = details.get(runId);
+  // Read once — but a refusal is asked again at the next refresh, and "no details" for a run
+  // that ended under a minute ago may only mean they were still being written.
+  if (had && !D.detailAgain(had, run, Date.now())) return;
+  details.set(runId, { res: null, error: null, loading: true, at: Date.now() });
   const res = await jobRunDetail(runId);
-  details.set(runId, res && res.ok ? { res, error: null, loading: false }
-    : { res: null, error: J.refusalText(res) || 'the core did not answer', loading: false, unsupported: !!(res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) });
+  details.set(runId, res && res.ok ? { res, error: null, loading: false, at: Date.now() }
+    : { res: null, error: J.refusalText(res) || 'the core did not answer', loading: false, at: Date.now(), unsupported: !!(res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) });
   if (host) draw();
 }
 
@@ -682,7 +687,7 @@ function detailPanel(job, cur, last, now) {
   const s = rowState.get(job.id) || { tab: 'summary' };
   const run = rowRun(job.id, last);
   const done = run && !J.isOpen(run);
-  if (done) loadDetail(run.id);
+  if (done) loadDetail(run);
   const d = done ? details.get(run.id) : null;
   const sig = JSON.stringify([s.tab, s.showAll, run && run.id, run && run.status, run && run.endedAt, d && [!!d.res, d.error, d.loading],
     s.hist ? (s.hist.runs || []).map((x) => x.id).join(',') : null, s.histLoading, cur && cur.id, job.state && job.state.nextRunAt,
@@ -821,8 +826,11 @@ async function loadSlow({ now = false } = {}) {
   slow.loading = true; slow.at = Date.now();
   const res = await slowSearches(slow.minMs);
   slow.loading = false;
-  if (res && res.ok) { slow.res = res; slow.error = null; }
-  else if (res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) slow.unsupported = true;
+  if (res && res.ok) {
+    slow.res = res; slow.error = null;
+    // Clusters still being read when the core answered: ask again in 5 s, not 30.
+    if (Array.isArray(res.reading) && res.reading.length) slow.at = Date.now() - D.SLOW_POLL_MS + D.SLOW_RETRY_MS;
+  } else if (res && (res.kind === 'bad_message' || res.kind === 'unknown_message')) slow.unsupported = true;
   else slow.error = J.refusalText(res) || 'the core did not answer';
   if (host && tab === 'jobs') draw();
 }
@@ -888,6 +896,7 @@ function slowCard() {
         ? h('tr', h('td.muted', { colspan: 6 }, `${list.length - shown.length} more · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); slow.showAll = true; draw(); } }, `Show all ${list.length}`)))
         : null;
       const notRead = (r.notRead || []);
+      const reading = (r.reading || []);
       body = [
         h('div.jg-tiles.jb-slow-tiles',
           h('div.jg-tile', { dataset: { tile: 'slow-count' } }, h('span.k', 'Running long'), h('b.v', tiles.count.value), h('span.d', tiles.count.sub)),
@@ -899,6 +908,8 @@ function slowCard() {
         notRead.length ? h('div.jb-dnote.jb-notread', { title: notRead.map((x) => `${x.name || nameOfCluster(x.cluster)}: ${x.why}`).join('\n') },
           `${notRead.length} cluster${notRead.length === 1 ? '' : 's'} not read — `, notRead.slice(0, 3).map((x) => `${x.name || nameOfCluster(x.cluster)} (${x.why.replace(/^not read: /, '')})`).join(', '),
           notRead.length > 3 ? ` +${notRead.length - 3}` : '', ': unknown, not "none"') : null,
+        reading.length ? h('div.jb-dnote.muted.jb-reading', { title: reading.map((x) => x.name || nameOfCluster(x.cluster)).join(', ') },
+          `${reading.length} cluster${reading.length === 1 ? '' : 's'} still being read… — shown at the next read`) : null,
       ];
     }
     return h('section.card.jb-slowcard', { dataset: { card: 'slow' } },

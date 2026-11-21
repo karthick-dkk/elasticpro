@@ -39,6 +39,18 @@ pub const JOB_LINE_TARGET: &str = "jobline";
 /// The field that makes an event a run's line whatever its target.
 pub const JOB_LINE_FIELD: &str = "job_line";
 
+/// What the capture layer is given (its own filter, outside the log's `RUST_LOG`, so
+/// `RUST_LOG=warn` never drops a job line): every span (to find the run it names) and only the
+/// events that may be job lines — target `jobline`, or carrying `job_line`. Decided from the
+/// callsite alone, before any field is read.
+pub fn wanted(m: &tracing::Metadata<'_>) -> bool {
+    m.is_span() || maybe_job_line(m)
+}
+
+fn maybe_job_line(m: &tracing::Metadata<'_>) -> bool {
+    m.target() == JOB_LINE_TARGET || m.fields().field(JOB_LINE_FIELD).is_some()
+}
+
 /// Begin gathering for `run_id`.
 pub fn open(run_id: &str) {
     let mut m = OPEN.lock();
@@ -158,7 +170,8 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        if COUNT.load(Ordering::Relaxed) == 0 {
+        // Opt-in first, from the callsite: nothing of any other event is read or stringified.
+        if COUNT.load(Ordering::Relaxed) == 0 || !maybe_job_line(event.metadata()) {
             return;
         }
         let mut f = Fields::default();
@@ -224,5 +237,26 @@ mod tests {
         // After it ended: nothing is held for it.
         add_part(&id, Part::ok("x", None, None));
         assert!(!is_open(&id));
+    }
+
+    #[test]
+    fn a_job_line_is_kept_whatever_the_logs_level_and_nothing_else_is_read() {
+        use tracing_subscriber::Layer as _;
+        // As the binary installs it: the log at WARN (RUST_LOG=warn), the capture with its own filter.
+        let log = tracing_subscriber::fmt::layer().with_writer(std::io::sink).with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+        let sub = tracing_subscriber::registry().with(log).with(Layer.with_filter(tracing_subscriber::filter::filter_fn(wanted)));
+        let id = format!("cap-{}", crate::auth::random_hex(6));
+        tracing::subscriber::with_default(sub, || {
+            open(&id);
+            let span = tracing::info_span!("job_run", run = %id);
+            span.in_scope(|| {
+                tracing::info!(target: "jobline", cluster = "a", "a page=1 records=3");
+                tracing::info!(cluster = "a", "an INFO line that is not a job line");
+                tracing::error!("an ERROR line that is not a job line");
+            });
+        });
+        let d = take(&id).expect("open").finish();
+        let texts: Vec<&str> = d.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["a page=1 records=3 cluster=a"], "an INFO job line under RUST_LOG=warn is kept; nothing un-opted is");
     }
 }

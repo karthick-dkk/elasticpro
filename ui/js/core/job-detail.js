@@ -137,6 +137,25 @@ function triggerWord(t) {
   return t ? String(t) : '—';
 }
 
+/** A run's details are read once; asked for again only after a refusal, or after "no details" for a run that ended under this long ago. */
+export const DETAIL_YOUNG_MS = 60_000;
+/** Not more often than this, so a refresh every 3 s does not ask every 3 s. */
+export const DETAIL_RETRY_MS = 5_000;
+
+/**
+ * Whether a run's kept answer (`had`: `{res, error, loading, at}`) should be asked for again
+ * now: never while loading or within DETAIL_RETRY_MS of the last ask; after a refusal (unless
+ * the server does not know the message); after "no details" while the run is younger than
+ * DETAIL_YOUNG_MS (its details may still have been on their way).
+ */
+export function detailAgain(had, run, now = Date.now()) {
+  if (!had || had.loading || had.unsupported) return false;
+  if (now - (num(had.at) || 0) < DETAIL_RETRY_MS) return false;
+  if (had.error) return true;
+  const ended = num(run && run.endedAt);
+  return !!(had.res && !had.res.detail && ended !== null && now - ended < DETAIL_YOUNG_MS);
+}
+
 /** Parts that did not succeed (the Exceptions tab), as the core ordered them: worst first. */
 export const exceptionsOf = (detail) => ((detail && detail.parts) || []).filter((p) => p.status !== 'succeeded');
 
@@ -193,6 +212,8 @@ export const SLOW_THRESHOLDS = Object.freeze([[10_000, '10 s'], [30_000, '30 s']
 export const SLOW_DEFAULT_MS = 30_000;
 /** The card asks at most this often, and only while the Jobs page is open. */
 export const SLOW_POLL_MS = 30_000;
+/** Sooner when the core answered with clusters still being read (`reading`). */
+export const SLOW_RETRY_MS = 5_000;
 /** Rows shown before "Show all". */
 export const SLOW_ROWS = 3;
 
@@ -229,7 +250,8 @@ export function slowTiles(answer, nameOf = (id) => id) {
     by.set(s.cluster, e);
   }
   const notRead = Array.isArray(answer.notRead) ? answer.notRead.length : 0;
-  const nr = notRead ? ` · ${notRead} not read` : '';
+  const reading = Array.isArray(answer.reading) ? answer.reading.length : 0;
+  const nr = `${notRead ? ` · ${notRead} not read` : ''}${reading ? ` · ${reading} reading…` : ''}`;
   const top = list[0] || null;
   const worst = [...by.values()].sort((a, b) => b.n - a.n || b.longest - a.longest)[0] || null;
   return {
@@ -237,7 +259,7 @@ export function slowTiles(answer, nameOf = (id) => id) {
     longest: top ? { value: runningText(top.runningMs), tone: runningTone(top.runningMs), sub: `${top.name || nameOf(top.cluster)} · node ${top.node || '—'}` }
       : { value: '—', tone: '', sub: 'nothing over the threshold' },
     slowest: worst ? { value: nameOf(worst.cluster), sub: `${worst.n} long search${worst.n === 1 ? '' : 'es'} · longest ${runningText(worst.longest)}` }
-      : { value: '—', sub: notRead ? 'some clusters not read' : 'no cluster is slow now' },
+      : { value: '—', sub: notRead ? 'some clusters not read' : reading ? 'some clusters still being read' : 'no cluster is slow now' },
   };
 }
 

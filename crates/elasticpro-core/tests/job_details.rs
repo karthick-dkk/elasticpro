@@ -35,7 +35,12 @@ async fn user(c: &Arc<Core>, s: &str, name: &str, role: &str) -> String {
 /// A cluster that answers the delay search with one device, takes a bulk, and lists two
 /// searches in `_tasks`: one of ElasticPro's (95 s) and somebody else's (42 s).
 async fn cluster() -> GaugedServer {
-    GaugedServer::start(|hit| {
+    cluster_taking(0).await
+}
+
+/// The same cluster, its `_tasks` answer taking `tasks_ms`.
+async fn cluster_taking(tasks_ms: u64) -> GaugedServer {
+    GaugedServer::start(move |hit| {
         if hit.path.starts_with("/_bulk") {
             return (200, r#"{"took":3,"errors":false,"items":[{"index":{"status":201}}]}"#.into(), 0);
         }
@@ -47,7 +52,7 @@ async fn cluster() -> GaugedServer {
                 "n1:12": { "node": "n1", "id": 12, "action": "indices:data/read/search", "running_time_in_nanos": 42_000_000_000u64,
                            "description": "indices[metrics-*], search_type[QUERY_THEN_FETCH]", "headers": { "X-Opaque-Id": "kibana-7f" } },
             } } } });
-            return (200, body.to_string(), 0);
+            return (200, body.to_string(), tasks_ms);
         }
         let body = json!({ "took": 5, "aggregations": { "devices": { "buckets": [
             { "key": "fw-1", "doc_count": 120, "latest": { "hits": { "hits": [
@@ -122,4 +127,29 @@ async fn slow_searches_read_tasks_once_label_ours_and_keep_to_the_offered_thresh
     assert!(srv.hits().iter().filter(|h| h.path.starts_with("/_tasks")).all(|h| h.method == "GET"), "read only");
     assert_eq!(c.handle(json!({ "type": "SLOW_SEARCHES", "session": &s, "minMs": 5 })).await["kind"], json!("bad_request"));
     assert_eq!(c.handle(json!({ "type": "SLOW_SEARCHES" })).await["kind"], json!("unauthenticated"));
+}
+
+#[tokio::test]
+async fn two_overlapping_asks_send_one_read_and_a_slow_cluster_does_not_hold_the_answer() {
+    let dir = TempDir::new("slow-overlap");
+    let srv = cluster_taking(5_500).await;
+    let c = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, Role::All);
+    let s = admin(&c).await;
+    let res = c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "url": srv.url() }] })).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let (c1, s1) = (c.clone(), s.clone());
+    let first = tokio::spawn(async move { c1.handle(json!({ "type": "SLOW_SEARCHES", "session": &s1 })).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let t0 = std::time::Instant::now();
+    let second = c.handle(json!({ "type": "SLOW_SEARCHES", "session": &s })).await;
+    assert!(t0.elapsed() < std::time::Duration::from_millis(1_500), "the second ask shares the read in flight, it does not wait: {:?}", t0.elapsed());
+    assert_eq!(second["reading"][0]["cluster"], json!("prod"), "{second}");
+    assert_eq!(second["clustersRead"], json!(0), "being read is not 'none running': {second}");
+    let first = first.await.unwrap();
+    assert_eq!(first["reading"][0]["cluster"], json!("prod"), "answered within the wait, the read still out: {first}");
+    // Once the read is in, the next ask has it, and nothing was read twice.
+    tokio::time::sleep(std::time::Duration::from_millis(6_000)).await;
+    let third = c.handle(json!({ "type": "SLOW_SEARCHES", "session": &s })).await;
+    assert_eq!(third["searches"].as_array().unwrap().len(), 2, "{third}");
+    assert_eq!(srv.hits().iter().filter(|h| h.path.starts_with("/_tasks")).count(), 1, "one read per cluster");
 }

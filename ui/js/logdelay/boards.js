@@ -528,11 +528,10 @@ function fleetStateBar(t, b) {
     legend(...parts.map(([v, colour, tx]) => h('span.ld-key', h('i', { style: { background: colour } }), `${tx} `, h('b', countText(v))))));
 }
 
-/** The mini stacked bar of a cluster's states, in the By cluster table. */
-/** By cluster's "Change": "+12 −5" — became late, came back — in the last run's window; — unknown. */
+/** By cluster's "Change": "+12 −5" — became late, came back — in today's window holding the last run (it can cover several runs); — unknown. */
 function changeCell(k, b) {
   if (!k) return h('td.num', { title: 'no run today: the change is not known' }, h('span.muted', '—'));
-  const title = `last run (${k.label}): ${countText(k.up)} became late (${b.late}), ${countText(k.down)} came back below the line · net ${k.net > 0 ? '+' : ''}${countText(k.net)}`;
+  const title = `in today's window holding the last run (${k.label}): ${countText(k.up)} became late (${b.late}), ${countText(k.down)} came back below the line · net ${k.net > 0 ? '+' : ''}${countText(k.net)}`;
   if (!k.up && !k.down) return h('td.num', { title }, h('span.muted', '0'));
   return h('td.num.ld-change', { title },
     k.up ? h('span.ld-chg-up', `+${countText(k.up)}`) : null,
@@ -540,6 +539,7 @@ function changeCell(k, b) {
     k.down ? h('span.ld-chg-dn', `−${countText(k.down)}`) : null);
 }
 
+/** The mini stacked bar of a cluster's states, in the By cluster table. */
 function stateBar(c, b) {
   const parts = [[c.below, C.ok, b.below], [c.delay, C.delay, b.mid], [c.critical, C.crit, b.high], [c.otherTz, C.tz, 'Other time zone'], [c.silent, C.silent, 'Silent'], [c.unmeasured, 'var(--surface-3)', 'Can’t measure']]
     .filter(([v]) => finite(v) && v > 0);

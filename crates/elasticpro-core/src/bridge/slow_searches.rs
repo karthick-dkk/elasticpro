@@ -2,12 +2,15 @@
 //! clusters the caller sees, for the *Slow searches now* card of Jobs › Jobs.
 //!
 //! * Read only while somebody has the Jobs page open: the page asks at most every 30 s, and a
-//!   cluster's task list is read at most once in `READ_EVERY_MS` however many people ask
-//!   (one answer per cluster, kept that long).
+//!   cluster's task list is read at most once in `READ_EVERY_MS` however many people ask: a
+//!   cluster is marked in flight under the lock before its read goes out, so a second caller
+//!   meanwhile shares that read instead of sending another.
 //! * One `GET tasks::SEARCH_TASKS_PATH` per cluster, background class, through the gate like
 //!   every background read, at most `AT_ONCE` clusters at a time. A cluster the governor's
 //!   signals call busy, or the poller cannot reach, is not read and is said so ("not read:
 //!   busy …") — unknown is not zero, so it is never counted as "no slow search".
+//! * The answer comes within `WAIT_MS` from what is read by then; clusters still being read are
+//!   listed in `reading` (the page asks again soon), so a large fleet never holds the request.
 //! * Read only. ElasticPro's own searches (opaque id `elasticpro/…`) are labelled; nothing is
 //!   cancelled from here.
 
@@ -27,13 +30,42 @@ pub const DEFAULT_MIN_MS: u64 = 30_000;
 const AT_ONCE: usize = 4;
 /// One cluster's read, at most.
 const TIMEOUT_MS: u64 = 10_000;
+/// How long an answer waits for the reads it started; what is still out is `reading`.
+pub const WAIT_MS: u64 = 4_000;
+/// A read marked in flight longer than this is taken to have been lost (a panic) and is sent again.
+const INFLIGHT_STALE_MS: u64 = TIMEOUT_MS * 3;
 const ORIGIN: &str = "core:slow-searches";
 /// The searches listed at most (longest first); the count says how many there were.
 const LIST_MAX: usize = 200;
 
-/// What one cluster's last read gave: when, and its searches (every one, from 10 s up) or why
-/// it was not read.
-pub(crate) type SlowRead = (u64, Result<Vec<SlowSearch>, String>);
+/// One cluster's state: its last read (when, and its searches — every one from 10 s up — or why
+/// it was not read), and since when a read is in flight, if one is.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlowRead {
+    pub(crate) read: Option<(u64, Result<Vec<SlowSearch>, String>)>,
+    pub(crate) reading_since: Option<u64>,
+}
+
+/// What to do with one cluster now: under the lock, so two callers never both send its read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Plan {
+    /// Read within `READ_EVERY_MS`, or being read by somebody else: answer from what is kept.
+    Kept,
+    /// Read it now; it is marked in flight.
+    Read,
+}
+
+/// The one rule: fresh or in flight is kept, otherwise the cluster is marked in flight and read.
+pub(crate) fn plan(e: &mut SlowRead, now: u64) -> Plan {
+    if e.read.as_ref().is_some_and(|(at, _)| now.saturating_sub(*at) < READ_EVERY_MS) {
+        return Plan::Kept;
+    }
+    if e.reading_since.is_some_and(|t| now.saturating_sub(t) < INFLIGHT_STALE_MS) {
+        return Plan::Kept;
+    }
+    e.reading_since = Some(now);
+    Plan::Read
+}
 
 impl Core {
     pub(crate) async fn slow_searches(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
@@ -46,68 +78,62 @@ impl Core {
         };
         let now = crate::fleet::now_ms();
         let ids = self.fleet_visible(caller);
+        // Busy and unreachable first (they lock other state); then, under the cache's lock, which
+        // clusters this call reads — each marked in flight before the lock is let go.
         let mut skipped: Vec<(String, String)> = vec![];
-        let mut to_read: Vec<String> = vec![];
-        {
-            let cache = self.slow_cache.lock();
-            for id in &ids {
-                if cache.get(id).is_some_and(|(at, _)| now.saturating_sub(*at) < READ_EVERY_MS) {
-                    continue;
-                }
-                if let Some(b) = self.cluster_busy(id) {
-                    skipped.push((id.clone(), format!("busy: {}", b.reason)));
-                } else if self.volume_unreachable(id) {
-                    skipped.push((id.clone(), "unreachable".into()));
-                } else {
-                    to_read.push(id.clone());
-                }
+        let mut candidates: Vec<String> = vec![];
+        for id in &ids {
+            if let Some(b) = self.cluster_busy(id) {
+                skipped.push((id.clone(), format!("busy: {}", b.reason)));
+            } else if self.volume_unreachable(id) {
+                skipped.push((id.clone(), "unreachable".into()));
+            } else {
+                candidates.push(id.clone());
             }
         }
-        // Read what is due, a few clusters at a time.
-        let sem = Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
-        let mut set = tokio::task::JoinSet::new();
-        for id in to_read {
+        let to_read: Vec<String> = {
+            let mut cache = self.slow_cache.lock();
+            candidates.into_iter().filter(|id| plan(cache.entry(id.clone()).or_default(), now) == Plan::Read).collect()
+        };
+        if !to_read.is_empty() {
+            // The reads go on by themselves; this answer waits for them at most WAIT_MS.
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
             let core = self.clone();
-            let sem = sem.clone();
-            set.spawn(async move {
-                let _permit = sem.acquire_owned().await;
-                let res = core.es_req(EsRequest {
-                    cluster_id: id.clone(), method: "GET".into(), path: tasks::SEARCH_TASKS_PATH.into(), timeout_ms: Some(TIMEOUT_MS),
-                    origin: Some(ORIGIN.into()), class: Class::Background, ..Default::default()
-                }).await;
-                let out = if res.get("ok") == Some(&json!(true)) {
-                    Ok(tasks::slow_searches(res.get("json").unwrap_or(&Value::Null), THRESHOLDS_MS[0]))
-                } else {
-                    Err(match res.get("kind").and_then(Value::as_str) {
-                        Some("no_creds") => "not primed".to_string(),
-                        _ => {
-                            let (_, status) = super::status_of(&res);
-                            let m = res.get("message").and_then(Value::as_str).unwrap_or("");
-                            if m.is_empty() { format!("the cluster answered {status}") } else { format!("{status}: {}", crate::jobs::detail::cut(m, 120)) }
-                        }
-                    })
-                };
-                (id, out)
+            tokio::spawn(async move {
+                let sem = Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
+                let mut set = tokio::task::JoinSet::new();
+                for id in to_read {
+                    let core = core.clone();
+                    let sem = sem.clone();
+                    set.spawn(async move {
+                        let _permit = sem.acquire_owned().await;
+                        let out = core.slow_read(&id).await;
+                        let mut cache = core.slow_cache.lock();
+                        let e = cache.entry(id).or_default();
+                        e.read = Some((crate::fleet::now_ms(), out));
+                        e.reading_since = None;
+                    });
+                }
+                while set.join_next().await.is_some() {}
+                let _ = tx.send(());
             });
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(WAIT_MS), rx).await;
         }
-        while let Some(done) = set.join_next().await {
-            if let Ok((id, out)) = done {
-                self.slow_cache.lock().insert(id, (crate::fleet::now_ms(), out));
-            }
-        }
-        // The answer: every cluster the caller sees, read now or within READ_EVERY_MS.
+        // The answer: every cluster the caller sees, as read now or within READ_EVERY_MS.
         let cache = self.slow_cache.lock();
         let mut searches: Vec<Value> = vec![];
         let mut not_read: Vec<Value> = skipped.iter().map(|(id, why)| json!({ "cluster": id, "name": self.cluster_name(id), "why": format!("not read: {why}") })).collect();
+        let mut reading: Vec<Value> = vec![];
         let mut read = 0usize;
         let mut oldest: Option<u64> = None;
         for id in &ids {
             if skipped.iter().any(|(s, _)| s == id) {
                 continue;
             }
-            let Some((at, out)) = cache.get(id) else { continue };
-            match out {
-                Ok(list) => {
+            let Some(e) = cache.get(id) else { continue };
+            match &e.read {
+                None => reading.push(json!({ "cluster": id, "name": self.cluster_name(id) })),
+                Some((at, Ok(list))) => {
                     read += 1;
                     oldest = Some(oldest.map_or(*at, |o| o.min(*at)));
                     for s in list.iter().filter(|s| s.running_ms >= min_ms) {
@@ -119,7 +145,7 @@ impl Core {
                         }));
                     }
                 }
-                Err(why) => not_read.push(json!({ "cluster": id, "name": self.cluster_name(id), "why": format!("not read: {why}") })),
+                Some((_, Err(why))) => not_read.push(json!({ "cluster": id, "name": self.cluster_name(id), "why": format!("not read: {why}") })),
             }
         }
         drop(cache);
@@ -127,6 +153,44 @@ impl Core {
         let count = searches.len();
         searches.truncate(LIST_MAX);
         json!({ "ok": true, "minMs": min_ms, "at": now, "readEveryMs": READ_EVERY_MS, "thresholdsMs": THRESHOLDS_MS,
-                "count": count, "searches": searches, "clustersRead": read, "clustersSeen": ids.len(), "notRead": not_read, "readAt": oldest })
+                "count": count, "searches": searches, "clustersRead": read, "clustersSeen": ids.len(), "notRead": not_read,
+                "reading": reading, "readAt": oldest })
+    }
+
+    /// One cluster's task list, or why it could not be read.
+    async fn slow_read(self: &Arc<Self>, id: &str) -> Result<Vec<SlowSearch>, String> {
+        let res = self.es_req(EsRequest {
+            cluster_id: id.to_string(), method: "GET".into(), path: tasks::SEARCH_TASKS_PATH.into(), timeout_ms: Some(TIMEOUT_MS),
+            origin: Some(ORIGIN.into()), class: Class::Background, ..Default::default()
+        }).await;
+        if res.get("ok") == Some(&json!(true)) {
+            return Ok(tasks::slow_searches(res.get("json").unwrap_or(&Value::Null), THRESHOLDS_MS[0]));
+        }
+        Err(match res.get("kind").and_then(Value::as_str) {
+            Some("no_creds") => "not primed".to_string(),
+            _ => {
+                let (_, status) = super::status_of(&res);
+                let m = res.get("message").and_then(Value::as_str).unwrap_or("");
+                if m.is_empty() { format!("the cluster answered {status}") } else { format!("{status}: {}", crate::jobs::detail::cut(m, 120)) }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cluster_is_read_once_however_many_ask_at_once() {
+        let mut e = SlowRead::default();
+        assert_eq!(plan(&mut e, 1_000), Plan::Read, "nothing kept: read it");
+        assert_eq!(plan(&mut e, 1_500), Plan::Kept, "in flight: the second caller shares it");
+        e.read = Some((3_000, Ok(vec![])));
+        e.reading_since = None;
+        assert_eq!(plan(&mut e, 3_000 + READ_EVERY_MS - 1), Plan::Kept, "fresh");
+        assert_eq!(plan(&mut e, 3_000 + READ_EVERY_MS), Plan::Read, "due again");
+        // A read lost in flight (its task ended without a word) is sent again, later.
+        assert_eq!(plan(&mut e, 3_000 + READ_EVERY_MS + INFLIGHT_STALE_MS + 1), Plan::Read);
     }
 }

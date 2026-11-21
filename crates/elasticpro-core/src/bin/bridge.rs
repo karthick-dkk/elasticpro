@@ -95,15 +95,18 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    // The JSON log, and beside it the run log's capture (docs/JOBS.md "Run details"): the lines
-    // a job's run writes are kept with that run as well. The filter is the one for both.
+    // The JSON log, and beside it the run log's capture (docs/JOBS.md "Run details"): the job
+    // lines a run writes (target `jobline`) are kept with that run as well.
     {
         use tracing_subscriber::layer::SubscriberExt as _;
         use tracing_subscriber::util::SubscriberInitExt as _;
+        use tracing_subscriber::Layer as _;
+        let log_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+        // Each layer its own filter: RUST_LOG is the log's; the capture keeps job lines whatever it says.
+        let capture = tracing_subscriber::filter::filter_fn(elasticpro_core::jobs::capture::wanted);
         tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-            .with(tracing_subscriber::fmt::layer().json())
-            .with(elasticpro_core::jobs::capture::Layer)
+            .with(tracing_subscriber::fmt::layer().json().with_filter(log_filter))
+            .with(elasticpro_core::jobs::capture::Layer.with_filter(capture))
             .init();
     }
     // Loading could not log: tracing was not up yet.

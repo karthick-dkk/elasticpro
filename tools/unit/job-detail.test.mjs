@@ -120,3 +120,22 @@ test('slow searches: the tiles, our own labelled, unread clusters never counted 
   assert.match(txt, /X-Opaque-Id: kibana-7f/);
   assert.match(txt, /\{"size":0\}$/);
 });
+
+test('a run\'s details are asked again only after a refusal, or "none" for a run just ended', () => {
+  const now = 1_000_000;
+  const run = { id: 'r', endedAt: now - 10_000 };
+  assert.equal(D.detailAgain({ loading: true, at: 0 }, run, now), false, 'in flight');
+  assert.equal(D.detailAgain({ error: 'boom', at: now - 1000 }, run, now), false, 'not every refresh');
+  assert.equal(D.detailAgain({ error: 'boom', at: now - D.DETAIL_RETRY_MS }, run, now), true, 'a refusal is asked again');
+  assert.equal(D.detailAgain({ error: 'x', unsupported: true, at: 0 }, run, now), false, 'an older server stays older');
+  const none = { res: { ok: true, detail: null }, at: now - D.DETAIL_RETRY_MS };
+  assert.equal(D.detailAgain(none, run, now), true, 'just ended: its details may have been on their way');
+  assert.equal(D.detailAgain(none, { id: 'r', endedAt: now - D.DETAIL_YOUNG_MS - 1 }, now), false, 'an old run without details has none');
+  assert.equal(D.detailAgain({ res: { ok: true, detail: {} }, at: 0 }, run, now), false, 'details kept: read once');
+});
+
+test('clusters still being read are said, never counted as none', () => {
+  const t = D.slowTiles({ count: 0, searches: [], notRead: [], reading: [{ cluster: 'a' }, { cluster: 'b' }] });
+  assert.equal(t.count.sub, 'on 0 clusters · 2 reading…');
+  assert.equal(D.SLOW_RETRY_MS, 5_000);
+});
