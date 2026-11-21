@@ -7881,10 +7881,18 @@ await settleFor(300);
     ok(heat && /never measured/.test(heat.textContent), 'log delay: the heat map does not say a cluster was never measured');
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
-    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min · share|Above 60 min|Other time zone|Devices|In last run|Worst device|',
+    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min · share|Change|Above 60 min|Other time zone|Devices|In last run|Worst device|',
       `log delay: the By cluster columns read ${heads.join(' · ')}`);
     // Every column sorts (aria-sort on the heads); the most delayed clusters come first by default, the 5 most delayed only, the footer offers the rest.
-    ok(g('ld-by-cluster').querySelectorAll('thead th[aria-sort]').length >= 10, 'log delay: not every By cluster column sorts');
+    ok(g('ld-by-cluster').querySelectorAll('thead th[aria-sort]').length >= 11, 'log delay: not every By cluster column sorts');
+    // 0.3.81: the States bar is drawn (its own class, a row of pieces — it was an empty box), and
+    // Change reads "+N −M", "0" or "—" (unknown when the last run is not today).
+    {
+      const bars = [...g('ld-by-cluster').querySelectorAll('.ld-statemini')];
+      ok(bars.length >= 1 && bars.every((x) => x.querySelectorAll('i').length >= 1 && !x.classList.contains('ld-mini')), `log delay: By cluster's States bar is not drawn (${bars.length})`);
+      const chg = [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 7).map((tr) => tr.cells[6].textContent.trim());
+      ok(chg.length >= 1 && chg.every((t) => /^(\+[\d,]+( −[\d,]+)?|−[\d,]+|0|—)$/.test(t)), `log delay: By cluster's Change reads ${chg.join(' | ')}`);
+    }
     {
       const lateCol = [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 6).map((tr) => Number(tr.cells[5].textContent.split('·')[0].replace(/[,\s]/g, '')));
       ok(lateCol.length >= 1 && lateCol.every((v, i) => i === 0 || v <= lateCol[i - 1]), `log delay: By cluster is not most delayed first (${lateCol.join(', ')})`);
@@ -7936,7 +7944,7 @@ await settleFor(300);
     await waitFor(() => location.hash === '#/log-delay?tz=480' && g('ld-tz-filter-note'), `log delay: picking a zone did not filter the address (${location.hash})`);
     ok(tzChipText() === 'Time zone +08:00 · only these devices', `log delay: the filtered chip reads "${tzChipText()}"`);
     ok(view().querySelector('[data-kpi="tz"] b').textContent === '1' && view().querySelector('[data-kpi="critical"] b').textContent === '0', 'log delay: the tiles do not count the devices in the zone');
-    ok(g('ld-by-cluster') && [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 8 && tr.cells[8].textContent.trim() === '1').length >= 1, 'log delay: By cluster does not count the devices in the zone');
+    ok(g('ld-by-cluster') && [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 9 && tr.cells[9].textContent.trim() === '1').length >= 1, 'log delay: By cluster does not count the devices in the zone');
     ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === '#/log-delay/devices?tz=480', 'log delay: the tabs drop the time-zone filter');
     press(doc.querySelector('.ld-tabs a[data-tab="devices"]'));
     await waitFor(() => ldView() === 'devices' && g('ld-devices'), 'log delay: the Devices tab did not open with the zone filter');
