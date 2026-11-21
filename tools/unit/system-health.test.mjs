@@ -21,7 +21,9 @@ test('the tab comes from the hash', () => {
   assert.equal(S.tabOfHash('#/jobs/health'), 'log');
   assert.equal(S.tabHash('health'), '#/jobs/requests/health');
   assert.equal(S.tabHash('log'), '#/jobs/requests');
-  assert.deepEqual(S.REQUEST_TABS.map((t) => t.label), ['Requests', 'ElasticPro health']);
+  assert.deepEqual(S.REQUEST_TABS.map((t) => t.label), ['Requests', 'ElasticPro health', 'Cost']);
+  assert.equal(S.tabOfHash('#/jobs/requests/cost'), 'cost');
+  assert.equal(S.tabHash('cost'), '#/jobs/requests/cost');
 });
 
 test('the nav dot is there for amber and red only', () => {

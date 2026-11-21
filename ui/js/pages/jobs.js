@@ -741,10 +741,10 @@ function summaryPane(job, cur, run, detail, now, why = null) {
 
 /** A part's Action: the page that has the setting, when the core names one the caller may open. */
 function todoLink(p) {
-  const t = p.todo;
+  const t = D.todoTarget(p, canOpenPage);
   if (!t) return dash();
-  if (!D.TODO_PAGES.includes(t.page) || !canOpenPage(t.page)) return h('span.muted', { title: t.text }, t.label);
-  return h('a', { href: '#', title: t.text, onclick: (e) => { e.preventDefault(); navigateTo(t.page, null, { cluster: p.cluster }); } }, t.label);
+  if (!t.page) return h('span.muted', { title: t.text }, t.label);
+  return h('a', { href: '#', title: t.text, onclick: (e) => { e.preventDefault(); navigateTo(t.page, null, { cluster: t.cluster }); } }, t.label);
 }
 
 function partsPane(job, parts, detail, { exceptions }) {

@@ -417,6 +417,12 @@ check "and kept in the built-in store"             "$(python3 -c 'import json,sy
 rs() { python3 -c 'import json,sys;d=json.load(sys.stdin);a=d["kinds"]["alerts"];print(d.get("ok"),a["state"],a["store"]["queued"],a["store"]["writing"],"built-in store" in a["line"])'; }
 check "and queued for the store, saying so"         "$(cookie -d '{"type":"DATA_ROUTING_STATUS"}' | rs)" "True queued 1 False True"
 check "and nothing was written to a monitored cluster" "$(cookie -d '{"type":"REQUEST_LOG"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len([r for r in (d.get("recent") or [])+(d.get("inflight") or []) if str(r.get("method","GET")).upper()!="GET"]))')" "0"
+# Jobs › Requests › Cost (docs/JOBS.md "Query cost", 0.3.82): the request log's figures, so an
+# administrator's like REQUEST_LOG — read-only, never a caller-less request's, a user's or an operator's.
+check "REQUEST_COST needs a caller"                "$(post "$B5" -d '{"type":"REQUEST_COST"}' | field kind)" "unauthenticated"
+check "a user may not read the request costs"      "$(as_jar "$JUS" -d '{"type":"REQUEST_COST"}' | field kind)" "forbidden"
+check "nor an operator"                            "$(as_jar "$JOP" -d '{"type":"REQUEST_COST"}' | field kind)" "forbidden"
+check "an admin reads them, a day kept, no write"  "$(cookie -d '{"type":"REQUEST_COST"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("keepHours"),isinstance(d.get("rows"),list),isinstance(d.get("top"),list))')" "True 24 True True"
 # A page may report only what the pages raise: a flood of made-up keys is refused by name,
 # queues nothing and evicts nothing; the account is then over its budget (200 in 15 minutes).
 FLOOD=$(python3 -c 'import json;print(json.dumps({"type":"ALERT_EVENTS_PUT","events":[{"event":"raised","key":"hc-es:junk-%d"%i} for i in range(150)]}))')

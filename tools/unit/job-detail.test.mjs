@@ -139,3 +139,29 @@ test('clusters still being read are said, never counted as none', () => {
   assert.equal(t.count.sub, 'on 0 clusters · 2 reading…');
   assert.equal(D.SLOW_RETRY_MS, 5_000);
 });
+
+test('the Log Delay page\'s not-measured line is the run details\' own parts, in a few words', () => {
+  const part = (cluster, status, code, message, elapsedMs, todo) => ({ cluster, status, code, message, elapsedMs, todo });
+  assert.equal(D.partReason(part('demo', 'failed', 'INDEX_NOT_FOUND', 'no index matches logstash-* on this cluster')), 'no index matches logstash-*');
+  assert.equal(D.partReason(part('demo', 'failed', 'INDEX_NOT_FOUND', 'index_not_found_exception: no such index [logs-*]')), 'no index matches logs-*');
+  assert.equal(D.partReason(part('demo', 'failed', 'INDEX_NOT_FOUND', '')), 'no index matches the log index');
+  assert.equal(D.partReason(part('ussc', 'failed', 'TIMEOUT', 'Request timed out after 30.0 s', 30012)), 'timed out (30 s)');
+  assert.equal(D.partReason(part('aib', 'partial', 'SHARD_FAILURE', '2 of 10 shards failed (x): figures may be short')), 'part read (2 shards failed)');
+  assert.equal(D.partReason(part('aib', 'partial', 'SHARD_FAILURE', '1 of 3 shards failed')), 'part read (1 shard failed)');
+  assert.equal(D.partReason(part('b', 'deferred', 'BUSY', 'b is busy')), 'busy — deferred');
+  assert.equal(D.partReason(part('s', 'skipped', null, 'cancelled before its turn')), 'skipped — cancelled before its turn');
+  const todo = { label: 'Set log index', text: "set the cluster's log index (Config › Clusters)", page: 'settings' };
+  const res = { ok: true, run: { id: 'r1' }, detail: { counts: counts({ succeeded: 67, failed: 3, partial: 1 }), parts: [
+    part('demo', 'failed', 'INDEX_NOT_FOUND', 'no index matches logstash-*', 400, todo), part('ussc', 'failed', 'TIMEOUT', '', 30000),
+    part('hidden', 'failed', 'TIMEOUT', '', 30000), part('aib', 'partial', 'SHARD_FAILURE', '2 of 4 shards failed'), part('ok1', 'succeeded') ] } };
+  const nm = D.notMeasured(res, (id) => id !== 'hidden');
+  assert.equal(nm.total, 71);
+  assert.deepEqual(nm.missed.map((m) => m.cluster), ['demo', 'ussc', 'aib'], 'kept to the clusters the viewer may see');
+  assert.deepEqual(nm.missed[0].fix, { page: 'settings', label: 'Set log index', text: todo.text, cluster: 'demo' });
+  assert.equal(nm.missed[1].fix, null);
+  assert.deepEqual(D.notMeasured(res, () => true, () => false).missed[0].fix, { label: 'Set log index', text: todo.text }, 'a page the viewer may not open: no link');
+  assert.equal(D.notMeasured({ ok: true, detail: { counts: counts({ succeeded: 71 }), parts: [part('ok1', 'succeeded')] } }), null, 'every cluster read: nothing');
+  assert.equal(D.notMeasured({ ok: true, detail: null }), null, 'no details: nothing said');
+  assert.equal(D.lastFinishedRun({ runs: [{ id: 'a', jobId: 'logdelay.measure', status: 'running' }, { id: 'b', jobId: 'logdelay.measure', status: 'completed' }] }).id, 'b');
+  assert.equal(D.lastFinishedRun({ runs: [] }), null);
+});

@@ -4214,6 +4214,67 @@ restoreConsole();
   }
 }
 
+// Requests › Cost (docs/JOBS.md "Query cost", 0.3.82): an administrator's tab, read from REQUEST_COST
+// every 30 s while open; per cluster and kind a sortable compact table, then the slowest requests;
+// a figure the core did not send stays "—" / "not reported"; leaving stops the read; no cluster is asked.
+{
+  const before = globalThis.fetch;
+  const csent = [];
+  const now = Date.now();
+  const S0 = await load('core/state.js');
+  const cl = S0.clusters();
+  const answer = { ok: true, keepHours: 24, hours: 24, since: now - 24 * 3600e3, now, rows: [
+    { cluster: cl[0].id, kind: 'poller:health', label: 'Poller · health', requests: 288, perHour: 12, avgMs: 85, p95Ms: 200, maxMs: 900, bytes: 288000, bytesKnown: 288, timeouts: 0, deferrals: 0 },
+    { cluster: cl[0].id, kind: 'job:logdelay.measure', label: 'Log delay measurement', requests: 24, perHour: 1, avgMs: 8200, p95Ms: 30000, maxMs: 30000, bytes: 9000000, bytesKnown: 24, timeouts: 2, deferrals: 0 },
+    { cluster: cl[cl.length - 1].id, kind: 'job:hosts.collect', label: 'Hosts collection', requests: 0, perHour: 0, avgMs: null, p95Ms: null, maxMs: null, bytes: null, bytesKnown: 0, timeouts: 0, deferrals: 3 },
+  ], top: [
+    { at: now - 600e3, cluster: cl[0].id, kind: 'job:logdelay.measure', label: 'Log delay measurement', method: 'POST', path: '/logstash-*/_search?filter_path', ms: 30000, bytes: null, status: 'timeout' },
+    { at: now - 900e3, cluster: cl[0].id, kind: 'poller:health', label: 'Poller · health', method: 'GET', path: '/_cluster/health', ms: 900, bytes: 1000, status: '200' },
+  ] };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    csent.push(body);
+    if (body.type === 'REQUEST_COST') return stubReply(answer);
+    return before(input, init);
+  };
+  const count = (t) => csent.filter((m) => m.type === t).length;
+  try {
+    await go('requests'); await settleFor(400);
+    const tab = doc.querySelector('nav.rq-tabs button[data-tab="cost"]');
+    ok(!!tab && tab.textContent.trim() === 'Cost', 'cost: no "Cost" tab on Jobs › Requests');
+    if (tab) {
+      tab.click(); await settleFor(600);
+      ok(window.location.hash === '#/jobs/requests/cost', `cost: the tab is not at #/jobs/requests/cost (${window.location.hash})`);
+      ok(count('REQUEST_COST') >= 1 && !csent.some((m) => m.type === 'ES'), 'cost: the tab did not read REQUEST_COST, or sent a cluster something');
+      const kinds = doc.getElementById('rc-kinds');
+      const rows = kinds ? [...kinds.querySelectorAll('tbody tr')] : [];
+      ok(rows.length === 3, `cost: ${rows.length} rows in By cluster and kind, not 3`);
+      const heads = kinds ? [...kinds.querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim()) : [];
+      ok(heads.join('|') === 'Cluster|Kind|Requests / h|Average|p95|Bytes|Timeouts|Deferrals', `cost: the columns read ${heads.join(' · ')}`);
+      const ld = rows.find((r) => r.dataset.kind === 'job:logdelay.measure');
+      ok(ld && /8\.2 s/.test(ld.textContent) && /30 s/.test(ld.textContent) && ld.cells[6].textContent === '2', `cost: the log delay row reads ${ld && ld.textContent}`);
+      const hosts = rows.find((r) => r.dataset.kind === 'job:hosts.collect');
+      ok(hosts && hosts.cells[3].textContent === '—' && hosts.cells[4].textContent === '—' && hosts.cells[7].textContent === '3', `cost: a kind with no request reads ${hosts && hosts.textContent} (unknown is not 0)`);
+      ok(/\b2 timeouts\b/.test(doc.getElementById('rc-line').textContent) && /3 deferrals/.test(doc.getElementById('rc-line').textContent), `cost: the line reads ${doc.getElementById('rc-line').textContent}`);
+      // Sortable like other Jobs tables: Average pressed puts the slowest first.
+      const avg = [...kinds.querySelectorAll('thead th')].find((t) => /Average/.test(t.textContent));
+      ok(avg && avg.hasAttribute('aria-sort'), 'cost: the Average column does not sort');
+      if (avg) { avg.click(); await settleFor(200); }
+      const first = doc.getElementById('rc-kinds').querySelector('tbody tr');
+      ok(first && first.dataset.kind === 'job:logdelay.measure', `cost: sorting by Average did not put the slowest first (${first && first.dataset.kind})`);
+      const top = doc.getElementById('rc-top');
+      const trs = top ? [...top.querySelectorAll('tbody tr')] : [];
+      ok(trs.length === 2 && /POST \/logstash-\*\/_search\?filter_path/.test(trs[0].textContent) && /not reported/.test(trs[0].textContent), `cost: the slowest requests read ${trs.map((t) => t.textContent).join(' | ')}`);
+      await go('overview');
+      const left = count('REQUEST_COST');
+      await settleFor(400);
+      ok(count('REQUEST_COST') === left, 'cost: REQUEST_COST is still read after leaving the page');
+    }
+  } finally {
+    globalThis.fetch = before;
+  }
+}
+
 // Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
 // run and draws what came back, and Run now asks first (a real run deletes). The real run is
 // never pressed here: against a bridge with a real data dir it would clean it.
@@ -7754,6 +7815,22 @@ await settleFor(300);
       if (fetchAnswer === 'busy') return stubReply({ ok: false, kind: 'already_running', runId: 'run-old', message: 'already running' });
       return stubReply({ ok: true, jobId: 'logdelay.measure', runId: 'run-1', started: true });
     }
+    // The not-measured line (0.3.82): the last finished measurement run, then its details —
+    // the same parts Jobs › run details show. Not a Fetch now poll (limit 5, no jobPolls).
+    if (body.type === 'JOBS_LIST' && body.limit === 5) {
+      lsent.push(body);
+      return stubReply({ ok: true, jobs: [], runs: [{ id: 'run-going', jobId: 'logdelay.measure', status: 'running' }, { id: 'ld-last', jobId: 'logdelay.measure', status: 'completed' }], next: null });
+    }
+    if (body.type === 'JOB_RUN_DETAIL') {
+      lsent.push(body);
+      const never = list[list.length - 1].id;
+      return stubReply({ ok: true, run: { id: body.runId, jobId: 'logdelay.measure', status: 'completed' }, detail: {
+        counts: { succeeded: 1, partial: 0, failed: 2, deferred: 0, skipped: 0 }, parts: [
+          { cluster: never, status: 'failed', code: 'INDEX_NOT_FOUND', message: 'no index matches logstash-*', elapsedMs: 400,
+            todo: { label: 'Set log index', text: "set the cluster's log index (Config › Clusters)", page: 'settings' } },
+          { cluster: 'not-a-cluster-you-see', status: 'failed', code: 'TIMEOUT', message: 'Request timed out after 30.0 s', elapsedMs: 30000 },
+          { cluster: list[0].id, status: 'succeeded', records: 12 }] } });
+    }
     if (body.type === 'JOBS_LIST') {
       lsent.push(body);
       jobPolls += 1;
@@ -7875,10 +7952,68 @@ await settleFor(300);
     }
     ok(!fleet.querySelector('polyline') && !fleet.querySelector('.ld-ring') && !fleet.querySelector('.ld-red') && !fleet.querySelector('.ld-day'), 'log delay: an overlay line or the old graphs are still drawn');
     ok([...g('ld-chart-delay').querySelectorAll('text')].every((t) => !/median|average/i.test(t.textContent)), 'log delay: a chart writes a statistic');
-    // The cluster × time heat map: one row per cluster, a cell per day, a never-measured cluster says so.
-    const heat = g('ld-heat');
-    ok(heat && heat.querySelectorAll('rect.ld-heat').length === 30 * (list.length - 1), `log delay: the heat map has ${heat && heat.querySelectorAll('rect.ld-heat').length} cells`);
-    ok(heat && /never measured/.test(heat.textContent), 'log delay: the heat map does not say a cluster was never measured');
+    // Late devices over the day (0.3.82, replaces the heat map): a row per cluster, a cell per 2-hour window of
+    // today (12), the window before the current one hatched "not measured" — never the earlier reading again.
+    {
+      const grid = g('ld-late-grid');
+      ok(grid && !g('ld-heat') && !view().querySelector('.ld-heatmap'), 'log delay: Late devices over the day is not drawn, or the heat map still is');
+      const headTxt = grid ? [...grid.querySelectorAll('thead th')].map((t) => t.textContent.trim()) : [];
+      ok(headTxt.join('|') === 'Cluster|Late now|vs yesterday|00|02|04|06|08|10|12|14|16|18|20|22|Measured', `log delay: the grid's heads read ${headTxt.join(' · ')}`);
+      const row0 = grid && grid.querySelector(`tbody tr[data-cluster="${list[0].id}"]`);
+      const cells = row0 ? [...row0.querySelectorAll('td.ld-gc')] : [];
+      ok(cells.length === 12, `log delay: the first cluster has ${cells.length} window cells, not 12`);
+      const begun = Math.floor((Date.now() - new Date().setHours(0, 0, 0, 0)) / 7200000) + 1;
+      const hatched = cells.filter((c) => c.classList.contains('ld-g-na'));
+      ok(hatched.length === (begun >= 2 ? 1 : 0) && hatched.every((c) => /not measured/.test(c.title) && !/\d/.test(c.textContent)),
+        `log delay: ${hatched.length} hatched cells for ${begun} begun windows (the fixture leaves the one before the current unmeasured)`);
+      ok(cells.filter((c) => c.classList.contains('ld-g-fut')).length === 12 - begun, 'log delay: windows not begun yet are not left blank');
+      ok(row0 && row0.querySelector('.ld-g-meas').textContent === `${begun - (begun >= 2 ? 1 : 0)}/12`, `log delay: Measured reads ${row0 && row0.querySelector('.ld-g-meas').textContent}`);
+      ok(row0 && /^▲ 1$/.test(row0.querySelector('.ld-g-vs').textContent.trim()), `log delay: vs yesterday reads "${row0 && row0.querySelector('.ld-g-vs').textContent}"`);
+      const shaded = cells.filter((c) => /ld-gs-\d/.test(c.className));
+      ok(shaded.length >= 1 && shaded.every((c) => c.getAttribute('role') === 'button'), 'log delay: a measured cell is not pressable');
+      ok(/never measured/.test(grid.querySelector(`tbody tr[data-cluster="${list[list.length - 1].id}"]`).textContent), 'log delay: the grid does not say a cluster was never measured');
+      ok(grid.querySelector('.ld-g-nm') && grid.querySelectorAll('th.ld-g-nm').length >= 2, 'log delay: the cluster column is not the sticky name column');
+      // The toggles: Above 60 min counts the critical ones only; Worst 10 / All N.
+      const lateNow0 = row0.querySelector('.ld-g-now').textContent;
+      const modeBtns = [...g('ld-grid-mode').querySelectorAll('button')];
+      ok(modeBtns.map((b) => b.textContent).join('|') === 'Late (30+ min)|Above 60 min' && modeBtns[0].getAttribute('aria-pressed') === 'true', `log delay: the grid's mode toggle reads ${modeBtns.map((b) => b.textContent).join(' / ')}`);
+      press(modeBtns[1]); await settleFor(120);
+      const row0c = g('ld-late-grid').querySelector(`tbody tr[data-cluster="${list[0].id}"]`);
+      const fxG = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list).byCluster[0];
+      ok(g('ld-grid-mode').querySelectorAll('button')[1].getAttribute('aria-pressed') === 'true' && row0c.querySelector('.ld-g-now').textContent === String(fxG.critical) && String(fxG.critical) !== lateNow0,
+        `log delay: Above 60 min did not count the critical devices (${row0c.querySelector('.ld-g-now').textContent} vs ${fxG.critical})`);
+      press(g('ld-grid-mode').querySelectorAll('button')[0]); await settleFor(120);
+      const rowsBtns = [...g('ld-grid-rows').querySelectorAll('button')];
+      ok(rowsBtns.map((b) => b.textContent).join('|') === `Worst 10|All ${list.length}` && rowsBtns[0].getAttribute('aria-pressed') === 'true', `log delay: the rows toggle reads ${rowsBtns.map((b) => b.textContent).join(' / ')}`);
+      press(rowsBtns[1]); await settleFor(120);
+      ok(g('ld-grid-rows').querySelectorAll('button')[1].getAttribute('aria-pressed') === 'true' && g('ld-late-grid').querySelectorAll('tbody tr').length === list.length, 'log delay: All N did not list every cluster');
+      press(g('ld-grid-rows').querySelectorAll('button')[0]); await settleFor(120);
+      const order = [...g('ld-late-grid').querySelectorAll('tbody tr')].map((tr) => tr.dataset.cluster);
+      ok(order[order.length - 1] === list[list.length - 1].id, `log delay: the never-measured cluster is not last (${order.join(', ')})`);
+      // A cell opens that cluster at that window: its board, with a line naming the window and the count.
+      const cell = [...g('ld-late-grid').querySelector(`tbody tr[data-cluster="${list[0].id}"]`).querySelectorAll('td.ld-gc[role="button"]')].pop();
+      const want = cell.textContent;
+      press(cell);
+      await waitFor(() => ldView() === 'cluster' && g('ld-focus-window'), 'log delay: a grid cell did not open its cluster at that window');
+      ok(location.hash === `#/log-delay/cluster/${encodeURIComponent(list[0].id)}` && new RegExp(`Opened at \\d\\d:\\d\\d–\\d\\d:\\d\\d from Late devices over the day: ${want} device`).test(g('ld-focus-window').textContent),
+        `log delay: the cluster opened from a cell reads "${(g('ld-focus-window') || {}).textContent}" (${location.hash})`);
+      location.hash = '#/log-delay';
+      await waitFor(() => ldView() === 'fleet' && g('ld-late-grid'), 'log delay: back on the Dashboard the grid did not draw');
+    }
+    // The line about the last run (replaces "How the last run read each cluster"): only the clusters the
+    // viewer may see, why, the fix, and the way to Jobs — from the run details JOB_RUN_DETAIL gives.
+    {
+      await waitFor(() => g('ld-not-measured'), 'log delay: the not-measured line did not draw');
+      const nm = g('ld-not-measured');
+      ok(!g('ld-last-read') && ![...view().querySelectorAll('section.card header h2')].some((x) => /How the last run read/.test(x.textContent)), 'log delay: the old last-run card is still drawn');
+      ok(/^1 of 3 clusters not measured in the last run/.test(nm.textContent), `log delay: the not-measured line reads "${nm.textContent}"`);
+      ok(lsent.some((m) => m.type === 'JOB_RUN_DETAIL' && m.runId === 'ld-last'), 'log delay: the line did not read the last finished run\'s details (not the one still going)');
+      const items = [...nm.querySelectorAll('.ld-nm-item')];
+      ok(items.length === 1 && items[0].dataset.cluster === list[list.length - 1].id && /no index matches logstash-\*/.test(items[0].textContent) && /set log index/.test(items[0].textContent),
+        `log delay: the line's clusters read ${items.map((x) => x.textContent).join(' | ')}`);
+      ok(!/not-a-cluster-you-see/.test(nm.textContent), 'log delay: the line names a cluster the viewer cannot see');
+      ok(nm.querySelector('a.ld-nm-jobs') && nm.querySelector('a.ld-nm-jobs').getAttribute('href') === '#/jobs' && /Run details in Jobs ›/.test(nm.textContent), 'log delay: no "Run details in Jobs ›" link');
+    }
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
     ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|zone|tag1|States|30+ min · share|Change|Above 60 min|Other time zone|Devices|In last run|Worst device|',
@@ -7925,11 +8060,12 @@ await settleFor(300);
     ok(g('ld-tz-chip') && /^Time zone [+−]\d\d:\d\d$/.test(tzChipText()) && g('ld-tz-chip').tagName === 'BUTTON' && g('ld-tz-chip').getAttribute('aria-expanded') === 'false', `log delay: the fleet's time-zone chip reads "${tzChipText()}" (${g('ld-tz-chip') && g('ld-tz-chip').tagName})`);
     ok(!g('ld-zones') && !g('ld-tz-expand'), 'log delay: a Devices by time zone panel or a separate Expand button is drawn (the chip itself opens the counts)');
     ok(g('ld-tz-panel') && g('ld-tz-panel').hidden, 'log delay: the time-zone panel does not start hidden');
-    // The owner's order: tiles, the state bar, By cluster, then the charts; the heat map is Hourly Delay Status.
-    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-heat')].map((x) => x.id);
-    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-heat', `log delay: the Dashboard order is ${order.join(' › ')}`);
+    // The owner's order: tiles, the state bar, the charts, By cluster, then Late devices over the day and the not-measured line.
+    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-late-grid, #ld-not-measured')].map((x) => x.id);
+    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-late-grid|ld-not-measured', `log delay: the Dashboard order is ${order.join(' › ')}`);
     ok(g('ld-statebar') && g('ld-statebar').querySelectorAll('.ld-stack i').length >= 3 && /Silent \d/.test(g('ld-statebar').textContent), 'log delay: no state bar with a counted legend under the tiles');
-    ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'), 'log delay: the heat map is not titled Hourly Delay Status');
+    ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Late devices over the day') && ![...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'),
+      'log delay: the grid is not titled Late devices over the day');
     g('ld-tz-chip').click(); await settleFor(120);
     ok(g('ld-tz-chip').getAttribute('aria-expanded') === 'true', 'log delay: the open chip is not marked expanded');
     const tzEntries = () => [...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim());

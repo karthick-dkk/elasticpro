@@ -12,16 +12,20 @@
  * A second tab, ElasticPro health (`#/jobs/requests/health`, docs/HEALTH.md), is an
  * administrator's: ElasticPro's own memory, CPU, response time, gate, poller, reports and
  * disk, from SYSTEM_HEALTH every five seconds while it is open — and the log is not read
- * meanwhile. Neither tab sends a cluster anything.
+ * meanwhile. A third, Cost (`#/jobs/requests/cost`, docs/JOBS.md "Query cost", 0.3.82), is an
+ * administrator's too: what the requests cost each cluster per kind over the last day, from
+ * REQUEST_COST every 30 s while it is open (pages/requests-cost.js). No tab sends a cluster anything.
  */
 
 import { h, mount, reconcile } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad, syncFleet } from '../core/state.js';
-import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun, systemHealth } from '../core/es.js';
+import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun, systemHealth, requestCost } from '../core/es.js';
 import { REQUEST_TABS, tabOfHash, tabHash, HEALTH_POLL_MS, levelTone, levelWord } from '../core/system-health.js';
 import { healthView } from './requests-health.js';
+import { costView } from './requests-cost.js';
+import { COST_POLL_MS } from '../core/request-cost.js';
 import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
 import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
@@ -67,6 +71,10 @@ let tab = 'log';
 let health = null;
 let healthError = null;
 let healthTimer = null;
+/** REQUEST_COST's last answer, why the last read failed, and the Cost tab's own 30-s timer. */
+let cost = null;
+let costError = null;
+let costTimer = null;
 
 /**
  * What the last draw put on screen (lib/keyed.js). The page redraws every two seconds (the
@@ -98,7 +106,13 @@ export function render(el) {
 function startTab() {
   clearInterval(timer); timer = null;
   clearInterval(healthTimer); healthTimer = null;
+  clearInterval(costTimer); costTimer = null;
   draw();
+  if (tab === 'cost') {
+    pollCost();
+    costTimer = setInterval(() => { if (host && host.isConnected) pollCost(); else clearInterval(costTimer); }, COST_POLL_MS);
+    return;
+  }
   if (tab === 'health') {
     pollHealth();
     healthTimer = setInterval(() => { if (host && host.isConnected) pollHealth(); else clearInterval(healthTimer); }, HEALTH_POLL_MS);
@@ -126,6 +140,14 @@ function openTab(id) {
   else { tab = id; startTab(); }
 }
 
+async function pollCost() {
+  try {
+    const r = await requestCost();
+    if (r && r.ok) { cost = r; costError = null; } else { costError = (r && (r.kind === 'bad_message' ? 'unknown message' : r.message)) || 'the core did not answer'; }
+  } catch (e) { costError = e.message || String(e); }
+  if (host && host.isConnected && tab === 'cost') draw();
+}
+
 async function pollHealth() {
   try {
     const r = await systemHealth();
@@ -151,6 +173,7 @@ export function onData() { /* the log is the core's; data events do not change i
 export function onLeave() {
   clearInterval(timer); timer = null;
   clearInterval(healthTimer); healthTimer = null;
+  clearInterval(costTimer); costTimer = null;
   // #view is one element for every page, so `host.isConnected` stays true after the page
   // has gone: a read still in flight (the log, the policy, housekeeping) would land on
   // whatever page had replaced this one. Forgetting the host is what makes draw() a no-op.
@@ -278,6 +301,10 @@ function pageKids() {
       h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')]);
   }
   if (tab === 'health') return [built.same('tabs', tabsBar()), healthView(health, { error: healthError, cache: built, redraw: draw })];
+  if (tab === 'cost') {
+    const nameOf = (id) => (clusters().find((c) => c.id === id) || {}).name || id;
+    return [built.same('tabs', tabsBar()), ...costView(cost, { error: costError, cache: built, redraw: draw, nameOf, tz: (health && health.tz) || null })];
+  }
   // Filter, then the header's order, then the first 500: the CSV is the rows in this order.
   const rows = SORTS.log.apply(requestRows(log, filter), {
     time: { type: 'date', value: (r) => r.startedAt },

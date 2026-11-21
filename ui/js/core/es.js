@@ -49,6 +49,8 @@ export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });
 export const jobRunDetail = (runId) => send({ type: 'JOB_RUN_DETAIL', runId });
 /** Searches running longer than `minMs` on the clusters the caller sees (docs/JOBS.md `SLOW_SEARCHES {minMs}`). User and up. */
 export const slowSearches = (minMs) => send({ type: 'SLOW_SEARCHES', minMs });
+/** What ElasticPro's requests cost each cluster per kind over the last day, and the slowest (docs/JOBS.md `REQUEST_COST`). Administrators only. */
+export const requestCost = () => send({ type: 'REQUEST_COST' });
 /** A job control (docs/JOBS.md "Controls": JOB_RUN, JOB_PAUSE, … JOB_SETTINGS_SET). Administrators only. */
 export const jobControl = (type, params = {}) => send({ type, ...params });
 

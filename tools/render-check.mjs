@@ -105,7 +105,7 @@ const PAGES = ['alerts', 'overview', 'overview/overview', 'indices', 'indices/do
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link',
   // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST,
   // and Requests — the Request Centre, its own app page — with its ElasticPro health tab.
-  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health',
+  'jobs', 'jobs/history', 'jobs/settings', 'jobs/requests', 'jobs/requests/health', 'jobs/requests/cost',
   'automation', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const { ldRoute, ldTab } = await load('core/logdelay-report.js');
