@@ -55,8 +55,10 @@ export const LD_NO_SCHEDULER = 'This server does not run the scheduled measureme
  * unknown, never "no change".
  */
 export function lastRunChange(c) {
-  const at = c && Number(c.lastRunAt);
-  if (!c || !Number.isFinite(at) || !Array.isArray(c.windows)) return null;
+  // null / undefined is "never measured", not the epoch (Number(null) is 0).
+  if (!c || c.lastRunAt === null || c.lastRunAt === undefined || !Array.isArray(c.windows)) return null;
+  const at = Number(c.lastRunAt);
+  if (!Number.isFinite(at)) return null;
   const w = c.windows.find((x) => x && at >= x.from && at < x.to);
   if (!w) return null;
   const up = Number(w.newlyLate) || 0; const down = Number(w.solved) || 0;
