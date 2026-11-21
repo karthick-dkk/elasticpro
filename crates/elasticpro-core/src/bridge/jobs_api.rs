@@ -86,6 +86,35 @@ impl Core {
                 "governor": governor, "process": self.jobs_process(), "problems": problems })
     }
 
+    /// `JOB_RUN_DETAIL {runId}` (docs/JOBS.md "Run details"): one run's per-cluster parts and its
+    /// own log lines, read when a row of All jobs is opened. Who may read the run is `JOBS_LIST`'s
+    /// rule (`jobs::run_detail_view`); a caller limited to some clusters reads only their
+    /// clusters' parts and lines. A run they may not read is `not_found`, as one that is not there.
+    pub(crate) async fn job_run_detail(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+        let Some(id) = msg.get("runId").and_then(Value::as_str).filter(|s| jobs::is_run_id(s)) else {
+            return json!({ "ok": false, "kind": "bad_request", "message": "runId must be a run's id (runs[].id of JOBS_LIST)" });
+        };
+        let view = self.sink_view(caller);
+        let who = jobs::Reader { view: &view, admin: caller.is_none_or(|c| c.role >= crate::auth::Role::Admin) };
+        let (mut runs, _) = self.jobs.all_runs();
+        runs.extend(self.reports.snapshot().jobs.iter().map(|j| (Owner::Worker, jobs::from_report_job(j))));
+        let missing = || json!({ "ok": false, "kind": "not_found", "message": format!("no run {id} in the run log (it may have been trimmed)") });
+        let Some((owner, r)) = runs.into_iter().find(|(_, r)| r.id == id) else { return missing() };
+        let detail = if r.status.finished() && !id.starts_with("report-") {
+            match self.jobs.detail(owner, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(run = %id, error = %e, "jobs: a run's detail could not be read");
+                    return json!({ "ok": false, "kind": "io_error",
+                                   "message": if who.admin { format!("the run's detail could not be read: {e}") } else { "the run's detail could not be read".into() } });
+                }
+            }
+        } else {
+            None
+        };
+        jobs::run_detail_view(owner, &r, detail.as_ref(), who).unwrap_or_else(missing)
+    }
+
     /// Role core: the worker's heartbeat is late, down, or never came (its runs may be stale).
     fn worker_heartbeat_late(&self) -> bool {
         let Some(d) = self.data_dir.as_deref() else { return false };

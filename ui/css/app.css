@@ -3008,6 +3008,52 @@ tr.jb-detail td.jb-more { white-space: normal; height: auto; background: var(--s
 .jb-kv { display: flex; gap: 10px; min-width: 0; }
 .jb-kv .k { color: var(--text-muted); width: 84px; flex: none; }
 .jb-kv .v { overflow-wrap: anywhere; white-space: pre-wrap; min-width: 0; }
+/* All jobs › a job opened (0.3.81, docs/JOBS.md "Run details"): its last run's summary, exceptions and log. */
+.jb-subl .jb-warn { color: var(--serious-ink); }
+.jb-page table.tbl td.jb-res .pill { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.jb-exp { display: grid; gap: 8px; padding: 6px 8px 8px 22px; font-size: 12px; min-width: 0; }
+.jb-exp > * { min-width: 0; }
+.jb-dtabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.jb-dtabs button { border: 0; background: transparent; padding: 4px 10px; font: inherit; font-size: 12px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.jb-dtabs button[aria-pressed="true"] { color: var(--text-primary); border-bottom-color: var(--accent); font-weight: 600; }
+.jb-dtabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.jb-h { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; margin-bottom: 4px; }
+.jb-hn { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.jb-dnote { padding: 4px 0; font-size: 12px; }
+.jb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 4px 12px; }
+.jb-grid > div { display: flex; flex-direction: column; min-width: 0; }
+.jb-grid small { color: var(--text-muted); font-size: 10.5px; white-space: nowrap; }
+.jb-grid b { font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t-ok { color: var(--good-ink); }
+.t-warn { color: var(--serious-ink); }
+.t-bad { color: var(--critical-ink); }
+.jb-sum .jb-details { padding: 6px 0 0; }
+.jb-scroll { max-height: 330px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.jb-page table.tbl.jb-inner, .jb-page table.tbl.jb-slow { table-layout: fixed; width: 100%; }
+.jb-page table.tbl.jb-inner td, .jb-page table.tbl.jb-slow td { overflow: hidden; text-overflow: ellipsis; }
+.jb-page table.tbl.jb-inner td.jb-perr { white-space: nowrap; }
+.jb-perr .jb-code, .jb-code { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--surface-3); margin-right: 6px; }
+.jb-perr .sub { display: inline; color: var(--text-secondary); }
+tr.jb-defer td { background: var(--serious-bg); }
+pre.jb-log { margin: 0; max-height: 300px; overflow: auto; padding: 6px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.jb-log .m { color: var(--text-muted); }
+pre.jb-log .e { color: var(--critical-ink); }
+pre.jb-log .w { color: var(--serious-ink); }
+/* Slow searches now (0.3.81, docs/JOBS.md "Slow searches"): a query is two lines; Open shows all of it. */
+.jb-slow-tiles { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.jb-page table.tbl.jb-slow th:nth-child(1) { width: 18%; }
+.jb-page table.tbl.jb-slow th:nth-child(2) { width: 9%; }
+.jb-page table.tbl.jb-slow th:nth-child(3) { width: 12%; }
+.jb-page table.tbl.jb-slow th:nth-child(4) { width: 17%; }
+.jb-page table.tbl.jb-slow th:nth-child(6) { width: 64px; }
+.jb-page table.tbl.jb-slow td.jb-qc { white-space: normal; }
+.jb-q { font-family: var(--mono); font-size: 11px; line-height: 13px; max-height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; color: var(--text-secondary); }
+.jb-slow .jb-chiplet { margin-left: 6px; }
+.jb-notread { color: var(--serious-ink); padding: 4px 12px 6px; }
+.jb-kvs { display: grid; gap: 3px; font-size: 12px; margin-bottom: 8px; }
+pre.jb-q-full { margin: 0; max-height: 50vh; overflow: auto; padding: 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .jb-hbar { margin-bottom: 0; }
 .jb-pager { display: flex; align-items: center; gap: 6px; height: 30px; }
 .jb-hnote { font-size: 11px; align-self: center; }
@@ -3160,8 +3206,14 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-heatmap .ld-heat-name { fill: var(--text-secondary); }
 .ld-heatmap .ld-heat-never { fill: var(--text-muted); font-style: italic; }
 /* The mini stacked bar of a cluster's states, in By cluster. */
-.ld .ld-mini { display: flex; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; }
-.ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
+/* By cluster's States bar (0.3.81: its own class — sharing .ld-mini with the old per-cluster
+   cards made it a column of zero-height pieces, an empty box). */
+.ld .ld-statemini { display: flex; flex-direction: row; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; padding: 0; border: 0; }
+.ld .ld-statemini i { display: block; min-width: 2px; height: 100%; }
+/* By cluster's Change: + became late, − came back (text inks, not series colours). */
+.ld-change { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ld-chg-up { color: var(--critical-ink); font-weight: 600; }
+.ld-chg-dn { color: var(--good-ink); font-weight: 600; }
 /* Devices: the search, the level chips with counts, zone and tag1. */
 .ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
 .ld .ld-dev-bar input[type="search"] { min-width: 190px; height: 28px; }

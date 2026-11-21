@@ -1277,6 +1277,21 @@ pub fn bytes_text(b: u64) -> String {
     }
 }
 
+/// What the Jobs menu dot says (PING `healthReason`, docs/HEALTH.md "The dot"): the first red
+/// check, else the first amber one, in `evaluate`'s order — its label, its value and the limit
+/// it is past, e.g. "Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%". `None` when
+/// nothing is amber or red. The same checks as `overall`: one definition of what turns it.
+pub fn reason(checks: &[Check]) -> Option<String> {
+    let c = checks.iter().find(|c| c.level == Level::Bad).or_else(|| checks.iter().find(|c| c.level == Level::Warn))?;
+    let t = THRESHOLDS.iter().find(|t| t.id == c.threshold);
+    let limit = match (c.level, t) {
+        (Level::Bad, Some(t)) => format!(" — over at {}", t.red),
+        (_, Some(t)) => format!(" — watch at {}", t.amber),
+        _ => String::new(),
+    };
+    Some(format!("{}: {}{limit}", c.label, c.value))
+}
+
 pub fn secs_text(s: u64) -> String {
     if s >= 3600 {
         format!("{} h {} min", s / 3600, (s % 3600) / 60)
@@ -1495,6 +1510,8 @@ pub struct Health {
     ticks: parking_lot::Mutex<VecDeque<(u64, u64)>>,
     pub held: parking_lot::RwLock<Held>,
     level: std::sync::atomic::AtomicU8,
+    /// Why `level` is amber or red (`reason`), for PING `healthReason`.
+    reason: parking_lot::Mutex<Option<String>>,
     pub role: &'static str,
     pub started_at: u64,
     pub samples: std::sync::atomic::AtomicU64,
@@ -1520,6 +1537,7 @@ impl Health {
             ticks: Default::default(),
             held: Default::default(),
             level: std::sync::atomic::AtomicU8::new(0),
+            reason: Default::default(),
             role,
             started_at: now,
             samples: Default::default(),
@@ -1564,6 +1582,17 @@ impl Health {
 
     pub fn set_level(&self, l: Level) {
         self.level.store(l.rank(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The level and the reason (`reason`) from the checks just worked out.
+    pub fn set_checks(&self, checks: &[Check]) {
+        self.set_level(overall(checks));
+        *self.reason.lock() = reason(checks);
+    }
+
+    /// Why the level is amber or red, as the minute task last worked it out.
+    pub fn reason(&self) -> Option<String> {
+        self.reason.lock().clone()
     }
 }
 
@@ -1846,6 +1875,26 @@ mod tests {
         let mut i = inputs(&m, &c, &w, None, None);
         i.refused_5m = Some(25);
         assert_eq!(overall(&evaluate(&i)).ping(), "bad");
+    }
+
+    #[test]
+    fn the_reason_names_the_first_red_else_the_first_amber_check_with_its_limit() {
+        let c = |id: &str, threshold: &str, label: &str, level: Level, value: &str| Check {
+            id: id.into(), threshold: threshold.into(), label: label.into(), level, value: value.into(), text: String::new(), fix: None };
+        let ok = c("core.memory", "memory", "Core memory of limit", Level::Ok, "41%");
+        let disk = c("disk.free", "disk", "Data volume free", Level::Warn, "12% · 5.7 GiB free");
+        let late = c("poller.late", "poller", "Poller late datasets", Level::Warn, "6% · 3 of 50");
+        let worker = c("worker.heartbeat", "worker", "Report worker", Level::Bad, "2 min 0 s ago");
+        assert_eq!(reason(std::slice::from_ref(&ok)), None, "nothing amber: nothing to say");
+        assert_eq!(reason(&[ok.clone(), disk.clone(), late]).as_deref(), Some("Data volume free: 12% · 5.7 GiB free — watch at ≤ 15%"));
+        assert_eq!(reason(&[disk.clone(), worker]).as_deref(), Some("Report worker: 2 min 0 s ago — over at ≥ 90 s, or version mismatch"), "red before amber");
+        // Unknown never turns the dot: it is not a reason either.
+        let unknown = c("gate.refused", "gate", "Requests turned away (5 min)", Level::Unknown, "not known");
+        assert_eq!(reason(&[unknown]), None);
+        // The same checks as the level: a reason exactly when the dot shows.
+        for set in [vec![ok.clone()], vec![ok, disk]] {
+            assert_eq!(reason(&set).is_some(), overall(&set) != Level::Ok);
+        }
     }
 
     #[test]

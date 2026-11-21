@@ -24,6 +24,7 @@ use super::{xlsx, zip};
 use crate::auth::Caller;
 use crate::bridge::Core;
 use crate::volume::collect::{self, Indices};
+use crate::jobs::spread;
 use crate::volume::schedule::{self as vsched, day_key};
 use crate::volume::VolumeSettings;
 use chrono::{NaiveDate, NaiveDateTime};
@@ -486,7 +487,7 @@ impl Core {
                     let split: Vec<&str> = part.indices.iter().filter(|n| split_names.contains(*n)).map(String::as_str).collect();
                     let query = collect::day_query(&dated, &split, &s.time_field, w.date);
                     let body = hosts::composite_body(&query, &resolved, part.page_size.max(hosts::PAGE_SIZE_MIN), part.after.as_ref());
-                    let req = hosts::page_request(&id, &ind, &body, timeout);
+                    let req = hosts::page_request(&id, &ind, &body, timeout, w.date, vsched::utc_day(now_ms()));
                     let pause = if first_page.insert((di, pk)) { delay } else { delay.max(cfg.page_pause_ms) };
                     let core = self.clone();
                     set.spawn(crate::jobs::governor::within(lane.clone(), async move {
@@ -725,8 +726,14 @@ impl Core {
         }
         let at = self.hosts_at();
         let local = vsched::local_now();
-        let begun_today = (local.time() >= at).then_some(local.date());
-        vsched::local_to_ms(vsched::next_run(local, at, begun_today))
+        // The next cluster's own start (jobs::spread::scheduled_at, what the tick waits for):
+        // inside the two hours, the next one still to come; after them, tomorrow's first.
+        let Some((t, tomorrow)) = spread::next_start(&self.spread_members(), at, spread::HOSTS_WINDOW_MS, local.time()) else {
+            let begun_today = (local.time() >= at).then_some(local.date());
+            return vsched::local_to_ms(vsched::next_run(local, at, begun_today));
+        };
+        let day = if tomorrow { local.date() + chrono::Duration::days(1) } else { local.date() };
+        vsched::local_to_ms(day.and_time(t))
     }
 
     /// One tick of the daily hosts collection at the given server local time: from the hosts
@@ -761,9 +768,15 @@ impl Core {
         let now = now_ms();
         let mut specs = self.all_specs();
         specs.sort_by(|a, b| a.id.cmp(&b.id));
+        // Each cluster at its own place in the two hours from `at` (jobs::spread, docs/JOBS.md
+        // "Spread"), so the fleet does not start, and retry, in the same minute.
+        let members = self.spread_members();
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
+            if local.time() < spread::scheduled_at(&members, &id, at, spread::HOSTS_WINDOW_MS) {
+                continue;
+            }
             if self.reports.hosts_running.lock().contains(&id) || self.volume_unreachable(&id) || self.report_cluster_red(&id) {
                 continue;
             }

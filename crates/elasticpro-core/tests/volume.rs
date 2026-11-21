@@ -174,7 +174,12 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     }
     // The built-in pattern logstash-*: the pattern in the path, the day's indices in the query.
     let search = srv.hits().into_iter().find(|h| support::day_search(h).is_some()).unwrap();
-    assert_eq!(search.path, "/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true");
+    assert!(search.path.starts_with("/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true"), "{}", search.path);
+    // A closed day goes with the request cache; today never (0.3.81).
+    for h in srv.hits().iter().filter(|h| support::day_search(h).is_some()) {
+        let is_today = support::day_search(h).is_some_and(|s| s.day == Some(dash(t)) || s.dated.iter().any(|n| n.contains(&dot(t))));
+        assert_eq!(h.path.contains("request_cache=true"), !is_today, "{} {}", h.path, h.body);
+    }
     assert_eq!(search.header("x-opaque-id").map(|v| v.contains("volume-daily")), Some(true), "origin volume-daily in the request log");
     let body: Value = serde_json::from_str(&search.body).unwrap();
     assert!(body["aggs"].get("ev").is_none(), "event_logsize is not mapped: no ev agg: {body}");
@@ -369,7 +374,8 @@ async fn the_legacy_index_format_keeps_its_requests() {
     let hits = srv.hits();
     assert!(hits.iter().any(|h| h.path == "/_cat/indices/logstash-*-*?format=json&bytes=b&h=index,status,docs.count,pri.store.size,store.size"));
     let search = hits.iter().find(|h| h.path.contains("/_search")).unwrap();
-    assert_eq!(search.path, format!("/logstash-*-{}/_search?ignore_unavailable=true&allow_no_indices=true", dot(t - Duration::days(1))));
+    assert_eq!(search.path, format!("/logstash-*-{}/_search?ignore_unavailable=true&allow_no_indices=true&request_cache=true", dot(t - Duration::days(1))),
+               "yesterday is closed: the request cache");
     assert!(!search.body.contains("\"query\""), "no query: the day is the path, as before");
     assert!(!hits.iter().any(|h| h.body.contains("date_histogram")), "nothing split by time");
     assert_eq!(daily["skipped"], json!(["logstash-linux-2026.10"]));
@@ -630,7 +636,19 @@ async fn a_scheduled_run_the_stop_ended_is_run_after_the_stop() {
     let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": clusters })).await;
     assert_eq!(r["ok"], true, "{r}");
 
-    assert_eq!(c.volume_tick_at(local(t, "06:00")).await.len(), 4, "all four due");
+    // Four clusters start 7½ min apart in the half hour from collectAt (06:00, jobs::spread):
+    // never before it, and by 06:30 every one's place has come. Volume shows each one's own
+    // start as its next run, the time the tick uses.
+    assert!(c.volume_tick_at(local(t, "05:59")).await.is_empty(), "never before collectAt");
+    let mut nexts = vec![];
+    for id in ids {
+        let d = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": id })).await;
+        nexts.push(d["status"]["nextRunAt"].as_i64());
+    }
+    nexts.sort();
+    nexts.dedup();
+    assert!(nexts.len() == 4 || nexts == vec![None], "four starts, or none shown off hosted: {nexts:?}");
+    assert_eq!(c.volume_tick_at(local(t, "06:30")).await.len(), 4, "all four due");
     // Two hold the permits and have sent `_cat`; the other two wait. Then the stop.
     wait_for("two runs to reach their cluster", || servers.iter().filter(|s| cats(s) > 0).count() == 2).await;
     stop(&c, true).await;
@@ -645,10 +663,10 @@ async fn a_scheduled_run_the_stop_ended_is_run_after_the_stop() {
         let e = d["status"]["lastError"].as_str().unwrap_or("");
         assert!(e.contains("emergency stop") && e.contains("tried again"), "{id}: {d}");
     }
-    assert!(c.volume_tick_at(local(t, "06:01")).await.is_empty(), "nothing while the stop holds");
+    assert!(c.volume_tick_at(local(t, "06:31")).await.is_empty(), "nothing while the stop holds");
 
     stop(&c, false).await;
-    let mut again = c.volume_tick_at(local(t, "06:02")).await;
+    let mut again = c.volume_tick_at(local(t, "06:32")).await;
     again.sort();
     assert_eq!(again, waited, "the two the stop held back, and not the two that finished");
     for id in ids {

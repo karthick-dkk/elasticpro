@@ -564,6 +564,13 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // whose page is cluster health only: runs name clusters and carry their errors. A
         // caller limited to some clusters reads only the runs about theirs (the handler).
         "JOBS_LIST" => Some(Role::User),
+        // One run's per-cluster parts and its own log lines, read when its row is opened: the
+        // same as JOBS_LIST, narrowed to the caller's clusters in the handler.
+        "JOB_RUN_DETAIL" => Some(Role::User),
+        // Searches running long on the clusters the caller sees (`GET _tasks`, read only while
+        // the Jobs page is open): a user's, like JOBS_LIST; narrowed to their clusters in the
+        // handler. Index names and query bodies are the same shape of fact a user reads on REST.
+        "SLOW_SEARCHES" => Some(Role::User),
         // The Jobs page's health lines (docs/HEALTH.md "History"): a user's, as the strip it draws
         // from; the ElasticPro health figures and the fleet-wide counts are narrowed in the handler.
         "HEALTH_HISTORY" => Some(Role::User),

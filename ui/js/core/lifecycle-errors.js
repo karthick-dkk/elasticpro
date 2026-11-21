@@ -8,7 +8,8 @@
  * actually running:
  *
  *  - ILM error: an index matching the log pattern, managed by an ILM policy and in the ERROR
- *    step (d.ilmErrors is `_ilm/explain?only_errors&only_managed` over every index), while
+ *    step (d.ilmErrors is `_ilm/explain?only_errors&only_managed` over the cluster's log
+ *    pattern, `*` without one, since 0.3.81; the pattern match below still applies), while
  *    ILM's operation mode is RUNNING.
  *  - SLM error: a scheduled policy whose indices cover the log pattern (policy.config.indices;
  *    absent or `*` means everything) and whose last run failed (last_failure newer than

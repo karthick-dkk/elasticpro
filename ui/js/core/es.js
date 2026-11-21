@@ -45,6 +45,10 @@ export const healthHistory = (range) => send({ type: 'HEALTH_HISTORY', range });
 
 /** Every job, its state and a page of runs (docs/JOBS.md `JOBS_LIST {before?, limit?, jobId?}`). User and up. */
 export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });
+/** One run's per-cluster parts and its own log lines (docs/JOBS.md `JOB_RUN_DETAIL {runId}`), read when its row opens. User and up. */
+export const jobRunDetail = (runId) => send({ type: 'JOB_RUN_DETAIL', runId });
+/** Searches running longer than `minMs` on the clusters the caller sees (docs/JOBS.md `SLOW_SEARCHES {minMs}`). User and up. */
+export const slowSearches = (minMs) => send({ type: 'SLOW_SEARCHES', minMs });
 /** A job control (docs/JOBS.md "Controls": JOB_RUN, JOB_PAUSE, … JOB_SETTINGS_SET). Administrators only. */
 export const jobControl = (type, params = {}) => send({ type, ...params });
 
@@ -542,7 +546,14 @@ export class EsClient {
   slmStats() { return this.json('GET', '/_slm/stats'); }
   slmStatus() { return this.json('GET', '/_slm/status'); }
   ilmStatus() { return this.json('GET', '/_ilm/status'); }
-  ilmErrors() { return this.json('GET', '/*/_ilm/explain?only_errors=true&only_managed=true'); }
+  /**
+   * The log indices in ILM error, only the fields the pages read: the request the core's
+   * `ilm_errors` dataset makes (fleet/catalogue.rs `ilm_errors_path`), character for character.
+   */
+  ilmErrors(pattern) {
+    return this.json('GET', `/${encodeURIComponent(String(pattern || '').trim() || '*')}/_ilm/explain?only_errors=true&only_managed=true` +
+      '&filter_path=indices.*.policy,indices.*.phase,indices.*.step,indices.*.failed_step,indices.*.step_info.type,indices.*.step_info.reason');
+  }
   aliases() { return this.json('GET', '/_cat/aliases?format=json&h=alias,index,is_write_index'); }
   search(index, body, opts = {}) {
     const qs = opts.qs ? `?${opts.qs}` : '?ignore_unavailable=true&allow_no_indices=true';

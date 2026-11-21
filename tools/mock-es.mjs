@@ -925,16 +925,17 @@ function volumeSearch(url, body) {
 
 // The task list. Two long searches are always "running": one is ours — it carries the last
 // X-Opaque-Id this fixture was sent, so the Tasks panel can tell our query from a stranger's
-// — and one is somebody else's. POST /_tasks/<id>/_cancel removes it from the listing, so
+// — and one is somebody else's. `detailed` gives each its description with the query
+// (`source[...]`), as Elasticsearch does: Jobs › Slow searches now shows it (SLOW_SEARCHES). POST /_tasks/<id>/_cancel removes it from the listing, so
 // "cancelled and still there" means the app, not the fixture.
 const seenOpaqueIds = [];
 const cancelledTasks = new Set();
 function tasksListing() {
   const ours = seenOpaqueIds.length ? seenOpaqueIds[seenOpaqueIds.length - 1] : 'elasticpro/mock/page:indices/mock-prod/1';
   const all = {
-    'node-1:4711': { node: 'node-1', id: 4711, type: 'transport', action: 'indices:data/read/search', description: 'indices[logstash-*], search_type[QUERY_THEN_FETCH]',
+    'node-1:4711': { node: 'node-1', id: 4711, type: 'transport', action: 'indices:data/read/search', description: 'indices[logstash-*], search_type[QUERY_THEN_FETCH], source[{"size":0,"aggs":{"by_host":{"terms":{"field":"host.keyword","size":50000}}}}]',
       start_time_in_millis: Date.now() - 95_000, running_time_in_nanos: 95_000_000_000, cancellable: true, headers: { 'X-Opaque-Id': ours } },
-    'node-1:4712': { node: 'node-1', id: 4712, type: 'transport', action: 'indices:data/read/search', description: 'indices[metrics-*], search_type[QUERY_THEN_FETCH]',
+    'node-1:4712': { node: 'node-1', id: 4712, type: 'transport', action: 'indices:data/read/search', description: 'indices[metrics-*], search_type[QUERY_THEN_FETCH], source[{"query":{"query_string":{"query":"*error*"}},"sort":[{"@timestamp":"desc"}]}]',
       start_time_in_millis: Date.now() - 42_000, running_time_in_nanos: 42_000_000_000, cancellable: true, headers: { 'X-Opaque-Id': 'kibana-reporting-7f3a' } },
   };
   const tasks = Object.fromEntries(Object.entries(all).filter(([id]) => !cancelledTasks.has(id)));

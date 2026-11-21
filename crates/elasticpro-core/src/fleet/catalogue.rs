@@ -100,6 +100,30 @@ pub const REPOS_PATH: &str = "/_snapshot?local=false";
 /// only the running ones, and `filter_path` keeps the per-index detail out of the answer.
 pub const SNAPSHOT_STATUS_PATH: &str = "/_snapshot/_status?filter_path=snapshots.snapshot,snapshots.repository,snapshots.state,snapshots.stats.start_time_in_millis,snapshots.stats.time_in_millis,snapshots.shards_stats";
 
+/// The shipped seconds between two `ilm_errors` fetches (the policy may say otherwise). An
+/// index in ILM error stays in error until somebody fixes it: half an hour is soon enough to
+/// hear of it, and asks half as often as the 15 minutes before 0.3.81.
+pub const ILM_ERRORS_INTERVAL_SECS: u64 = 1800;
+
+/// What of an `_ilm/explain` answer the pages read (`lifecycle-errors.js`, `alert-groups.js`,
+/// `automation.js`): per index in error, its policy, phase, step, failed step and the step's
+/// reason. Ages, dates and the phase definition stay on the cluster.
+pub const ILM_ERRORS_FILTER: &str =
+    "indices.*.policy,indices.*.phase,indices.*.step,indices.*.failed_step,indices.*.step_info.type,indices.*.step_info.reason";
+
+/// The indices the lifecycle datasets look at: the cluster's `logIndexPattern`, every index
+/// (`*`) when it has none. One definition for `ilm_assign` and `ilm_errors`.
+pub fn log_indices(log_pattern: Option<&str>) -> &str {
+    log_pattern.map(str::trim).filter(|p| !p.is_empty()).unwrap_or("*")
+}
+
+/// The `ilm_errors` request: only the log indices (the pages count no other index's error,
+/// `lifecycle-errors.js` `ilmErrorsOf`), and only the fields they read. `_ilm/explain` takes
+/// no `ignore_unavailable`, so none is sent.
+pub fn ilm_errors_path(log_pattern: Option<&str>) -> String {
+    format!("/{}/_ilm/explain?only_errors=true&only_managed=true&filter_path={ILM_ERRORS_FILTER}", enc(log_indices(log_pattern)))
+}
+
 impl Dataset {
     pub fn name(self) -> &'static str {
         match self {
@@ -133,7 +157,7 @@ impl Dataset {
         match self {
             Dataset::Health => health_secs,
             Dataset::Nodes => 300,
-            Dataset::IlmErrors => 900,
+            Dataset::IlmErrors => ILM_ERRORS_INTERVAL_SECS,
             Dataset::Policies => 3600,
             Dataset::IlmAssign => 3600,
             Dataset::Snapshots => 1800,
@@ -161,7 +185,7 @@ impl Dataset {
                 q("nodes", format!("/_cat/nodes?format=json&bytes=b&h={}", enc(NODE_COLS)), t),
                 q("alloc", "/_cat/allocation?format=json&bytes=b".into(), t),
             ],
-            Dataset::IlmErrors => vec![q("ilmErr", "/*/_ilm/explain?only_errors=true&only_managed=true".into(), 30_000)],
+            Dataset::IlmErrors => vec![q("ilmErr", ilm_errors_path(log_pattern), 30_000)],
             Dataset::Policies => vec![
                 q("repos", REPOS_PATH.into(), t),
                 q("slm", "/_slm/policy".into(), t),
@@ -175,7 +199,7 @@ impl Dataset {
                 // The uuid too: without it an index with no policy has nothing left after the
                 // filter and drops out, so "every log index is managed" could not be told
                 // from "some are not" (es.js asks the same).
-                let p = log_pattern.map(str::trim).filter(|p| !p.is_empty()).unwrap_or("*");
+                let p = log_indices(log_pattern);
                 vec![q(
                     "ilmOfIndices",
                     format!("/{}/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true", enc(p)),
@@ -323,6 +347,12 @@ mod tests {
         assert_eq!(Dataset::IlmAssign.queries(Some("logs-*"))[0].path,
             "/logs-*/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true");
         assert_eq!(Dataset::IlmAssign.queries(None)[0].path.split('/').nth(1), Some("*"));
+        // ILM errors: the same indices as ilm_assign, and only what the pages read.
+        assert_eq!(Dataset::IlmErrors.queries(Some("logs-*"))[0].path,
+            "/logs-*/_ilm/explain?only_errors=true&only_managed=true&filter_path=indices.*.policy,indices.*.phase,indices.*.step,indices.*.failed_step,indices.*.step_info.type,indices.*.step_info.reason");
+        assert!(Dataset::IlmErrors.queries(None)[0].path.starts_with("/*/_ilm/explain?only_errors=true&only_managed=true&filter_path="));
+        assert!(Dataset::IlmErrors.queries(Some("  "))[0].path.starts_with("/*/_ilm/explain?"), "a blank pattern is no pattern");
+        assert_eq!(Dataset::IlmErrors.queries(Some("a-*,b-*"))[0].path.split('/').nth(1), Some("a-*%2Cb-*"), "encoded as ilm_assign encodes it");
         assert_eq!(snapshots_full_path("my repo"), "/_snapshot/my%20repo/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=500");
         assert!(snapshots_cat_path("r").starts_with("/_cat/snapshots/r?format=json&s=end_epoch:desc&h=id,status"));
         assert_eq!(enc("a/b:c"), "a%2Fb%3Ac");
@@ -333,6 +363,7 @@ mod tests {
         assert_eq!(Dataset::Health.default_interval_secs(180), 180);
         assert_eq!(Dataset::Nodes.default_interval_secs(180), 300);
         assert_eq!(Dataset::Snapshots.default_interval_secs(180), 1800);
+        assert_eq!(Dataset::IlmErrors.default_interval_secs(180), 1800, "half an hour since 0.3.81");
         assert_eq!(Dataset::Health.stale_after_ms(180), 360_000);
         assert_eq!(Dataset::Policies.stale_after_ms(3600), 3 * 3_600_000);
         assert_eq!(Dataset::Indices.class(), Class::OnDemand);

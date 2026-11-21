@@ -399,3 +399,13 @@ test('the time-zone chip is drawn only when it has a zone to say (0.3.77)', () =
   assert.equal(R.zoneChipShown([...none, { key: '0', offsetMinutes: 0, devices: 2 }], null), true, 'UTC detected is a zone');
   assert.equal(R.zoneChipShown([{ key: '330', offsetMinutes: 330, devices: 12 }], null), true);
 });
+
+test('lastRunChange: became late and came back in the window of the last run; unknown is null', () => {
+  const { lastRunChange } = R;
+  const windows = [{ from: 0, to: 100, label: '00:00–02:00', newlyLate: 9, solved: 1 }, { from: 100, to: 200, label: '02:00–04:00', newlyLate: 12, solved: 5 }];
+  assert.deepEqual(lastRunChange({ lastRunAt: 150, windows }), { up: 12, down: 5, net: 7, label: '02:00–04:00' });
+  assert.deepEqual(lastRunChange({ lastRunAt: 50, windows }), { up: 9, down: 1, net: 8, label: '00:00–02:00' });
+  assert.equal(lastRunChange({ lastRunAt: 999, windows }), null, 'the last run is not today: not known');
+  assert.equal(lastRunChange({ lastRunAt: null, windows }), null, 'never measured');
+  assert.equal(lastRunChange({ lastRunAt: 150 }), null, 'no windows');
+});

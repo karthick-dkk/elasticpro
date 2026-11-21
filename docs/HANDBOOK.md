@@ -222,7 +222,10 @@ a `TZ` rule like `IST-5:30`), and `tzOffsetMinutes`, its offset now (`330`). Pag
 that zone, the browser's only when `tz` is absent (an older core).
 
 **Datasets** (`FLEET_STATE.catalogue` lists them with interval, class and the guest flag):
-`health` (`/`, `/_cluster/health`, 180 s), `nodes` (300 s), `ilm_errors` (900 s), `policies`
+`health` (`/`, `/_cluster/health`, 180 s), `nodes` (300 s), `ilm_errors`
+(`/<logIndexPattern>/_ilm/explain?only_errors=true&only_managed=true` with a `filter_path`
+keeping each erroring index's policy, phase, step, failed step and step reason; `/*/…` when the
+cluster has no log pattern; 1800 s since 0.3.81, 900 s before), `policies`
 (snapshot repos, SLM, ILM status and policies, `path.repo`, watermarks — 3600 s),
 `ilm_assign` (the cluster's `logIndexPattern`, 3600 s), `snapshots` (`_cat/snapshots/<repo>`
 per repo, 1800 s), `snapshot_status` (`/_snapshot/_status` with a `filter_path`, one request,
@@ -328,7 +331,7 @@ classic policy, which is what Config → Requests → Automatic saves:
 
 ```json
 { "mode": "auto",
-  "intervalsSec": { "health": 180, "nodes": 300, "ilm_errors": 900, "policies": 3600, "ilm_assign": 3600,
+  "intervalsSec": { "health": 180, "nodes": 300, "ilm_errors": 1800, "policies": 3600, "ilm_assign": 3600,
                     "snapshots": 1800, "snapshots_full": 1800, "indices": 600, "shards": 300 },
   "watchMinutes": 15,
   "concurrency": { "global": 16, "perCluster": 2, "tunnel": 6 },

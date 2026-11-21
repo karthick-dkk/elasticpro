@@ -25,6 +25,13 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// When `id`'s daily run starts, local time: its `collectAt` plus its place in the half hour
+/// after it (`jobs::spread::scheduled_at`), never before `collectAt`. The timer's tick and the
+/// "next run" Volume and Jobs show both ask this, so they cannot disagree.
+pub(crate) fn volume_start_at(members: &[crate::jobs::spread::Member], id: &str, s: &VolumeSettings) -> chrono::NaiveTime {
+    crate::jobs::spread::scheduled_at(members, id, s.collect_time(), crate::jobs::spread::VOLUME_WINDOW_MS)
+}
+
 fn now_ms() -> i64 {
     crate::fleet::now_ms() as i64
 }
@@ -260,11 +267,17 @@ impl Core {
 
     /// When a cluster's scheduled run is next, epoch ms; `None` off hosted. One definition, for
     /// VOLUME_SETTINGS and JOBS_LIST.
-    pub(crate) fn volume_next_run_at(&self, s: &VolumeSettings, st: &ClusterState) -> Option<i64> {
+    pub(crate) fn volume_next_run_at(&self, id: &str, s: &VolumeSettings, st: &ClusterState, members: &[crate::jobs::spread::Member]) -> Option<i64> {
         self.edition().schedules().then(|| {
             let last = st.last_scheduled_day.as_deref().and_then(parse_day);
-            schedule::local_to_ms(schedule::next_run(schedule::local_now(), s.collect_time(), last))
+            schedule::local_to_ms(schedule::next_run(schedule::local_now(), volume_start_at(members, id, s), last))
         }).flatten()
+    }
+
+    /// Every cluster, as `jobs::spread` places them: the one list the timers and the pages'
+    /// "next run" are worked out from.
+    pub(crate) fn spread_members(&self) -> Vec<crate::jobs::spread::Member> {
+        self.all_specs().iter().map(|s| crate::jobs::spread::Member::new(&s.id, s.via.as_deref())).collect()
     }
 
     /// The earliest next scheduled run of any cluster; `Ok(None)` when there is none (no data
@@ -272,15 +285,16 @@ impl Core {
     pub(crate) async fn volume_next_run_any(&self) -> Result<Option<i64>, String> {
         let Some(store) = &self.volume.store else { return Ok(None) };
         let raw = self.volume_config().await?;
+        let members = self.spread_members();
         Ok(self.all_specs().iter().filter_map(|spec| {
             let r = self.volume_resolve(raw.as_ref(), Some(&spec.id), None);
-            self.volume_next_run_at(&r.settings, &store.read_state(&spec.id))
+            self.volume_next_run_at(&spec.id, &r.settings, &store.read_state(&spec.id), &members)
         }).min())
     }
 
     fn volume_status(&self, id: &str, s: &VolumeSettings, st: &ClusterState) -> Value {
         let run = self.volume_run_state(id);
-        let next = self.volume_next_run_at(s, st);
+        let next = self.volume_next_run_at(id, s, st, &self.spread_members());
         json!({
             "lastRunAt": st.last_run_at,
             "nextRunAt": next,
@@ -1068,7 +1082,7 @@ impl Core {
                             let (from, to) = opts.period.unwrap_or_else(|| {
                                 (NaiveDate::parse_from_str(&format!("{oldest}-01"), "%Y-%m-%d").unwrap_or(today), today)
                             });
-                            let h = self.volume_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today))), opts.stop).await;
+                            let h = self.volume_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today), today)), opts.stop).await;
                             if ok(&h) {
                                 let res = h.get("json").unwrap_or(&Value::Null);
                                 match collect::partial_answer(res) {
@@ -1229,7 +1243,7 @@ impl Core {
                     }
                 }
                 let group = listing.group_for(date, &split);
-                let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body)), opts.stop).await;
+                let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body, today)), opts.stop).await;
                 if !ok(&res) {
                     // Refused or cut off because the stop came on: not this day's fault.
                     if let Some(reason) = (opts.stop)() {
@@ -1368,13 +1382,16 @@ impl Core {
                 return vec![];
             }
         };
+        // Each cluster at its own place in the half hour from its collectAt (jobs::spread,
+        // docs/JOBS.md "Spread"): the fleet does not start in the same minute.
+        let members = self.spread_members();
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
             let r = self.volume_resolve(raw.as_ref(), Some(&id), None);
             let prev = store.read_state(&id).last_scheduled_day;
             let last = prev.as_deref().and_then(parse_day);
-            if !schedule::is_due(local, r.settings.collect_time(), last) || self.volume_unreachable(&id) {
+            if !schedule::is_due(local, volume_start_at(&members, &id, &r.settings), last) || self.volume_unreachable(&id) {
                 continue;
             }
             // Busy (docs/JOBS.md "Busy clusters"): not marked, so it waits, with one deferred

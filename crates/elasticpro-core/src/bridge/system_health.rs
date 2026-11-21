@@ -102,7 +102,7 @@ impl Core {
         }
         let poller = self.health_poller(now);
         let checks = self.health_checks(now, &worker, Some(&poller));
-        self.health.set_level(health::overall(&checks));
+        self.health.set_checks(&checks);
         self.health.held.write().checks = checks;
         // The Jobs page's health lines (docs/HEALTH.md "History"): this minute's point, kept 7 days.
         // Each line sits beside its check's tile, so it stores the tile's own figure — the 5-minute
@@ -334,7 +334,7 @@ impl Core {
         let poller = self.health_poller(now);
         let checks = self.health_checks(now, &worker, Some(&poller));
         let level = health::overall(&checks);
-        self.health.set_level(level);
+        self.health.set_checks(&checks);
 
         let (mem, cpu, hour, trend) = {
             let m = self.health.monitor.lock();
