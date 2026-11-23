@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.83
 
 - **▶ Play is back in the top bar.** Anyone who may open Play (every signed-in role but a guest) presses **▶ Play** in the top bar to open the wall display full screen, as before 0.3.63. Since then it opened only from Config-Management › Play, which only an administrator reaches. It is left off evidence pages (Snapshots, REST, Indices), which show one cluster, not the fleet. Config-Management › Play › **▶ Open Play** and display links are unchanged.
 - **Security: the `url` library moves to 2.5.9** (RUSTSEC-2026-0592, a stack overflow on nested `blob:` addresses).
