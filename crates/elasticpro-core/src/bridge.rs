@@ -5961,12 +5961,13 @@ impl Core {
         if let Some(r) = cfg.refusal() {
             return Some(SinkNote::general(r));
         }
-        let p = self.primed.read();
-        if p.clusters.is_empty() {
+        // Zabbix hosts count: they are clusters the core can reach (all_specs), primed or not.
+        if self.all_specs().is_empty() {
             return Some(SinkNote::general(
                 "nothing is primed: the core has no cluster credentials until somebody opens the app",
             ));
         }
+        let p = self.primed.read();
         // The built-in store: the server's own files, nothing written to any cluster.
         if cfg.destination == delay_sink::Destination::Builtin {
             return self.logdelay_store().is_none().then(|| SinkNote::general("no data directory: the built-in store needs one"));
@@ -5977,7 +5978,7 @@ impl Core {
             return self.history_delay_index(y, m).err()
                 .map(|e| SinkNote::write(None, None, format!("the history store cannot take the measurements: {e}")));
         }
-        if !p.clusters.contains_key(&cfg.sink_cluster_id) {
+        if self.spec_for(&cfg.sink_cluster_id).is_none() {
             // About the sink cluster, as it was named when this was decided.
             let sink = cfg.sink_cluster_id.as_str();
             return Some(SinkNote::write(Some(sink), Some(sink), "the sink cluster is not one of the primed clusters"));
@@ -5994,16 +5995,9 @@ impl Core {
 
     /// Which primed clusters this run measures.
     fn delay_sink_targets(&self, cfg: &SinkConfig) -> Vec<String> {
-        let p = self.primed.read();
-        // Only a sink cluster is left out of its own measurement.
-        let to_history = cfg.destination != delay_sink::Destination::Cluster;
-        if cfg.clusters.is_empty() {
-            let mut ids: Vec<String> =
-                p.clusters.keys().filter(|id| to_history || **id != cfg.sink_cluster_id).cloned().collect();
-            ids.sort();
-            return ids;
-        }
-        cfg.clusters.iter().filter(|id| p.clusters.contains_key(*id)).cloned().collect()
+        // Every cluster the core can reach, Zabbix hosts included (delay_sink::SinkConfig::targets).
+        let known: Vec<String> = self.all_specs().into_iter().map(|s| s.id).collect();
+        cfg.targets(&known)
     }
 
     /// One run of the scheduled measurement, recorded in the run log (docs/JOBS.md): one at a
@@ -6113,10 +6107,7 @@ impl Core {
         let index = delay_sink::index_name(&prefix, year, month);
         let targets = match &scope.clusters {
             None => self.delay_sink_targets(&cfg),
-            Some(ids) => {
-                let p = self.primed.read();
-                ids.iter().filter(|id| p.clusters.contains_key(*id)).cloned().collect()
-            }
+            Some(ids) => ids.iter().filter(|id| self.spec_for(id).is_some()).cloned().collect(),
         };
         if targets.is_empty() && !full {
             let why = SinkNote::general("none of the clusters named is primed: open the app (or prime the core) so it holds their credentials");
@@ -6155,8 +6146,8 @@ impl Core {
         // place in the first quarter of the interval (at most 10 min). A cluster that took
         // longer than its slot is followed at once: the run never waits to catch up.
         let members: Vec<crate::jobs::spread::Member> = if paced {
-            let p = self.primed.read();
-            targets.iter().map(|id| crate::jobs::spread::Member::new(id, p.clusters.get(id).and_then(|s| s.via.as_deref()))).collect()
+            let specs: Vec<Option<ClusterSpec>> = targets.iter().map(|id| self.spec_for(id)).collect();
+            targets.iter().zip(&specs).map(|(id, s)| crate::jobs::spread::Member::new(id, s.as_ref().and_then(|s| s.via.as_deref()))).collect()
         } else {
             vec![]
         };
