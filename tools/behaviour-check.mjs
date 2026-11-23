@@ -5123,11 +5123,11 @@ restoreConsole();
   ok(!doc.querySelector('#pending-updates') && ![...doc.querySelectorAll('#topbar *')].some((e) => /updates? — Apply/.test(e.textContent)),
     'quiet: a held update showed a pill or counter');
   // The bar says nothing about freshness any more (the owner, 2026-11-14): no live / quiet / manual
-  // pill, no Refresh button or badge, no Auto toggle, no Reports · idle, no ▶ Play.
+  // pill, no Refresh button or badge, no Auto toggle, no Reports · idle. ▶ Play is back (2026-11-23).
   ok(![...doc.querySelectorAll('#topbar .pill')].some((p) => /^(quiet|live|manual)$/.test(p.textContent.trim())),
     'quiet: the top bar still carries a live / quiet / manual pill');
-  ok(![...doc.querySelectorAll('#topbar button')].some((b) => /Refresh|Auto|▶ Play|Reports · idle/.test(b.textContent)) && !doc.getElementById('refresh-btn') && !doc.getElementById('play-btn'),
-    `quiet: the top bar still carries a Refresh / Auto / Play / Reports control: ${[...doc.querySelectorAll('#topbar button')].map((b) => b.textContent.trim()).filter(Boolean).join(' | ')}`);
+  ok(![...doc.querySelectorAll('#topbar button')].some((b) => /Refresh|Auto|Reports · idle/.test(b.textContent)) && !doc.getElementById('refresh-btn'),
+    `quiet: the top bar still carries a Refresh / Auto / Reports control: ${[...doc.querySelectorAll('#topbar button')].map((b) => b.textContent.trim()).filter(Boolean).join(' | ')}`);
   ok(!doc.querySelector('#topbar #reports-pill') || doc.querySelector('#topbar #reports-pill').hidden, 'quiet: the Reports pill shows while no report run failed');
   await go('requests');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(300);
@@ -6546,7 +6546,7 @@ if (viaFleet) {
     ok(doc.querySelector('#topbar h1').textContent === label, `evidence ${id}: the top bar does not carry the page title`);
     const chip = doc.getElementById('cluster-select');
     ok(chip && chip.value === main.id, `evidence ${id}: the chooser does not show this cluster: "${chip && chip.value}"`);
-    // The bar carries no Refresh (nor Play, nor a freshness pill) on any page now; refreshing runs on the configured defaults.
+    // The bar carries no Refresh (nor a freshness pill) on any page, and an evidence page no ▶ Play (it shows the fleet).
     ok(![...doc.querySelectorAll('#topbar button')].some((b) => /Refresh|▶ Play/.test(b.textContent)), `evidence ${id}: a Refresh or Play control is in the top bar`);
     noFleetChrome(id);
     if (id === 'snapshots') {
@@ -6923,9 +6923,18 @@ if (viaFleet) {
   const label = () => (fsBtn() ? fsBtn().getAttribute('aria-label') : null);
   const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true }));
   try {
-    // ▶ Play left the top bar (the owner, 2026-11-14); Config-Management › Play opens it.
+    // ▶ Play is in the top bar (back since 2026-11-23) and opens Play full screen, as
+    // Config-Management › Play's ▶ Open Play does; the latter is pressed below.
     await go('overview');
-    ok(!doc.getElementById('play-btn'), 'fullscreen: a ▶ Play button is back in the top bar');
+    const topPlay = doc.getElementById('play-btn');
+    ok(!!topPlay && /▶ Play/.test(topPlay.textContent), 'fullscreen: no ▶ Play button in the top bar');
+    if (topPlay) {
+      topPlay.click(); await settleFor(600);
+      ok(calls.req === 1, `fullscreen: the top bar's ▶ Play asked for full screen ${calls.req} times`);
+      ok(/#\/play$/.test(window.location.hash), `fullscreen: the top bar's ▶ Play landed on "${window.location.hash}"`);
+      setFs(null); change(); await settleFor(100);
+      calls.req = 0; calls.exit = 0;
+    }
     await go('settings'); window.location.hash = '#/settings/play/play'; await settleFor(600);
     const play = doc.getElementById('play-open');
     ok(!!play, 'fullscreen: no ▶ Open Play button on Config-Management › Play');
