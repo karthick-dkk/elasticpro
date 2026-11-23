@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.84
+
+- **Log delay: clusters that come from Zabbix are measured.** The scheduled measurement (and *Run now*, and *Fetch now*) chose its clusters from those an administrator primed in ElasticPro and left out every cluster that comes from Zabbix, so those clusters were never measured, their Log Delay boards said "never measured", and the run still reported success with 0 measured. It now measures every cluster the server can reach, Zabbix hosts included, the same set the rest of the server works with; a sink cluster may be a Zabbix host too. One definition, `SinkConfig::targets` (docs/LOGDELAY.md).
+
 ## 0.3.83
 
 - **▶ Play is back in the top bar.** Anyone who may open Play (every signed-in role but a guest) presses **▶ Play** in the top bar to open the wall display full screen, as before 0.3.63. Since then it opened only from Config-Management › Play, which only an administrator reaches. It is left off evidence pages (Snapshots, REST, Indices), which show one cluster, not the fleet. Config-Management › Play › **▶ Open Play** and display links are unchanged.

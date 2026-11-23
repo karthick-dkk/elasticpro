@@ -21,7 +21,7 @@
 //!   applied when the data is read back. Porting `classify()` here would put one rule
 //!   in two languages, which is this codebase's named recurring failure.
 //! * **It borrows credentials; it does not keep any.** Both the clusters measured and
-//!   the cluster written to are ids from the primed set — the same specs the UI primed,
+//!   the cluster written to are ids of clusters the core can reach (Zabbix hosts or primed),
 //!   with the same secrets, the same jump hosts and the same pinned certificates. A
 //!   sealed config that nobody has opened yet has no credentials to lend, so the run is
 //!   skipped and says so. An unmeasured cluster is unknown, not zero.
@@ -57,12 +57,12 @@ pub struct SinkConfig {
     /// nothing. An upgrade cannot start writing on its own.
     #[serde(default)]
     pub enabled: bool,
-    /// Which primed cluster receives the measurements. Naming a cluster rather than a
+    /// Which cluster (Zabbix host or primed) receives the measurements. Naming a cluster rather than a
     /// URL is what keeps this from inventing a second place to store a password.
     #[serde(default)]
     pub sink_cluster_id: String,
-    /// Which primed clusters to measure. Empty means every primed cluster except the
-    /// sink itself.
+    /// Which clusters to measure (`targets`). Empty means every cluster the core can reach
+    /// (Zabbix hosts and primed ones) except the sink itself.
     #[serde(default)]
     pub clusters: Vec<String>,
     /// Indices are `<prefix>-YYYY.MM`, matching the tool this is ported from.
@@ -101,7 +101,7 @@ pub enum Destination {
     History,
     /// Nowhere but the built-in store (0.3.57): the server keeps the measurements, periods and
     /// daily totals in its data directory and writes to no cluster at all. Needs only arming
-    /// and a primed cluster to read.
+    /// and a cluster to read (a Zabbix host or a primed one).
     Builtin,
 }
 
@@ -183,6 +183,23 @@ impl SinkConfig {
             return Some("the only cluster to measure is the sink itself".into());
         }
         None
+    }
+
+    /// The clusters a full run measures, out of `known`: every cluster the core can reach —
+    /// Zabbix hosts and primed clusters alike (`Core::all_specs`), one definition for the timer,
+    /// `DELAY_SINK_RUN` and the refusal. The config's list when it names any (those it knows,
+    /// in the list's order), else every known cluster but the sink when the destination is a
+    /// cluster, sorted. Before 0.3.84 this read the primed clusters alone, so a cluster that
+    /// came from Zabbix was never measured and the run said "ok, 0 measured".
+    pub fn targets(&self, known: &[String]) -> Vec<String> {
+        if self.clusters.is_empty() {
+            let to_cluster = self.destination == Destination::Cluster;
+            let mut ids: Vec<String> = known.iter().filter(|id| !to_cluster || **id != self.sink_cluster_id).cloned().collect();
+            ids.sort();
+            ids.dedup();
+            return ids;
+        }
+        self.clusters.iter().filter(|id| known.contains(id)).cloned().collect()
     }
 }
 
@@ -587,6 +604,21 @@ pub fn month_and_hour_bucket(ms: i64) -> (i64, i64, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_are_every_known_cluster_zabbix_ones_included() {
+        // Known = Zabbix hosts and primed clusters together (Core::all_specs).
+        let known: Vec<String> = ["zbx-local", "primed-a", "kibana"].iter().map(|s| s.to_string()).collect();
+        // No list: every known cluster, sorted; the sink is left out only when it is written to.
+        let to_builtin = SinkConfig { destination: Destination::Builtin, sink_cluster_id: "kibana".into(), ..SinkConfig::default() };
+        assert_eq!(to_builtin.targets(&known), vec!["kibana", "primed-a", "zbx-local"]);
+        let to_cluster = SinkConfig { destination: Destination::Cluster, sink_cluster_id: "kibana".into(), ..SinkConfig::default() };
+        assert_eq!(to_cluster.targets(&known), vec!["primed-a", "zbx-local"]);
+        // A list: the clusters it names that exist, in its order — a Zabbix one included.
+        let listed = SinkConfig { clusters: vec!["zbx-local".into(), "gone".into(), "primed-a".into()], ..SinkConfig::default() };
+        assert_eq!(listed.targets(&known), vec!["zbx-local", "primed-a"]);
+        assert!(listed.targets(&[]).is_empty(), "nothing known, nothing measured");
+    }
 
     #[test]
     fn a_note_is_read_by_exact_cluster_id_and_a_write_also_by_the_sink() {

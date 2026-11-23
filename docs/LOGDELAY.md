@@ -167,7 +167,9 @@ named in the card's head, so the difference seen is the delay.
   0.3.53; needs the config's `readOnly=false`), `history` (the history store, under its two
   gates — `HISTORY_STORE_WRITES=true` and *Write history* armed after a passing test — and the
   routing's history kind not `builtin`), or **`builtin`** (new): the server's own files only,
-  nothing written to any cluster; needs only arming and a primed cluster. The built-in store
+  nothing written to any cluster; needs only arming and a cluster the core can reach — a Zabbix
+  host or a primed cluster (`SinkConfig::targets`; before 0.3.84 only primed ones, so a cluster
+  from Zabbix was never measured and the run said "ok, 0 measured"). The built-in store
   is written in every mode; the destination gets a mirror.
 * **Fields per cluster** (`Core::logdelay_fields`): `auth::DelayShape` (the cluster's own
   `delayFields`/`timeField`/`logIndexPattern`, the clusters file's `defaults:`, config.txt
