@@ -33,7 +33,11 @@ disagree, this file wins and the difference is a bug in one of them: fix it.
   storage holds it." Section nav in this order: **Overview · Daily & monthly · Capacity &
   retention · Measure size · Planning · Exports & schedules**.
 - Reports is an evidence page like Indices/Snapshots: the cluster chooser shows; Overview,
-  Capacity and Measure are fleet-wide (one row per cluster), Daily & monthly is one cluster.
+  Capacity and Measure are fleet-wide (one row per cluster), Daily & monthly and Volume by host
+  are one cluster: the one in the top bar's chooser, and only that one (since 0.3.83 there is
+  no second picker on these sections; the chooser offers no "All clusters" there and opens on
+  the cluster last chosen, else the first, as Clusters › Overview does — `singleCluster` in
+  `ui/js/pages/reports.js`). Overview's *Daily ›* on a row chooses that cluster.
 
 ### Overview (board 1)
 

@@ -926,13 +926,12 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     // The Refresh button with its minutes badge and its ▾ menu, the Auto toggle, the live / quiet /
-    // manual pill, the Reports · idle pill and the ▶ Play button are gone from the bar (the owner,
-    // 2026-11-14: "remove this completely; make it default settings as configured"). Refreshing
-    // runs on the configured defaults (System › Defaults: Auto-refresh, Refresh every; the fleet
-    // cache's own schedule) with no control here; `r` still refreshes the selection; Play opens
-    // from Config-Management › Play (and a display link). The bar says something only in an
-    // abnormal state: the emergency stop (pausedPill) or a failed report run (reportsPill).
-    // A snapshot file keeps its way to a newer one.
+    // manual pill and the Reports · idle pill are gone from the bar (the owner, 2026-11-14: "remove
+    // this completely; make it default settings as configured"). Refreshing runs on the configured
+    // defaults (System › Defaults: Auto-refresh, Refresh every; the fleet cache's own schedule) with
+    // no control here; `r` still refreshes the selection. Beyond ▶ Play (below), the bar says
+    // something only in an abnormal state: the emergency stop (pausedPill) or a failed report run
+    // (reportsPill). A snapshot file keeps its way to a newer one.
     isSnapshotMode() && !(ev && L.needsCluster)
       ? h('label.btn.sm', { style: { position: 'relative', overflow: 'hidden' }, title: 'Open a newer snapshot file' }, '↻ Load newer',
           h('input', { type: 'file', accept: '.json,application/json',
@@ -945,6 +944,12 @@ function renderTopbar() {
     // (the owner, 2026-11-17) — never on an evidence page. Elsewhere notices still go into it
     // (ui/menu.js keeps the history whether or not the bell is on screen) and it shows them all
     // the next time it is drawn.
+    // The wall display, full screen, the same figures (docs/PLAY.md). Back in the bar (the owner,
+    // 2026-11-23: "I want play feature again"), so anyone who may see Play opens it in one click,
+    // not only an admin through Config-Management › Play. Not on an evidence page: it shows the fleet.
+    ev || !visiblePages().some((p) => p.id === 'play') ? null
+      : h('button.btn.sm#play-btn', { type: 'button', onclick: () => { try { fullscreen().request().catch(() => {}); } catch (_) { /* no API: Play opens in the window */ } go('play'); },
+          title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)' }, '\u25B6 Play'),
     ev || page.id !== 'overview' ? null : notificationBell(),
     // Your settings (page menu, theme, opens on, sign out), from the person's name. With the
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page

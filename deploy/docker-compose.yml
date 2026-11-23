@@ -176,7 +176,7 @@ services:
   redis:
     # One `apk upgrade` over redis:8-alpine, which clears the last zlib advisory.
     # Pulled rather than built, for the reason given on nginx above.
-    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.82}
+    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.83}
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -208,7 +208,7 @@ services:
     # inside a build container, and on a host whose Docker bridge could not resolve DNS the
     # install died there. Build it yourself with:
     #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
-    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.82}
+    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.83}
     restart: unless-stopped
     depends_on:
       core:
