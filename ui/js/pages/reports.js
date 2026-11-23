@@ -10,7 +10,7 @@
 
 import { h, mount } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
-import { activeClusters } from '../core/state.js';
+import { activeClusters, state } from '../core/state.js';
 import { intent } from '../core/intent.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { empty } from './common.js';
@@ -28,7 +28,7 @@ import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.
 
 let host = null;
 let visiting = false;
-const ui = { section: 'overview', dailyId: null };
+const ui = { section: 'overview' };
 /** The Planning section keeps its own state and draws itself: built once per visit. */
 let planningNode = null;
 /** A field-volume alert asked for this field (core/focus.js): its analysis sits above Daily. */
@@ -64,7 +64,6 @@ export function render(el) {
   intent.reports = null;
   if (asked && asked.section && REPORT_SECTIONS.some((s) => s.id === asked.section)) {
     ui.section = asked.section;
-    if (asked.cluster) ui.dailyId = asked.cluster;
     if (asked.mode) setSummaryMode(asked.mode);
   }
   // From a field-volume alert: that field's volume, on Daily & monthly.
@@ -76,6 +75,11 @@ export function render(el) {
   // The cluster chosen stays chosen (the owner, 2026-11-17): Overview no longer puts "All clusters" back.
   syncHash();
   lastHash = location.hash;
+  // A link or an alert that opened a one-cluster section while the address still named another:
+  // the shell chose before the address moved, so it is asked to choose again (once: then it holds one).
+  if (SINGLE.has(ui.section) && state.selected === 'all') {
+    setTimeout(() => window.dispatchEvent(new CustomEvent('ep:navigate', { detail: { page: 'reports' } })), 0);
+  }
   draw();
 }
 
@@ -102,17 +106,24 @@ function syncHash() {
   }
 }
 
-function goSection(id) {
+function goSection(id, cluster) {
   if (!REPORT_SECTIONS.some((s) => s.id === id)) return;
+  const wasSingle = SINGLE.has(ui.section);
   ui.section = id;
   syncHash();
+  // Into or out of a one-cluster section: the shell draws the page again, as it does for a page,
+  // so the chooser offers (or stops offering) "All clusters" and names the cluster shown.
+  if (wasSingle !== SINGLE.has(id) || cluster) {
+    window.dispatchEvent(new CustomEvent('ep:navigate', { detail: { page: 'reports', cluster: cluster || null } }));
+    return;
+  }
   draw();
 }
 
+/** Overview's "Daily ›" on a cluster's row: Daily & monthly on that cluster, chosen in the top bar. */
 function openDaily(id) {
-  ui.dailyId = id;
   setSummaryMode('daily');
-  goSection('daily');
+  goSection('daily', id);
 }
 
 /** A section that moved to a page of its own (Log delay → the Log Delay page): one line and the link. */
@@ -141,17 +152,17 @@ function sectionNav() {
       }, s.label))));
 }
 
-/** Daily & monthly is one cluster: the one selected, or — on "All clusters" — one picked here. */
+/**
+ * Daily & monthly and Volume by host show one cluster: the one in the top bar's chooser, and only
+ * that one (the owner, 2026-11-23: "only master cluster selection"). The shell reads
+ * `singleCluster` (app.js resolveSelection) as it does for Clusters › Overview: on these sections
+ * the chooser offers no "All clusters" and picks the cluster last chosen, else the first, so the
+ * chooser always names the cluster the section shows. There is no second picker on the page.
+ */
+const SINGLE = new Set(['daily', 'hosts']);
+export const singleCluster = () => SINGLE.has(sectionOfHash(location.hash));
 function dailyCluster(list) {
-  if (list.length === 1) return list[0];
-  return list.find((c) => c.id === ui.dailyId) || list[0];
-}
-function dailyPicker(list, c) {
-  if (list.length < 2) return null;
-  const s = h('select#rp-daily-cluster', { onchange: (e) => { ui.dailyId = e.target.value; draw(); } },
-    ...list.map((x) => h('option', { value: x.id }, x.name)));
-  s.value = c.id;
-  return h('label.field', 'Cluster', s);
+  return list.find((c) => c.id === state.selected) || list[0];
 }
 
 function body(list) {
@@ -161,11 +172,11 @@ function body(list) {
       const c = dailyCluster(list);
       return h('div.rp-section',
         focusField ? h('div', { dataset: { focus: 'field-volume' }, style: { marginBottom: '10px' } }, volumeAnalysisCard(c, draw)) : null,
-        volumeSummary(c, { redraw: draw, picker: dailyPicker(list, c) }));
+        volumeSummary(c, { redraw: draw }));
     }
     case 'hosts': {
       const c = dailyCluster(list);
-      return hostsSection({ cluster: c, picker: dailyPicker(list, c) });
+      return hostsSection({ cluster: c });
     }
     case 'capacity': return capacitySection(ctx);
     case 'measure': return measureSection(ctx);

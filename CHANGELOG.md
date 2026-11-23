@@ -3,6 +3,7 @@
 ## 0.3.83
 
 - **▶ Play is back in the top bar.** Anyone who may open Play (every signed-in role but a guest) presses **▶ Play** in the top bar to open the wall display full screen, as before 0.3.63. Since then it opened only from Config-Management › Play, which only an administrator reaches. It is left off evidence pages (Snapshots, REST, Indices), which show one cluster, not the fleet. Config-Management › Play › **▶ Open Play** and display links are unchanged.
+- **Reports › Daily & monthly and Volume by host: one cluster choice, the top bar's.** The second *Cluster* list inside these sections is gone. They show the cluster chosen in the top bar, and the top bar names it: on these sections it offers no "All clusters" and opens on the cluster last chosen (else the first). Before, with "All clusters" in the top bar, the section showed whichever cluster its own list held, often a different one from the top bar's, so the daily and monthly figures looked like the wrong cluster's. Overview's *Daily ›* on a row now chooses that cluster in the top bar.
 - **Security: the `url` library moves to 2.5.9** (RUSTSEC-2026-0592, a stack overflow on nested `blob:` addresses).
 
 ## 0.3.82

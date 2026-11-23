@@ -883,6 +883,18 @@ await go('reports');
   const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
   const navTo = async (id) => { const a = doc.querySelector(`.rp-nav a[data-section="${id}"]`); if (a) { press(a); await settleFor(250); } return !!a; };
   ok(await navTo('daily'), 'reports: no Daily & monthly in the section nav');
+  // One cluster, the top bar's (the owner, 2026-11-23): no second picker on the page, and the
+  // chooser names one cluster — no "All clusters" — so it always says what the section shows.
+  {
+    const chooser = doc.getElementById('cluster-select');
+    ok(!doc.getElementById('rp-daily-cluster'), 'reports daily: a second cluster picker is on the page');
+    ok(!!chooser && chooser.value && chooser.value !== 'all', `reports daily: the top bar's chooser reads "${chooser && chooser.value}", expected one cluster`);
+    ok(!!chooser && ![...chooser.options].some((o) => o.value === 'all'), 'reports daily: the chooser still offers "All clusters"');
+    await navTo('overview');
+    const back = doc.getElementById('cluster-select');
+    ok(!!back && [...back.options].some((o) => o.value === 'all'), 'reports overview: the chooser does not offer "All clusters" again');
+    await navTo('daily');
+  }
   ok(!!segBtn('Daily') && !!segBtn('Monthly'), 'reports daily: no Daily | Monthly switch');
   ok(segBtn('Daily') && segBtn('Daily').getAttribute('aria-pressed') === 'true', 'reports daily: should open on Daily');
   // Either the record or the plain "needs 0.3.45" state — never a crash, never zeros.
