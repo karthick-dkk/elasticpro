@@ -179,7 +179,8 @@ refused as malformed (`mapper_parsing_exception`, `document_parsing_exception`,
 - `volume` (`<prefix>-volume-YYYY.MM`, `_id` `cluster|day`): `clusterId, clusterName, day, final,
   live, indices, docs, eventBytes, subBytes, priBytes, totalBytes, unmeasuredSizeIndices,
   sources{<name>: {indices, priBytes, totalBytes, docs, eventBytes, subBytes,
-  unmeasuredSizeIndices}}, error, aggregatedAt, totalsAt, writtenAt`. Sizes are `Day::sizes`
+  unmeasuredSizeIndices, unreadableIndices}}, error, aggregatedAt, totalsAt, writtenAt`, and since 0.3.89
+  `unreadableIndices, closedIndices, goneIndices, eventMissingDocs, subMissingDocs`. Sizes are `Day::sizes`
   (`null` while not measured) so a direct reader never takes the dated part for the day.
 - `capacity` (`<prefix>-capacity-YYYY.MM`, `_id` `cluster|day`, day = UTC day of the cluster's
   scheduled daily run, written after that run only): `dataNodeDiskTotal/Used/Free, dataNodes,
@@ -204,7 +205,9 @@ earlier days and Monthly agrees with Daily; such a row carries `historyDays: n`,
 local day `source: "history"`. Reads are pages of 10 000 days (`search_after` on
 `day desc, clusterId asc`), at most 5 pages; past the bound the reply says
 `truncated: true, truncatedBefore: <day>` and month rows starting on or before that day are
-`incomplete: true` (the page marks them "history (incomplete)"). The month views leave `sources`
+`incomplete: true` (the page marks them "history (incomplete)"). When part of the store's shards
+did not answer, or a search ran out of time, `partial` says so, `message` repeats it, and every month
+row that uses the store's days is `incomplete: true`. The month views leave `sources`
 out of the read. The reads are the **interactive** class (a person is waiting: a bounded queue
 wait, an 8 s timeout); a store that did not answer is not asked again by a page for 60 s ("asked
 again after N s"); a display link (Play) never reads the store back. A store that answers with no
