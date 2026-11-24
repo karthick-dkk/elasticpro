@@ -44,7 +44,7 @@ import { figureWhy, HIDDEN_NOTE } from '../core/index-figures.js';
 import {
   OVERVIEW, LIST, overviewClusterOf, overviewHash, listHash, highestNode, heapFigures,
   busiestFirst, nodeCounts, shardFigures, placedText, unhealthyFirst, indexHealthCounts, indexTotals,
-  indexShards, clusterAlerts, rateText, fig, longRunningSearches, slmSummary, ilmSummary, devicesDelay,
+  indexShards, clusterAlerts, rateText, fig, longRunningSearches, slmSummary, ilmSummary, ilmNote, ilmNoteTitle, devicesDelay,
 } from '../core/cluster-overview.js';
 
 let host = null;
@@ -522,9 +522,9 @@ function pressureCard(r) {
 /* ------------------------------------ row 4: SLM and ILM ------------------------------------ */
 
 /** A lifecycle card: one heading line (the name, the operation pill, a note, a link) and ONE status line. */
-function lifecycleCard(id, name, pill, note, link, line) {
+function lifecycleCard(id, name, pill, note, link, line, noteTitle = null) {
   return h('section.card.ov-card.ov-lc', { dataset: { card: id } },
-    h('div.ov-lc-h', h('b.ov-fact-t', name), h(`span.pill.${pill.tone}`, h('i.dot'), pill.word), note ? h('span.muted.ov-lc-note', note) : null, h('span.ov-spacer'), link),
+    h('div.ov-lc-h', h('b.ov-fact-t', name), h(`span.pill.${pill.tone}`, h('i.dot'), pill.word), note ? h('span.muted.ov-lc-note', { title: noteTitle }, note) : null, h('span.ov-spacer'), link),
     h('div.ov-lc-line', line));
 }
 const statusDot = (tone, text) => h(`span.q.${tone}.dotted`, h('i.qdot', { 'aria-hidden': 'true' }), text);
@@ -550,7 +550,7 @@ function ilmCardEl(c, d, idx) {
   const s = ilmSummary(d, c, state.defaults, idx);
   const link = canOpenPage('indices')
     ? h('a.ov-link', { href: '#/indices', onclick: (e) => { e.preventDefault(); navigateTo('indices', null, { cluster: c.id }); } }, 'Indices') : null;
-  const note = s.managed === null ? null : `${num(s.managed)} ${s.managed === 1 ? 'index' : 'indices'} managed`;
+  const note = ilmNote(s);
   let line;
   if (!s.known) line = h('span.muted', { title: s.why || null }, s.pill.word === 'not read' ? 'not readable' : (s.why || 'not readable'));
   else if (s.state === 'none') line = h('span', statusDot('bad', 'no policy'), h('span.muted', ' for the log indices'));
@@ -561,7 +561,7 @@ function ilmCardEl(c, d, idx) {
     const errs = s.errors === null ? h('span.muted', 'errors not known') : s.errors ? statusDot('bad', `${num(s.errors)} in error`) : h('span', `${num(s.errors)} in error`);
     line = h('span', stale, size, ' · ', errs);
   }
-  return lifecycleCard('ilm', 'ILM', s.pill, note, link, line);
+  return lifecycleCard('ilm', 'ILM', s.pill, note, link, line, ilmNoteTitle(s));
 }
 
 /* ------------------------------------ row 5: the two panels ------------------------------------ */
