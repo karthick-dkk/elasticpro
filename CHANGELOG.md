@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.88
+
+- **Clusters: a row opens again.** ▸, a click on the row, or its ILM or SLM button opens the cluster's details, as before 0.3.64: cluster health (with the red or yellow indices on hover), endpoint, jump host and log bucket; the Shard allocation, ILM, Backups and Activity cards; the snapshot repositories; the nodes. Columns ▾ again chooses the tiles, sections and columns of an open row and *Expand details by default*. *Overview →* on the name stays. A repository whose snapshots are switched off (Edit cluster › Collection) or not read yet says so instead of 0.
+- **Clusters › List shows every cluster when it is opened**, whichever one is chosen for the other pages; that choice is back on the next page. A cluster picked in the top bar on the List narrows it, and is the choice from then on. A link to one cluster (Alerts, a Zabbix problem) lists them all with that row open and in view.
+
 ## 0.3.87
 
 - **Nodes & shards: disk and dangling indices.** A new card shows the cluster's disk as one ring (index data, in use but **not** index data, free) and whether it has dangling indices: none, or each one's name, UUID, creation date and node, with the import and the delete prepared in REST. What Elasticsearch does not report reads "–" or "not known" with the reason (an account without the cluster privilege `manage`, a cluster before 7.9), never 0. Dangling indices are read when the page opens on one or two clusters, kept 10 minutes, and on the page's Refresh; with All clusters only on that cluster's Refresh. The disk alert "not accounted for by any index" sends here again: since 0.3.63 it named a check that no longer existed.

@@ -776,14 +776,106 @@ await go('overview');
   const bad = btns.filter((b) => b.parentElement.querySelector('.cl-errdot'));
   ok(bad.length > 0, 'overview: the mock has a logstash-* index in an ILM error step, so a red dot should show');
   for (const b of bad) ok(!/\d/.test(b.parentElement.textContent), `overview: the ILM/SLM cell shows a count: "${b.parentElement.textContent}"`);
+  const b0 = btns[0];
+  if (b0) {
+    const rowEl = b0.closest('tr.cl-row');
+    const was = rowEl && rowEl.classList.contains('open');
+    b0.click(); await settleFor(150);
+    const after = doc.querySelector(`tr.cl-row[data-cluster="${rowEl && rowEl.getAttribute('data-cluster')}"]`);
+    ok(!!after && after.classList.contains('open'), `overview: the ${b0.textContent} button did not open the cluster's details (was open: ${was})`);
+    // Put it back, so the checks below start from the collapsed row they expect.
+    const chev = after && after.querySelector('button.cl-chev');
+    if (!was && chev) { chev.click(); await settleFor(150); }
+  }
 }
 
-// The summary line: disk % large with the index size, a 40 px bar with used / total.
+/* ------------- the expanded row: boxes, four cards, nodes; the health list opens on hover ------------- */
+// Owner-approved board of 2026-11-05. The mock cluster is yellow (one index with an unassigned replica).
 {
   await go('overview');
-  const sizeCell = doc.querySelector('tr.cl-row td .cl-size-pct');
+  const rowEl = doc.querySelector('tr.cl-row');
+  const chev = rowEl && rowEl.querySelector('button.cl-chev');
+  if (chev && !rowEl.classList.contains('open')) { chev.click(); await settleFor(250); }
+  const det = await waitFor(() => doc.querySelector('.cl-detail'), 'overview: the expanded row');
+  if (det) {
+    const txt = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+    const strip = det.querySelector('.cl-strip');
+    const labels = strip ? [...strip.querySelectorAll('.cl-box-k')].map(txt) : [];
+    ok(JSON.stringify(labels) === JSON.stringify(['Cluster health', 'Endpoint', 'Jump host', 'Log bucket (S3)']), `expanded row: the strip's boxes are ${labels.join(' | ')}`);
+    // 2026-11-07: the Report button left the strip; each box is its label and value on one line.
+    ok(!!strip && !strip.querySelector('a.cl-report') && ![...strip.querySelectorAll('a, button')].some((a) => /^Report/.test(txt(a))), 'expanded row: the Report button is back in the strip');
+    ok(!!strip && [...strip.querySelectorAll('.cl-box')].every((b) => b.firstElementChild && b.firstElementChild.classList.contains('cl-box-k') && b.children.length === 2), 'expanded row: a strip box is not "label value"');
+    ok(/None \(direct\)/.test(txt(strip || det)), 'expanded row: a directly reached cluster does not say "None (direct)" as its Jump host');
+    const cards = [...det.querySelectorAll('.cl-card')].map((c) => c.getAttribute('data-tile'));
+    ok(JSON.stringify(cards) === JSON.stringify(['shards', 'ilm', 'slm', 'activity']), `expanded row: the cards are ${cards.join(', ')}`);
+    ok(!det.querySelector('.cl-tile'), 'expanded row: the old tiles are still drawn');
+    ok(!!det.querySelector('.cl-card[data-tile="shards"] svg.cl-donut'), 'expanded row: the Shard allocation card is not a donut');
+    // ILM: a donut when Elasticsearch said which policy each log index has — as the mock does (its
+    // _settings answer names each index's uuid and policy, every log index managed, one in error).
+    // The grey "Not known" (unread) and the red "No policy" (confirmed) cards are drawn and checked
+    // in tools/unit/lifecycle-errors.test.mjs; here: the known case is neither of them.
+    const ilmC = det.querySelector('.cl-card[data-tile="ilm"]');
+    const ilmPill = ilmC && ilmC.querySelector('.cl-card-pill');
+    ok(!!ilmC && !!ilmC.querySelector('svg.cl-donut'), `expanded row: the ILM card is not a donut although the mock says which policy each index has: "${ilmC && txt(ilmC)}"`);
+    ok(!!ilmPill && !/^(Not known|No policy)$/.test(txt(ilmPill)), `expanded row: the ILM pill says "${ilmPill && txt(ilmPill)}" for a cluster whose log indices are all managed`);
+    const shardHead = det.querySelector('.cl-card[data-tile="shards"] .cl-dhead');
+    ok(!!shardHead && /\d+(\.\d)?%\s*active/.test(txt(shardHead)), `expanded row: the shard headline is "${shardHead && txt(shardHead)}", not "NN.N% active" beside the ring`);
+    const bk = det.querySelector('.cl-card[data-tile="slm"]');
+    ok(!!bk && !!bk.querySelector('a.cl-card-t') && /Backups \(SLM\)/.test(txt(bk)), 'expanded row: the Backups (SLM) title is not a link');
+    const quick = [...det.querySelectorAll('.cl-strip a, .cl-cards a')].map(txt).filter((t) => /^(Indices|Snapshots|REST console|Nodes) ›$/.test(t));
+    ok(quick.length === 0, `expanded row: quick links are back: ${quick.join(', ')}`);
+    // The red/yellow list is a hover popover, fetched only when opened.
+    const hp = det.querySelector('.cl-hp');
+    const btn = hp && hp.querySelector('button.cl-hp-btn');
+    ok(!!btn && /yellow/i.test(btn.textContent), `expanded row: a yellow cluster has no "yellow indices" button (${btn && btn.textContent})`);
+    ok(!!hp && !hp.querySelector('table.cl-hp-tbl'), 'expanded row: the indices list was fetched before it was opened');
+    if (hp) {
+      hp.dispatchEvent(new window.MouseEvent('mouseenter', { bubbles: false }));
+      // The list is painted three times as its answers land (indices, then shards + explanation),
+      // each time as a new table in the popover, and the page may redraw the whole row on a push.
+      // So never hold the table found first: look it up again each time, and wait for the final
+      // state (no "…" placeholder left in it), not for the first draw.
+      const liveTbl = () => {
+        const pop = doc.querySelector('.cl-detail .cl-hp .cl-hp-pop') || hp.querySelector('.cl-hp-pop');
+        return pop && pop.querySelector('table.cl-hp-tbl');
+      };
+      const settled = () => {
+        const t = liveTbl();
+        const loading = t && [...t.querySelectorAll('.muted')].some((m) => m.textContent.trim() === '…');
+        return t && !loading && /replica/.test(txt(t)) ? t : null;
+      };
+      const first = await waitFor(liveTbl, 'expanded row: the yellow indices list after hover');
+      const tbl = first && await waitFor(settled, 'expanded row: the unassigned replica and its reason in the list', 10000);
+      if (tbl) {
+        const heads = [...tbl.querySelectorAll('th')].map(txt);
+        ok(JSON.stringify(heads) === JSON.stringify(['Index', 'Health', 'Primaries', 'Replicas', 'Unassigned', 'Reason']), `expanded row: the list's columns are ${heads.join(' | ')}`);
+        const rows = [...tbl.querySelectorAll(':scope > tbody > tr')];
+        ok(rows.length >= 1 && rows.every((tr) => /Yellow/i.test(txt(tr.children[1]))), 'expanded row: the yellow list holds a non-yellow index');
+        ok(/watermark|node left/i.test(txt(tbl)), `expanded row: the list gives no reason: ${txt(tbl)}`);
+      }
+      ok(!!hp.querySelector('.cl-hp-head a'), 'expanded row: the list has no "Open in Indices, health" link');
+    }
+    // Nodes: Version before IP, no Tier, Free size after Disk, data rows tinted.
+    const heads = [...det.querySelectorAll('[data-section="nodes"] thead th')].map(txt);
+    ok(heads.indexOf('Version') > -1 && heads.indexOf('Version') < heads.indexOf('IP'), `expanded row: Version is not before IP: ${heads.join(' | ')}`);
+    ok(!heads.includes('Tier'), 'expanded row: the Tier column is back');
+    ok(heads.indexOf('Free size') === heads.indexOf('Disk') + 1, `expanded row: Free size does not follow Disk: ${heads.join(' | ')}`);
+    ok(det.querySelectorAll('[data-section="nodes"] tbody tr.cl-data').length > 0, 'expanded row: no data node row is tinted');
+    // 2026-11-07: no "Data node" legend, and a data node shows one plain "data" chip (tiers in its tooltip).
+    ok(!/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)) && !det.querySelector('.cl-key'), 'expanded row: the "Data node" key is back in the Nodes header');
+    const chips = [...det.querySelectorAll('[data-section="nodes"] .cl-role')].map(txt);
+    ok(chips.includes('data') && !chips.some((t) => /^data[:_]|hot·|·warm/.test(t)), `expanded row: the Roles column lists data tiers: ${chips.join(', ')}`);
+    const nodeLinks = [...det.querySelectorAll('[data-section="nodes"] .cl-sec-h a')].map(txt);
+    ok(JSON.stringify(nodeLinks) === JSON.stringify(['Nodes & shards ›']), `expanded row: the Nodes header links are ${nodeLinks.join(', ')}`);
+    ok(/Data covered/.test(txt(det.querySelector('[data-section="repo"]') || det)), 'expanded row: the repositories table has no "Data covered" column');
+  }
+  // The summary line: disk % large with the index size, a 40 px bar with used / total.
+  const sizeCell = doc.querySelector('tr.cl-row.open td .cl-size-pct');
   ok(!!sizeCell && /^\d+ %$/.test(sizeCell.textContent.trim()), 'summary: the Size cell does not lead with the disk used %');
   ok(!!doc.querySelector('tr.cl-row td .cl-dbar') && /\//.test((doc.querySelector('tr.cl-row td .cl-dtext') || {}).textContent || ''), 'summary: the Disk usage cell is not a bar with "used / total"');
+  // Put it back, so the checks below start from the collapsed row they expect.
+  const open = doc.querySelector('tr.cl-row.open button.cl-chev');
+  if (open) { open.click(); await settleFor(150); }
 }
 
 // A hint from the Clusters row ("Open in Indices, health: yellow") starts from an unfiltered list:
@@ -2376,11 +2468,46 @@ await go('overview');
     ok(jdkCell && /17\.0\.9/.test(jdkCell.getAttribute('title') || ''),
       'overview: the JDK cell should carry the per-version breakdown');
 
+    // The row expander is a chevron button at the START of the row; it says which way it goes
+    // (aria-expanded), is a real button (so Tab and Enter/Space reach it), and there is no
+    // per-row "Details" button any more.
     ok(![...firstRow.querySelectorAll('button')].some((b) => /Details/i.test(b.textContent)), 'overview: the per-row Details button is still there');
+    const expand = firstRow.querySelector('td:first-child button.cl-chev');
+    ok(!!expand, 'overview: no chevron button at the start of a summary row');
+    if (expand) {
+      ok(expand.tagName === 'BUTTON' && expand.type === 'button' && expand.tabIndex >= 0, 'overview: the chevron is not a keyboard-reachable button');
+      ok(expand.getAttribute('aria-expanded') === 'false', 'overview: a collapsed row should say so');
+      ok(/Show details for /.test(expand.getAttribute('aria-label') || ''), `overview: the chevron's name is "${expand.getAttribute('aria-label')}"`);
+      const rowId = firstRow.dataset.cluster;
+      const before = summary.querySelectorAll('table.cl-tbl > tbody > tr').length;
+      expand.focus();
+      expand.click();
+      await settleFor(300);
+      const after = [...doc.querySelectorAll('section.card')]
+        .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
+      ok(after.querySelectorAll('table.cl-tbl > tbody > tr').length === before + 1,
+        'overview: pressing the chevron did not open exactly one detail row');
+      const detailRow = after.querySelector('tbody tr.cl-detail-row');
+      ok(detailRow && /Endpoint/.test(detailRow.textContent) && /Snapshot repositories/.test(detailRow.textContent) && /Shard allocation/.test(detailRow.textContent),
+        'overview: the opened row does not show the details (Endpoint, shard allocation, Snapshot repositories)');
+      ok(detailRow && !/Cluster UUID|Lucene|path\.repo|Our requests/.test(detailRow.textContent),
+        'overview: the open row still shows a tile the board removed');
+      ok(detailRow && [...detailRow.querySelectorAll('.cl-role')].length >= 3, 'overview: the Nodes table has no role chips');
+      const now = after.querySelector(`tbody tr[data-cluster="${rowId}"] button.cl-chev`);
+      ok(now && now.getAttribute('aria-expanded') === 'true', 'overview: an open row should say it is open');
+      ok(now && /Hide details for /.test(now.getAttribute('aria-label') || ''), 'overview: an open row should offer to close');
+      ok(now && doc.activeElement === now, 'overview: the keyboard lost the chevron when the row opened');
+      now.click();
+      await settleFor(250);
+      const closed = doc.querySelector(`#view tbody tr[data-cluster="${rowId}"] button.cl-chev`);
+      ok(closed && closed.getAttribute('aria-expanded') === 'false' && !doc.querySelector('#view tr.cl-detail-row'), 'overview: the chevron did not close the row');
+      ok(closed && doc.activeElement === closed, 'overview: the keyboard lost the chevron when the row closed');
+    }
 
     // The Alerts cell is a link to THAT cluster's alerts, or a dash with no link at all.
     {
       const alertsAt = heads.indexOf('Alerts');
+      // Fresh from the page: opening and closing a row rebuilt the ones in `summary`.
       const live = [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
       const trs = [...live.querySelectorAll('tbody tr[data-cluster]')];
       const withLink = trs.find((tr) => tr.children[alertsAt] && tr.children[alertsAt].querySelector('a.cl-alink'));
@@ -2629,7 +2756,7 @@ await go('overview');
     const note = () => doc.querySelector('#view .cl-down-note');
     const rowOf = (c) => summary().querySelector(`tbody tr[data-cluster="${c.id}"]`);
     const rowNames = () => [...summary().querySelectorAll('tbody button.cl-name')].map((x) => x.textContent.replace('▾', '').trim());
-    const colAt = (id) => headIds().indexOf(id);
+    const colAt = (id) => headIds().indexOf(id) + 1;   // the chevron column comes first
     try {
       st.state.selected = 'all';
       ok(!note(), 'unreachable: the pointer line is there with every cluster answering');
@@ -2653,8 +2780,9 @@ await go('overview');
           const i = colAt(id);
           if (i > 0) ok(A.children[i].textContent.trim() === '\u2014', `unreachable: ${id} reads "${A.children[i].textContent.trim()}", expected a dash`);
         }
+        ok(!A.querySelector('button.cl-chev'), 'unreachable: an unreachable row has an expand chevron');
         ok(!!A.querySelector('button.cl-name'), 'unreachable: the name menu is gone from the row');
-        ok(A.children.length === headCells().length, 'unreachable: the row has a different number of cells than the heads');
+        ok(A.children.length === headCells().length + 1, 'unreachable: the row has a different number of cells than the heads');
         const al = A.children[colAt('alerts')];
         ok(!!al.querySelector('a.cl-alink') && /^\d+ \u2192$/.test(al.textContent.trim()), `unreachable: its Alerts cell reads "${al.textContent.trim()}"`);
       }
@@ -3188,8 +3316,20 @@ await go('log-delay');
   await pickTop(one);
   for (const p of ['indices', 'reports', 'alerts', 'overview', 'snapshots', 'log-delay', 'jobs']) {
     await go(p);
+    // The Clusters List shows every cluster when it is opened (2026-11-24); the choice is back on the next page.
+    if (p === 'overview') {
+      const n = doc.querySelectorAll('#view table.cl-tbl > tbody > tr[data-cluster]').length;
+      ok(state.selected === 'all' && chooser() === 'all' && n === config.clusters.length, `selection: Clusters opened on "${chooser()}" with ${n} of ${config.clusters.length} clusters`);
+      continue;
+    }
     ok(state.selected === one && chooser() === one, `selection: a cluster picked on Log Delay became "${state.selected}" (chooser "${chooser()}") on ${p}`);
   }
+  // A cluster picked on Clusters narrows the List and is the choice from then on; the List opens on all again.
+  await go('overview');
+  await pickTop(one);
+  ok(doc.querySelectorAll('#view table.cl-tbl > tbody > tr[data-cluster]').length === 1, 'selection: a cluster picked on Clusters did not narrow the List');
+  await go('reports');
+  ok(state.selected === one, `selection: the cluster picked on Clusters became "${state.selected}" on Reports`);
   // All clusters, chosen on Clusters, stays All on a page that can show it.
   await go('overview');
   await pickTop('all');
@@ -9389,15 +9529,31 @@ async function backToList() {
   location.hash = '#/clusters'; await settleFor(400);
   await go('overview');
 }
-/* -------- Clusters › List: no expanded row; "Overview →" on the name, shown on hover or focus -------- */
+/* -------- Clusters › List: the row opens; "Overview →" on the name, shown on hover or focus -------- */
 {
   await go('overview');
   const st = await load('core/state.js');
-  const rows = [...doc.querySelectorAll('#view table.cl-tbl > tbody > tr.cl-row')];
-  ok(rows.length > 1, 'clusters: the fixture should have more than one row');
-  ok(!doc.querySelector('#view button.cl-chev, #view tr.cl-detail-row, #view .cl-detail, #view th.cl-xth'), 'clusters: the expanded row (chevron, details) is still on the page');
-  rows[0].querySelector('td:nth-child(2)').click(); await settleFor(150);
-  ok(!doc.querySelector('#view tr.cl-detail-row') && !rows[0].classList.contains('open'), 'clusters: a click on a row still opens it');
+  const list = () => [...doc.querySelectorAll('#view table.cl-tbl > tbody > tr[data-cluster]')];
+  ok(list().length > 1, 'clusters: the fixture should have more than one row');
+  // A click on a plain cell opens the row; a second closes it.
+  const up = () => doc.querySelector('#view table.cl-tbl > tbody > tr.cl-row');
+  up().querySelector('td:nth-child(4)').click(); await settleFor(250);
+  ok(doc.querySelectorAll('#view tr.cl-detail-row').length === 1 && up().classList.contains('open'), 'clusters: a click on a row does not open it');
+  up().querySelector('td:nth-child(4)').click(); await settleFor(250);
+  ok(!doc.querySelector('#view tr.cl-detail-row'), 'clusters: a second click does not close the row');
+  // A link that names a cluster (Alerts): every cluster is listed, that one's row is open.
+  const { navigateTo } = await load('core/intent.js');
+  const named = up().dataset.cluster, n = list().length;
+  await go('alerts');
+  navigateTo('overview', null, { cluster: named }); await settleFor(350);
+  ok(list().length === n && st.state.selected === 'all', `clusters: a link to ${named} lists ${list().length} of ${n} clusters (chooser ${st.state.selected})`);
+  const opened = doc.querySelector(`#view tr.cl-row.open[data-cluster="${named}"]`);
+  ok(!!opened && doc.querySelectorAll('#view tr.cl-detail-row').length === 1, `clusters: a link to ${named} did not open its row`);
+  if (opened) { opened.querySelector('button.cl-chev').click(); await settleFor(200); }
+  await go('reports');
+  ok(st.state.selected === named, `clusters: after a link to ${named}, Reports shows ${st.state.selected}`);
+  await go('overview');
+  const rows = list().filter((tr) => tr.classList.contains('cl-row'));
   const btns = rows.map((tr) => tr.querySelector('td.cl-name-td button.cl-ov'));
   ok(btns.every((b) => b && /^Overview →$/.test(b.textContent.trim()) && b.type === 'button'), 'clusters: a row has no "Overview →" button in its name cell');
   // Hidden until the pointer is on the name cell or the keyboard is in it, and keeping its place
@@ -9415,17 +9571,6 @@ async function backToList() {
     ok(st.state.selected === id, `clusters: the Overview chose ${st.state.selected}, not the row's cluster ${id}`);
     ok(!!doc.querySelector('#view .ov-board') || !!doc.querySelector('#view.ov-page'), 'clusters: "Overview →" did not land on the Overview board');
     await backToList();
-  }
-  // The ILM / SLM buttons open that cluster's Overview too.
-  {
-    const btns = [...doc.querySelectorAll('table.cl-tbl button.cl-pillbtn')];
-    const b0 = btns[0];
-    if (b0) {
-      const id = b0.closest('tr.cl-row').dataset.cluster;
-      b0.click(); await settleFor(400);
-      ok(location.hash === `#/clusters/overview/${encodeURIComponent(id)}`, `overview: the ${b0.textContent} button opened ${location.hash}, not that cluster's Overview`);
-      await backToList();
-    }
   }
 }
 

@@ -1,4 +1,4 @@
-/** What the Overview cards read (core/cluster-boxes.js): disk lines, data nodes, unassigned shards, the ILM and Backups cards. */
+/** What the expanded Clusters row is drawn from (core/cluster-boxes.js): disk lines, free size, the red/yellow list, donuts, the Backups card. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -21,6 +21,15 @@ test('disk level is the cluster\'s own watermarks (one definition: Size %, Disk 
   assert.equal(lvl(NaN, dflt), 'unknown');
 });
 
+test('free size: total minus used, else avail, else unknown (never 0 B)', () => {
+  assert.equal(B.nodeFreeBytes({ 'disk.total': '8000', 'disk.used': '7280' }), 720);
+  assert.equal(B.nodeFreeBytes({ 'disk.total': '100', 'disk.used': '120' }), 0, 'over-full is 0, not negative');
+  assert.equal(B.nodeFreeBytes({ 'disk.avail': '55' }), 55, 'avail when total/used are missing');
+  assert.equal(B.nodeFreeBytes({ 'disk.total': '', 'disk.used': '', 'disk.avail': '55' }), 55, 'empty strings are not 0');
+  assert.equal(B.nodeFreeBytes({}), null);
+  assert.equal(B.nodeFreeBytes(null), null);
+});
+
 test('a data node is one with data or any data_* role', () => {
   assert.equal(B.isDataNode(['master']), false);
   assert.equal(B.isDataNode(['master', 'ingest']), false);
@@ -30,7 +39,49 @@ test('a data node is one with data or any data_* role', () => {
   assert.equal(B.isDataNode([]), false, 'coordinating-only holds no data');
 });
 
-test('unassigned shards per index, filtered to the indices asked for', () => {
+test('role chips: every data role is one plain "data" chip, tiers only in its tooltip; the rest is counted', () => {
+  assert.deepEqual(B.roleChips([]).chips.map((c) => c.label), ['coordinating']);
+  const one = B.roleChips(['master']);
+  assert.deepEqual([one.chips.map((c) => c.label), one.more], [['master'], []]);
+  const hot = B.roleChips(['data_hot', 'data_content', 'ingest']);
+  assert.deepEqual(hot.chips.map((c) => c.label), ['data', 'ingest'], 'two data roles are one data chip');
+  assert.equal(hot.chips[0].kind, 'other', 'plain: no tier colour');
+  assert.equal(hot.chips[0].title, 'Data tiers: hot, content');
+  const all = B.roleChips(['master', 'data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content', 'ingest', 'ml', 'transform', 'remote_cluster_client']);
+  assert.deepEqual(all.chips.map((c) => c.label), ['master', 'data', 'ingest']);
+  assert.ok(!all.chips.some((c) => /hot|warm|cold|frozen|·/.test(c.label)), 'no tier is listed on a chip');
+  assert.equal(all.chips[1].title, 'Data tiers: hot, warm, cold, frozen, content');
+  assert.deepEqual(all.chips[1].roles, ['data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content']);
+  assert.deepEqual(all.more, ['ml', 'transform', 'remote_cluster_client'], '+3 and the names for the tooltip');
+  const plain = B.roleChips(['data', 'master']);
+  assert.deepEqual([plain.chips.map((c) => c.label), plain.chips[0].title], [['data', 'master'], 'data (every tier)']);
+  assert.equal(B.roleChips(['data', 'data_hot']).chips[0].title, 'Data tiers: hot (and the generic data role)');
+});
+
+test('the nodes header: counts, master-eligible, data with tiers, the elected master', () => {
+  const lists = [['master'], ['master'], ['master'], ['data_hot', 'ingest'], ['data_hot'], ['data_warm']];
+  assert.equal(B.nodesSummary(lists, true), '6 · 3 master-eligible · 3 data (2 hot, 1 warm) · ★ elected master');
+  assert.equal(B.nodesSummary([['master', 'data', 'ingest']], true), '1 · 1 master-eligible · 1 data · ★ elected master');
+  assert.equal(B.nodesSummary([['data']], false), '1 · 0 master-eligible · 1 data');
+});
+
+test('the health list: a red cluster lists red indices only, yellow lists yellow only, green nothing', () => {
+  const rows = [
+    { index: 'b', health: 'yellow', pri: '1', rep: '1' }, { index: 'a', health: 'red', pri: '1', rep: '1' },
+    { index: 'c', health: 'green', pri: '1', rep: '1' }, { index: 'd', health: 'yellow', pri: '3', rep: '1' },
+  ];
+  assert.deepEqual(B.problemIndices('red', rows).rows.map((r) => r.index), ['a']);
+  assert.deepEqual(B.problemIndices('yellow', rows).rows.map((r) => r.index), ['b', 'd'], 'sorted by name');
+  assert.equal(B.problemIndices('green', rows), null);
+  assert.equal(B.problemIndices('unreachable', rows), null);
+  assert.equal(B.problemIndices(undefined, rows), null);
+  assert.deepEqual(B.problemIndices('red', null).rows, [], 'an answer that is not a list is no rows, not a throw');
+  assert.equal(B.problemIndices('yellow', rows).rows[1].pri, 3, 'figures are numbers');
+  assert.equal(B.problemButtonText('yellow', 2), '2 yellow indices');
+  assert.equal(B.problemButtonText('red', 1), '1 red index');
+});
+
+test('unassigned shards per index, in words, with the reason code or explain sentence', () => {
   const m = B.unassignedByIndex([
     { index: 'a', shard: '0', prirep: 'r', state: 'UNASSIGNED', 'unassigned.reason': 'NODE_LEFT' },
     { index: 'a', shard: '1', prirep: 'r', state: 'UNASSIGNED', 'unassigned.reason': 'NODE_LEFT' },
@@ -40,9 +91,42 @@ test('unassigned shards per index, filtered to the indices asked for', () => {
   ]);
   const only = B.unassignedByIndex([{ index: 'a', prirep: 'r', state: 'UNASSIGNED' }, { index: 'z', prirep: 'r', state: 'UNASSIGNED' }], ['a']);
   assert.deepEqual([...only.keys()], ['a'], 'one cluster-wide listing, filtered to the indices the list shows');
-  assert.deepEqual([m.get('a').primaries, m.get('a').replicas], [0, 2]);
-  assert.deepEqual([m.get('b').primaries, m.get('b').replicas], [1, 1]);
-  assert.ok(!m.has('zzz'), 'no shard data for it: unknown, not a guess');
+  assert.equal(B.unassignedText(m.get('a')), '2 replicas');
+  assert.equal(B.unassignedText(m.get('b')), '1 primary, 1 replica');
+  assert.equal(B.unassignedText(undefined), null);
+  assert.equal(B.reasonFor('a', m, null).text, 'a node left the cluster');
+  assert.equal(B.reasonFor('a', m, null).source, 'unassigned.reason');
+  assert.equal(B.reasonFor('b', m, null).text, 'allocation failed, replica added');
+  assert.equal(B.reasonFor('zzz', m, null), null, 'no shard data for it: unknown, not a guess');
+  const ex = B.explainLine({ index: 'a', node_allocation_decisions: [{ node_name: 'n1', deciders: [{ decision: 'YES', explanation: 'fine' }, { decision: 'NO', explanation: 'over the high watermark' }] }] });
+  assert.deepEqual(ex, { index: 'a', text: 'n1: over the high watermark' });
+  assert.deepEqual(B.reasonFor('a', m, ex), { text: 'n1: over the high watermark', source: 'allocation explain' });
+  assert.equal(B.reasonFor('b', m, ex).source, 'unassigned.reason', 'explain covers the one shard it named');
+  assert.equal(B.explainLine({ error: { type: 'illegal_argument_exception' } }), null);
+  assert.equal(B.explainLine(null), null);
+});
+
+test('donut segments sum to the whole ring; an empty total is an empty ring', () => {
+  const segs = B.donutSegments([{ key: 'a', n: 1406 }, { key: 'i', n: 4 }, { key: 'u', n: 0 }, { key: 'x', n: 2 }]);
+  assert.deepEqual(segs.map((s) => s.key), ['a', 'i', 'x'], 'zero parts are skipped');
+  assert.ok(Math.abs(segs.reduce((s, x) => s + x.len, 0) - 100) < 1e-9);
+  assert.equal(segs[0].offset, -0);
+  assert.ok(Math.abs(segs[1].offset + segs[0].len) < 1e-9, 'each segment starts where the last ended');
+  assert.deepEqual(B.donutSegments([{ key: 'a', n: 0 }]), []);
+  assert.deepEqual(B.donutSegments([]), []);
+});
+
+test('shard allocation card: the pill follows unassigned, initializing, relocating', () => {
+  const h = (o) => ({ status: 'green', active_shards: 100, relocating_shards: 0, initializing_shards: 0, unassigned_shards: 0, active_shards_percent_as_number: 100, ...o });
+  assert.equal(B.shardCard(null), null, 'health not read is unknown, not Healthy');
+  assert.deepEqual(B.shardCard(h({})).pill, { tone: 'green', text: 'Healthy' });
+  assert.equal(B.shardCard(h({})).figure, '100.0%');
+  assert.deepEqual(B.shardCard(h({ status: 'yellow', unassigned_shards: 2 })).pill, { tone: 'yellow', text: '2 unassigned' });
+  assert.deepEqual(B.shardCard(h({ status: 'red', unassigned_shards: 2 })).pill, { tone: 'red', text: '2 unassigned' });
+  assert.deepEqual(B.shardCard(h({ initializing_shards: 4 })).pill, { tone: 'yellow', text: '4 initializing' });
+  assert.deepEqual(B.shardCard(h({})).parts.map((p) => p.key), ['active', 'init', 'unas']);
+  assert.deepEqual(B.shardCard(h({ relocating_shards: 1 })).parts.map((p) => p.key), ['active', 'reloc', 'init', 'unas'], 'relocating is listed only when something moves');
+  assert.equal(B.shardCard(h({ active_shards_percent_as_number: undefined })).figure, null);
 });
 
 const ilmData = (of, errors = {}, mode = 'RUNNING') => ({ ilm: { operation_mode: mode }, ilmOfIndex: of, ilmErrors: errors });
