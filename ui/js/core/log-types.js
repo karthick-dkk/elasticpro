@@ -110,12 +110,13 @@ export function typesHeadline(series, { now = Date.now(), truncated = false } = 
   if (!n) return '';
   const late = list.filter(seriesLate);
   const rest = list.filter((s) => !seriesLate(s));
-  const more = truncated ? ` · ${n} log types read, the device has more that were not` : '';
+  const what = truncated ? `${n} log types read` : `${n} log types`;
+  const more = truncated ? ' · the device has more, not read' : '';
   if (n === 1) return `Its only log type, ${typeLabel(list[0])}: ${seriesStateText(list[0], now)}${more}`;
-  if (late.length === n) return `All ${n} log types late: ${namesText(late.map(typeLabel))}${more}`;
-  if (late.length) return `${late.length} of ${n} log types late: ${namesText(late.map(typeLabel))} — ${othersText(rest, now)}${more}`;
-  if (rest.every((s) => isOnTime(s.state) && !s.stale)) return `All ${n} log types on time${more}`;
-  return `None of ${n} log types late — ${othersText(rest, now).replace(/^the other \d+: /, '')}${more}`;
+  if (late.length === n) return `All ${what} late: ${namesText(late.map(typeLabel))}${more}`;
+  if (late.length) return `${late.length} of ${what} late: ${namesText(late.map(typeLabel))} — ${othersText(rest, now)}${more}`;
+  if (rest.every((s) => isOnTime(s.state) && !s.stale)) return `All ${what} on time${more}`;
+  return `None of ${what} late — ${othersText(rest, now).replace(/^the other \d+: /, '')}${more}`;
 }
 
 /** The newest delay of a series, `{started → …}`, or null. */

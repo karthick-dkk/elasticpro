@@ -169,7 +169,7 @@ test('the headline: how many log types are late and what the others are, each ca
   assert.equal(lt.typesHeadline([ser('a', 'delay', 40, { stale: true, lastMeasuredMs: at(115) }), on('b')], { now: NOW }),
     'None of 2 log types late — 1 on time · 1 not measured since 10:05', 'a stale late series is not late now, and not on time');
   assert.equal(lt.typesHeadline([ser('a', 'delay', 46)], { now: NOW }), 'Its only log type, a: delayed');
-  assert.match(lt.typesHeadline([on('a'), on('b')], { now: NOW, truncated: true }), /2 log types read, the device has more that were not/);
+  assert.equal(lt.typesHeadline([on('a'), on('b')], { now: NOW, truncated: true }), 'All 2 log types read on time · the device has more, not read');
   assert.equal(lt.typesHeadline([], { now: NOW }), '');
   assert.equal(lt.typesHeadline(null), '');
 });

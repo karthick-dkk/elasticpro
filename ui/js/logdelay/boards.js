@@ -1040,7 +1040,8 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
   const pinned = narrow && openDevice && !shown.some((r) => r.device === openDevice && r.cluster === clusterId)
     ? rows.find((r) => r.device === openDevice && r.cluster === clusterId) : null;
   if (pinned) shown = [pinned, ...shown];
-  const keys = withTypes(narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS, res.devices);
+  // Beside a device board the state and its log types come first: the list is narrow.
+  const keys = withTypes(!narrow ? FLEET_COLS : anyTypes ? ['device', 'state', 'now', 'zone', 'tag1'] : ['device', 'zone', 'tag1', 'state', 'now'], res.devices);
   const narrowed = !!(S.devFilter || S.devState !== 'all' || S.devZone || S.devTag);
   const noneYet = allNever(res.byCluster);
   const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.devSet}|${S.tz}|${sortSig(sorts.devices)}|${narrow}|${pinned ? openDevice : ''}`, () => [

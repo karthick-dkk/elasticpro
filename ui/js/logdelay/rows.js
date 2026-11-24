@@ -54,7 +54,7 @@ const COLS = {
   types: ['Log types', false, (r) => h(`td.ld-types-cell${r.types && r.types.late ? '' : '.muted'}`, { title: typesTitle(r.types) }, typesText(r.types)),
     { type: 'number', value: (r) => (hasTypes(r) && r.types.measured !== 0 ? r.types.late : null), start: -1 }],
   // The figure after the zone step; its title spells the sum out (docs/LOGDELAY.md "Time zones").
-  now: ['Delay now', true, (r, ctx) => h(`td.num${r.stale ? '.muted' : ''}`, { title: [r.stale && finite(r.lastMeasuredMs) ? `last measured ${whenText(r.lastMeasuredMs, ctx.now || Date.now())}, not measured since` : '', delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true }))].filter(Boolean).join(' · ') || null }, nowText(r)),
+  now: ['Delay now', true, (r, ctx) => h(`td.num${r.stale || r.state === 'part_delay' ? '.muted' : ''}`, { title: [r.state === 'part_delay' ? 'its newest log, whichever log type: the late ones are in Log types' : '', r.stale && finite(r.lastMeasuredMs) ? `last measured ${whenText(r.lastMeasuredMs, ctx.now || Date.now())}, not measured since` : '', delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true }))].filter(Boolean).join(' · ') || null }, nowText(r)),
     { type: 'number', value: (r) => r.nowMinutes }],
   // Live's delay: a bar against the worst in the table (ctx.barMax) and the minutes; unknown is an empty track and "—", never 0.
   nowBar: ['Delay now', true, (r, ctx) => {
