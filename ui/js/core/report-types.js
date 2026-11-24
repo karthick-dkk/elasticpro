@@ -194,6 +194,9 @@ const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 /** The meta field the core fills with ClientID / branch: the reply's name when it gives one, else the shipped default name. */
 const fillField = (fields, given, re) => (given && fields.includes(given) ? given : fields.find((f) => re.test(f)) || null);
 
+/** A row's event size: null when no document of it had one (the sum of none is not a measured 0). */
+const eventOf = (r) => (num(r.eventBytes) === 0 && num(r.eventMissingDocs) > 0 && num(r.eventMissingDocs) >= (num(r.docs) ?? Infinity) ? null : num(r.eventBytes));
+
 /** A HOSTS_QUERY reply as the view reads it; every missing figure stays null. */
 export function hostsOf(res) {
   const t = (res && res.totals) || {};
@@ -206,13 +209,15 @@ export function hostsOf(res) {
   return {
     rows: asList(res && res.rows).map((r) => ({
       day: r.day, index: r.index, source: r.source ?? null, host: r.host ?? null,
-      docs: num(r.docs), eventBytes: num(r.eventBytes), subBytes: num(r.subBytes),
+      docs: num(r.docs), eventBytes: eventOf(r), subBytes: num(r.subBytes),
       eventMissingDocs: num(r.eventMissingDocs),
-      clientId: r.clientId ?? null, branch: r.branch ?? null, incomplete: !!r.incomplete,
+      clientId: r.clientId ?? null, branch: r.branch ?? null,
+      // Set by the core on a value it filled in: not in the logs.
+      clientIdFilled: r.clientIdFilled === true, branchFilled: r.branchFilled === true, incomplete: !!r.incomplete,
       meta: r.meta && typeof r.meta === 'object' ? r.meta : {},
     })),
     total: num(res && res.total) ?? 0,
-    totals: { docs: num(t.docs), eventBytes: num(t.eventBytes), subBytes: num(t.subBytes) },
+    totals: { docs: num(t.docs), eventBytes: eventOf(t), subBytes: num(t.subBytes), eventMissingDocs: num(t.eventMissingDocs) },
     // The core sends both; an answer with only `days` still flags its incomplete days.
     incompleteDays: res && Array.isArray(res.incompleteDays) ? res.incompleteDays : days.filter((d) => d.incomplete).map((d) => d.day),
     failedDays: days.filter((d) => !d.held && d.failed),

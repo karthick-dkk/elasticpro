@@ -87,6 +87,9 @@ function headCell(c) {
   return sortTh(serverSort, c.col, c.label, { num: !!c.num, attrs: { scope: 'col', dataset: { col: c.col } }, title: c.title ? `${c.title} — click to sort` : null });
 }
 
+/** A ClientID or branch the core filled in carries a "*". */
+export const FILLED_NOTE = '* filled, not in the logs';
+
 /** What the table was last drawn from: the page redraws on every push from the core, and the table changes only with these. */
 let paintedSig = '';
 
@@ -102,12 +105,13 @@ function paintTable() {
   const d = v.data;
   // The ClientID and branch columns are the core's filled values (rows[].clientId/branch, as the
   // workbook fills them) and sort on the filled value (`clientId`/`branch`), not the raw field.
-  const metaCol = (f) => (f === d.clientIdField ? { col: 'clientId', label: f, fill: 'clientId' }
-    : f === d.branchField ? { col: 'branch', label: f, fill: 'branch' } : { col: `meta.${f}`, label: f, meta: f });
+  const metaCol = (f) => (f === d.clientIdField ? { col: 'clientId', label: f, fill: 'clientId', title: FILLED_NOTE }
+    : f === d.branchField ? { col: 'branch', label: f, fill: 'branch', title: FILLED_NOTE } : { col: `meta.${f}`, label: f, meta: f });
   const cols = [...FIXED, ...d.fields.map(metaCol)];
   const metaCell = (r, c) => {
     const val = c.fill ? (r[c.fill] ?? r.meta[c.label]) : r.meta[c.meta];
-    return h('td', val === undefined || val === null || val === '' ? h('span.muted', '—') : String(val));
+    if (val === undefined || val === null || val === '') return h('td', h('span.muted', '—'));
+    return c.fill && r[`${c.fill}Filled`] ? h('td', { title: FILLED_NOTE }, `${val}*`) : h('td', String(val));
   };
   // Event size: the documents that had no event size are said on hover, never folded into the sum silently.
   const eventCell = (r) => {
@@ -120,7 +124,7 @@ function paintTable() {
     h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', cellOf(r.subBytes, (x) => bytes(x))),
     ...cols.slice(FIXED.length).map((c) => metaCell(r, c)));
   const totals = h('tr.hv-totals', h('th', { scope: 'row', colspan: 4 }, `Total · ${plural(d.total, 'row')}`),
-    h('td.num', cellOf(d.totals.docs, num)), h('td.num', cellOf(d.totals.eventBytes, (x) => bytes(x))), h('td.num', cellOf(d.totals.subBytes, (x) => bytes(x))),
+    h('td.num', cellOf(d.totals.docs, num)), h('td.num', eventCell(d.totals)), h('td.num', cellOf(d.totals.subBytes, (x) => bytes(x))),
     ...d.fields.map(() => h('td')));
   const from = d.total ? v.offset + 1 : 0;
   const to = Math.min(d.total, v.offset + d.rows.length);

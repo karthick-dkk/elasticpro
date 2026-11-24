@@ -131,7 +131,9 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
 - Reports › **Volume by host** section (`#/reports/hosts`): cluster (one), day or month,
   search box (host, index, ClientID), sortable columns as the sheet, totals row, server-side
   paging of 200 rows (`HOSTS_QUERY {clusterId, period, q, sort, offset, limit}`), reading the
-  day files without holding them. ClientID/branch filled as in the workbook.
+  day files without holding them. ClientID/branch filled as in the workbook; a filled value
+  carries a "*" (header tooltip "* filled, not in the logs"; `clientIdFilled`/`branchFilled`), and
+  a row whose documents had no event size reads *not measured*, not 0.
 
 ## Schedules
 
