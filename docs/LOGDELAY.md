@@ -31,15 +31,25 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 | `delay` | `delayFrom ≤ m ≤ criticalOver` (30–60, 60 inclusive) | delayed ("30–60 min") |
 | `critical` | `m > criticalOver` (>60) | critical ("Above 60 min") |
 | `little` | **not produced since 0.3.62** (there is no little-delay band — the owner's rule); kept so points and daily totals stored before it still read; everywhere counted and shown as `no_delay` | on time |
-| `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead |
+| `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead — can't measure: how late it is, is not known |
 | `other_tz` | the raw gap sits at a real UTC offset other than the cluster's, two runs in a row ("Time zones" below) | other time zone — not late, counted apart |
 | `silent` | seen recently, no document for `silentAfterHours` (2) | silent — never on time, never 0 min |
 | `unmeasured` | arrival or event time unreadable | can't measure — never 0 min |
 
 * `m` is the **corrected** delay: the raw gap (arrival − event) with the cluster's log time zone
   taken out ("Time zones" below). Without a zone the raw gap is the delay, as before 0.3.62.
-* **Late** = `delay` or `critical`. **On time** (in totals and percentages) = `no_delay`,
-  `clock_ahead` (and an old `little`). Silent, unmeasured and other-time-zone are neither.
+* **Late** = `delay` or `critical`. **On time** = `no_delay` (and an old `little`) alone
+  (`State::on_time`). **Can't measure** = `unmeasured` or `clock_ahead` (0.3.89: a clock ahead
+  was counted on time). Silent, can't-measure and other-time-zone are neither late nor on time.
+* **No delay** (owner, 2026-11-24; `State::no_delay`, `summary::Totals`) is the count of devices
+  not shown to be late: on time + silent + can't measure. It is what every "without delay" figure
+  shows, always with the split beside it (`noDelayText`: "No delay 95 % (on time 89 % · silent 6 % ·
+  can't measure 0 %)"); a silent or can't-measure device keeps its own state and is never itself
+  called on time. `lateBeforeSilent` counts the silent ones whose delay period was open when they
+  went silent ("1 of them was late before it went silent"): they count in No delay, their period
+  stays unsolved. Percentages have one decimal and add up to 100 (largest remainder). A cluster never
+  measured, or whose last run failed, has **no** percentage (`notMeasured` says why) and is in no
+  fleet percentage (`pctOf: {clusters, ofClusters, devices, ofDevices}`); no device, no percentage.
 * **`noDelayUnder` stays in the `levels` JSON for compatibility** (the settings file, the Zabbix
   modules and older clients send it) and is always equal to `delayFrom`: whatever is sent is
   ignored, the two lines `delayFrom` / `criticalOver` are the levels. The `little` counts in
@@ -47,9 +57,15 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
   *Day by day* sheet has no Little delay column; a schedule's `devices: "little"` reads as
   `delayed`.
 * **A delay period** starts at the first measurement ≥ `delayFrom` and is solved at the first
-  measurement back under it. Silent or unmeasured measurements change nothing about an open
-  period (unknown solves nothing). Start/solve times are the run's time: as exact as the
+  measurement back under it. Silent, unmeasured or clock-ahead measurements change nothing about an
+  open period (unknown solves nothing). Start/solve times are the run's time: as exact as the
   interval.
+* **An open period counts up to the device's last measurement**, not to now, once more than one
+  interval or the silence limit, whichever is smaller, has passed since it (`state::stale_after_ms`,
+  the one rule): `lastMeasuredMs`, `measuredUntilMs`, `stale: true`, and the state text is "late when
+  last measured 10:05, not measured since", never "still late". A period that ends without being
+  solved says why (`ended`, `endedWhy`): the device was forgotten (it lasted to its last measurement,
+  0.3.89), or its time zone changed.
 * **Resolution per cluster** (`logdelay::levels_for`): `logdelay.json` `clusters.<id>.levels`
   → the clusters file's `delayThresholds` on that cluster (`delayMinutes` → `delayFrom`,
   `criticalMinutes` → `criticalOver`; today's override, kept) → `logdelay.json` `levels` →
@@ -95,7 +111,13 @@ offset, not a queue" matched whole hours alone, so +05:30 and +05:45 never match
    parser's date filter for it. Not late, counted apart (`totals.otherTz`), its delay shown against
    its own offset, with its own offset (`+08:00`) in the *Device time zone* column. One run at
    another offset could still be a backlog, so the first one is levelled as measured. A device in
-   another zone solves any open delay period of its own (it is not late). A device **east** of the
+   another zone solves any open delay period of its own (it is not late). **A device's own zone is
+   kept** (`state::Home`, `DeviceRow.ownZone`, 0.3.89): once found — the cluster's, or its own after
+   the two runs — a gap at a *different* offset is a delay until it has sat there
+   `REHOME_RUNS` = **12** runs at least `REHOME_RUN_GAP_MS` = 30 min apart, so a device 60 min late
+   for an afternoon is late, not "+01:00". Then the zone is the new one and the period is ended
+   ("time zone changed"), never "solved". The same holds for a device seen on time in the cluster's
+   zone, or whose open period has other readings, before any zone of its own was found. A device **east** of the
    cluster that writes its local time as UTC has its event *ahead*: its gap sits under the
    cluster's offset, and `cluster offset − gap` is its zone (`Offsets::device_zone`) — an India
    device on a UTC cluster, gap −330, is `other_tz` at `+05:30` (−330 taken out), not a clock
@@ -117,6 +139,11 @@ invent a name. The fix texts quote an *example* zone at an offset (`tz::example_
 
 **Partial runs** (one device, the late devices — "Fetch now") are not runs the zone is detected
 from; they are corrected by the zone in force.
+
+**What the window reads.** A run's window is the arrival field as stored, up to the run's time. Where
+it is the *arrival* that is written in local time, the newest logs are stored past the window's end
+and the ones measured are older by the offset. A reading cannot tell which of its two times the zone
+shifts, so this is said (`timeZone.windowNote`, the report's About sheet), not corrected.
 
 **`timeZone`** — on every `byCluster[]` row, `LOGDELAY_CLUSTER`, `LOGDELAY_DEVICE` and
 `LOGDELAY_SETTINGS_GET` `resolved[]` (with `logTimeZone`, the setting: `detect` | `UTC` | name):
@@ -226,6 +253,12 @@ named in the card's head, so the difference seen is the delay.
   ≥ `silentAfterHours` ago → `silent`; a silence record opens (`from` = last arrival). The
   first arrival after ends it with what came back (`burstDocs`, `burstMinutes`). A device not
   seen for 7 days is forgotten (its open period is kept unsolved).
+* **Which event time**: each reading keeps the name of the candidate it was measured from
+  (`eventField`, 0.3.89): device rows, the device board, the CSV and the measurement document
+  (`event_field`) say it, because two devices measured from different fields are not the same
+  figure.
+* **A run that could not read a cluster at all** is kept with it (`Tracker.last_failed`) until one
+  succeeds: its figures are then the run before's and say so (`notMeasured`, `lastRunAt`).
 
 **Switched off for a cluster** (Edit cluster › Collection, docs/JOBS.md "Per-cluster switches"):
 the scheduled run does not ask that cluster — it is a `skipped` part of the run ("skipped — log delay
@@ -326,9 +359,9 @@ in memory, replaced when the run writes it; the pages never re-read the file. Da
 
 | record | index | `_id` | fields |
 |---|---|---|---|
-| `measurement` | `<prefix>-YYYY.MM` (as before) | `cluster\|device\|hour` — a rerun in the hour overwrites | `@timestamp` (hour bucket), `measured_at`, `cluster`, `device`, `docs`, `arrival_time`, `event_time`, `delay_minutes` (null = can't measure), `state`, `extras.{…}` |
-| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras` |
-| `daily` | `<prefix>-daily-YYYY` | `cluster\|day` — every run rewrites today; the first run of a new day rewrites yesterday complete | `@timestamp` (day), `day`, `cluster`, `clusterName`, `devices`, `measured`, `onTime`, `little`, `delayed`, `critical`, `clockAhead`, `silent`, `unmeasured`, `startedCount`, `solvedCount`, `lateHours`, `medianMinutes`, `p95Minutes`, `complete`, `writtenAt` |
+| `measurement` | `<prefix>-YYYY.MM` (as before) | `cluster\|device\|hour` — a rerun in the hour overwrites | `@timestamp` (hour bucket), `measured_at`, `cluster`, `device`, `docs`, `arrival_time`, `event_time`, `event_field`, `delay_minutes` (null = can't measure), `state`, `extras.{…}` |
+| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `ended` / `ended_why` (ended unsolved), `last_measured`, `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras` |
+| `daily` | `<prefix>-daily-YYYY` | `cluster\|day` — every run rewrites today; the first run of a new day rewrites yesterday complete | `@timestamp` (day), `day`, `cluster`, `clusterName`, `devices`, `measured`, `onTime`, `little`, `delayed`, `critical`, `clockAhead`, `silent`, `unmeasured`, `noDelay`, `lateBeforeSilent`, `startedCount`, `solvedCount`, `lateHours`, `medianMinutes`, `p95Minutes`, `complete`, `writtenAt` |
 
 * Store template `<history prefix>-delay-template` on `<history prefix>-delay-*`, priority 210
   (above the general 200), mappings only, extras as keywords by dynamic template; created
@@ -344,7 +377,7 @@ in memory, replaced when the run writes it; the pages never re-read the file. Da
 `Tracker::apply(run_ms, readings, levels, silent_after_ms)` is the pure transition; the
 tests in `state.rs` are the spec. `state::daily(tracker, day, from, to, now)` makes a day's
 totals: each device once by its **last state of the day**; `started`/`solved` by instant;
-`lateHours` = overlap of periods with the day; `medianMinutes`/`p95Minutes` of devices'
+`lateHours` = overlap of periods with the day, each up to its last measurement; `medianMinutes`/`p95Minutes` of devices'
 last measured delay (`null` when nothing measured); `complete` when the day had ended.
 
 ## Recommended fixes (`logdelay/fixes.rs`)
@@ -418,6 +451,17 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
   "schedule": { "supported": true, "enabled": true, "everyHours": 2, "destination": "builtin", "lastRunAt": 1762249000000, "state": { "…DELAY_SINK state" } } }
 ```
 
+Added in 0.3.89 (the JSON above keeps its fields). `totals`: `noDelay` (now on time + silent + can't
+measure; before, the strict `no_delay` count), `cantMeasure`, `lateBeforeSilent`, `pctNoDelay`,
+`pctOtherTz`, `pctCantMeasure`, `noDelayText`, `pctOf`. `onTime` is the strict
+count (no clock ahead). `byCluster[]`: `noDelay`, `onTime`, `cantMeasure`, `clockAhead`,
+`lateBeforeSilent`, `noDelayText`, the percentages, `notMeasured` (why there is none), `stale`;
+`below` / `belowPct` / `belowPctPrevious` are the No delay figures, `null` when not measured.
+`days[]`: `noDelay`, `cantMeasure`, `pctNoDelay`, `noDelayText`, `lateBeforeSilent`; `onTimeAll` has no
+clock ahead. `windows[]` do not carry a reading past the stale rule. `DeviceRow`: `ownZone`,
+`lastEndedWhy`, `lastMeasuredMs`, `measuredUntilMs`, `stale`, `eventField`, `docsCounted` over
+`docsCountedHours` — `docsPerDay` is `null` under 24 h of windows (no extrapolation).
+
 Board figures (0.3.62): the five tiles = `totals` (`onTime` = below the delay line, `delay`,
 `critical`, `otherTz`, `silent` with `unmeasured` named under it); *Devices behind* = `days[]`
 (`delayed`, `critical`, `solved`) or, for Today, `windows[]` (`stillLate`, `solved`); *Late devices
@@ -478,6 +522,11 @@ Tiles (0.3.62): the same five counts as the fleet's; `started`/`solved` in the c
   "olderMeasurements": [ { "t": 0, "m": 5.0, "s": "no_delay" } ], "olderTruncated": false }
 ```
 
+Added in 0.3.89: `lastMeasuredMs`, `measuredUntilMs`, `stale`, `stateText` ("late when last measured
+10:05, not measured since"), `measuredMs` and `lateMeasuredMs` — `latePct` is late over **measured**
+time of the period, `null` when nothing was —, `docsCounted`, `docsCountedHours`, `eventField`,
+`ownZone`, `notMeasured`; each period `endedWhy`, `lastMeasuredMs`, `measuredUntilMs`, `stale`.
+
 `points` is the graph (one per run, 31 days held in the tracker; `m: null` = silent/can't
 measure, draw no dot); `periods` are the shaded bands and the *Every delay* table (`pattern`
 = "Looks like": `"a whole hour off: time zone"`, `"clock ahead"` or null = "—"); `insights.*`
@@ -536,8 +585,13 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
 * **Options** `{ devices: "delayed"|"little"|"all", groupBy: "cluster"|<extra column>,
   columns: [..], sections: [..], xlsx: bool, csv: bool, pdf: bool, top: 1–100 }`. Columns:
   `device, cluster, nowMinutes, level, startedSolved, median, max, episodes, lateTime, docsPerDay,
-  arrival, eventTime, lateSince` and any extra column. Sections: `summary, lateEvery2h,
+  arrival, eventTime, eventField, lateSince` and any extra column. Sections: `summary, lateEvery2h,
   windows, dayByDay, topDelayed, fixes`. Unknown names are refused by name.
+* **What each figure rests on** (0.3.89): every cluster's *Last read* and its own levels are in the
+  Summary sheet and the mail's *By cluster*; a truncated, failed or stale read, or a cluster never
+  measured, is named at the top of mail and text and in the **About** sheet (docs/REPORT-TYPES.md
+  "About"). Labels say the lines in force ("30–60 min"), or "between the lines" when clusters differ.
+  The CSV ends with `last measured`, `event time field` and `note`.
 * **Attachments**: `elasticpro-log-delay-<from>_<to>.xlsx` (`elasticpro-log-delay-<YYYY-MM-DDTHH00>.xlsx`
   for an hour) — sheets *Summary* (with a *Zone · tag1* table: devices, late now, above 60 min,
   silent per pair, the most late first; "—" where the logs do not say), *Devices* (chosen
@@ -555,11 +609,13 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   job's `warning` says so.
 * **Mail**: `multipart/alternative` text + HTML inside `multipart/mixed` with the files
   (`mail::message_parts`; the volume kinds still send plain text). HTML sections follow the
-  Mail board: Summary tiles, *Late devices every N hours* (bar per window: pink late, green
+  Mail board: Summary tiles, *Late devices every N hours* (bar per window: red late, green
   under), *Every N hours* table, *Day by day · last 7 days*, *Top delayed*, *Recommended fixes*
   (top 3 that are not "unknown"), *Open the full report* when `UI_PUBLIC_URL` is set in
-  config.txt (`<url>/#/reports/log-delay`, which opens the Log Delay page since 0.3.60). Tables and inline styles only; colours light
-  green `#DDF3E4`, blue `#DCEBFA`, pink `#FBDCE6`, orange `#FDE4CC`.
+  config.txt (`<url>/#/reports/log-delay`, which opens the Log Delay page since 0.3.60). Tables and inline styles only. A state has one
+  colour everywhere (`report::state_colour`, owner 2026-11-24): critical light red, delayed light
+  yellow, on time light green, another time zone violet, silent and can't measure grey — with dark
+  ink and the word always written.
 * Period days are local days; `yesterday`/`last7`/`previousWeek`/`previousMonth`/`{from,to}`
   as every report, and **`lastHour`** (this kind only): the whole server-local hour before now.
 * **Hourly** (this kind only; `REPORT_SCHEDULE_SET {kind: "log_delay", schedule: "hourly", at}`,
