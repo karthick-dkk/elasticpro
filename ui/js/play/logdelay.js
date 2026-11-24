@@ -17,6 +17,7 @@
 import { h } from '../lib/dom.js';
 import { summarise, STATUS } from '../core/log-delay.js';
 import { statusFor } from '../core/delay-levels.js';
+import { noDelayOfStatuses, noDelaySplit, shareText } from '../core/logdelay-report.js';
 import { kpi, unknown, minutes, fitRows, clockText } from './parts.js';
 import { tierLine } from './measure.js';
 
@@ -48,6 +49,7 @@ const byDelay = (a, b) => (b.delayMinutes ?? -Infinity) - (a.delayMinutes ?? -In
 export function render(ctx) {
   const all = fleetRecords(ctx);
   const s = summarise(all);
+  const nd = noDelayOfStatuses(s);
   const t = ctx.watch;
   const done = measured(ctx);
   const tone = (st) => (STATUS[st] || STATUS.ERROR).cls;
@@ -76,7 +78,7 @@ export function render(ctx) {
     tiers ? h('div.pl-s.pl-tiers', tiers) : null,
     h('div.pl-kpis',
       kpi('Devices sending logs', String(s.devices), `${done.length} of ${ctx.clusters.length} clusters measured${truncated ? ' · list capped' : ''}`),
-      kpi(`Under ${t.delayYellowFromMin} min`, String(s.by.OK || 0), null, 'green'),
+      kpi('No delay', String(nd.count), `${nd.pct ? `${shareText(nd.pct.noDelay)} · ` : ''}${noDelaySplit(nd)}`, 'green'),
       kpi(`${t.delayYellowFromMin}–${t.delayRedAboveMin} min`, String(s.by.DELAYED || 0), null, s.by.DELAYED ? 'yellow' : ''),
       kpi(`Over ${t.delayRedAboveMin} min`, String(s.by.CRITICAL || 0), null, s.by.CRITICAL ? 'red' : ''),
       kpi('Worst device', s.worst && s.worst.delayMinutes !== null ? minutes(s.worst.delayMinutes) : unknown('none'),

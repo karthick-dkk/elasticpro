@@ -22,7 +22,7 @@ import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js'
 import { sumKnown, notCounted } from './index-figures.js';
 import { clusterKind } from './cluster-kind.js';
 import { durationMs } from './snapshot-list.js';
-import { bands, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
+import { bands, noDelayOf, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
 
 /* ------------------------------------ the route ------------------------------------ */
 
@@ -211,7 +211,7 @@ export function rateText(v) {
  *     late, bands, lastRunAt, nextDueAt }
  */
 export function devicesDelay(res, clusterId) {
-  const out = { state: 'none', message: null, inLastRun: null, delay: null, critical: null, late: null, bands: bands(null), lastRunAt: null, nextDueAt: null };
+  const out = { state: 'none', message: null, inLastRun: null, delay: null, critical: null, late: null, bands: bands(null), lastRunAt: null, nextDueAt: null, noDelay: null };
   if (!res) return out;
   if (res.unsupported) return { ...out, state: 'unsupported', message: res.message || 'This server has no log delay report yet.' };
   if (res.ok === false) return { ...out, state: 'error', message: res.message || 'the log delay summary could not be read' };
@@ -228,6 +228,8 @@ export function devicesDelay(res, clusterId) {
   out.inLastRun = n(res.devicesInLastRun);
   out.delay = n(t.delay);
   out.critical = n(t.critical);
+  // The Log Delay page's No delay (one definition), and why there is no percentage.
+  out.noDelay = noDelayOf(t, { why: (mine && mine.notMeasured) || '' });
   out.late = out.delay === null && out.critical === null ? null : (out.delay || 0) + (out.critical || 0);
   out.state = sch.enabled === false ? 'off' : 'ok';
   out.message = sch.enabled === false ? LD_SCHEDULE_OFF : null;

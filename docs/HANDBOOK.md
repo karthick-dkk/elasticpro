@@ -773,6 +773,13 @@ decimal, then ">99.9 %" and "<0.1 %".
 **Query pressure** (`core/node-rates.js`): a counter that reset, a section not reported, a reading
 over six minutes old or two readings from different nodes is *not measured*, never "No pressure".
 
+**Log delay** (`core/logdelay-report.js`): *No delay* = on time + silent + can't measure, always with
+its split (`noDelayOf`, LOGDELAY.md "Levels"); a clock ahead is can't measure, never on time. A
+cluster never measured, or whose last run failed, has no percentage and says why. Figures say when
+they were measured ("as of 14:02"); a device not measured since is "late when last measured", never
+"still late"; a window without a measurement is a gap in a line, not its neighbour's value. Live says
+which shards, time or limit cut its answer, on screen and in the CSV.
+
 **A cluster that is not answering**: the Clusters CSV leaves its figures blank and states why; the
 cluster's Overview says when the figures on it were read. **Alerts**: times in a text carry their
 zone; `since_is_first_seen` in the CSV is yes when the start is only when it was first seen here; the

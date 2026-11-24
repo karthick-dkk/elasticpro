@@ -31,15 +31,22 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 | `delay` | `delayFrom ≤ m ≤ criticalOver` (30–60, 60 inclusive) | delayed ("30–60 min") |
 | `critical` | `m > criticalOver` (>60) | critical ("Above 60 min") |
 | `little` | **not produced since 0.3.62** (there is no little-delay band — the owner's rule); kept so points and daily totals stored before it still read; everywhere counted and shown as `no_delay` | on time |
-| `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead |
+| `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead — can't measure: the figure is the clock's, not the delay's |
 | `other_tz` | the raw gap sits at a real UTC offset other than the cluster's, two runs in a row ("Time zones" below) | other time zone — not late, counted apart |
 | `silent` | seen recently, no document for `silentAfterHours` (2) | silent — never on time, never 0 min |
 | `unmeasured` | arrival or event time unreadable | can't measure — never 0 min |
 
 * `m` is the **corrected** delay: the raw gap (arrival − event) with the cluster's log time zone
   taken out ("Time zones" below). Without a zone the raw gap is the delay, as before 0.3.62.
-* **Late** = `delay` or `critical`. **On time** (in totals and percentages) = `no_delay`,
-  `clock_ahead` (and an old `little`). Silent, unmeasured and other-time-zone are neither.
+* **Late** = `delay` or `critical`. **On time** = `no_delay` (and an old `little`). Silent,
+  can't measure (`unmeasured`, `clock_ahead`) and other-time-zone are neither.
+* **No delay** (the owner, 2026-11-24; UI `noDelayOf` in `core/logdelay-report.js`, the one
+  definition) = on time + silent + can't measure: every device not shown to be late. It is what
+  every tile, percentage, day bar, ring and CSV counts, always with its split ("No delay 95 % · on
+  time 89 % · silent 6 % · can't measure 0 %", and "1 of them was late before it went silent"). A
+  device's own state never changes: a silent device reads silent, never on time. A cluster never
+  measured, or whose last run failed, has no percentage and says why; a fleet percentage that does
+  not cover every cluster says "of 30 of 32 clusters".
 * **`noDelayUnder` stays in the `levels` JSON for compatibility** (the settings file, the Zabbix
   modules and older clients send it) and is always equal to `delayFrom`: whatever is sent is
   ignored, the two lines `delayFrom` / `criticalOver` are the levels. The `little` counts in
@@ -428,7 +435,7 @@ cluster* = `byCluster` (`timeZone`, a states bar from `below`/`delay`/`critical`
 the 5 most delayed shown until *Show all N* — then 30 a page with Previous / Next); *Devices* (its own tab) = `devices` sorted by time late until a column heading
 is pressed (every Log delay table sorts by any column, remembered in the browser; a state sorts
 worst first, "can't measure" last). `sparkline` entries are `null` for a day without totals —
-draw a gap, not zero. `byCluster[].lastRunAt: null` = never measured — say so. `reduced`,
+draw a gap, not zero; a window not `measured` is a gap too. `byCluster[].lastRunAt: null` = never measured — say so. `reduced`,
 `yesterday`, `medianMinutes` and the percentages are still answered; the page draws no median,
 percentile or average.
 
@@ -448,8 +455,12 @@ percentile or average.
 ("Time zones"). A `by cluster` row's `otherTz` and `timeZone` are the cluster's.
 
 `nowMinutes: null` with `state: silent|unmeasured` — show "—" / "can't measure". *Last delay:
-started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still late"; `silentSince`
-= "no logs since"). *Time late* = `lateMs`. *Logs a day* = `docsPerDay` (`null` = unknown).
+started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still late", or "not solved ·
+last measured 14:00" when the device is `stale`; `silentSince` = "no logs since"). *Time late* =
+`lateMs`, with how long it was measured. *Logs a day* = `docsPerDay` (`null` = fewer than 24 hours
+counted: the page gives the count and the hours instead). The event time column is headed by the
+field the cluster's event time is read from (`fields.eventTime`, a device's `eventField` when the
+core names it).
 
 ### `LOGDELAY_CLUSTER {clusterId, from?, to?}` — Cluster board
 
@@ -609,11 +620,11 @@ else (no little-delay band, no median, percentile or average anywhere), an "i" o
 
 | route | view | |
 |---|---|---|
-| `#/log-delay` | **Dashboard**: the fleet (Main board) — five count tiles (Below N, N–M, Above M, Other time zone, Silent; each opens Devices on that level), the three chart panels over the period, *By cluster* with a states bar and an "i" per cluster, *Late devices over the day*, the clusters the last run did not measure | `ui/js/logdelay/boards.js` |
+| `#/log-delay` | **Dashboard**: the fleet (Main board) — the figures' time ("as of 14:02", which clusters are older or were not measured), five count tiles (No delay with its split, N–M, Above M, Other time zone, Silent; each opens Devices on that level; a cluster never measured has no tiles, charts or bar, only why), the three chart panels over the period, *By cluster* with a states bar and an "i" per cluster, *Late devices over the day*, the clusters the last run did not measure | `ui/js/logdelay/boards.js` |
 | `#/log-delay/cluster/<id>` | one cluster (Cluster board), under the Dashboard tab: the same tiles and chart, its devices (the delayed ones until *Show all devices*) | |
-| `#/log-delay/summary[/<cluster>]` | **Summary** (second tab; the fleet view of Reports › Log delay before 0.3.60, back on the owner's word): four tiles from `totals` (total devices; with delay now, split by the two late levels; with no delay and the on-time share; the shares without delay / delayed / silent / can't measure), *Delay reduced* (`reduced`, 2 h to 24 h, green bars), *Day by day* (`days[]` stacked: below the line, the delay band, above the critical line, another time zone, silent or can't measure; at least the last 7 days — `dayChartDays`: a shorter page range asks one more `LOGDELAY_SUMMARY` for the 7 days ending today (`maxDevices: 1`), a Custom range of 7+ days is its own days; the header says which ("Last 7 days · 11 Nov – 17 Nov"); each tick its own date; only this card widens) and *Delayed devices by cluster* (a ring per cluster from `byCluster` `delay`/`critical`/`latePct` — All clusters first, then worst first, never measured last as an empty ring; a ring opens the cluster on Dashboard; a ring above `LD_RING_RED_PCT` = **2 %** of its devices delayed draws its arcs in the theme's critical red — the delay band a lighter red — and its share in red ink, All clusters by the same rule, `ringAlert` in `core/logdelay-report.js`; at or below 2 % the level colours). One cluster chosen: its tiles, its days, its own ring. Documents without a device name: one summed line under the cards, not a note per cluster. The core's totals for every zone: no time-zone chip on this tab | `ui/js/logdelay/summary.js` |
+| `#/log-delay/summary[/<cluster>]` | **Summary** (second tab; the fleet view of Reports › Log delay before 0.3.60, back on the owner's word): four tiles from `totals` (total devices; with delay at the last run, split by the two late levels; No delay and its split in devices; the No delay share with its split, and delayed), *Delay reduced* (`reduced`, 2 h to 24 h, green bars), *Day by day* (`days[]` stacked: No delay, the delay band, above the critical line, another time zone; at least the last 7 days — `dayChartDays`: a shorter page range asks one more `LOGDELAY_SUMMARY` for the 7 days ending today (`maxDevices: 1`), a Custom range of 7+ days is its own days; the header says which ("Last 7 days · 11 Nov – 17 Nov"); each tick its own date; only this card widens) and *Delayed devices by cluster* (a ring per cluster from `byCluster` `delay`/`critical`/`latePct` — All clusters first, then worst first, never measured last as an empty ring; a ring opens the cluster on Dashboard; a ring above `LD_RING_RED_PCT` = **2 %** of its devices delayed draws its arcs in the theme's critical red — the delay band a lighter red — and its share in red ink, All clusters by the same rule, `ringAlert` in `core/logdelay-report.js`; at or below 2 % the level colours). One cluster chosen: its tiles, its days, its own ring. Documents without a device name: one summed line under the cards, not a note per cluster. The core's totals for every zone: no time-zone chip on this tab | `ui/js/logdelay/summary.js` |
 | `#/log-delay/devices[/<cluster>]` | **Devices**: the delayed devices of the period (the delay band and above the critical line) until *Show all devices* (never remembered, each visit starts on the delayed ones), a search box, level chips with counts over every device (a level that is not delayed shows every device's set; a chip pressed again lets go), zone and tag1 selects, CSV; each row ends in "i" and *Open in logs* | |
-| `#/log-delay/device/<cluster>/<device>` | one device (Device board) beside the short list of its cluster's devices (the delayed ones; a device opened by a link that is not delayed is listed too, with a line saying why): facts (no median), the Recommendation (the core's finding — the same words as the row's "i"), the graph, every delay | |
+| `#/log-delay/device/<cluster>/<device>` | one device (Device board) beside the short list of its cluster's devices (the delayed ones; a device opened by a link that is not delayed is listed too, with a line saying why): facts (no median), the Recommendation (the core's finding — the same words as the row's "i"), the graph, every delay. A device not measured since is said to be "late when last measured …, not measured since" — never still late; the graph ends at its last measurement (hatched after it), a window without a measurement is a gap | |
 | `#/log-delay/live[/<cluster>[/<device>]]` | **Live** (Live Watch and Live logs as one tab since the merge; see *Live* below): "Delayed now" — the cluster chosen in the top bar measured from the browser on **Fetch**, one device watched — above "Logs", its documents on **Search**. Nothing runs until pressed. `#/log-delay/watch` (the old Live Watch) opens it; a device address puts the device in the Logs filters and waits for Search | `ui/js/logdelay/watch.js`, `ui/js/logdelay/live-logs.js` |
 
 The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
@@ -647,6 +658,10 @@ drawn on Live (Live's Fetch is the browser's).
   (critical, delayed, clock ahead, silent …), columns Device · (Cluster, when several) · zone ·
   tag1 · the address field · Delay now (a bar against the worst in the table, and the minutes) ·
   Level · "i" and **Watch**. A cluster that could not be measured is named in a coverage card.
+* **What a Fetch did not read is said** (`answerGaps` in `core/log-delay.js`): shards that failed, a
+  search that timed out, or more devices than the limit — a banner above the list, beside the count
+  and in the CSV; no device is called silent from an answer that was cut. The CSV holds the rows
+  shown, with the filter and the zone in its notes.
 * **Watch** on a row draws the device strip at the top of the Logs card — Delay now (the
   measurement's), Late since (the core's store, one `LOGDELAY_DEVICE` read; "not known" when the
   store has not seen the device), Measured — with **Re-measure** (the measurement's own search,

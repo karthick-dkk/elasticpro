@@ -404,3 +404,11 @@ test('Fetch all devices in cluster: the lookback asks names and newest arrivals 
   assert.deepEqual(b.aggs.devices.terms, { field: 'src_hostname.keyword', size: ld.LATE_MAX, order: { last: 'desc' } });
   assert.deepEqual(b.aggs.devices.aggs, { last: { max: { field: '@timestamp' } } });
 });
+
+test('an answer cut by the device limit, failed shards or a timeout says so: a device not in it is not "silent"', () => {
+  assert.deepEqual(ld.answerGaps({ aggregations: { devices: { sum_other_doc_count: 0 } }, _shards: { total: 4, failed: 0 }, timed_out: false }), []);
+  const g = ld.answerGaps({ aggregations: { devices: { sum_other_doc_count: 1200 } }, _shards: { total: 4, failed: 1 }, timed_out: true });
+  assert.equal(g.length, 3);
+  assert.match(g[0], /only the 500 devices .* 1,200 documents/);
+  assert.match(g[1], /1 of 4 shards failed/);
+});

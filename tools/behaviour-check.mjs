@@ -8190,12 +8190,12 @@ await settleFor(300);
         && g('ld-nodevice-note').textContent.startsWith(`${docsN.toLocaleString('en')} document`) && (lost.length === 1 || new RegExp(`in ${lost.length} clusters`).test(g('ld-nodevice-note').textContent)) : !g('ld-nodevice-note'),
         `log delay: the no-device line reads "${(g('ld-nodevice-note') || {}).textContent}" for ${docsN} documents in ${lost.length} clusters`);
     }
-    // The five count tiles: the three configured levels, another time zone, silent. No median, percentile or average anywhere.
+    // The five count tiles: No delay (on time + silent + can't measure), the two late levels, another time zone, silent. No median, percentile or average anywhere.
     for (const k of ['below', 'delay', 'critical', 'tz', 'silent']) ok(!!fleet.querySelector(`[data-kpi="${k}"]`), `log delay: no ${k} tile`);
     ok(fleet.querySelectorAll('.ld-kpi').length === 5, `log delay: ${fleet.querySelectorAll('.ld-kpi').length} tiles, not five`);
     ok(!/median|p95|percentile|average/i.test(fleet.textContent), 'log delay: the Dashboard shows a median, percentile or average');
     const tileLabels = [...fleet.querySelectorAll('.ld-kpi .ld-kpi-l')].map((x) => x.textContent.trim());
-    ok(tileLabels.join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent', `log delay: the tiles read ${tileLabels.join(' · ')} (levels from the config)`);
+    ok(tileLabels.join('|') === 'No delay|30–60 min|Above 60 min|Other time zone|Silent', `log delay: the tiles read ${tileLabels.join(' · ')} (levels from the config)`);
     // A 30-day custom range: the charts are by day (the default 1 h window is Today's measurement windows).
     g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);
     g('ld-range-from').value = new Date(Date.parse(`${g('ld-range-to').value}:00Z`) - 29 * 86400000).toISOString().slice(0, 16);
@@ -8489,9 +8489,17 @@ await settleFor(300);
       const t = fx.totals; const n = (x) => x.toLocaleString('en');
       const tile = (k) => g('ld-sum-tiles').querySelector(`[data-kpi="${k}"]`);
       ok(tile('devices').querySelector('b').textContent === n(t.devices) && /total devices/.test(tile('devices').textContent), `log delay: the total tile reads ${tile('devices').textContent}`);
-      ok(tile('late').querySelector('b').textContent === n(t.late) && tile('late').textContent.includes(`devices with delay now · ${n(t.delay)} at 30–60 min, ${n(t.critical)} above 60 min`), `log delay: the delay-now tile reads ${tile('late').textContent}`);
-      ok(tile('onTime').querySelector('b').textContent === n(t.onTime) && tile('onTime').textContent.includes(`devices with no delay · ${t.pctOnTime.toFixed(1)} % on time`), `log delay: the no-delay tile reads ${tile('onTime').textContent}`);
-      ok(tile('pct').querySelector('b').textContent === `${t.pctOnTime.toFixed(1)} %` && tile('pct').textContent.includes(`${t.pctLate.toFixed(1)} % delayed · ${t.pctSilent.toFixed(1)} % silent · ${t.pctUnmeasured.toFixed(1)} % can’t measure`), `log delay: the share tile reads ${tile('pct').textContent}`);
+      ok(tile('late').querySelector('b').textContent === n(t.late) && tile('late').textContent.includes(`devices with delay at the last run · ${n(t.delay)} at 30–60 min, ${n(t.critical)} above 60 min`), `log delay: the delay-now tile reads ${tile('late').textContent}`);
+      // The owner's No delay (2026-11-24): on time + silent + can't measure, its split beside it; late and another zone stay apart.
+      const cantN = t.cantMeasure ?? t.unmeasured; const ndN = t.onTime + t.silent + cantN;
+      ok(tile('onTime').querySelector('b').textContent === n(ndN) && tile('onTime').textContent.includes(`No delayon time ${n(t.onTime)} · silent ${n(t.silent)} · can't measure ${n(cantN)}`), `log delay: the No delay tile reads ${tile('onTime').textContent}`);
+      {
+        const num = (re) => Number((re.exec(tile('pct').textContent) || [])[1]);
+        const nd = Number(tile('pct').querySelector('b').textContent.replace(/\s*%/, ''));
+        const parts = [num(/on time ([\d.]+) %/), num(/silent ([\d.]+) %/), num(/can't measure ([\d.]+) %/)];
+        ok(Math.abs(nd - parts.reduce((a, v) => a + v, 0)) < 0.051 && Math.abs(nd - (ndN * 100) / t.devices) < 0.2 && Math.abs(num(/([\d.]+) % delayed/) - t.pctLate) < 0.2 && !/without delay/.test(tile('pct').textContent),
+          `log delay: the No delay share reads ${tile('pct').textContent} for ${ndN} of ${t.devices}`);
+      }
       const reds = [...g('ld-sum-reduced').querySelectorAll('.ld-red')];
       ok(reds.length === 5 && reds.map((r) => r.querySelector('b').textContent).join() === fx.reduced.map((r) => r.n).join() && reds.every((r) => r.querySelector('i')),
         `log delay: Delay reduced draws ${reds.map((r) => r.querySelector('b').textContent).join(', ')}`);
@@ -8516,7 +8524,7 @@ await settleFor(300);
       ok(ticks().length > 1 && new Set(ticks()).size === ticks().length, `log delay: the Day by day ticks repeat a date (${ticks().join(' · ')})`);
       const gapDay = g('ld-sum-days').querySelector('.ld-day.ld-gap');
       ok(gapDay && !gapDay.querySelector('i') && /no measurement/.test(gapDay.title), 'log delay: a day without totals is not a gap in Day by day');
-      ok([...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent or can’t measure',
+      ok([...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join('|') === 'No delay (silent and can’t measure included)|30–60 min|Above 60 min|Other time zone',
         `log delay: the Day by day legend reads ${[...g('ld-sum-days').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join(' · ')}`);
       ok(/30 days · /.test(g('ld-sum-days').closest('section').querySelector('header').textContent), 'log delay: a 30-day Day by day does not say its 30 days');
       g('ld-range').querySelector('[data-range="1h"]').click(); await settleFor(200);
@@ -8722,7 +8730,7 @@ await settleFor(300);
       location.hash = `#/log-delay/device/${encodeURIComponent(c0)}/${encodeURIComponent(devName)}`;
       await waitFor(() => ldView() === 'device' && g('ld-periods') && view().querySelector('.ld-split-list tr.ld-sel') && view().querySelector('.ld-split-list tr.ld-sel').dataset.device === devName, 'log delay: the first device did not open again');
     }
-    ok(g('ld-periods') && /still late/.test(g('ld-periods').textContent), 'log delay: Every delay does not show the open delay as still late');
+    ok(g('ld-periods') && /still late|not solved · last measured/.test(g('ld-periods').textContent), 'log delay: Every delay does not show the open delay as still late (or not solved since its last measurement)');
     const ph = [...g('ld-periods').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
     ok(ph.includes('zone') && ph.includes('tag1'), `log delay: Every delay has no zone or tag1 (${ph.join(' · ')})`);
     // The filter bar: src_device / wildcards, cluster, dates.

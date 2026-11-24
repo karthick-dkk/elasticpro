@@ -106,7 +106,8 @@ be read says "no data" / "not measured", never 0.
    Running pills); last good snapshot; backup size; delayed devices (> 30 min, > 60 min,
    worst); volume yesterday vs 7-day avg; indices per day (yesterday's count and size).
    Empty spotlight: the slide is skipped.
-4. **Log delay**: devices sending logs, < 30, 30–60, > 60 min, worst device; "Top 10 devices
+4. **Log delay**: devices sending logs, No delay (on time + silent + can't measure, with its split),
+   30–60, > 60 min, worst device; "Top 10 devices
    by delay" (device, cluster, delay, last event, peak 24 h, status); "Top 10 clusters by
    delay" (delay, devices > 30 min).
 5. **Backups**: backed up in 26 h (x of y), older than 26 h, **snapshot failures · 24 h**

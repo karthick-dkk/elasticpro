@@ -42,8 +42,8 @@ import { rememberLevels } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
 import {
   LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
-  minutesText, durationText, whenText, docsText, pctText, countText,
-  stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
+  minutesText, durationText, whenText, pctText, countText,
+  stateText, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
   lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
@@ -54,7 +54,7 @@ import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
 import { fetchNowPress } from './fetch-now.js';
 import { measureAgainButton } from './measure-again.js';
 import { summaryCards } from './summary.js';
-import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText, BOARD_RANGES } from '../core/log-range.js';
+import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText, fromZonedInput, BOARD_RANGES } from '../core/log-range.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
 const PAGE_ROWS = 50;
@@ -160,6 +160,23 @@ function windowNote(lastRunAt, nowMs) {
     : (ymdIn(lastRunAt, S.zone) === ymdIn(nowMs, S.zone) ? zonedText(lastRunAt, S.zone, { seconds: false }).slice(11) : zonedText(lastRunAt, S.zone, { seconds: false }));
   return h('div.banner.warn#ld-window-note', `No scheduled measurement in ${rangeWords(S.rng)} — ${finite(lastRunAt) ? `last run ${when}` : when}. The figures below are the store’s for ${S.win.from === S.win.to ? S.win.from : `${S.win.from} – ${S.win.to}`}.`);
 }
+/**
+ * What the figures are of, under the tiles: the state now is the last run's, so it says when that
+ * was (the oldest and the newest when the clusters differ), and the days the period figures cover —
+ * the store keeps whole days, so a range shorter than a day says what is really covered.
+ */
+function asOfLine(byCluster, nowMs, notMeasuredN = 0) {
+  const runs = (byCluster || []).map((c) => c.lastRunAt).filter(finite);
+  const lo = runs.length ? Math.min(...runs) : null; const hi = runs.length ? Math.max(...runs) : null;
+  const short = { '30m': 1, '1h': 1, '2h': 1, '4h': 1, '8h': 1, '12h': 1 }[S.rng.id];
+  const days = S.win.from === S.win.to ? dayText(S.win.from) : `${dayText(S.win.from)} – ${dayText(S.win.to)}`;
+  return h('div.muted.ld-note#ld-as-of', [
+    lo === null ? 'never measured' : whenText(lo, nowMs) === whenText(hi, nowMs) ? `“now” is as of the last run, ${whenText(hi, nowMs)}` : `“now” is as of each cluster’s last run, ${whenText(lo, nowMs)} to ${whenText(hi, nowMs)}`,
+    notMeasuredN ? `${countText(notMeasuredN)} of ${countText((byCluster || []).length)} clusters never measured` : '',
+    `figures over time cover ${days}${short ? ` whole, not only ${rangeWords(S.rng)}: the store keeps whole days` : ''}`].filter(Boolean).join(' · '));
+}
+const isNever = (c) => !c || c.lastRunAt === null || c.lastRunAt === undefined;
+const allNever = (byCluster) => Array.isArray(byCluster) && byCluster.length > 0 && byCluster.every(isNever);
 const lastRunOf = (byCluster) => (byCluster || []).reduce((m, c) => (finite(c.lastRunAt) && (m === null || c.lastRunAt > m) ? c.lastRunAt : m), null);
 
 /** The one cluster a route or the pick names; null for every cluster. */
@@ -414,28 +431,30 @@ function clusterFixItems(c) {
 
 
 /**
- * The five count tiles: the three configured levels, another time zone, silent. Each opens the
+ * The five count tiles: No delay (noDelayOf: on time, silent and can't measure together, the split
+ * under it), the delay band, above the critical line, another time zone, silent. Each opens the
  * Devices tab on that filter. A figure the core did not give reads "—", never 0; can't-measure
  * devices are said under Silent (they have no figure either).
  */
-function tiles(t, b, scopeId, keyPrefix, unmeasured = false, everyHours = null) {
+function tiles(t, b, scopeId, keyPrefix, unmeasured = false, everyHours = null, whyNone = '') {
   if (unmeasured) { t = {}; }
+  const nd = noDelayOf(t, { why: whyNone });
   const cnt = (v) => (unmeasured ? '—' : countText(v));
   const note = (d) => (unmeasured ? 'not measured yet' : d);
   // Not measured: a plain tile (no Devices link: nothing to list) carrying the ↻ Measure again button.
   const tile = (k, filter, label, value, colour, detail) => (unmeasured
     ? h('div.ld-kpi', { dataset: { kpi: k } }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail),
-      measureAgainButton({ clusterIds: [scopeId], devices: 'all', label: nameOf(scopeId) }, { zone: S.zone, everyHours }))
+      scopeId ? measureAgainButton({ clusterIds: [scopeId], devices: 'all', label: nameOf(scopeId) }, { zone: S.zone, everyHours }) : null)
     : h('button.ld-kpi.ld-kpi-btn', {
       type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
       onclick: () => openDevicesOn(filter, scopeId),
     }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail)));
   return h(`div.ld-kpis.ld-5#${keyPrefix}-tiles`,
-    tile('below', 'ok', b.below, cnt(t.onTime), C.ok, note('devices under the delay line')),
+    tile('below', 'noDelay', 'No delay', cnt(nd.count), C.ok, unmeasured ? 'not measured yet' : [h('b', nd.pct ? shareText(nd.pct.noDelay) : ''), nd.pct ? ' · ' : '', nd.pct ? noDelaySplit(nd) : `${noDelaySplit(nd, { counts: true })}${nd.why ? ` · no percentage: ${nd.why}` : ''}`, nd.pct && nd.of ? ` · ${noDelayOfText(nd)}` : '']),
     tile('delay', 'delay', b.mid, cnt(t.delay), C.delay, note('delay')),
     tile('critical', 'critical', b.high, cnt(t.critical), C.crit, note('critical')),
     tile('tz', 'tz', 'Other time zone', cnt(t.otherTz), C.tz, note('not counted as late')),
-    tile('silent', 'silent', 'Silent', cnt(t.silent), C.silent, unmeasured ? 'not measured yet' : finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
+    tile('silent', 'silent', 'Silent', cnt(t.silent), C.silent, unmeasured ? 'not measured yet' : nd.cant ? `no logs · ${countText(nd.cant)} can’t measure` : 'no logs for the silence limit'));
 }
 
 /* ------------------------------------ charts ------------------------------------ */
@@ -606,17 +625,17 @@ function lastRunDetail(lastRunAt) {
 }
 
 /**
- * The fleet's state bar under the tiles: one stacked bar of every device by state, with a counted
- * legend (below the line, the delay band, above the critical line, another time zone, silent,
- * can't measure). Counts are the core's totals, or the devices in the time-zone filter.
+ * The fleet's state bar under the tiles: one stacked bar of every device, with a counted legend
+ * (No delay with its split, the delay band, above the critical line, another time zone). Counts are the core's totals, or the devices in the time-zone filter.
  */
 function fleetStateBar(t, b) {
-  const parts = [[t.onTime, C.ok, b.below], [t.delay, C.delay, b.mid], [t.critical, C.crit, b.high], [t.otherTz, C.tz, 'Other time zone'], [t.silent, C.silent, 'Silent'], [t.unmeasured, 'var(--surface-3)', 'Can’t measure']];
+  const nd = noDelayOf(t);
+  const parts = [[nd.count, C.ok, 'No delay'], [t.delay, C.delay, b.mid], [t.critical, C.crit, b.high], [t.otherTz, C.tz, 'Other time zone']];
   const drawn = parts.filter(([v]) => finite(v) && v > 0);
   return h('div.ld-statebar#ld-statebar',
     drawn.length ? h('div.ld-stack', { role: 'img', 'aria-label': drawn.map(([v, , tx]) => `${tx} ${v}`).join(', ') },
       ...drawn.map(([v, colour, tx]) => h('i', { style: { flex: `${v} 0 0`, background: colour }, title: `${tx}: ${countText(v)}` }))) : h('div.muted.ld-note', 'No device measured.'),
-    legend(...parts.map(([v, colour, tx]) => h('span.ld-key', h('i', { style: { background: colour } }), `${tx} `, h('b', countText(v))))));
+    legend(...parts.map(([v, colour, tx]) => h('span.ld-key', h('i', { style: { background: colour } }), `${tx} `, h('b', countText(v)), tx === 'No delay' && v !== null ? h('span.muted', ` (${noDelaySplit(nd, { counts: true })})`) : null))));
 }
 
 /** By cluster's "Change": "+12 −5" — became late, came back — in today's window holding the last run (it can cover several runs); — unknown. */
@@ -632,7 +651,8 @@ function changeCell(k, b) {
 
 /** The mini stacked bar of a cluster's states, in the By cluster table. */
 function stateBar(c, b) {
-  const parts = [[c.below, C.ok, b.below], [c.delay, C.delay, b.mid], [c.critical, C.crit, b.high], [c.otherTz, C.tz, 'Other time zone'], [c.silent, C.silent, 'Silent'], [c.unmeasured, 'var(--surface-3)', 'Can’t measure']]
+  const nd = noDelayOf(c);
+  const parts = [[nd.count, C.ok, `No delay (${noDelaySplit(nd, { counts: true })})`], [c.delay, C.delay, b.mid], [c.critical, C.crit, b.high], [c.otherTz, C.tz, 'Other time zone']]
     .filter(([v]) => finite(v) && v > 0);
   if (!parts.length) return h('span.muted', '—');
   return h('div.ld-statemini', { role: 'img', 'aria-label': parts.map(([v, , t]) => `${t} ${v}`).join(', ') },
@@ -664,15 +684,18 @@ function fleetView() {
   // (the core's totals are for every zone), and the charts, which are the core's day totals, say so.
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
 
+  // No cluster in view has ever been measured: no counts, no charts, nothing that reads as 0.
+  const none = allNever(res.byCluster);
   const notice = B.get('fleet:notice', rid, () => scheduleNotice(res));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
   const noDevNote = B.get('fleet:nodevice', rid, () => noDeviceNote(res.byCluster, 'Each cluster’s count: its board’s “Last run read” line.'));
-  const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
+  const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet', none, null, none ? 'never measured' : ''));
+  const asOf = B.get('fleet:asof', `${rid}|${S.pk}|${S.rng.id}`, () => asOfLine(res.byCluster, res.now, (res.byCluster || []).filter(isNever).length));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and Late devices over the day are the core’s totals for every zone.`)
     : null));
   const winNote = B.get('fleet:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
-  const charts = B.get('fleet:charts', `${rid}|${S.pk}|${scopeId}|${S.tz}`, () => chartPanels(res, S.period, b, scopeId));
+  const charts = none ? null : B.get('fleet:charts', `${rid}|${S.pk}|${scopeId}|${S.tz}`, () => chartPanels(res, S.period, b, scopeId));
   const gridDay = finite(res.now) ? dayText(zonedText(res.now, S.zone, { seconds: false }).slice(0, 10)) : '';
   const grid = B.get('fleet:grid', `${rid}|${S.gridMode}|${S.gridAll}`, () => {
     const el = card('Late devices over the day',
@@ -690,7 +713,7 @@ function fleetView() {
     const fromRows = (c) => {
       const rows = devsOf(c.id); const k = tileCounts(rows);
       const worstRow = rows.filter((d) => finite(d.nowMinutes)).sort((x, y) => y.nowMinutes - x.nowMinutes)[0];
-      return { ...c, devices: k.devices, below: k.onTime, delay: k.delay, critical: k.critical, otherTz: k.otherTz, silent: k.silent, unmeasured: k.unmeasured,
+      return { ...c, devices: k.devices, below: k.onTime, onTime: k.onTime, noDelay: undefined, pctNoDelay: undefined, cantMeasure: k.cantMeasure, lateBeforeSilent: k.lateBeforeSilent, delay: k.delay, critical: k.critical, otherTz: k.otherTz, silent: k.silent, unmeasured: k.unmeasured,
         lateNow: k.delay + k.critical, latePct: k.devices ? Math.round(((k.delay + k.critical) / k.devices) * 1000) / 10 : null,
         worst: worstRow ? { device: worstRow.device, minutes: worstRow.nowMinutes, state: worstRow.state } : null };
     };
@@ -739,7 +762,7 @@ function fleetView() {
           : [h('td', stateBar(c, cb)),
             // Late now and its share in one cell: "12 · 3 %".
             h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now · their share of the cluster's devices` },
-              countText(c.lateNow), h('span.muted', ` · ${pctText(c.latePct)}`)),
+              countText(c.lateNow), h('span.muted', { title: c.notMeasured ? `no percentage: ${c.notMeasured}` : null }, ` · ${pctText(c.latePct)}`)),
             changeCell(lastRunChange(c), cb),
             h(`td.num${c.critical ? '.ld-crit' : ''}`, countText(c.critical)),
             anyZone ? h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
@@ -770,10 +793,10 @@ function fleetView() {
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
+  const stateRow = none ? null : B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
   // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, then
   // Late devices over the day (0.3.82) and the line about clusters the last run did not measure.
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, winNote, charts, clusterCard, grid, nmLine, noDevNote, neverNote];
+  return [head, notice, readNote, tileRow, asOf, stateRow, tzFilterNote, winNote, charts, clusterCard, grid, nmLine, noDevNote, neverNote];
 }
 
 /* ------------------------------------ the summary ------------------------------------ */
@@ -806,7 +829,8 @@ function summaryView(clusterId) {
   const daysRes = dent.state === 'ok' ? dent.res : null;
   const cards = B.get('sum:cards', `${rid}|${clusterId}|${win.from}..${win.to}|${entSig(dent)}`, () => summaryCards(res, {
     clusterId, nameOf, daysRes, win, daysPending: daysRes ? null : problem(dent, 'The days of the last week') }));
-  return [notice, readNote, winNote, tzNote, ...cards, noDevNote];
+  const asOf = B.get('sum:asof', `${rid}|${S.pk}|${S.rng.id}`, () => asOfLine(res.byCluster, res.now, (res.byCluster || []).filter(isNever).length));
+  return [notice, readNote, winNote, tzNote, asOf, ...cards, noDevNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */
@@ -835,16 +859,17 @@ function clusterView(id) {
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
   const never = res.lastRunAt === null || res.lastRunAt === undefined;
   const lr = res.lastRead || (res.counts && res.counts.lastRead);
-  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl', never || (!lr && !(t.devices > 0)), res.everyHours));
+  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl', never || (!lr && !(t.devices > 0)), res.everyHours, res.notMeasured || ''));
+  const asOf = B.get('cl:asof', `${rid}|${S.pk}|${S.rng.id}`, () => asOfLine([{ lastRunAt: res.lastRunAt }], res.now));
   const tzFilterNote = B.get('cl:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices. The tiles and the table count these devices; the charts are the core’s day totals for every zone.`)
     : null));
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
-  const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
+  const countsNote = never ? null : B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
     h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
   const winNote = B.get('cl:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(res.lastRunAt, res.now));
-  const charts = B.get('cl:charts', `${rid}|${S.pk}|${S.tz}`, () => chartPanels(res, S.period, b, id));
+  const charts = never ? null : B.get('cl:charts', `${rid}|${S.pk}|${S.tz}`, () => chartPanels(res, S.period, b, id));
   const fw = S.focusWin && S.focusWin.cluster === id ? S.focusWin : null;
   const focusNote = B.get('cl:focus', `${rid}|${fw ? `${fw.from}|${fw.mode}` : '-'}`, () => {
     if (!fw) return null;
@@ -858,9 +883,11 @@ function clusterView(id) {
   });
 
   const f = res.fields || {};
+  const cdRowsAll = res.devices || [];
   const extras = Array.isArray(f.extras) ? f.extras : [];
   const arrival = f.arrival || 'arrival';
-  const event = (Array.isArray(f.eventTime) && f.eventTime[0]) || 'event time';
+  const event = 'Event time';
+  const eventFrom = eventFieldsText(cdRowsAll, f.eventTime);
   const xc = extraCols(extras);
   const keys = ['device', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
   // Delayed devices only until "Show all devices" (the owner, 2026-11-17).
@@ -872,8 +899,8 @@ function clusterView(id) {
   const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${S.cdSet}|${S.tz}|${sortSig(sorts.clusterDevices)}`, () => [
     deviceTable({ id: 'ld-cluster-devices', sort: sorts.clusterDevices, rows: shown.map((r) => ({ ...r, cluster: r.cluster || id })), keys, extra: xc,
       labels: { arrival, event }, ctx: { now: res.now, zone: S.zone, everyHours: res.everyHours },
-      emptyText: S.cdSet === 'delayed' ? delayedEmpty(cdLate > 0, !!S.cdFilter, cdShowAll) : S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
-    footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `${event} (event time)`].join(', ')} · delay = ${arrival} − ${event}`
+      emptyText: never ? 'Never measured: which devices are delayed is not known.' : S.cdSet === 'delayed' ? delayedEmpty(cdLate > 0, !!S.cdFilter, cdShowAll) : S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
+    footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `event time: ${eventFrom}`].join(', ')} · delay = ${arrival} − event time`
       + (res.timeZone && res.timeZone.mode !== 'none' ? ` − time zone (${res.timeZone.offset || offsetLabel(res.timeZone.offsetMinutes)})` : '')
       + (f.device ? ` · device field ${f.device}` : '') + (f.pattern ? ` · indices ${f.pattern}` : ''),
       ` · Showing ${countText(shown.length)} of ${countText(ordered.length)}${S.cdSet === 'delayed' ? ' delayed' : ''}`,
@@ -881,9 +908,9 @@ function clusterView(id) {
   const cdBtn = B.get('cl:dev:set', '', () => setButton('ld-cd-showall', () => { S.cdSet = S.cdSet === 'all' ? 'delayed' : 'all'; S.cdAll = false; repaint(); }));
   setButtonWords(cdBtn, S.cdSet, cdRows.length);
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
-    `${S.cdSet === 'delayed' ? `${countText(cdLate)} delayed of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
+    never ? 'never measured' : `${S.cdSet === 'delayed' ? `${countText(cdLate)} delayed of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [cdBtn, filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  return [head, focusNote, neverNote, readNote, tileRow, tzFilterNote, winNote, countsNote, charts, devCard];
+  return [head, focusNote, neverNote, readNote, tileRow, asOf, tzFilterNote, winNote, countsNote, charts, devCard];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */
@@ -901,14 +928,19 @@ function devicesFiltered(rows) {
 }
 
 /** The rows as a file, as filtered, with zone and tag1 and the time zone step; unknown stays blank, never 0. */
-function exportDevicesCsv(rows) {
+function exportDevicesCsv(rows, res) {
+  // The server sends at most 2,000 device rows: a cut file says so on every row, never looks whole.
+  const cut = res && res.devicesTruncated ? `the server sent the first ${(res.devices || []).length} of ${res.devicesTotal ?? 'more'} devices` : '';
   const out = rows.map((r) => ({
     device: r.device, cluster: r.clusterName || r.cluster, zone: extraOf(r, 'zone') ?? '', tag1: extraOf(r, 'tag1') ?? '',
     state: stateText(r.state), delay_minutes: finite(r.nowMinutes) ? r.nowMinutes.toFixed(2) : '',
     raw_gap_minutes: finite(r.rawGapMinutes) ? r.rawGapMinutes.toFixed(2) : '', time_zone_offset: finite(r.tzOffsetMinutes) ? offsetLabel(r.tzOffsetMinutes) : '',
     max_minutes: finite(r.maxMinutes) ? r.maxMinutes.toFixed(2) : '', delays: finite(r.episodes) ? r.episodes : '', late_ms: finite(r.lateMs) ? r.lateMs : '',
+    last_measured: finite(r.lastMeasuredMs) ? new Date(r.lastMeasuredMs).toISOString() : '',
     late_since: finite(r.lateSince) ? new Date(r.lateSince).toISOString() : '', docs_per_day: finite(r.docsPerDay) ? r.docsPerDay : '',
+    event_field: r.eventField || '',
     fix: r.fix ? `${stepLabel(r.fix)}: ${r.fix.fix || r.fix.why || ''}` : '',
+    note: cut,
   }));
   download(`log-delay-devices-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(out));
 }
@@ -930,12 +962,12 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
       h('h2', clusterId ? `Devices · ${nameOf(clusterId)}` : 'Devices'),
       h('p.sub', `The delayed devices of the period until Show all devices, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
     h('div.ld-actions',
-      h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'))));
+      h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered((res.devices || []).filter((r) => matchesZone(r, S.tz))), res) }, 'Export CSV'))));
   if (!res) return [head, B.get('dev:problem', entSig(ent), () => problem(ent, 'The devices'))].filter(Boolean);
   const rid = objId(res);
   const rows = (res.devices || []).filter((r) => matchesZone(r, S.tz));
   const counts = filterCounts(filterRows(rows, S.devFilter));
-  const chipLabel = { late: b.lateShort, critical: b.high, delay: b.mid, ok: b.below, tz: 'Other time zone', silent: 'Silent' };
+  const chipLabel = { late: b.lateShort, critical: b.high, delay: b.mid, noDelay: 'No delay', ok: b.below, tz: 'Other time zone', silent: 'Silent' };
   const devShowAll = () => { S.devSet = 'all'; S.devAll = false; repaint(); };
   const zones = valuesOf(rows, 'zone'); const tags = valuesOf(rows, 'tag1');
   // The bar is one element for the visit (its counts, the pressed chip and the selects change in
@@ -976,9 +1008,10 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
   if (pinned) shown = [pinned, ...shown];
   const keys = narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS;
   const narrowed = !!(S.devFilter || S.devState !== 'all' || S.devZone || S.devTag);
+  const noneYet = allNever(res.byCluster);
   const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.devSet}|${S.tz}|${sortSig(sorts.devices)}|${narrow}|${pinned ? openDevice : ''}`, () => [
     deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys, ctx: { now: res.now, zone: S.zone, everyHours: res.everyHours },
-      emptyText: S.devSet === 'delayed' ? delayedEmpty(counts.late > 0, narrowed, devShowAll)
+      emptyText: noneYet ? 'Never measured: which devices are delayed is not known.' : S.devSet === 'delayed' ? delayedEmpty(counts.late > 0, narrowed, devShowAll)
         : narrowed ? 'No device matches. Clear the search or pick another level.' : 'No device measured in this period.' }),
     pinned ? h('div.muted.ld-note#ld-dev-pinned', `${pinned.device} is listed because it is open; it is not delayed. The list holds the delayed devices only.`) : null,
     footer(`Showing ${countText(shown.length - (pinned ? 1 : 0))} of ${countText(ordered.length)}${S.devSet === 'delayed' ? ' delayed' : ''}`,
@@ -986,11 +1019,12 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
       res.devicesTruncated ? ` · the server sent the first ${countText(rows.length)} of ${countText(res.devicesTotal)}` : null)]);
   const lateN = rows.filter(rowLate).length;
   const list = keptCard(B, 'dev:list', narrow ? (S.devSet === 'delayed' ? 'Delayed devices' : 'Devices')
-    : S.devSet === 'delayed' ? `${countText(lateN)} delayed of ${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`
+    : noneYet ? 'Never measured' : S.devSet === 'delayed' ? `${countText(lateN)} delayed of ${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`
       : `${countText(S.tz === null ? (res.devicesTotal ?? rows.length) : rows.length)} devices`,
-    `${sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late'}${S.tz === null ? '' : ` · ${tzWords()}`}`, [bar, body]);
+    noneYet ? 'no cluster in view has been measured' : `${sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late'}${S.tz === null ? '' : ` · ${tzWords()}`}`, [bar, body]);
   const winNote = narrow ? null : B.get('dev:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(lastRunOf(res.byCluster), res.now));
-  return [head, winNote, list].filter(Boolean);
+  const asOf = narrow ? null : B.get('dev:asof', `${rid}|${S.pk}|${S.rng.id}`, () => asOfLine(res.byCluster, res.now, (res.byCluster || []).filter(isNever).length));
+  return [head, winNote, asOf, list].filter(Boolean);
 }
 
 /* ------------------------------------ one device ------------------------------------ */
@@ -1014,15 +1048,16 @@ function deviceView(clusterId, device) {
   const every = res && finite(res.everyHours) ? res.everyHours : null;
   const cname = (res && res.clusterName) || nameOf(clusterId);
   const late = res && (res.state === 'delay' || res.state === 'critical');
+  const age = measuredAge(res, res ? res.now : Date.now(), every);
   const head = B.get('dev1:head', `${clusterId}|${device}|${S.pk}|${JSON.stringify(S.range)}|${entSig(ent)}|${entSig(cent)}`, () => h('div.ld-head',
     h('div.ld-title',
       crumbs(link(ldHash('devices'), 'Devices'), link(clusterHref(clusterId), cname)),
       h('h2.ld-dev-h', h('span.mono', device),
-        res ? statePill(res.state, late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
+        res ? statePill(res.state, late && age.stale && age.at !== null ? staleText(age.at, res.now) : late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
           : res.state === 'silent' && finite(res.silentSince) ? `silent · no logs since ${whenText(res.silentSince, res.now)}` : stateText(res.state)) : null,
         res ? fixButton({ kind: 'device', id: device, items: () => fixesFor(res, 'device') }) : null),
       h('p.sub', [`Device field ${devField}`, `arrival ${f.arrival || '@timestamp'}`,
-        `event time ${Array.isArray(f.eventTime) && f.eventTime.length ? f.eventTime.join(' / ') : 'not known'}`,
+        `event time ${res && res.eventField ? res.eventField : Array.isArray(f.eventTime) && f.eventTime.length ? f.eventTime.join(' / ') : 'not known'}`,
         res && extraOf(res, 'zone') !== null ? `zone ${extraOf(res, 'zone')}` : 'zone not known',
         res && extraOf(res, 'tag1') !== null ? `tag1 ${extraOf(res, 'tag1')}` : 'tag1 not known',
         res && res.timeZone ? `cluster time zone ${timeZoneShort(res.timeZone)}` : null,
@@ -1039,13 +1074,15 @@ function deviceView(clusterId, device) {
   if (!res) return [head, bar, B.get('dev1:problem', entSig(ent), () => problem(ent, device))];
   const rid = objId(res);
   const lv = res.levels || {};
+  const lt = lateTime(res, age);
+  const perDay = logsADay(res);
   // Facts, not statistics: no median, no average (the owner's rule).
   const tiles5 = B.get('dev1:tiles', rid, () => h('div.ld-kpis.ld-5',
-    h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${late ? (res.state === 'critical' ? '.ld-crit' : '.ld-delay') : ''}`, res.state === 'unmeasured' ? 'can’t measure' : res.state === 'silent' ? 'silent' : minutesText(res.nowMinutes)), h('span', 'delay now')),
+    h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${late ? (res.state === 'critical' ? '.ld-crit' : '.ld-delay') : ''}`, res.state === 'unmeasured' ? 'can’t measure' : res.state === 'silent' ? 'silent' : minutesText(res.nowMinutes)), h('span', age.at === null ? 'delay now' : age.stale ? `last measured ${whenText(age.at, res.now).replace(/^today /, '')}` : `delay now · measured ${whenText(age.at, res.now).replace(/^today /, '')}`)),
     h('div.ld-kpi', { dataset: { kpi: 'worst' } }, h('b', minutesText(res.worst && res.worst.minutes)), h('span', `worst · ${res.worst && finite(res.worst.at) ? whenText(res.worst.at, res.now) : 'not known'}`)),
     h('div.ld-kpi', { dataset: { kpi: 'episodes' } }, h('b', countText(res.episodes)), h('span', `delays · ${countText(res.solved)} solved`)),
-    h('div.ld-kpi', { dataset: { kpi: 'lateMs' } }, h('b', durationText(res.lateMs)), h('span', `time late · ${pctText(res.latePct)} of the period`)),
-    h('div.ld-kpi', { dataset: { kpi: 'docs' } }, h('b', docsText(res.docsPerDay)), h('span', `logs a day · ${finite(res.lastSilence) ? `${whenText(res.lastSilence, res.now)} last silence` : 'no silence'}`))));
+    h('div.ld-kpi', { dataset: { kpi: 'lateMs' } }, h('b', durationText(lt.ms)), h('span', `time late · ${finite(lt.pct) ? `${pctText(lt.pct)} ` : ''}${lt.of}`)),
+    h('div.ld-kpi', { dataset: { kpi: 'docs' } }, h('b', perDay.text), h('span', `${perDay.label} · ${finite(res.lastSilence) ? `${whenText(res.lastSilence, res.now)} last silence` : 'no silence'}`))));
 
   const rec = B.get('dev1:rec', rid, () => {
     const fnd = res.finding; const it = fixItem(fnd);
@@ -1062,7 +1099,7 @@ function deviceView(clusterId, device) {
         : h('div.muted', NO_FINDING)));
   });
 
-  return [head, bar, tiles5, rec, B.get('dev1:graph', rid, () => graphCard(res, lv, every)), periodsCard(res, every)];
+  return [head, bar, tiles5, rec, B.get('dev1:graph', rid, () => graphCard(res, lv, every, age)), periodsCard(res, every, age)];
 }
 
 function searchBar(clusterId, device, devField, extras, res) {
@@ -1129,50 +1166,59 @@ function searchBar(clusterId, device, devField, extras, res) {
   return form;
 }
 
-function graphCard(res, lv, every) {
-  const lo = Date.parse(`${res.from}T00:00:00`); const hi = Math.min(Date.parse(`${res.to}T23:59:59`), res.now || Date.now());
+function graphCard(res, lv, every, age) {
+  // The days are the server's: their midnights in the zone the page writes times in.
+  const lo = fromZonedInput(`${res.from}T00:00`, S.zone); const hi = Math.min(fromZonedInput(`${res.to}T23:59:59`, S.zone), res.now || Date.now());
+  const until = age.at !== null ? age.at : res.now;
+  // Not solved: what is known of it ends at the last measurement.
+  const openText = age.stale && age.at !== null ? staleText(age.at, res.now) : age.at !== null ? `still late at ${whenText(age.at, res.now)}` : 'still late';
   const H = 220;
   const g = deviceGraph(res.points, { fromMs: lo, toMs: hi, height: H, levels: lv });
   const y = (m) => g.Y(m);
   const line = (m, colour) => (finite(m) && m <= g.scaleMax ? h('div.ld-hline', { style: { top: `${y(m)}px`, borderTopColor: colour } }) : null);
   const bandsEls = (res.periods || []).map((p) => {
-    const b = periodBand(p, g.lo, g.hi, res.now);
+    const b = periodBand(p, g.lo, g.hi, until);
     if (!b) return null;
-    return h(`div.ld-band${b.critical ? '.ld-band-crit' : ''}`, { title: `${whenText(p.started, res.now)} → ${p.solved ? whenText(p.solved, res.now) : 'still late'}, worst ${minutesText(p.worstMinutes)}`,
+    return h(`div.ld-band${b.critical ? '.ld-band-crit' : ''}`, { title: `${whenText(p.started, res.now)} → ${p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? `${whenText(p.ended, res.now)} (${p.endedWhy || 'ended'})` : openText}, worst ${minutesText(p.worstMinutes)}`,
       style: { left: `${b.left}%`, width: `${b.width}%` } });
   });
+  const tail = age.stale && age.at !== null && age.at < g.hi
+    ? h('div.ld-tail', { title: `not measured after ${whenText(age.at, res.now)}`, style: { left: `${Math.max(0, ((age.at - g.lo) / (g.hi - g.lo || 1)) * 100)}%` } }) : null;
+  const dotW = g.dots.length > 120 ? 3 : 6;
   const unknown = (res.points || []).filter((p) => p && !finite(p.m) && finite(p.t));
   const pic = svg('svg', { viewBox: `0 0 1000 ${H}`, preserveAspectRatio: 'none', role: 'img', class: 'ld-graph-svg',
     'aria-label': `Delay of ${res.device} over the period: ${(res.points || []).length} measurements, ${(res.periods || []).length} delays, worst ${minutesText(res.worst && res.worst.minutes)}` },
   ...g.segments.map((p) => svg('polyline', { points: p, fill: 'none', stroke: C.line, 'stroke-width': 1.6, 'vector-effect': 'non-scaling-stroke' })),
+  ...g.dots.map((p) => svg('path', { d: `M${p.x.toFixed(1)},${p.y.toFixed(1)}h0.01`, class: 'ld-dot', fill: 'none', stroke: C.line, 'stroke-width': dotW, 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' })),
   ...unknown.map((p) => svg('rect', { x: g.X(p.t) - 2, y: H - 6, width: 4, height: 6, fill: C.silent })));
   const marks = [];
   for (const p of res.periods || []) {
     if (finite(p.started) && p.started >= g.lo) marks.push(h('span.ld-mark.ld-mark-start', { title: `delay started ${whenText(p.started, res.now)}`, style: { left: `calc(${((p.started - g.lo) / (g.hi - g.lo || 1)) * 100}% - 5px)` } }, '▲'));
     if (finite(p.solved)) marks.push(h('span.ld-mark.ld-mark-solved', { title: `solved ${whenText(p.solved, res.now)}`, style: { left: `calc(${((p.solved - g.lo) / (g.hi - g.lo || 1)) * 100}% - 4px)` } }, '●'));
-    else marks.push(h('span.ld-mark.ld-mark-open', { title: 'still late', style: { left: 'calc(100% - 10px)' } }, '◆'));
+    else if (!finite(p.ended)) marks.push(h('span.ld-mark.ld-mark-open', { title: openText, style: { left: `calc(${Math.min(100, Math.max(0, ((until - g.lo) / (g.hi - g.lo || 1)) * 100))}% - 5px)` } }, '◆'));
   }
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => g.lo + f * (g.hi - g.lo)).map((ms) => whenText(ms, 0).replace(/ \d\d:\d\d$/, ''));
+  const ticks = axisTicks(g.lo, g.hi);
   const ins = res.insights || {};
+  const longestMs = !ins.longest ? null : !finite(ins.longest.solved) && age.stale && finite(ins.longest.started) ? Math.max(0, until - ins.longest.started) : ins.longest.lastedMs;
   const cell = (label, value, sub) => h('div.ld-ins', h('div.muted', label), h('b', value), sub ? h('span', ` ${sub}`) : null);
   const scale = [[g.scaleMax, `${g.scaleMax} min`], [lv.criticalOver, String(lv.criticalOver)], [lv.delayFrom, String(lv.delayFrom)], [0, '0']]
     .filter(([m]) => finite(m) && m <= g.scaleMax);
   return card('Delay over time', `each point is one ${every ? `${every}-hour ` : ''}measurement · shaded bands are delays, from start to solve`,
     [h('div.ld-graph',
       h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))),
-      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, line(lv.criticalOver, C.crit), line(lv.delayFrom, C.delay), pic)),
+      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, tail, line(lv.criticalOver, C.crit), line(lv.delayFrom, C.delay), pic)),
     h('div.ld-marks', { 'aria-label': 'Delay starts and solves' }, ...marks),
     h('div.ld-ticks.ld-indent', ...ticks.map((t) => h('span', t))),
-    h('div.muted.ld-indent.ld-tiny', '▲ delay started · ● solved · ◆ still late · ', h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
+    h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
     // Facts about the period: the peak, the longest delay, when delays begin. No average.
     h('div.ld-insights.ld-3',
       cell('Peak', minutesText(ins.peak && ins.peak.minutes, 'not known'), ins.peak && finite(ins.peak.at) ? whenText(ins.peak.at, res.now) : null),
-      cell('Longest delay', ins.longest ? durationText(ins.longest.lastedMs) : 'not known', ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : 'still late'}` : null),
+      cell('Longest delay', longestMs === null ? 'not known' : longestMs === 0 ? 'one measurement' : durationText(longestMs), ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : openText}` : null),
       cell('Late most often', ins.lateMostOften ? ins.lateMostOften.label : 'not known', ins.lateMostOften ? `${ins.lateMostOften.count} of ${ins.lateMostOften.of} delays began then` : null))],
     [legend(key(C.line, 'Delay', { line: true }), key(C.delay, `${lv.delayFrom ?? '?'} min`, { dash: true }), key(C.crit, `${lv.criticalOver ?? '?'} min`, { dash: true }))]);
 }
 
-function periodsCard(res, every) {
+function periodsCard(res, every, age) {
   return B.get('dev1:periods', `${objId(res)}|${sortSig(sorts.periods)}`, () => {
     const rows = sorts.periods.apply((res.periods || []).slice().sort((a, b) => (b.started || 0) - (a.started || 0)), {
       started: { type: 'date', value: (p) => p.started },
@@ -1188,8 +1234,9 @@ function periodsCard(res, every) {
       const zone = extraOf(p, 'zone') ?? extraOf(res, 'zone'); const tag1 = extraOf(p, 'tag1') ?? extraOf(res, 'tag1');
       return h(`tr${p.solved ? '' : '.ld-open'}`,
         h('td', whenText(p.started, res.now)),
-        h('td', p.solved ? whenText(p.solved, res.now) : statePill('critical', 'still late')),
-        h('td.num', `${durationText(p.lastedMs)}${p.solved ? '' : ' so far'}`),
+        h('td', p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? h('span.muted', `${whenText(p.ended, res.now)} · ${p.endedWhy || 'ended, not solved'}`)
+          : statePill(p.lastState || p.worstState || 'critical', age.stale && age.at !== null ? `not solved · last measured ${whenText(age.at, res.now).replace(/^today /, '')}` : 'still late')),
+        h('td.num', p.solved || finite(p.ended) ? durationText(p.lastedMs) : age.stale && age.at !== null ? `${durationText(Math.max(0, age.at - p.started))} to the last measurement` : `${durationText(p.lastedMs)} so far`),
         h('td.num', minutesText(p.worstMinutes)), h('td', stateText(p.worstState)),
         h('td', p.pattern ? p.pattern : h('span.muted', '—')),
         h('td', zone === null ? h('span.muted', '—') : String(zone)), h('td', tag1 === null ? h('span.muted', '—') : String(tag1)),

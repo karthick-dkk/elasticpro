@@ -3,7 +3,7 @@
  * Dashboard on the owner's word (2026-11-17). docs/LOGDELAY.md "The Log Delay page" is the contract.
  *
  *   four tiles      total devices · with delay now (the delay band and above the critical line) ·
- *                   with no delay (on time %) · the shares: without delay, delayed, silent, can't measure
+ *                   No delay (noDelayOf: on time + silent + can't measure) · its share with the split
  *   Delay reduced   devices back under the delay line in the last 2 / 4 / 6 / 12 / 24 h
  *   Day by day      one stacked bar per day, each tick its own date — at least the last 7 days
  *                   (dayChartDays): a shorter page range widens this card only, from its own answer
@@ -19,7 +19,7 @@
 import { h, svg } from '../lib/dom.js';
 import { card, empty } from '../pages/common.js';
 import {
-  LD_COLOURS as C, LD_NEVER_MEASURED, ldHash, bands, sharedLevels, countText, pctText,
+  LD_COLOURS as C, LD_NEVER_MEASURED, noDelayOf, noDelaySplit, noDelayOfText, shareText, ldHash, bands, sharedLevels, countText,
   lateSplitText, reducedBars, ringsOrder, ringArcs, dayBars, dayTitle, dayTicks, dayChartWords,
   LD_RING_RED_PCT, ringAlert,
 } from '../core/logdelay-report.js';
@@ -40,14 +40,20 @@ function tiles(res, b, lv) {
   const t = res.totals || {};
   const red = reducedBars(res.reduced, 44);
   const back = lv && finite(lv.delayFrom) ? `${lv.delayFrom} min` : 'the delay line';
-  const late = finite(t.late) ? t.late : finite(t.delay) && finite(t.critical) ? t.delay + t.critical : null;
+  const list = res.byCluster || [];
+  const none = list.length > 0 && list.every(never);
+  const nd = noDelayOf(t, { why: none ? 'never measured' : '' });
+  const n = (v) => (none ? '—' : countText(v));
+  const late = nd.late;
+  const pc = nd.pct || {};
   return h('div.ld-kpis.ld-6#ld-sum-tiles',
-    kpi('devices', countText(t.devices), 'total devices'),
-    kpi('late', countText(late), `devices with delay now · ${lateSplitText(t, b)}`, late ? 'ld-crit' : null),
-    kpi('onTime', countText(t.onTime), `devices with no delay · ${pctText(t.pctOnTime)} on time`, 'ld-ok'),
-    kpi('pct', pctText(t.pctOnTime), [h('span', 'without delay'),
-      h('span.ld-small', `${pctText(t.pctLate)} delayed · ${pctText(t.pctSilent)} silent · ${pctText(t.pctUnmeasured)} can’t measure`,
-        finite(t.otherTz) && t.otherTz ? ` · ${countText(t.otherTz)} in another time zone` : '')], 'ld-ok'),
+    kpi('devices', n(t.devices), none ? 'never measured' : 'total devices'),
+    kpi('late', n(late), none ? 'never measured' : `devices with delay at the last run · ${lateSplitText(t, b)}`, late && !none ? 'ld-crit' : null),
+    kpi('onTime', n(nd.count), none ? 'never measured' : [h('span', 'No delay'), h('span.ld-small', noDelaySplit(nd, { counts: true }))], none ? null : 'ld-ok'),
+    kpi('pct', shareText(pc.noDelay), [h('span', 'No delay'),
+      h('span.ld-small', nd.pct ? `${noDelaySplit(nd)} · ${shareText(pc.late)} delayed` : `no percentage: ${nd.why}`,
+        nd.pct && nd.of ? ` · ${noDelayOfText(nd)}` : '',
+        !none && finite(t.otherTz) && t.otherTz ? ` · ${countText(t.otherTz)} in another time zone` : '')], nd.pct ? 'ld-ok' : null),
     h('div.ld-kpi.ld-wide', { dataset: { kpi: 'reduced' } },
       h('span', `Delay reduced · devices back under ${back} in the last`),
       h('div.ld-reduced#ld-sum-reduced', { role: 'img', 'aria-label': `Devices back under ${back}: ${red.map((r) => `${r.n === null ? 'not known' : r.n} in the last ${r.label}`).join(', ')}` },
@@ -79,10 +85,10 @@ function dayCard(daysRes, win, b, pending) {
   const chart = h('div.ld-chart.ld-sum-days',
     h('div.ld-days#ld-sum-days', { role: 'img', 'aria-label': `Devices per day, ${covered}: between ${Math.min(...late)} and ${Math.max(...late)} delayed`, style: { height: `${H}px` } },
       ...bars.map((x, i) => h(`span.ld-day${x.gap ? '.ld-gap' : ''}`, { title: dayTitle(list[i], b), dataset: { day: x.day || '' } },
-        seg(x.ok, C.ok, 'ok'), seg(x.tz, C.tz, 'tz'), seg(x.unk, C.silent, 'unknown'), seg(x.delay, C.delay, 'delay'), seg(x.critical, C.crit, 'critical')))),
+        seg(x.ok, C.ok, 'ok'), seg(x.tz, C.tz, 'tz'), seg(x.delay, C.delay, 'delay'), seg(x.critical, C.crit, 'critical')))),
     h('div.ld-ticks#ld-sum-ticks', ...ticks.map((t) => h('span', t))));
   return card('Day by day', sub, chart,
-    [legend(key(C.ok, b.below), key(C.delay, b.mid), key(C.crit, b.high), anyTz ? key(C.tz, 'Other time zone') : null, key(C.silent, 'Silent or can’t measure'))]);
+    [legend(key(C.ok, 'No delay (silent and can’t measure included)'), key(C.delay, b.mid), key(C.crit, b.high), anyTz ? key(C.tz, 'Other time zone') : null)]);
 }
 
 /**
@@ -95,8 +101,10 @@ function ring(o) {
   const known = arcs !== null && finite(o.pct);
   const alert = known && ringAlert(o.pct);
   const arcColour = (kind) => (alert ? (kind === 'critical' ? RED : RED_SOFT) : kind === 'critical' ? C.crit : C.delay);
+  const nd = o.nd;
   const title = o.never ? `${o.name}: ${LD_NEVER_MEASURED}`
-    : known ? `${o.name}: ${countText(o.late)} of ${countText(o.devices)} devices delayed (${pctText(o.pct)}) · opens ${o.all ? 'Dashboard' : 'the cluster'}`
+    : o.why ? `${o.name}: no percentage — ${o.why}`
+    : known ? `${o.name}: ${countText(o.late)} of ${countText(o.devices)} devices delayed (${shareText(o.pct)})${nd && nd.pct ? ` · No delay ${shareText(nd.pct.noDelay)} (${noDelaySplit(nd)})` : ''} · opens ${o.all ? 'Dashboard' : 'the cluster'}`
       : `${o.name}: no device measured`;
   const circle = (stroke, extra = {}) => svg('circle', { cx: 21, cy: 21, r: 15.915, fill: 'none', stroke, 'stroke-width': 5, ...extra });
   return h(`a.ld-ring${o.all ? '.ld-all' : ''}`, { href: o.href, title: alert ? `${title} · above ${LD_RING_RED_PCT} % delayed` : title, dataset: { ring: o.all ? 'all' : o.id, known: String(known), alert: String(alert) } },
@@ -104,9 +112,9 @@ function ring(o) {
       svg('svg', { width: 84, height: 84, viewBox: '0 0 42 42', role: 'img', 'aria-label': title },
         circle('var(--surface-3)'),
         ...(arcs || []).map((a) => circle(arcColour(a.kind), { class: `ld-arc ld-arc-${a.kind}`, 'stroke-dasharray': a.dash, 'stroke-dashoffset': a.offset }))),
-      h('span.ld-ring-mid', h('b', known ? pctText(o.pct) : '—'), h('span', known ? 'delayed' : 'not measured'))),
+      h('span.ld-ring-mid', h('b', known ? shareText(o.pct) : '—'), h('span', known ? 'delayed' : 'not measured'))),
     h('span.ld-ring-name', o.name),
-    h('span.ld-ring-sub', o.never ? 'never measured' : known ? [h('b', countText(o.late)), ` of ${countText(o.devices)} devices`] : 'no device measured'));
+    h('span.ld-ring-sub', o.never ? 'never measured' : known ? [h('b', countText(o.late)), ` of ${countText(o.devices)} devices`] : o.why ? 'last run failed' : 'no device measured'));
 }
 
 /** Delayed devices by cluster: All clusters first (when every cluster is in view), then each cluster worst first. */
@@ -116,15 +124,15 @@ function ringsCard(res, b, clusterId, nameOf) {
   const rings = [];
   if (!clusterId) {
     rings.push(ring({ all: true, name: 'All clusters', href: ldHash('fleet'), delay: t.delay, critical: t.critical, devices: t.devices,
-      late: finite(t.late) ? t.late : late(t.delay, t.critical), pct: t.pctLate, never: false }));
+      late: finite(t.late) ? t.late : late(t.delay, t.critical), pct: t.pctLate, nd: noDelayOf(t), why: '', never: (res.byCluster || []).length > 0 && res.byCluster.every(never) }));
   }
   for (const c of ringsOrder(res.byCluster)) {
     rings.push(ring({ id: c.id, name: c.name || nameOf(c.id), href: ldHash('cluster', c.id), delay: c.delay, critical: c.critical, devices: c.devices,
-      late: finite(c.lateNow) ? c.lateNow : late(c.delay, c.critical), pct: c.latePct, never: never(c) }));
+      late: finite(c.lateNow) ? c.lateNow : late(c.delay, c.critical), pct: c.latePct, nd: noDelayOf(c), why: !never(c) && c.notMeasured ? c.notMeasured : '', never: never(c) }));
   }
-  return card('Delayed devices by cluster', `share of each cluster’s devices at ${b.late} now · worst first · a ring opens the cluster`,
+  return card('Delayed devices by cluster', `share of each cluster’s devices at ${b.late} at its last run · worst first · a ring opens the cluster`,
     rings.length ? h('div.ld-rings#ld-rings', ...rings) : empty('No cluster you can see is measured.'),
-    [legend(key(C.crit, b.high), key(C.delay, b.mid), key('var(--surface-3)', 'not delayed now'), key(RED, `Above ${LD_RING_RED_PCT} % delayed`))]);
+    [legend(key(C.crit, b.high), key(C.delay, b.mid), key('var(--surface-3)', 'no delay, or another time zone'), key(RED, `Above ${LD_RING_RED_PCT} % delayed`))]);
 }
 
 /**
