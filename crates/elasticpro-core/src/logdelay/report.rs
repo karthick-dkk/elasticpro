@@ -1105,7 +1105,7 @@ mod tests {
         let opts = Options::default();
         let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &[], options: &opts, extras: &[], app_url: None };
         let b = build(&i).unwrap();
-        assert!(b.text.contains("5000 devices read, list cut at 5000") && b.text.contains("New · no percentage · late 0 (0 critical) · never measured"), "{}", b.text);
+        assert!(b.text.contains("5000 devices read, list cut at 5000") && b.text.contains("New · no percentage · late not known · never measured"), "{}", b.text);
         assert!(b.text.contains("1 of 2 clusters; the others were not measured") && !b.text.contains("30–60 min"), "{}", b.text);
         assert!(b.html.contains("never measured"));
         let parts = crate::report::zip::read(b.xlsx.as_ref().unwrap()).unwrap();

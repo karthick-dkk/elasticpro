@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(m(json!({ "value": 1024, "days": 23, "daysMeasured": 9, "todayValue": null })), "1.00 KB (9 of 23 finished days measured)");
         assert_eq!(m(json!({ "value": null, "days": 23, "daysMeasured": 0, "todayValue": null })), "not measured (0 of 23 finished days measured)");
         assert!(m(json!({ "value": 1024, "days": 23, "daysMeasured": 9, "notFinal": 1, "todayValue": 7, "asOf": 1 })).starts_with("1.00 KB (9 of 23 finished days measured, 1 not final; today so far 7 B, read 1970"));
-        assert!(m(json!({ "value": null, "days": 23, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 23 finished days measured; today 1.00 KB, read 1970"));
+        assert!(m(json!({ "value": null, "days": 23, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 23 finished days measured; today so far 1.00 KB, read 1970"));
         assert!(m(json!({ "value": null, "days": 0, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 0 finished days measured; today so far 1.00 KB, read 1970"));
     }
 
@@ -842,7 +842,7 @@ mod tests {
         let today = parse_day("2026-10-29").unwrap();
         let files = csv_files(&d, &period(), today);
         let monthly = String::from_utf8(files[1].data.clone()).unwrap();
-        assert_eq!(monthly.lines().nth(1).unwrap(), "prod/eu,2026-10,2,1073742024,536871012,2026-10-20,1073741824,20,,0,2026-10-19,2026-10-20,2,1,0,2",
+        assert_eq!(monthly.lines().nth(1).unwrap(), "prod/eu,2026-10,2,1073742024,536871012,2026-10-20,1073741824,20,,0,2026-10-19,2026-10-20,2,1,0,2,0",
                    "avg and peak primary, not the event-bytes basis");
         let sheets = sheets(&d, &period(), &layouts(), today, &["monthly".into()], false);
         let head: Vec<String> = sheets[0].rows[0].iter().map(text).collect();
