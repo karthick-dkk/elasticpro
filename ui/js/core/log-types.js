@@ -18,13 +18,13 @@ export const NO_LOG_TYPE = '(no log type)';
 /** The most lines the device graph draws at once; the rest wait behind "+N". */
 export const LINES_MAX = 6;
 /**
- * The lines' colours: the categorical chart tokens (blue, orange, pink, green, teal, sky) — what a
- * series is, never how bad it is: red and yellow are the states'. A line keeps its slot while it
- * is drawn. The last two are dashed too, so six lines never rest on the hue alone.
+ * The lines' colours: the categorical chart tokens (blue, orange, pink, green, teal, a deep blue) —
+ * what a series is, never how bad it is: red and yellow are the states'. A line keeps its slot while
+ * it is drawn. The last two are dashed too, so six lines never rest on the hue alone.
  */
-export const LINE_COLOURS = Object.freeze(['--series-1', '--series-2', '--series-4', '--series-3', '--series-6', '--series-7']);
+export const LINE_COLOURS = Object.freeze(['var(--series-1)', 'var(--series-2)', 'var(--series-4)', 'var(--series-3)', 'var(--series-6)', 'color-mix(in srgb, var(--series-1) 45%, var(--text-primary))']);
 export const LINE_DASHES = Object.freeze(['', '', '', '', '6 3', '2 3']);
-export const lineColour = (slot) => `var(${LINE_COLOURS[slot % LINE_COLOURS.length]})`;
+export const lineColour = (slot) => LINE_COLOURS[slot % LINE_COLOURS.length];
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -152,10 +152,13 @@ export function seriesGraph(list, opts = {}) {
     const g = deviceGraph(s.points, { ...opts, fromMs: base.lo, toMs: base.hi, scaleMax: base.scaleMax });
     return { key: typeKey(s), label: typeLabel(s), segments: g.segments, dots: g.dots };
   });
-  const times = [...new Set(all.filter((p) => p && finite(p.t) && p.t >= base.lo && p.t <= base.hi).map((p) => p.t))].sort((a, b) => a - b);
+  const times = [];
+  for (const t of all.filter((p) => p && finite(p.t) && p.t >= base.lo && p.t <= base.hi).map((p) => p.t).sort((a, b) => a - b)) if (!times.length || t - times[times.length - 1] > SAME_RUN_MS) times.push(t);
   return { scaleMax: base.scaleMax, X: base.X, Y: base.Y, lo: base.lo, hi: base.hi, lines, times };
 }
 
+/** Points this close are one measurement's. */
+export const SAME_RUN_MS = 60000;
 /** One point in words: "46 min", "no logs", "can't measure"; no point at that measurement: "not measured". */
 export function pointText(p) {
   if (!p) return 'not measured';
@@ -164,7 +167,7 @@ export function pointText(p) {
 }
 /** Every drawn log type's delay at measurement `t`, in the legend's order: `[{key, label, text}]`. */
 export function delaysAt(list, t) {
-  return (list || []).map((s) => ({ key: typeKey(s), label: typeLabel(s), text: pointText((s.points || []).find((p) => p && p.t === t)) }));
+  return (list || []).map((s) => ({ key: typeKey(s), label: typeLabel(s), text: pointText((s.points || []).find((p) => p && Math.abs(p.t - t) <= SAME_RUN_MS)) }));
 }
 /** The hover's line: "threat 46 min · traffic 2 min · system 1 min". */
 export const delaysAtText = (list, t) => delaysAt(list, t).map((x) => `${x.label} ${x.text}`).join(' · ');

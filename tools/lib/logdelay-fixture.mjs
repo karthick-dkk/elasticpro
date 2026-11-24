@@ -9,6 +9,12 @@
  * `clusters` is [{id, name}] (the fixture's). Deterministic: the same inputs give the same rows.
  * It includes the cases the pages must not get wrong: a silent device, one that can't be
  * measured, a cluster never measured, and days without totals (null in the sparkline).
+ *
+ * Log types (0.3.90, knobs.logTypes): the first cluster has them (log_type.keyword), the second has
+ * no log_type in its mapping, any other has log_type. A device with 1 of 3 late, 2 of 3 late, all
+ * late, exactly one, more than six, more than twenty, a type with no logs, a stale one, documents
+ * without the field beside a real value of that text, and a type that looks like HTML. Off: the
+ * answers of a core before 0.3.90, with none of it.
  */
 
 const DAY = 86400000;
@@ -30,6 +36,86 @@ export function timeZoneOf(ci, now) {
 }
 
 const ymd = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+/** The log type field of the cluster at position `ci`: `{logTypeField, logTypeWhy}`; nothing for an older core. */
+const typeFieldOf = (ci) => (!knobs.logTypes ? {} : ci === 1 ? { logTypeField: null, logTypeWhy: 'log_type is not in the mapping' } : { logTypeField: ci === 0 ? 'log_type.keyword' : 'log_type', logTypeWhy: null });
+export const NO_TYPE = '(no log type)';
+/**
+ * Device `i`'s log types, worst first: `[name, state, minutes|null, {noType, stale}]`. Null: the
+ * device was never read with log types.
+ */
+function typesOfDevice(i) {
+  if (i === 0) return [['threat', 'critical', 94], ['traffic', 'critical', 71]];
+  if (i === 1) return [['syslog', 'delay', 44]];
+  if (i === 2) return [['traffic', 'silent', null], ['system', 'silent', null]];
+  if (i === 3) return null;
+  if (i === 6) return [['threat', 'delay', 46], ['traffic', 'no_delay', 2], ['system', 'no_delay', 1]];
+  if (i === 7) return [['audit', 'critical', 95], ['security', 'delay', 41], [NO_TYPE, 'no_delay', 3, { noType: true }]];
+  if (i === 8) return [['web', 'delay', 38], ...['dns', 'dhcp', 'vpn', 'auth', 'system', 'url', 'wildfire'].map((x, k) => [x, 'no_delay', 1 + k])];
+  if (i === 9) return Array.from({ length: 20 }, (_, k) => [`app-${String(k + 1).padStart(2, '0')}`, 'no_delay', 1 + (k % 5)]);
+  if (i === 10) return [['traffic', 'no_delay', 2], ['web', 'delay', 52, { stale: true }], ['audit', 'silent', null]];
+  if (i === 11) return [['<b>evil</b>', 'delay', 52], [NO_TYPE, 'no_delay', 2], [NO_TYPE, 'no_delay', 4, { noType: true }]];
+  return [['traffic', 'no_delay', 2], ['system', 'no_delay', 1]];
+}
+/** A row's `types` and, where its log types decide it, its state — the contract's rule. */
+function withTypesOf(row, ci, i) {
+  const f = typeFieldOf(ci);
+  if (f.logTypeField === undefined) return row;
+  const list = f.logTypeField === null ? null : typesOfDevice(i);
+  if (!list) return { ...row, types: null, partLateMs: null };
+  const fresh = list.filter(([, , m, o]) => m !== null && !(o && o.stale));
+  const late = fresh.filter(([, s]) => s === 'delay' || s === 'critical');
+  const label = ([n, , , o]) => (n === NO_TYPE && !(o && o.noType) ? `“${n}”` : n);
+  const part = late.length > 0 && late.length < fresh.length;
+  return { ...row, types: { total: list.length, measured: fresh.length, late: late.length, lateNames: late.map(label), truncated: list.length >= 20 }, partLateMs: part ? 130 * 60000 : 0,
+    ...(part ? { state: 'part_delay', stateText: `${late.length} of ${list.length} log types late: ${late.map(label).join(', ')}`, lateMs: 0 } : {}) };
+}
+const isLateState = (s) => s === 'delay' || s === 'critical';
+/** byLogType over rows `[{row, i, ci}]` of the clusters with the field, worst first. */
+function byLogTypeOf(items) {
+  const by = new Map();
+  for (const { row, i, ci } of items) {
+    if (!row.types || typeFieldOf(ci).logTypeField == null) continue;
+    for (const [name, s, m, o] of typesOfDevice(i) || []) {
+      const noType = !!(o && o.noType); const k = `${noType}|${name}`;
+      const e = by.get(k) || { logType: name, noType, devices: 0, late: 0, above: 0, silent: 0, worstMinutes: null };
+      e.devices += 1;
+      if (isLateState(s) && !(o && o.stale)) e.late += 1;
+      if (s === 'critical' && !(o && o.stale)) e.above += 1;
+      if (s === 'silent') e.silent += 1;
+      if (m !== null && !(o && o.stale) && (e.worstMinutes === null || m > e.worstMinutes)) e.worstMinutes = m;
+      by.set(k, e);
+    }
+  }
+  return [...by.values()].sort((a, b) => b.late - a.late || (b.worstMinutes ?? -1) - (a.worstMinutes ?? -1) || a.logType.localeCompare(b.logType));
+}
+/** LOGDELAY_DEVICE `series[]` of device `i`: each type's points on the device's measurement times, its delays, its newest document. */
+function seriesOf(r, i, ci, now, start) {
+  const f = typeFieldOf(ci);
+  if (f.logTypeField === undefined) return {};
+  const list = f.logTypeField === null ? null : typesOfDevice(i);
+  if (!list) return { series: [], seriesWhy: f.logTypeWhy || 'before log types were measured', types: null, partLateMs: null };
+  const step = 2 * 3600000;
+  const series = list.map(([logType, s, m, o], k) => {
+    const stale = !!(o && o.stale); const noType = !!(o && o.noType);
+    const until = stale ? now - 3 * 3600000 : now - 60000;
+    const points = [];
+    const first = Math.max(start, now - 8 * DAY);
+    for (let t = first; t < until - step / 2; t += step) {
+      const n = Math.round((t - first) / step);
+      const v = s === 'silent' && t > now - 6 * 3600000 ? null : isLateState(s) && n % 12 > 8 ? (m || 40) - 4 : 1 + ((n * 3 + k) % 6);
+      points.push({ t, m: v, s: v === null ? 'silent' : v > 60 ? 'critical' : v >= 30 ? 'delay' : 'no_delay' });
+    }
+    points.push({ t: until, m, s });
+    const openFor = Math.min(3 * 3600000, (now - new Date(now).setHours(0, 0, 0, 0)) / 2);
+    const episodes = isLateState(s) ? [
+      { started: now - openFor, solved: null, lastedMs: openFor, worstMinutes: m, worstState: s, lastMinutes: m, lastState: s, measurements: 2, pattern: null, extras: r.extras },
+      { started: now - DAY - 4 * 3600000, solved: now - DAY, lastedMs: 4 * 3600000, worstMinutes: m + 5, worstState: s, lastMinutes: 3, lastState: 'no_delay', measurements: 2, pattern: null, extras: r.extras }] : [];
+    return { logType, noType, state: s, stateText: s === 'silent' ? 'no logs' : s, delayMinutes: m, rawGap: m, eventField: 'event_created', lastArrival: s === 'silent' ? now - 6 * 3600000 : until - 60000, lastEvent: m === null ? null : until - 60000 - m * 60000,
+      docs: s === 'silent' ? 0 : 1200 - k * 10, episodes, points, lateMs: isLateState(s) ? 7 * 3600000 : 0, lastMeasuredMs: m === null ? now - 6 * 3600000 : until, stale };
+  });
+  return { series, seriesWhy: null, types: r.types, partLateMs: r.partLateMs };
+}
 
 function devicesOf(c, ci, now) {
   const kinds = [['fw', 'firewall'], ['proxy', 'proxy'], ['sw', 'switch'], ['app', 'app'], ['lb', 'loadbalancer'], ['dns', 'dns']];
@@ -54,7 +140,7 @@ function devicesOf(c, ci, now) {
     const late = state === 'critical' || state === 'delay';
     const episodes = late ? 5 - ci : seed % 3;
     const extras = { tag1: tag, fwd_tag: `syslog-${c.id.slice(0, 4)}-0${(i % 3) + 1}`, parser_tag: i % 2 ? 'fortigate-grok' : 'generic-json', Zone: state === 'other_tz' ? 'SG' : `dc${(i % 2) + 1}` };
-    out.push({
+    out.push(withTypesOf({
       device, cluster: c.id, clusterName: c.name, state, nowMinutes, zone: extras.Zone, tag1: extras.tag1, inLastRun: state !== 'silent',
       rawGapMinutes, tzOffsetMinutes: nowMinutes === null ? null : tzOffsetMinutes, deviceTzOffset: nowMinutes === null ? null : deviceTzOffset, clusterTzOffset,
       medianMinutes: state === 'unmeasured' ? null : 3 + (seed % 5), maxMinutes: late ? 212 - i * 20 : 20 + seed,
@@ -67,7 +153,7 @@ function devicesOf(c, ci, now) {
       lastEvent: state === 'unmeasured' ? null : now - 20 * 60000 - (nowMinutes || 0) * 60000,
       silentSince: state === 'silent' ? now - 5 * 3600000 : null,
       extras,
-    });
+    }, ci, i));
   }
   return out;
 }
@@ -79,8 +165,9 @@ function daysOf(n, now, ci, devices) {
     if (k === 9 || (ci === 1 && k === 4)) { out.push({ day, devices: 0, onTime: 0, little: 0, delayed: 0, critical: 0, clockAhead: 0, silent: 0, unmeasured: 0, started: 0, solved: 0, lateHours: 0, medianMinutes: null, measured: 0, complete: true, onTimeAll: 0, late: 0 }); continue; }
     const delayed = 1 + ((k * 7 + ci * 3) % 4); const critical = (k * 5 + ci) % 3;
     const silent = k % 4 === 0 ? 1 : 0;
-    const onTimeAll = devices - delayed - critical - silent;
-    out.push({ day, devices, onTime: onTimeAll, little: 0, delayed, critical, clockAhead: 0, otherTz: ci === 0 ? 1 : 0, silent, unmeasured: 0, started: (k % 3), solved: (k % 2),
+    const part = typeFieldOf(ci).logTypeField ? 1 + (k % 2) : 0;
+    const onTimeAll = devices - delayed - critical - silent - part;
+    out.push({ ...(knobs.logTypes ? { partDelayed: part } : {}), day, devices, onTime: onTimeAll, little: 0, delayed, critical, clockAhead: 0, otherTz: ci === 0 ? 1 : 0, silent, unmeasured: 0, started: (k % 3), solved: (k % 2),
       lateHours: delayed * 1.5, medianMinutes: 4.1, measured: devices - silent, complete: k > 0, onTimeAll, late: delayed + critical });
   }
   return out;
@@ -88,11 +175,15 @@ function daysOf(n, now, ci, devices) {
 
 function totalsOf(rows) {
   const t = { devices: rows.length, measured: 0, onTime: 0, noDelay: 0, little: 0, delay: 0, critical: 0, clockAhead: 0, otherTz: 0, silent: 0, lateBeforeSilent: 0, unmeasured: 0, cantMeasure: 0 };
+  let part = 0; const lt = { total: 0, late: 0 };
   for (const r of rows) {
     if (r.state === 'no_delay') t.onTime++; else if (r.state === 'little') t.little++; else if (r.state === 'delay') t.delay++;
     else if (r.state === 'critical') t.critical++; else if (r.state === 'clock_ahead') t.clockAhead++; else if (r.state === 'other_tz') t.otherTz++;
+    else if (r.state === 'part_delay') part++;
     else if (r.state === 'silent') { t.silent++; if (r.lateSince) t.lateBeforeSilent++; } else t.unmeasured++;
+    if (r.types) { lt.total += r.types.total; lt.late += r.types.late; }
   }
+  if (knobs.logTypes) { t.partDelayed = part; t.logTypes = { ...lt, above: Math.min(lt.late, t.critical) }; }
   t.onTime += t.little;
   t.cantMeasure = t.unmeasured + t.clockAhead;
   // The owner's No delay (0.3.89): on time + silent + can't measure.
@@ -100,14 +191,14 @@ function totalsOf(rows) {
   t.late = t.delay + t.critical;
   t.measured = t.devices - t.silent - t.cantMeasure;
   // Shares in tenths of a percent that add up to 100.0 (largest remainder), as the core's.
-  const parts = [t.onTime, t.silent, t.unmeasured, t.clockAhead, t.delay, t.critical, t.otherTz];
+  const parts = [t.onTime, t.silent, t.unmeasured, t.clockAhead, t.delay, t.critical, t.otherTz, part];
   const p = parts.map((n) => (t.devices ? Math.floor((n * 1000) / t.devices) : null));
   if (t.devices) {
     let left = 1000 - p.reduce((a, n) => a + n, 0);
     for (const [, i] of parts.map((n, i) => [(n * 1000) % t.devices, i]).sort((a, b) => b[0] - a[0] || a[1] - b[1])) { if (left-- <= 0) break; p[i] += 1; }
   }
   const of = (...ix) => (t.devices ? ix.reduce((a, i) => a + p[i], 0) / 10 : null);
-  return { ...t, pctNoDelay: of(0, 1, 2, 3), pctOnTime: of(0), pctSilent: of(1), pctUnmeasured: of(2), pctCantMeasure: of(2, 3), pctLate: of(4, 5), pctOtherTz: of(6) };
+  return { ...t, pctNoDelay: of(0, 1, 2, 3), pctOnTime: of(0), pctSilent: of(1), pctUnmeasured: of(2), pctCantMeasure: of(2, 3), pctLate: of(4, 5), pctOtherTz: of(6), ...(knobs.logTypes ? { pctPartDelayed: of(7) } : {}) };
 }
 
 function sumDays(lists) {
@@ -115,6 +206,7 @@ function sumDays(lists) {
   for (const l of lists) for (const d of l) {
     const a = by.get(d.day) || { day: d.day, devices: 0, onTime: 0, little: 0, delayed: 0, critical: 0, clockAhead: 0, otherTz: 0, silent: 0, unmeasured: 0, started: 0, solved: 0, lateHours: 0, medianMinutes: null, measured: 0, complete: d.complete, onTimeAll: 0, late: 0 };
     for (const k of ['devices', 'onTime', 'little', 'delayed', 'critical', 'clockAhead', 'otherTz', 'silent', 'unmeasured', 'started', 'solved', 'lateHours', 'measured', 'onTimeAll', 'late']) a[k] += d[k] || 0;
+    if (d.partDelayed !== undefined) a.partDelayed = (a.partDelayed || 0) + d.partDelayed;
     by.set(d.day, a);
   }
   return [...by.values()];
@@ -183,8 +275,8 @@ export function logDelayData(clusters, now = Date.now()) {
   return { measured, per, never: clusters.length > 1 ? clusters.slice(-1) : [] };
 }
 
-/** What a test turns: how long ago the scheduled run last ran (the Log Delay window note). */
-export const knobs = { lastRunAgoMs: 4 * 60000, zonesUnknown: false };
+/** What a test turns: how long ago the scheduled run last ran (the Log Delay window note); whether the core measures log types (0.3.90). */
+export const knobs = { lastRunAgoMs: 4 * 60000, zonesUnknown: false, logTypes: true };
 
 export function logDelayAnswer(body, clusters, now = Date.now()) {
   const t = String((body && body.type) || '');
@@ -210,6 +302,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
         yesterdayWindow: { from: now - DAY, to: now - DAY + 7200000, label: 'yesterday', measured: true, lateAt: Math.max(0, tt.late - 1), criticalAt: 0 },
         otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now), notMeasured: null, stale: false,
         ...Object.fromEntries(['onTime', 'noDelay', 'cantMeasure', 'clockAhead', 'lateBeforeSilent', 'pctNoDelay', 'pctOnTime', 'pctSilent', 'pctUnmeasured', 'pctCantMeasure', 'pctLate', 'pctOtherTz'].map((k) => [k, tt[k]])),
+        ...typeFieldOf(p.ci), ...(knobs.logTypes ? { partDelayed: tt.partDelayed, pctPartDelayed: tt.pctPartDelayed, logTypes: tt.logTypes } : {}),
         below: tt.noDelay, belowPct: tt.pctNoDelay, latePct: tt.pctLate,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),
         worst: { device: p.rows[0].device, minutes: p.rows[0].nowMinutes, state: 'critical' }, levels: LEVELS, lastRunAt: now - knobs.lastRunAgoMs,
@@ -239,7 +332,8 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
     }
     return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - knobs.lastRunAgoMs, lastRead: lastRead(p.rows, now, p.ci), timeZone: timeZoneOf(p.ci, now),
       counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now, p.ci) },
-      totals: totalsOf(p.rows), started: 7, solved: 5, fixes: FINDINGS(p.c, p.rows),
+      totals: totalsOf(p.rows), started: 7, solved: 5, fixes: FINDINGS(p.c, p.rows), ...typeFieldOf(p.ci),
+      ...(knobs.logTypes ? { byLogType: byLogTypeOf(p.rows.map((row, i) => ({ row, i, ci: p.ci }))) } : {}),
       medianNow: 5.1, medianPrevious: 4.2, windows: windowsOf(now, p.ci, totalsOf(p.rows).late), days: daysOf(n, now, p.ci, p.rows.length), devices: withFix(p) };
   }
   if (t === 'LOGDELAY_DEVICE') {
@@ -270,6 +364,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       medianMinutes: r.medianMinutes, worst: { minutes: 212, at: now - 19 * DAY + 5 * 3600000 }, episodes: periods.length, solved: periods.filter((x) => x.solved).length,
       lateMs: r.lateMs, latePct: 2.6, docsPerDay: r.docsPerDay, lastSilence: now - 8 * DAY, extras: r.extras, zone: r.zone, tag1: r.tag1, inLastRun: r.inLastRun, lastArrival: r.lastArrival, lastEvent: r.lastEvent, firstSeen: now - 40 * DAY,
       timeZone: timeZoneOf(p.ci, now), rawGapMinutes: r.rawGapMinutes, tzOffsetMinutes: r.tzOffsetMinutes, deviceTzOffset: r.deviceTzOffset, clusterTzOffset: r.clusterTzOffset,
+      ...seriesOf(r, p.rows.indexOf(r), p.ci, now, start), ...typeFieldOf(p.ci),
       points, periods, silences: [{ from: now - 8 * DAY, to: now - 8 * DAY + 40 * 60000, burstDocs: 6800, burstMinutes: 90 }],
       insights: { peak: { minutes: 212, at: now - 19 * DAY + 5 * 3600000 }, average: { minutes: 9, measurements: points.length },
         longest: { lastedMs: 10.5 * 3600000, started: now - 19 * DAY, solved: now - 19 * DAY + 10.5 * 3600000 }, solvedIn: { averageMs: 7 * 3600000, solved: 2 },
@@ -283,7 +378,8 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
     const name = String(body.name || '').toLowerCase();
     const re = body.value ? new RegExp(`^${String(body.value).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i') : null;
     const rows = sel.flatMap((p) => p.rows).filter((r) => (!name || r.device.toLowerCase().includes(name))
-      && (!re || re.test(['device', 'src_hostname', 'src_device'].includes(body.field) || !body.field ? r.device : String(r.extras[body.field] ?? ''))));
+      && (!re || re.test(['device', 'src_hostname', 'src_device'].includes(body.field) || !body.field ? r.device : body.field === 'log_type' ? '' : String(r.extras[body.field] ?? ''))
+        || (body.field === 'log_type' && (typesOfDevice(Number(r.device.slice(-2)) - 1) || []).some(([n]) => re.test(n)))));
     return { ok: true, matches: rows.length, truncated: false, clusters: [...new Set(rows.map((r) => r.cluster))], devices: rows.slice(0, body.max || 50), from, to };
   }
   if (t === 'LOGDELAY_FIXES') {

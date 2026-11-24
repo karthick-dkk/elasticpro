@@ -490,7 +490,7 @@ label.field > select { text-overflow: ellipsis; }
    old edges, a third of the status FILL colour, did no better: a grey "silent" pill on navy was
    a word floating in space. The ink edge clears 3:1 on a card, a hovered row and a chosen row. */
 .pill.green, .pill.yellow, .pill.orange, .pill.high, .pill.red, .pill.grey, .pill.blue,
-.pill.ld-ok, .pill.ld-delay, .pill.ld-crit, .pill.ld-tz {
+.pill.ld-ok, .pill.ld-delay, .pill.ld-crit, .pill.ld-tz, .pill.ld-part {
   border-color: color-mix(in srgb, currentColor 75%, transparent);
 }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
@@ -1987,6 +1987,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-pill { display: inline-block; font-size: .8em; padding: .05em .55em; border-radius: 1em; border: 1px solid currentColor; white-space: nowrap; }
 .pl-pill.green { color: var(--tv-green); }
 .pl-pill.yellow, .pl-pill.orange { color: var(--tv-yellow); }
+.pl-pill.part { color: var(--tv-yellow); border-style: dashed; }
 .pl-pill.red { color: var(--tv-red); }
 .pl-pill.grey { color: var(--tv-muted); }
 .pl-pill.blue { color: var(--tv-blue); }
@@ -2860,6 +2861,8 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-kpis { display: grid; gap: 8px; }
 .ld-kpis.ld-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .ld-kpis.ld-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.ld-kpis.ld-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+@media (max-width: 1180px) { .ld-kpis.ld-7 { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 1180px) { .ld-kpis.ld-6, .ld-kpis.ld-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .ld-kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ld-kpi > b { font-size: 20px; font-weight: 650; line-height: 1.2; font-variant-numeric: tabular-nums; }
@@ -3022,6 +3025,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-dbar { display: inline-block; vertical-align: middle; width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-right: 8px; }
 .ld-dbar i { display: block; height: 100%; border-radius: 3px; background: var(--state-ok); }
 .ld-dbar[data-state="delay"] i { background: var(--state-late); }
+.ld-dbar[data-state="part_delay"] i { background: color-mix(in srgb, var(--state-late) 38%, var(--surface-1)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink)); }
 .ld-dbar[data-state="critical"] i { background: var(--state-crit); }
 .ld-dbar[data-state="clock_ahead"] i { background: var(--ld-silent); }
 .ld-dbar[data-state="other_tz"] i { background: var(--ld-tz); }
@@ -3252,6 +3256,7 @@ tr.jb-focus td { background: var(--accent-soft); }
   --ld-tz: #a77fd6; --ld-silent: #9aa1ab;
   --ld-tz-bg: color-mix(in srgb, var(--ld-tz) 28%, var(--surface-1)); --ld-tz-ink: color-mix(in srgb, var(--ld-tz) 35%, var(--text-primary));
   --ld-silent-ink: color-mix(in srgb, var(--ld-silent) 35%, var(--text-primary));
+  --ld-part: color-mix(in srgb, var(--state-late) 38%, var(--surface-1));
 }
 /* Dark themes: the same fills (the violet a shade lighter so it stands off a dark surface); -bg and -ink follow from them. */
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ld-tz: #b994ec; --ld-silent: #7a828d; } }
@@ -3261,6 +3266,27 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld .pill.ld-delay { color: var(--state-late-on); background: var(--state-late-pill); }
 .ld .pill.ld-crit { color: var(--state-crit-on); background: var(--state-crit-pill); }
 .ld .pill.ld-tz { color: var(--ld-tz-ink); background: var(--ld-tz-bg); }
+/* Part delayed (0.3.90): some of a device's log types late — a yellow outline, no ground, so never read as delayed. */
+.pill.ld-part { color: var(--state-late-ink); background: transparent; }
+.pill.ld-pill.ld-part { border-color: color-mix(in srgb, var(--state-late) 50%, var(--state-late-ink)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--state-late) 50%, var(--state-late-ink)); }
+.ld-part-fill { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink)); }
+.ld .ld-cl-part, .ld .ld-part-ms { font-weight: 400; white-space: nowrap; }
+.ld td.ld-types-cell, .ld td.ld-type-name { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ld .ld-split-list td.ld-types-cell { max-width: 84px; }
+.ld-type-chips { display: flex; flex-wrap: wrap; gap: 5px 6px; padding-bottom: 4px; }
+.ld-type-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; max-width: 260px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.ld-type-chip[aria-pressed="true"] { background: var(--surface-2); color: var(--text-primary); }
+.ld-type-chip:hover { border-color: var(--accent); }
+.ld-type-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-type-chip-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ld-type-chip b { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ld-line-sw { flex: none; }
+.ld-plot-types { cursor: crosshair; }
+.ld-plot-types:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ld-cursor { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--text-muted); pointer-events: none; }
+.ld-tip-row { display: flex; align-items: center; gap: 6px; }
+.ld-tip-row span { flex: 1; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ld-whole-note { padding-top: 6px; }
 .ld .ld-ok { color: var(--state-ok-ink); }
 .ld .ld-delay { color: var(--state-late-ink); font-weight: 600; }
 .ld .ld-crit { color: var(--state-crit-ink); font-weight: 600; }
@@ -3416,7 +3442,7 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-split-list .ld-dev-bar input[type="search"] { min-width: 0; width: 100%; }
 .ld table.tbl tr.ld-sel td { background: color-mix(in srgb, var(--accent) 12%, var(--surface-1)); }
 @media (max-width: 980px) { .ld-split { grid-template-columns: minmax(0, 1fr); } .ld-kpis.ld-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 520px) { .ld-kpis.ld-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .ld-kpis.ld-5, #ld-fleet-tiles.ld-6, #ld-cl-tiles.ld-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .ld-insights.ld-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 /* Config-Management › Scheduled log delay: three bands from two lines. */
 .ldc-levels.ldc-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }

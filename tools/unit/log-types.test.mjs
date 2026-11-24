@@ -203,7 +203,7 @@ test('the lines: six at most, worst first; a toggled one takes a free slot and t
   assert.equal(more.get('type:t0'), 0); assert.equal(more.get('type:t5'), 5);
   assert.deepEqual([...lt.lineSlots(list.slice(0, 2), more).keys()].sort(), ['type:t0'], 'a series that left is not drawn');
   assert.equal(new Set(lt.LINE_COLOURS).size, lt.LINES_MAX);
-  for (const c of lt.LINE_COLOURS) assert.ok(!['--series-5', '--series-8', '--state-crit', '--state-late'].includes(c), `${c}: never red, yellow or the time-zone violet`);
+  for (const c of lt.LINE_COLOURS) assert.ok(!/--series-[578]|--state-|--ld-/.test(c), `${c}: never red, yellow or the time-zone violet`);
 });
 
 test('seriesGraph: one scale for every line, gaps stay gaps', () => {
