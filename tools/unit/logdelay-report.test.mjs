@@ -277,11 +277,11 @@ test('late grid: each row is shaded on its own scale, its worst window darkest',
 
 test('device filters: the three levels, late, another time zone, silent (can\'t measure too); counts per chip', () => {
   const rows = ['no_delay', 'little', 'clock_ahead', 'delay', 'critical', 'other_tz', 'silent', 'unmeasured'].map((state) => ({ state }));
-  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, noDelay: 5, ok: 2, tz: 1, silent: 3 });
+  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, part: 0, noDelay: 5, ok: 2, tz: 1, silent: 3 });
   assert.ok(R.matchesFilter({ state: 'little' }, 'ok'), 'an old little row is under the line');
   assert.ok(!R.matchesFilter({ state: 'silent' }, 'late'), 'silent is not late: it has no figure');
   assert.ok(R.matchesFilter({ state: 'silent' }, 'all'));
-  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'noDelay', 'ok', 'tz', 'silent']);
+  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'part', 'noDelay', 'ok', 'tz', 'silent']);
 });
 
 test('time zones: a device\'s zone, the filter, the counts behind Expand, the chip\'s words, the By cluster cell', () => {

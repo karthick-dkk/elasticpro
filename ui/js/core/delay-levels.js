@@ -19,6 +19,8 @@
  *   silent       no document for silentAfterHours (only the core knows; never on time)
  *   other_tz     the gap sits steadily at another real UTC offset than the cluster's (only the
  *                core knows the steadiness; not late, counted apart)
+ *   part_delay   a device with two or more log types measured, some late and some on time
+ *                (stateFromTypes, 0.3.90): neither late nor on time, counted apart
  *
  * `m` is the corrected delay: the raw gap with the cluster's log time zone taken out
  * (core/log-tz.js, the core's tz.rs). The zone comes from the core too (`zoneOf`).
@@ -27,17 +29,17 @@
 import { bridge } from './transport.js';
 
 /** The states, worst first where it matters for sorting. */
-export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'little', 'no_delay', 'clock_ahead', 'other_tz', 'silent', 'unmeasured']);
+export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'part_delay', 'little', 'no_delay', 'clock_ahead', 'other_tz', 'silent', 'unmeasured']);
 
 /** A level state in words, as the pages and the mail say it. */
 export const STATE_LABEL = Object.freeze({
-  no_delay: 'on time', little: 'on time', delay: 'delayed', critical: 'critical',
+  no_delay: 'on time', little: 'on time', delay: 'delayed', critical: 'critical', part_delay: 'part delayed',
   clock_ahead: 'clock ahead', other_tz: 'other time zone', silent: 'silent', unmeasured: "can't measure",
 });
 
 /** The Logs page's STATUS names for the core's states (docs/LOGDELAY.md "UI copy to remove"). */
 export const STATUS_OF_STATE = Object.freeze({
-  no_delay: 'OK', little: 'OK', delay: 'DELAYED', critical: 'CRITICAL',
+  no_delay: 'OK', little: 'OK', delay: 'DELAYED', critical: 'CRITICAL', part_delay: 'PART_DELAY',
   clock_ahead: 'CLOCK_AHEAD', other_tz: 'OTHER_TZ', silent: 'NO_DATA', unmeasured: 'ERROR',
 });
 
@@ -72,14 +74,31 @@ export function statusFor(minutes, levels) {
   return s ? STATUS_OF_STATE[s] : 'UNKNOWN';
 }
 
-/** Late = delayed or critical (the contract's one definition). */
+/** Late = delayed or critical (the contract's one definition). A part delayed device is not: only some of its log types are. */
 export const isLate = (state) => state === 'delay' || state === 'critical';
+/** Part delayed: some of the device's log types late, others on time (0.3.90). */
+export const isPart = (state) => state === 'part_delay';
 /** On time in totals = no_delay, little. Silent, unmeasured and clock ahead are neither (they are in No delay, logdelay-report.js noDelayOf). */
 export const isOnTime = (state) => state === 'no_delay' || state === 'little';
 
+/**
+ * A device's state from its log types' states (0.3.90; the core's rule, logdelay/levels.rs): fewer
+ * than two, or none late → `own`, the device's own state as before; some late and some on time →
+ * `part_delay`; every one measured late → the worst of them. A silent or can't-measure log type
+ * is neither late nor on time. A state not known (null: levels unknown) keeps `own`.
+ */
+export function stateFromTypes(states, own) {
+  const list = states || [];
+  if (list.length < 2 || list.some((s) => !s)) return own;
+  const late = list.filter(isLate);
+  if (!late.length) return own;
+  if (list.some(isOnTime)) return 'part_delay';
+  return late.includes('critical') ? 'critical' : 'delay';
+}
+
 /* ------------------------------- what the core said ------------------------------- */
 
-const known = { byCluster: new Map(), zones: new Map(), fleet: null, at: 0, from: '' };
+const known = { byCluster: new Map(), zones: new Map(), types: new Map(), fleet: null, at: 0, from: '' };
 let asking = null;
 
 /** A cluster's `timeZone` as the core says it (docs/LOGDELAY.md "Time zones"), or null. */
@@ -100,12 +119,14 @@ export function rememberLevels(res) {
     if (l && r.id) { known.byCluster.set(String(r.id), l); any = true; }
     const z = zoneFrom(r && r.timeZone);
     if (z && r.id) { known.zones.set(String(r.id), z); any = true; }
+    if (r && r.id && r.logTypeField !== undefined) known.types.set(String(r.id), r.logTypeField);
   }
   if (typeof res.cluster === 'string' && res.cluster) {
     const l = levelsFrom(res.levels);
     if (l) { known.byCluster.set(res.cluster, l); any = true; }
     const z = zoneFrom(res.timeZone);
     if (z) { known.zones.set(res.cluster, z); any = true; }
+    if (res.logTypeField !== undefined) known.types.set(res.cluster, res.logTypeField);
   }
   const fleet = levelsFrom(res.settings && res.settings.levels);
   if (fleet) { known.fleet = fleet; any = true; }
@@ -126,11 +147,19 @@ export function zoneOf(clusterId) {
   return known.zones.get(String(clusterId)) || null;
 }
 
+/**
+ * The log type field a cluster's mapping has, as the core said it (`logTypeField`): its name, null
+ * when the mapping has none, undefined when the core has not said (a core before 0.3.90).
+ */
+export function logTypeFieldOf(clusterId) {
+  return known.types.get(String(clusterId));
+}
+
 /** The fleet's default levels (logdelay.json `levels`), when an admin's read said them. */
 export const fleetLevels = () => known.fleet;
 
 /** Forget what was read (a test, a sign-out). */
-export function forgetLevels() { known.byCluster.clear(); known.zones.clear(); known.fleet = null; known.at = 0; asking = null; }
+export function forgetLevels() { known.byCluster.clear(); known.zones.clear(); known.types.clear(); known.fleet = null; known.at = 0; asking = null; }
 
 /**
  * Ask the core for every visible cluster's levels: LOGDELAY_SETTINGS_GET where the caller is an
