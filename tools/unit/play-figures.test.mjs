@@ -77,5 +77,7 @@ test('volume: sums over the clusters that have the figure, and what they cover',
   assert.deepEqual(f.yesterday, { value: 150, of: 2 });
   assert.deepEqual(f.average, { value: 80, of: 1 });
   assert.equal(f.change, 25, 'the change only over clusters with both figures');
+  // The average card counts yesterday; the change is against the 7 days before it.
+  assert.equal(Math.round(V.fleetVolume([{ yesterday: 120, average: 110, month: null, change: 20 }, { yesterday: 55, average: 51, month: null, change: 10 }]).change * 10) / 10, 16.7, '175 against 100 + 50, not against the averages that include yesterday');
   assert.deepEqual(V.fleetVolume([null]).yesterday, { value: null, of: 0 });
 });

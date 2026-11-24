@@ -19,6 +19,10 @@
  */
 
 import { state } from './state.js';
+import { dur } from '../lib/fmt.js';
+
+/** A reading older than this is not "now": a page left for an hour does not show that hour's end as current. */
+export const READING_MAX_AGE_MS = 6 * 60000;
 
 /* ------------------------------------ tasks ------------------------------------ */
 
@@ -75,7 +79,7 @@ function sumTrips(b) {
  */
 export function readingOf(answer, at = Date.now()) {
   if (!answer || typeof answer !== 'object' || !answer.nodes || typeof answer.nodes !== 'object') return null;
-  const out = { at: Number(at) };
+  const out = { at: Number(at), nodes: Object.keys(answer.nodes).sort().join(',') };
   for (const [key, pick] of Object.entries(COUNTERS)) {
     let sum = 0, any = false;
     for (const n of Object.values(answer.nodes)) {
@@ -89,9 +93,9 @@ export function readingOf(answer, at = Date.now()) {
 }
 
 /** The result shape when there is nothing to divide yet. Queues come from the latest reading. */
-function unmeasured(latest) {
+function unmeasured(latest, why = '') {
   return {
-    measured: false, sinceMs: null,
+    measured: false, sinceMs: null, why,
     searchPerSec: null, searchLatencyMs: null, indexPerSec: null, deletesPerSec: null,
     rejected: null, rejectedBy: { search: null, write: null, bulk: null },
     breakerTrips: null, tripsBy: { parent: null, request: null, fielddata: null },
@@ -115,10 +119,13 @@ function delta(a, b, key) {
  * searches between the readings, and null when there were none (no searches, no latency —
  * not 0 ms). `rejected` and `breakerTrips` are counts between the two readings.
  */
-export function ratesBetween(a, b) {
+export function ratesBetween(a, b, now = null) {
   if (!a || !b) return unmeasured(b || a || null);
   const sec = (b.at - a.at) / 1000;
   if (!(sec >= 1)) return unmeasured(b);
+  if (now !== null && now - b.at > READING_MAX_AGE_MS) return { ...unmeasured(b, `the last reading is ${dur(now - b.at)} old`), searchQueue: null, writeQueue: null };
+  // A node that answered one reading and not the other would count its whole life as this interval.
+  if (a.nodes !== undefined && b.nodes !== undefined && a.nodes !== b.nodes) return unmeasured(b, 'the nodes that answered changed between the two polls');
   const dq = delta(a, b, 'query'), dqMs = delta(a, b, 'queryMs');
   const di = delta(a, b, 'index'), dd = delta(a, b, 'deletes');
   const rs = delta(a, b, 'searchRejected'), rw = delta(a, b, 'writeRejected'), rb = delta(a, b, 'bulkRejected');
@@ -126,7 +133,7 @@ export function ratesBetween(a, b) {
   const sum = (...xs) => (xs.every((x) => x === null) ? null : xs.reduce((n, x) => n + (x || 0), 0));
   const above = (x) => Number.isFinite(x) && x > 0;
   return {
-    measured: true,
+    measured: true, why: '',
     sinceMs: b.at - a.at,
     searchPerSec: dq === null ? null : dq / sec,
     searchLatencyMs: dq === null || dqMs === null ? null : dq > 0 ? dqMs / dq : null,
@@ -147,15 +154,20 @@ export function ratesBetween(a, b) {
  * Whether the cluster is under query pressure — the one rule the Query pressure card's pill
  * follows. 'pressure' when, between the last two polls, any work was rejected or any breaker
  * tripped, or a search or write queue stood above zero in both; 'none' when measured and none of
- * that; 'unknown' before two readings exist. `why` names what tripped it, in words.
+ * that; 'unknown' before two readings exist, and when nothing tripped but a figure it rests on is
+ * not known (a counter reset by a restart, a section not reported): "none" is said only of what
+ * was measured. `why` names what tripped it, `missing` what was not measured, in words.
  */
 export function pressureState(rates) {
-  if (!rates || !rates.measured) return { state: 'unknown', why: [] };
+  if (!rates || !rates.measured) return { state: 'unknown', why: [], missing: [] };
+  const gone = (v) => v === null || v === undefined;
+  const missing = [[rates.rejected, 'rejections'], [rates.breakerTrips, 'breaker trips'], [rates.searchQueue, 'search queue'], [rates.writeQueue, 'write queue']]
+    .filter(([v]) => gone(v)).map(([, what]) => `${what} not measured`);
   const why = [];
   if (rates.rejected > 0) why.push(`${rates.rejected} rejected`);
   if (rates.breakerTrips > 0) why.push(`${rates.breakerTrips} breaker trip${rates.breakerTrips === 1 ? '' : 's'}`);
   if (rates.queueSustained) why.push('a queue above zero for two polls');
-  return { state: why.length ? 'pressure' : 'none', why };
+  return { state: why.length ? 'pressure' : missing.length ? 'unknown' : 'none', why, missing };
 }
 
 /* --------------------------------- the data layer --------------------------------- */
@@ -191,9 +203,9 @@ export function readingCount(clusterId) { return (readings.get(clusterId) || [])
  * flight from the shard dataset the page already holds (state.shards `tasks`; null when not
  * read). `measured: false` with null rates until two readings exist.
  */
-export function nodeRates(clusterId) {
+export function nodeRates(clusterId, now = Date.now()) {
   const kept = readings.get(clusterId) || [];
-  const rates = ratesBetween(kept.length > 1 ? kept[0] : null, kept[kept.length - 1] || null);
+  const rates = ratesBetween(kept.length > 1 ? kept[0] : null, kept[kept.length - 1] || null, now);
   const got = state.shards.get(clusterId);
   return { ...rates, activeTasks: activeTaskCount(got && got.tasks) };
 }

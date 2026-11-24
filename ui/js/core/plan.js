@@ -29,14 +29,14 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const pos = (v) => (isNum(v) && v > 0 ? v : null);
 const num = (v, min) => { const x = Number(v); return Number.isFinite(x) && x >= min ? x : min; };
 
-/** The inputs as numbers inside their bounds (the design's rules: volume >= 1, hot >= 1, replicas whole). */
+/** The inputs as numbers inside their bounds (volume as measured, down to 0; hot >= 1, replicas whole). */
 export function normaliseInput(i = {}) {
   const d = DEFAULT_INPUT;
   const get = (k) => (i[k] === undefined ? d[k] : i[k]);   // a blank field is the board's minimum, not the default
   const hotDays = num(get('hotDays'), 1);
   const warmDays = num(get('warmDays'), 0);
   return {
-    perDay: num(get('perDay'), 1), hotDays, warmDays, days: hotDays + warmDays,
+    perDay: num(get('perDay'), 0), hotDays, warmDays, days: hotDays + warmDays,
     bkDays: num(get('bkDays'), 0), buffer: num(get('buffer'), 0), replicas: Math.floor(num(get('replicas'), 0)),
     backup: BACKUP_TARGETS.includes(i.backup) ? i.backup : d.backup,
   };
@@ -197,7 +197,8 @@ export function planCsvRows(plan) {
 
 /* ------------------------------ based on a cluster ------------------------------ */
 
-export const GB = 1e9;
+/** One GB of data, as every size on Reports reads it (lib/fmt.js bytes: 1024-based). */
+export const GB = 1024 ** 3;
 
 /** A cluster's `liveRetention` ("30d", "4w", "90 days", 45) as whole days, or null when unset or unreadable. */
 export function retentionDays(v) {
@@ -211,10 +212,13 @@ export function retentionDays(v) {
   return days > 0 ? days : null;
 }
 
-/** The inputs an existing cluster fills: daily volume (GB, 1 decimal, at least 0.1) and hot days. Null where unknown. */
+/** The inputs an existing cluster fills: daily volume (GB: 1 decimal, two figures below 1 GB) and hot days. Null where unknown. */
 export function inputsFromCluster({ perDayBytes, liveRetention }) {
   const out = {};
-  if (typeof perDayBytes === 'number' && perDayBytes > 0) out.perDay = Math.max(1, Math.round((perDayBytes / GB) * 10) / 10);
+  if (typeof perDayBytes === 'number' && perDayBytes > 0) {
+    const gb = perDayBytes / GB;
+    out.perDay = gb >= 1 ? Math.round(gb * 10) / 10 : Number(gb.toPrecision(2));
+  }
   const d = retentionDays(liveRetention);
   if (d) out.hotDays = d;
   return out;

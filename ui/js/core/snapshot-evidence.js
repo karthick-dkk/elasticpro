@@ -14,6 +14,7 @@
 import { toCsv, csvEscape } from '../lib/fmt.js';
 import { compareNullLast } from '../lib/sort-order.js';
 import { spanDaysIso } from './volume.js';
+import { restorableIndices, snapStatus, reposRead, repoListing } from './snapshot-restorable.js';
 
 export const NO_DATE = 'no date in name';
 
@@ -31,11 +32,14 @@ export function listingTitle(selected) {
  * repository, and only then a repository that is genuinely empty. "No snapshots in this
  * repository" was shown for all five, so an unreachable cluster read as a clean one.
  */
-export function listingEmptyText({ searching = false, fetched = false, repos = [], error = '' } = {}) {
+export function listingEmptyText({ searching = false, fetched = false, repos = [], error = '', repoError = '', listed = true } = {}) {
   if (searching) return 'No snapshot matches that search';
   if (error) return `Repositories could not be read: ${error}`;
   if (!fetched) return 'Repositories not read yet — press Refresh to list them';
   if (!repos.length) return 'No snapshot repositories on this cluster';
+  // One repository that could not be read, or has not been yet, is not an empty one.
+  if (repoError) return `Not known: this repository could not be read (${repoError})`;
+  if (!listed) return 'Snapshots of this repository not read yet';
   return 'No snapshots in this repository';
 }
 
@@ -44,11 +48,14 @@ export function listingEmptyText({ searching = false, fetched = false, repos = [
  *
  * `failures` is the snapshot detail's list, or null when the detail could not be read —
  * then every row's status is unknown, never "ok": a snapshot we did not look inside has
- * not been shown to be clean.
+ * not been shown to be clean. `state` is the snapshot's: while it is in progress nothing is
+ * written whole yet, and a failed one holds nothing, so neither is ever "ok" either.
  *
  * Sorted by data day (oldest first), then name; indices with no date in the name last.
  */
-export function evidenceRows(names, dayOf, failures) {
+export function evidenceRows(names, dayOf, failures, state = 'SUCCESS') {
+  const st = snapStatus({ status: state });
+  const none = st === 'IN_PROGRESS' ? 'in progress' : ['FAILED', 'INCOMPATIBLE', 'ABORTED'].includes(st) ? 'not restorable' : '';
   const byIndex = new Map();
   for (const f of failures || []) {
     const k = f && f.index;
@@ -61,11 +68,12 @@ export function evidenceRows(names, dayOf, failures) {
     const day = dayOf(index) || null;
     const fails = byIndex.get(index) || [];
     let status, detail = '';
-    if (failures == null) status = 'unknown';
-    else if (fails.length) {
+    if (fails.length) {
       status = 'failed';
       detail = fails.map((f) => `shard ${f.shard_id ?? '?'}: ${f.reason || f.status || 'failed'}`).join('; ');
-    } else status = 'ok';
+    } else if (none) { status = none; detail = `snapshot ${st.toLowerCase().replace('_', ' ')}`; }
+    else if (failures == null || (st !== 'SUCCESS' && st !== 'PARTIAL')) status = 'unknown';
+    else status = 'ok';
     return { index, day, failedShards: fails.length, status, detail };
   });
   rows.sort((a, b) => {
@@ -85,7 +93,12 @@ export function evidenceRows(names, dayOf, failures) {
  * `cover` is coveredDays' shape; `named` false means the index names themselves are not
  * known, which is not the same as none of them carrying a date.
  */
-export function coverLine(cover, { named = true } = {}) {
+export function coverLine(cover, { named = true, note = '' } = {}) {
+  if (note) {
+    if (!named && /^index names/.test(note)) return 'covers unknown — the index names could not be read';
+    if (!named || !cover || !cover.coverFrom) return `covers no restorable days: ${note}`;
+    return `${coverLine(cover)}; ${note}`;
+  }
   if (!named) return 'covers unknown — the index names could not be read';
   if (!cover || !cover.coverFrom) return 'covers no dated days — no index name in this snapshot carries a date';
   const days = cover.coverDays === 1 ? '1 day' : `${cover.coverDays} days`;
@@ -131,7 +144,7 @@ export const EVIDENCE_SORTS = {
 };
 export const DEFAULT_EVIDENCE_SORT = { key: 'day', dir: -1 };
 
-const STATUS_RANK = { ok: 0, unknown: 1, failed: 2 };
+const STATUS_RANK = { ok: 0, unknown: 1, 'in progress': 1, 'not restorable': 2, failed: 3 };
 
 /**
  * `evidenceRows` in the order shown, numbered again from 1 in that order — so the "#"
@@ -202,36 +215,66 @@ export function safeUrl(u) {
 /* ------------------------- the repositories overview ------------------------- */
 
 /**
- * Across every snapshot in the repository, the span of log days they hold between them.
+ * Across every snapshot in the repository, the span of log days that can be restored from it.
  *
- * Distinct from when the snapshots ran: this is what could actually be restored, read
- * from the dates in the index names each snapshot carries.
+ * Distinct from when the snapshots ran: read from the dates in the index names each snapshot
+ * can give back (core/snapshot-restorable.js restorableIndices: a failed, partial or running
+ * snapshot's lost indices are not counted). `days` is the span, both ends counted; `held` is
+ * how many of those days some snapshot holds and `missing` the rest — null when a row does
+ * not carry its days. `unknown` is true when some snapshot's indices are not known.
  */
 export function recoverableRange(snaps) {
-  let from = null, to = null;
-  for (const s of snaps) {
-    if (s.coverFrom && (from === null || s.coverFrom < from)) from = s.coverFrom;
-    if (s.coverTo && (to === null || s.coverTo > to)) to = s.coverTo;
+  let from = null, to = null, whole = true, unknown = false;
+  const seen = new Set();
+  for (const s of snaps || []) {
+    const ok = restorableIndices(s);
+    if (ok === null) { unknown = true; continue; }
+    if (!s.coverFrom) continue;
+    if (from === null || s.coverFrom < from) from = s.coverFrom;
+    if (to === null || s.coverTo > to) to = s.coverTo;
+    if (Array.isArray(s.days)) for (const d of s.days) seen.add(d);
+    else whole = false;
   }
-  return { from, to, days: spanDaysIso(from, to) };
+  const days = spanDaysIso(from, to);
+  const held = from && whole ? seen.size : null;
+  return { from, to, days, held, missing: held === null ? null : days - held, unknown };
 }
 
 /**
  * One repository's row on the Repositories view, from the same figures the snapshot list
  * and the SLM table use. `snaps` is null until the listing has been read (unknown is not
  * zero), `newest` is the listing's first row (it arrives newest first), and `span` is
- * `recoverableRange` with `unknown` set when some rows came from `_cat` and name no indices.
+ * `recoverableRange`.
  */
 export function repoOverview(repo, snaps, policies = []) {
   const list = Array.isArray(snaps) ? snaps : null;
-  const range = list ? recoverableRange(list) : { from: null, to: null, days: 0 };
+  const range = list ? recoverableRange(list) : { from: null, to: null, days: 0, held: null, missing: null, unknown: false };
   return {
     name: repo.name,
     count: list ? list.length : null,
     newest: list && list.length ? list[0] : null,
-    span: { ...range, unknown: !!list && list.some((s) => s.indexNames == null) },
+    span: range,
     policies: policies.filter((p) => p && p.policy && p.policy.repository === repo.name).map((p) => p.id),
   };
+}
+
+/** The tooltip of a repository's data span: the days held, and what is not in the figure. */
+export function spanTitle(span, cut = '') {
+  return [
+    span.missing === null ? `${span.days} day(s) from the first to the last, gaps not known`
+      : `${span.held} of ${span.days} day(s) can be restored` + (span.missing ? `: ${span.missing} day(s) inside this span are in no snapshot` : ''),
+    'Only indices that can be restored: failed shards, failed and running snapshots are not counted',
+    span.unknown ? 'Some snapshots were not read in full and are not in this figure' : '',
+    cut ? `Only the ${cut} snapshots were read` : '',
+  ].filter(Boolean).join('\n');
+}
+
+/** The empty-listing reason for one repository of a cluster (the listing's own error, or not read). */
+export function repoEmptyFacts(d, name) {
+  const repo = ((d && d.repos) || []).find((r) => r.name === name);
+  const l = repo ? repoListing(d, repo) : null;
+  return { fetched: reposRead(d), repos: (d && d.repos) || [],
+    repoError: repo && repo.error ? repo.error : '', listed: !l || !!l.rows };
 }
 
 /** The repository to show open: the one asked for, only while it is still registered. */

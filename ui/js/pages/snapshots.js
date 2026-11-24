@@ -3,7 +3,7 @@
 import { h, mount, $ } from '../lib/dom.js';
 import { tableSort } from '../lib/table-sort.js';
 import { nodeCache, objId } from '../lib/keyed.js';
-import { num, dt, dur, ago, bytes, eachDay, ymdDots, toCsv, download, plural } from '../lib/fmt.js';
+import { num, dt, dur, ago, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchSnapshots, fetchOverview, ensureFullSnapshots, expectChange,
          fleetMode, datasetFreshness, demandDataset, clusterRev, askForPage } from '../core/state.js';
 import { freshnessBar } from '../lib/freshness.js';
@@ -25,7 +25,10 @@ import { lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
 import { slmExempt, ulmLabel, ULM_WHY, clusterKindRev } from '../core/cluster-kind.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { isOff, offText } from '../core/collection.js';
-import { listingTitle, listingEmptyText, repoOverview, openRepo } from '../core/snapshot-evidence.js';
+import { listingTitle, listingEmptyText, repoOverview, openRepo, spanTitle, repoEmptyFacts } from '../core/snapshot-evidence.js';
+import { repoListing, cutText, spanText, snapshotCover, availability, reposRead, noRepository } from '../core/snapshot-restorable.js';
+import { serverZoneName } from '../core/es.js';
+import { browserZone } from '../core/log-range.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, sortSnapshots,
          SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT, SNAPSHOT_COLUMNS, shownColumns } from '../core/snapshot-list.js';
@@ -164,7 +167,7 @@ async function reload(c) {
  * cluster has none when nobody has looked. Without the fleet cache they come with the
  * overview, which the page always reads.
  */
-const policiesRead = (id) => !fleetMode() || datasetFreshness(id, 'policies').ts > 0;
+const policiesRead = (id) => (!fleetMode() || datasetFreshness(id, 'policies').ts > 0) && reposRead(state.data.get(id));
 
 /** Which dataset the listing on screen came from, for its freshness line. */
 function listingFreshness(c, d, repo) {
@@ -184,9 +187,15 @@ function clusterBlock(c) {
   const d = state.data.get(c.id) || {};
   const repos = d.repos || [];
   // Unknown is not zero: a listing not read yet says so rather than "0 snapshots".
-  const listed = d.snapshots ? Object.values(d.snapshots).reduce((n, l) => n + ((l && l.length) || 0), 0) : null;
+  const lists = repos.map((r) => repoListing(d, r));
+  const known = lists.filter((l) => l.rows);
+  const listed = lists.length && !known.length ? null : known.reduce((n, l) => n + l.rows.length, 0);
+  const least = known.some((l) => l.cut) ? 'at least ' : '';
+  const unread = lists.length - known.length;
   const sub = [policiesRead(c.id) ? plural(repos.length, 'repository', 'repositories') : 'repositories not read yet',
-    listed === null ? 'snapshots not read yet' : !listed && slmExempt(c) ? ulmLabel(c) : plural(listed, 'snapshot')].join(' · ');
+    listed === null ? 'snapshots not read' : !listed && slmExempt(c) ? ulmLabel(c)
+      : !lists.length && !policiesRead(c.id) ? 'snapshots not read yet' : `${least}${plural(listed, 'snapshot')}`,
+    unread && known.length ? `${unread} of ${plural(lists.length, 'repository', 'repositories')} not read` : ''].filter(Boolean).join(' · ');
   return h('div', { style: { marginBottom: '10px' } },
     collapsible(c.name, sub, () => clusterSection(c), { key: `snap-cluster-${c.id}`, open: false }));
 }
@@ -197,7 +206,8 @@ function clusterSection(c) {
   // Two levels: the repositories and policies first, one repository's snapshots once it is opened.
   const open = openRepo(ui.open[c.id], repos);
   const selected = open || (repos[0] && repos[0].name);
-  const snaps = (d.snapshots && d.snapshots[selected]) || [];
+  const listing = selected ? repoListing(d, repos.find((r) => r.name === selected)) : null;
+  const snaps = (listing && listing.rows) || [];
 
   return h('section.lazy-block', { style: { marginBottom: '22px' } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' } },
@@ -210,14 +220,14 @@ function clusterSection(c) {
         // The listing's own age and a Refresh that re-reads it now (the verbose one).
         freshnessBar(selected ? scrubFresh(listingFreshness(c, d, selected), c) : 0, () => fetchSnapshots(c.id), { label: 'snapshots', dense: true }))),
     open
-      ? openedRepoView(c, d, repos, open, snaps)
+      ? openedRepoView(c, d, repos, open, snaps, listing)
       : repositoriesView(c, d, repos));
 }
 
 /** Why this cluster's repositories cannot be read right now, or '' when they can. */
 function unreadableReason(c) {
   const cl = client(c.id);
-  if (!cl || !cl.state || cl.state === 'ok' || cl.state === 'unknown') return '';
+  if (!cl || !cl.state || ['ok', 'online', 'connecting', 'unknown'].includes(cl.state)) return '';
   const le = cl.lastError || {};
   return hideAddress(le.message, c) || le.kind || cl.state;
 }
@@ -233,7 +243,7 @@ function repoSelect(c, repos, selected) {
 /* ------------------------------- Snapshots view -------------------------------- */
 
 /** The search bar, the sort and column controls, and the snapshot list — nothing else. */
-function snapshotsView(c, repos, selected, snaps) {
+function snapshotsView(c, repos, selected, snaps, listing) {
   const holder = h('div');
   const sub = h('span', '');
   // Ticks and the bar they bring (admins only). The head tick means every snapshot the search
@@ -287,7 +297,8 @@ function snapshotsView(c, repos, selected, snaps) {
     const order = sortCaption(sort, SNAPSHOT_SORTS);
     sub.textContent = !snaps.length ? '' : q
       ? `${num(rows.length)} of ${num(snaps.length)} match · ${order}`
-      : `${num(snaps.length)} total · ${order}`;
+      : `${cutText(listing) || `${num(snaps.length)} total`} · ${order}`;
+    if (snaps.length && q && listing && listing.cut) sub.textContent += ` · ${cutText(listing)} read`;
     // A snapshot deleted since it was ticked is no longer ticked.
     if (sel) { const ids = new Set(snaps.map((s) => s.id)); for (const id of [...sel]) if (!ids.has(id)) sel.delete(id); }
     mount(holder,
@@ -357,7 +368,7 @@ function snapshotsView(c, repos, selected, snaps) {
           disabled: !snaps.length,
           title: 'Every snapshot that matches the search, in the order shown — all pages and all columns, not just this page',
           onclick: () => download(`snapshots-${c.id}-${selected}.csv`,
-            toCsv(snapshotCsvRows(sortSnapshots(filterSnapshots(snaps, ui.q[c.id] || ''), sortOf()))), 'text/csv'),
+            toCsv(snapshotCsvRows(sortSnapshots(filterSnapshots(snaps, ui.q[c.id] || ''), sortOf()), listing)), 'text/csv'),
         }, 'Export CSV'),
       ]));
 }
@@ -390,13 +401,12 @@ function repositoriesView(c, d, repos) {
 }
 
 /** One repository opened: the way back, its snapshot list and actions, and its availability strip. */
-function openedRepoView(c, d, repos, selected, snaps) {
-  const cov = coverage(snaps, ui.days);
+function openedRepoView(c, d, repos, selected, snaps, listing) {
   return h('div',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' } },
       h('button.btn.sm', { type: 'button', 'data-act': 'back-to-repos', title: 'Back to the repositories and policies',
         onclick: () => { ui.open[c.id] = null; draw(); } }, '← Repositories')),
-    snapshotsView(c, repos, selected, snaps),
+    snapshotsView(c, repos, selected, snaps, listing),
     h('div', { style: { marginTop: '10px' } },
       collapsible('Snapshot availability', `last ${ui.days} days in ${selected}`, () =>
         h('div', { style: { display: 'grid', gap: '10px' } },
@@ -406,12 +416,30 @@ function openedRepoView(c, d, repos, selected, snaps) {
                 ...[14, 30, 60, 90, 180, 365].map((n) => h('option', { value: String(n) }, `${n} days`)));
               s.value = String(ui.days); return s;
             })())),
-          coverageStrip(cov.days, { perRow: 62 }),
-          cov.missing.length
-            ? h('div.banner.warn', h('div', h('div.ttl', `${cov.missing.length} day(s) without a successful snapshot`),
-                h('div.mono', { style: { fontSize: '11.5px' } }, cov.missing.slice(0, 12).join(', ') + (cov.missing.length > 12 ? ` … +${cov.missing.length - 12}` : ''))))
-            : h('div.sec', { style: { fontSize: '12px' } }, `Every day in the window has at least one successful snapshot.`)),
+          ...availabilityBody(listing)),
         { key: 'snap-coverage', open: false })));
+}
+
+/** The strip and what it says: days in the server's zone, today not judged, unread days not called missing. */
+function availabilityBody(listing) {
+  if (!listing || !listing.rows) return [h('div.muted', { style: { fontSize: '12px' } }, `Not known: snapshots ${listing ? listing.why : 'not read yet'}`)];
+  const tz = serverZoneName() || browserZone();
+  const cov = availability(listing.rows, { days: ui.days, tz, cut: listing.cut });
+  const strip = cov.days.map((d) => ({ date: d.date, ok: d.state === 'ok' || d.state === 'bad', partial: d.state === 'bad',
+    notRead: d.state === 'notread', count: d.state === 'notread' ? null : d.count,
+    detail: d.state === 'notread' ? `not read: ${cutText(listing)}` : d.state === 'today' ? `so far ${d.other ? `${d.other} not successful` : 'none'}; the day is not over`
+      : d.count ? `${d.ok} success, ${d.other} other` : 'no snapshot' }));
+  const judged = cov.days.length - cov.notRead - (cov.today && cov.today.state === 'today' ? 1 : 0);
+  const facts = [`Days are by when a snapshot started, in ${tz}`,
+    cov.today && cov.today.state === 'today' ? `today (${cov.today.date}) has no success so far and is not counted` : '',
+    cov.notRead ? `${plural(cov.notRead, 'day')} not read (${cutText(listing)})` : ''].filter(Boolean).join(' · ');
+  return [
+    coverageStrip(strip, { perRow: 62 }),
+    cov.missing.length
+      ? h('div.banner.warn', h('div', h('div.ttl', `${cov.missing.length} of ${plural(judged, 'day')} without a successful snapshot`),
+          h('div.mono', { style: { fontSize: '11.5px' } }, cov.missing.slice(0, 12).join(', ') + (cov.missing.length > 12 ? ` … +${cov.missing.length - 12}` : ''))))
+      : h('div.sec', { style: { fontSize: '12px' } }, judged ? `${judged === 1 ? 'The 1 day' : `Each of the ${judged} days`} read in the window has at least one successful snapshot.` : 'No full day of the window was read.'),
+    h('div.muted', { style: { fontSize: '11.5px' } }, facts)];
 }
 
 /* --------------------------------- repositories -------------------------------- */
@@ -419,16 +447,18 @@ function openedRepoView(c, d, repos, selected, snaps) {
 function repoTable(c, d, repos) {
   const open = (name) => { ui.open[c.id] = name; ui.page[c.id] = 0; draw(); };
   const trs = repos.map((r) => {
-    const o = repoOverview(r, d.snapshots ? (d.snapshots[r.name] || []) : null, d.slm || []);
+    const l = repoListing(d, r);
+    const o = repoOverview(r, l.rows, d.slm || []);
     const st = o.newest ? String(o.newest.status || '').toUpperCase() : '';
     const cls = st === 'SUCCESS' ? 'green' : st === 'PARTIAL' || st === 'IN_PROGRESS' ? 'yellow' : st === 'FAILED' ? 'red' : 'grey';
-    // Rows from the _cat listing name no indices: the span is then unknown, never "none".
-    const span = o.span.from
-      ? h('span', { title: `${o.span.days} day(s) of dated indices${o.span.unknown ? ' — some snapshots not yet read in full' : ''}` },
-          `${o.span.from} → ${o.span.to}`)
-      : o.count === null ? h('span.muted', 'not read yet')
-      : o.span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices' }, 'unknown')
-      : h('span.muted', { title: 'No index in these snapshots carries a date in its name' }, '–');
+    // Not read and not readable are both "not known", with the reason — never "no snapshots".
+    const unknown = (text) => h('span.muted', { title: hideAddress(`Snapshots ${l.why}`, c) }, text);
+    const notKnown = l.why === 'not read yet' ? l.why : l.why === 'switched off' ? 'Off' : 'not known';
+    const span = !l.rows ? unknown(notKnown)
+      : o.span.from ? h('span', { title: spanTitle(o.span, cutText(l)) },
+          spanText(o.span.from, o.span.to, o.span.days, o.span.missing), o.span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
+      : o.span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices, or the failed shards of a partial snapshot were not read' }, 'unknown')
+      : h('span.muted', { title: o.count ? 'No index that can be restored from these snapshots carries a date in its name' : 'No snapshots' }, '–');
     return h('tr', { style: { cursor: 'pointer' }, 'data-repo': r.name,
         onclick: (e) => { if (!e.target.closest('button, a, .menu, [role="menu"]')) open(r.name); } },
       h('td',
@@ -436,11 +466,12 @@ function repoTable(c, d, repos) {
           title: `Open ${r.name}: its snapshots`, onclick: (e) => { e.preventDefault(); open(r.name); } }, r.name),
         r.error ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical-ink)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
       h('td', pill(r.type || '?', 'grey')),
-      h('td.num', o.count === null ? h('span.muted', { title: 'The snapshot listing has not been read yet' }, '–') : num(o.count)),
+      h('td.num', o.count === null ? unknown(notKnown)
+        : l.cut ? h('span', { title: `The ${cutText(l)} snapshots were read` }, l.total === null ? `${num(o.count)}+` : `${num(o.count)} of ${num(l.total)}`) : num(o.count)),
       h('td.nowrap', { style: { fontSize: '11.5px' } }, o.newest
         ? h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } }, pill(st || '?', cls),
             h('span', { title: dt(o.newest.start) }, ago(o.newest.start)))
-        : h('span.muted', o.count === null ? 'not read yet' : 'no snapshots')),
+        : o.count === null ? unknown(notKnown) : h('span.muted', 'no snapshots')),
       h('td.nowrap', { style: { fontSize: '11.5px' } }, span),
       h('td', { style: { fontSize: '11.5px' } }, o.policies.length ? o.policies.join(', ')
         : h('span.muted', { title: policiesRead(c.id) ? 'No SLM policy writes to this repository' : 'SLM policies not read yet' },
@@ -461,39 +492,15 @@ function repoTable(c, d, repos) {
         ], { title: `Actions for ${r.name}` }))));
   });
   return table(['Repository', 'Type', 'Snapshots', 'Newest snapshot', 'Data span', 'SLM policies', ''], trs, {
-    emptyText: empty('This cluster has no snapshot repository, so nothing can be backed up.', {
+    emptyText: !noRepository(d) ? empty(unreadableReason(c) ? `Repositories not read: ${unreadableReason(c)}`
+      : d.reachable === false && d.updatedAt ? 'Repositories not read: the cluster is not answering' : 'Repositories not read yet')
+    : empty('This cluster has no snapshot repository, so nothing can be backed up.', {
       detail: h('span', 'A repository is registered on the cluster itself — ',
         h('code.inline', 'PUT _snapshot/<name>'), ' — and needs a path in ',
         h('code.inline', 'path.repo'), '.'),
       actions: [h('button.btn.sm', { onclick: () => navigateTo('console') }, 'Open REST console')],
     }),
   });
-}
-
-/* ------------------------------------ coverage ---------------------------------- */
-
-function coverage(snaps, days) {
-  const today = new Date();
-  const start = new Date(today.getTime() - (days - 1) * 86400000);
-  const byDay = new Map();
-  snaps.forEach((s) => {
-    if (!s.start) return;
-    const k = ymdDots(new Date(s.start), '-');
-    const v = byDay.get(k) || { count: 0, ok: 0, bad: 0 };
-    v.count++;
-    if (String(s.status).toUpperCase() === 'SUCCESS') v.ok++; else v.bad++;
-    byDay.set(k, v);
-  });
-  const out = [], missing = [];
-  eachDay(ymdDots(start, '-'), ymdDots(today, '-')).forEach((d) => {
-    const k = ymdDots(d, '-');
-    const v = byDay.get(k);
-    const ok = !!(v && v.ok);
-    if (!ok) missing.push(k);
-    out.push({ date: k, ok: !!v, partial: !!(v && !v.ok), count: v ? v.count : 0,
-      detail: v ? `${v.ok} success, ${v.bad} other` : 'no snapshot' });
-  });
-  return { days: out, missing };
 }
 
 /* -------------------------------------- SLM ------------------------------------- */
@@ -582,12 +589,14 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
       }, `${num(s.indices)} ▸`)),
       // The days of data inside the snapshot — a snapshot taken this morning can hold
       // ninety days of daily indices, and that span is what says how far back it reaches.
-      cover: () => h('td.nowrap', { style: { fontSize: '11.5px' } },
-        s.coverFrom
-          ? h('span', { title: `${s.coverDays} day(s) of dated indices` }, `${s.coverFrom} → ${s.coverTo}`)
-          : s.indexNames === null
-            ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices' }, 'unknown')
-            : h('span.muted', { title: 'No index in this snapshot carries a date in its name' }, '–')),
+      cover: () => {
+        const v = snapshotCover(s);
+        const title = { span: `${s.coverDays - s.missingDays} of ${s.coverDays} day(s) can be restored${s.missingDays ? '; the others inside the span are not in this snapshot' : ''}`,
+          undated: 'No index that can be restored carries a date in its name', none: v.note, unknown: v.note }[v.kind];
+        return h('td.nowrap', { style: { fontSize: '11.5px' } },
+          h(v.kind === 'span' ? 'span' : 'span.muted', { title: v.kind === 'span' && v.note ? `${title}\n${v.note}` : title }, v.text),
+          v.kind === 'span' && v.note ? h('span.muted', ` · ${v.note}`) : null);
+      },
       shards: () => h('td.num', `${num(s.successful)}/${num(s.total)}`),
       failed: () => h('td.num', s.failed ? h('span.pill.red', h('i.dot'), num(s.failed)) : h('span.muted', '0')),
     };
@@ -619,6 +628,9 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
     ...cols.map((col) => ({ label: col.label, sort: col.sort, num: col.num })), ''];
   return table(headers, trs,
     { sort: onSort ? { id: 'snapshots', key: sort.key, dir: sort.dir, on: (key) => onSort(cycleSort(sort, key, SNAPSHOT_SORTS)) } : null,
-      emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
-                                       repos: (state.data.get(c.id) || {}).repos || [], error: unreadableReason(c) }) });
+      emptyText: (() => {
+        const facts = repoEmptyFacts(state.data.get(c.id), repo);
+        return listingEmptyText({ ...facts, searching, fetched: facts.fetched && policiesRead(c.id), error: unreadableReason(c),
+          repoError: hideAddress(facts.repoError, c) });
+      })() });
 }

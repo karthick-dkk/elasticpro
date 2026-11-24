@@ -146,7 +146,7 @@ const { client, alerts, setDelaySummary, delaySummaryFor } = await import(path.j
 const { preflight, measureDelay, summarise, delayItemValues } = await import(path.join(UI, 'core/log-delay.js'));
 const { loadLevels } = await import(path.join(UI, 'core/delay-levels.js'));
 const { zabbixAlertsToSend, zabbixAlertsCleared, alertHostsToClear, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
-const { volumeReport, clientPlanValues, measureRepoBytes } = await import(path.join(UI, 'core/volume.js'));
+const { volumeReport, clientPlanValues, measureRepoBytes, repoMeasureText } = await import(path.join(UI, 'core/volume.js'));
 
 /* ---------------------------------- gather ---------------------------------- */
 
@@ -254,7 +254,8 @@ for (const c of activeClusters()) {
     try {
       const m = await measureRepoBytes(client(c.id), data, { cache: repoCache });
       repoBytes = m.total;
-      if (m.failed) problems.push(`${c.name}: ${m.failed} snapshot size(s) could not be read; backup figures count ${m.counted}`);
+      // A short sum is not the repository's size: the backup figures stay unknown until it is whole.
+      if (m.total === null) problems.push(`${c.name}: backup figures not sent, ${repoMeasureText(m, (n) => `${(n / 1024 ** 3).toFixed(1)} GB`)}`);
     } catch (e) { problems.push(`${c.name}: repository measurement failed — ${e.message || e}`); }
   }
   const r = volumeReport(c, data, state.indices.get(c.id) || [], repoBytes);

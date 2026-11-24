@@ -17,10 +17,10 @@ import { tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
-import { utcDay, volumeMonthlyAll, monthlyAllEventCsvRows, reportDailyCsvRows, REPORT_DAILY_CSV, toMs } from '../core/volume-daily.js';
+import { utcDay, volumeMonthlyAll, monthlyAllEventCsvRows, reportDailyCsvRows, reportDailyMissingRow, recordEmptyWhy, REPORT_DAILY_CSV, toMs } from '../core/volume-daily.js';
 import { reportScheduleGet, reportSendNow, lastSentText, failText, failLevel, refreshReports } from '../core/reports.js';
 import { reportJobsMount, reportPanel, reportJobsTable, isAdmin } from '../ui/report-jobs.js';
-import { recordOf, RATE_DAYS } from './record.js';
+import { recordOf, recordEntry, recordState, RATE_DAYS } from './record.js';
 import { exportOverviewCsv, exportOverviewXlsx } from './overview.js';
 import { storagePlanCsv, reportsOf, exportWide, exportTall, SHEET_VIEWS } from './capacity.js';
 import { amber, tag } from './cells.js';
@@ -46,11 +46,24 @@ async function loadSchedule() {
 
 const sheetFile = (name, headers, rows) => workbook([{ name, rows: [headers, ...rows.map((o) => headers.map((k) => o[k] ?? null))] }]);
 
-function dailyRows(clusters) {
+/** Why a cluster has no day in the daily file. */
+function noRecordWhy(c, r) {
+  if (recordState.unsupported) return 'not measured: this server keeps no daily record';
+  if (recordState.noStore) return 'not measured: this server has no data directory';
+  const ent = recordEntry(c.id);
+  if (ent && ent.error) return `not read: ${ent.error}`;
+  const w = r ? recordEmptyWhy(r) : null;
+  if (w) return `not measured: ${w.reason}`;
+  return ent && ent.loading ? 'not read yet' : 'not measured: no day in the record';
+}
+
+export function dailyRows(clusters) {
   const out = [];
   for (const c of clusters) {
     const r = recordOf(c.id);
-    if (r) out.push(...reportDailyCsvRows(c.name, r, RATE_DAYS));
+    const days = r ? reportDailyCsvRows(c.name, r, RATE_DAYS) : [];
+    if (days.length) out.push(...days);
+    else out.push(reportDailyMissingRow(c.name, noRecordWhy(c, r)));
   }
   return out;
 }
@@ -58,7 +71,7 @@ function dailyRows(clusters) {
 async function monthlyRows() {
   const res = await volumeMonthlyAll({ months: 13 });
   if (!res.ok) { toast(res.unsupported ? 'This server does not keep a monthly record yet.' : `The monthly record could not be read: ${res.message || res.kind}`, 'err', 6000); return null; }
-  return monthlyAllEventCsvRows(res);
+  return monthlyAllEventCsvRows(res, cur.clusters);
 }
 
 /**

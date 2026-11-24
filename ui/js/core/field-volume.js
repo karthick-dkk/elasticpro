@@ -55,13 +55,33 @@ function bytesByDay(clusterId) {
   const out = new Map();
   for (const r of state.indices.get(clusterId) || []) {
     if (!r.day) continue;
-    out.set(r.day, (out.get(r.day) || 0) + (r.size || 0));
+    // An index without a size (closed, red) makes the day's size unknown, not smaller.
+    const cur = out.has(r.day) ? out.get(r.day) : 0;
+    out.set(r.day, cur === null || typeof r.size !== 'number' ? null : cur + r.size);
   }
   return out;
 }
 
 /**
- * @returns {Promise<{field:string, resolvedField:string, days:string[], terms:Array, error:string|null}>}
+ * What an answer's counts are, or why they are not exact: null when every shard answered, nothing
+ * timed out and the terms were counted without an error bound; else the reason in words.
+ */
+export function countsNotExact(res) {
+  if (!res) return 'no answer';
+  const sh = res._shards;
+  const why = [];
+  if (!sh) why.push('shards not reported');
+  else if (sh.failed > 0) why.push(`${sh.failed} of ${sh.total} shards failed`);
+  if (res.timed_out) why.push('the search timed out');
+  const t = res.aggregations && res.aggregations.terms;
+  const bound = t && t.doc_count_error_upper_bound;
+  if (bound > 0) why.push(`a value may be short by up to ${bound} documents`);
+  else if (bound !== 0) why.push('the error bound was not reported');
+  return why.length ? why.join(' · ') : null;
+}
+
+/**
+ * @returns {Promise<{field:string, resolvedField:string, days:string[], terms:Array, error:string|null, notExact:string|null}>}
  */
 export async function fetchFieldVolume(cluster, { field, days = 14, topN = 12 } = {}) {
   const cl = client(cluster.id);
@@ -103,13 +123,13 @@ export async function fetchFieldVolume(cluster, { field, days = 14, topN = 12 } 
         day,
         docs: b.doc_count,
         // Estimate only — see the note at the top of this file.
-        bytes: Math.round((sizeByDay.get(day) || 0) * share),
+        bytes: typeof sizeByDay.get(day) === 'number' ? Math.round(sizeByDay.get(day) * share) : null,
       };
     });
     return { term: String(t.key), docs: t.doc_count, series, ...spike(series, today) };
   });
 
-  return { field, resolvedField, days: dayList, terms, error: null, timeField, pattern };
+  return { field, resolvedField, days: dayList, terms, error: null, notExact: countsNotExact(res), timeField, pattern };
 }
 
 /**

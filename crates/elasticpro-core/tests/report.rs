@@ -276,7 +276,7 @@ async fn a_job_collects_builds_mails_and_hands_back_the_file() {
     assert_eq!(d["mime"], "application/zip");
     let parts = unzip(d["base64"].as_str().unwrap());
     let csv = part(&parts, "daily.csv");
-    assert!(csv.starts_with("cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days\n"), "{csv}");
+    assert!(csv.starts_with("cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days,final,read_at_utc,note\n"), "{csv}");
     assert_eq!(csv.lines().count(), 4, "three days: {csv}");
     assert!(part(&parts, "breakdown.csv").contains("prod,tag,tag1,fw&<co>,"));
     assert!(part(&parts, "monthly.csv").starts_with("cluster,month,days_with_data,"));
@@ -551,10 +551,11 @@ async fn a_scheduled_report_the_emergency_stop_cuts_short_is_recorded_and_tried_
 #[tokio::test]
 async fn a_period_the_record_holds_is_built_under_the_emergency_stop() {
     let t = today();
-    // Indices for t-1 and t-3: t-2 has none (a gap), t-6..t-4 come before the record.
+    // Indices for t-2 and t-4: t-3 has none (a gap), t-7..t-5 come before the record. Yesterday is
+    // in no settled period: it is read again until 24 h after it ended.
     let es = cluster_of(vec![
-        (format!("logstash-linux-{}", dot(t - Duration::days(1))), 200),
-        (format!("logstash-linux-{}", dot(t - Duration::days(3))), 100),
+        (format!("logstash-linux-{}", dot(t - Duration::days(2))), 200),
+        (format!("logstash-linux-{}", dot(t - Duration::days(4))), 100),
     ], 0).await;
     let dir = TempDir::new("report-settled");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
@@ -573,7 +574,7 @@ async fn a_period_the_record_holds_is_built_under_the_emergency_stop() {
     assert_eq!(stop["ok"], true, "{stop}");
     let asked = es.hits().len();
     let day = |n: i64| (t - Duration::days(n)).format("%Y-%m-%d").to_string();
-    let r = c.handle(json!({ "type": "REPORT_RUN", "clusterIds": ["prod"], "period": { "from": day(6), "to": day(1) }, "format": "csvzip" })).await;
+    let r = c.handle(json!({ "type": "REPORT_RUN", "clusterIds": ["prod"], "period": { "from": day(7), "to": day(2) }, "format": "csvzip" })).await;
     let id = r["jobs"][0]["id"].as_str().unwrap().to_string();
     let j = ended(&c, None, &id).await;
     assert_eq!(j["status"], "done", "every day settled: final, a gap the last listing showed, or before the record: {j}");
@@ -581,7 +582,7 @@ async fn a_period_the_record_holds_is_built_under_the_emergency_stop() {
     assert_eq!(es.hits().len(), asked, "the cluster was not asked");
     let d = c.handle(json!({ "type": "REPORT_DOWNLOAD", "id": id })).await;
     let csv = part(&unzip(d["base64"].as_str().unwrap()), "daily.csv").to_string();
-    assert!(csv.contains(&day(1)) && csv.contains(&day(3)), "{csv}");
+    assert!(csv.contains(&day(2)) && csv.contains(&day(4)), "{csv}");
     // A period that runs to today still needs the cluster: the stop fails it, saying so.
     let r = c.handle(json!({ "type": "REPORT_RUN", "clusterIds": ["prod"], "period": "month:".to_string() + &t.format("%Y-%m").to_string(), "format": "csvzip" })).await;
     let j = ended(&c, None, r["jobs"][0]["id"].as_str().unwrap()).await;

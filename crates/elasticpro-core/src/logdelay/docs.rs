@@ -47,6 +47,7 @@ pub fn measurement_doc(cluster: &str, r: &Row, bucket: &str, run_ms: i64) -> Val
         "docs": r.docs,
         "arrival_time": r.arrival_ms,
         "event_time": r.event_ms,
+        "event_field": r.event_field,
         "delay_minutes": r.delay_minutes,
         "raw_gap_minutes": r.raw_gap_minutes,
         "tz_offset_minutes": r.tz_offset_minutes,
@@ -69,7 +70,10 @@ pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
         "started": e.started_ms,
         "solved": e.solved_ms,
         "lasted_minutes": (e.lasted_ms(now) as f64 / 60_000.0).round(),
-        "open": e.solved_ms.is_none() && e.ended_ms.is_none(),
+        "open": e.open(),
+        "ended": e.ended_ms,
+        "ended_why": e.ended_why,
+        "last_measured": e.last_measured_ms,
         "worst_minutes": e.worst_minutes,
         "worst_state": e.worst_state.as_str(),
         "last_minutes": e.last_minutes,
@@ -98,6 +102,7 @@ pub fn daily_doc(cluster: &str, cluster_name: &str, d: &Daily, written_ms: i64) 
         o.remove("solved");
         o.insert("startedCount".into(), json!(d.started));
         o.insert("solvedCount".into(), json!(d.solved));
+        o.insert("noDelay".into(), json!(d.no_delay()));
     }
     v
 }
@@ -130,12 +135,12 @@ pub fn template_body(prefix: &str) -> Value {
     let ms = json!({ "type": "date", "format": "epoch_millis" });
     let fields: &[(&str, &Value)] = &[
         ("record", &kw), ("@timestamp", &json!({ "type": "date" })), ("cluster", &kw), ("clusterName", &kw), ("device", &kw),
-        ("docs", &long), ("arrival_time", &ms), ("event_time", &ms), ("delay_minutes", &float), ("raw_gap_minutes", &float),
+        ("docs", &long), ("arrival_time", &ms), ("event_time", &ms), ("event_field", &kw), ("delay_minutes", &float), ("raw_gap_minutes", &float),
         ("tz_offset_minutes", &long), ("device_tz_offset", &long), ("state", &kw), ("measured_at", &ms),
-        ("started", &ms), ("solved", &ms), ("lasted_minutes", &float), ("open", &json!({ "type": "boolean" })),
+        ("started", &ms), ("solved", &ms), ("ended", &ms), ("ended_why", &kw), ("last_measured", &ms), ("lasted_minutes", &float), ("open", &json!({ "type": "boolean" })),
         ("worst_minutes", &float), ("worst_state", &kw), ("last_minutes", &float), ("last_state", &kw), ("measurements", &long), ("pattern", &kw),
         ("day", &json!({ "type": "date", "format": "yyyy-MM-dd" })), ("devices", &long), ("onTime", &long), ("little", &long), ("delayed", &long),
-        ("critical", &long), ("clockAhead", &long), ("otherTz", &long), ("silent", &long), ("unmeasured", &long), ("startedCount", &long), ("solvedCount", &long),
+        ("critical", &long), ("clockAhead", &long), ("otherTz", &long), ("silent", &long), ("unmeasured", &long), ("lateBeforeSilent", &long), ("noDelay", &long), ("startedCount", &long), ("solvedCount", &long),
         ("lateHours", &float), ("medianMinutes", &float), ("p95Minutes", &float), ("measured", &long), ("complete", &json!({ "type": "boolean" })),
         ("writtenAt", &ms),
     ];
@@ -162,7 +167,7 @@ mod tests {
     fn ids_repeat_so_a_rerun_overwrites() {
         let mut extras = BTreeMap::new();
         extras.insert("fwd_tag".to_string(), "syslog-1".to_string());
-        let e = Episode { device: "fw".into(), started_ms: 1_000, solved_ms: None, ended_ms: None, worst_minutes: 45.0, worst_state: State::Delay,
+        let e = Episode { device: "fw".into(), started_ms: 1_000, solved_ms: None, ended_ms: None, ended_why: None, last_measured_ms: None, measured_until_ms: None, worst_minutes: 45.0, worst_state: State::Delay,
                           last_minutes: 45.0, last_state: State::Delay, measurements: 1, whole_hour: 0, extras: extras.clone() };
         assert_eq!(episode_id("prod", &e), "prod|fw|1000");
         let mut solved = e.clone();
@@ -178,7 +183,7 @@ mod tests {
 
     #[test]
     fn a_silent_row_carries_no_delay_and_its_state() {
-        let r = Row { device: "fw".into(), docs: 0, arrival_ms: Some(5), event_ms: None, delay_minutes: None, raw_gap_minutes: None, device_tz_offset: None,
+        let r = Row { device: "fw".into(), docs: 0, arrival_ms: Some(5), event_ms: None, event_field: None, delay_minutes: None, raw_gap_minutes: None, device_tz_offset: None,
                       tz_offset_minutes: None, state: State::Silent, extras: BTreeMap::new() };
         let d = measurement_doc("prod", &r, "2026-11-04T14:00:00Z", 1);
         assert_eq!(d["delay_minutes"], Value::Null);

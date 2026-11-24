@@ -124,6 +124,8 @@ export function lastRunOf(ids) {
 
 /** Measured repository sizes this session (Measure on the Storage plan), bytes, per cluster. */
 export const repoBytes = new Map();
+/** The last measurement that was not whole (core/volume.js measureRepoBytes), per cluster. */
+export const repoPartial = new Map();
 
 /* ------------------------------- one row per cluster ------------------------------- */
 

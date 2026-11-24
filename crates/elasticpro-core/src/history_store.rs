@@ -627,7 +627,8 @@ pub fn day_id(cluster: &str, day: &str) -> String {
 fn source_doc(s: &SourceTotals) -> Value {
     let (pri, total) = s.sizes();
     json!({ "indices": s.indices, "priBytes": pri, "totalBytes": total, "docs": s.docs,
-            "eventBytes": s.event_bytes, "subBytes": s.sub_bytes, "unmeasuredSizeIndices": s.unmeasured_size_indices })
+            "eventBytes": s.event_bytes, "subBytes": s.sub_bytes, "unmeasuredSizeIndices": s.unmeasured_size_indices,
+            "unreadableIndices": s.unreadable_indices })
 }
 
 /// One day of the daily record as the volume stream keeps it. Sizes are the whole-day figure
@@ -640,6 +641,8 @@ pub fn volume_doc(cluster: &str, name: &str, d: &Day, now_ms: u64) -> Value {
         "clusterId": cluster, "clusterName": name, "day": d.day, "final": d.is_final, "live": d.live,
         "indices": d.indices, "docs": d.docs, "eventBytes": d.event_bytes, "subBytes": d.sub_bytes,
         "priBytes": pri, "totalBytes": total, "unmeasuredSizeIndices": d.unmeasured_size_indices,
+        "unreadableIndices": d.unreadable_indices, "closedIndices": d.closed_indices, "goneIndices": d.gone_indices, "sizedWhole": d.sized_whole,
+        "eventMissingDocs": d.event_missing_docs, "subMissingDocs": d.sub_missing_docs,
         "sources": sources, "error": d.error, "aggregatedAt": d.aggregated_at, "totalsAt": d.totals_at,
         "writtenAt": now_ms,
     })
@@ -668,6 +671,12 @@ pub fn day_from_doc(v: &Value) -> Option<(String, Day)> {
         event_bytes: u("eventBytes"),
         sub_bytes: u("subBytes"),
         unmeasured_size_indices: u("unmeasuredSizeIndices").unwrap_or(0),
+        unreadable_indices: u("unreadableIndices").unwrap_or(0),
+        closed_indices: u("closedIndices").unwrap_or(0),
+        gone_indices: u("goneIndices").unwrap_or(0),
+        sized_whole: v.get("sizedWhole").and_then(Value::as_bool).unwrap_or(false),
+        event_missing_docs: u("eventMissingDocs"),
+        sub_missing_docs: u("subMissingDocs"),
         sources,
         fields: BTreeMap::new(),
         error: v.get("error").and_then(Value::as_str).map(String::from),
@@ -986,6 +995,14 @@ fn now() -> u64 {
 
 /* ------------------------------------------- read-back ------------------------------------------- */
 
+/// Why a search of the store is not its whole answer (`volume::collect::partial_answer`), or
+/// `None`.
+fn store_partial(res: &Value) -> Option<String> {
+    let why = crate::volume::collect::partial_answer(res.get("json")?)?;
+    let why = why.split(": figures may be short").next().unwrap_or(&why).to_string();
+    Some(format!("part of the history store did not answer ({why}): days may be missing"))
+}
+
 /// What one read-back found, and how the page says so.
 #[derive(Debug, Default)]
 pub struct ReadBack {
@@ -995,6 +1012,9 @@ pub struct ReadBack {
     pub message: Option<String>,
     /// The bound was reached: days on or before this one may not all have been read.
     pub truncated_before: Option<NaiveDate>,
+    /// Part of the store's shards did not answer, or a search ran out of time: days may be
+    /// missing anywhere in the period.
+    pub partial: Option<String>,
     /// The store answered with no day and has no ElasticPro index template under the prefix:
     /// nothing was ever written there, which is not the same as "no days".
     pub template_missing: bool,
@@ -1006,16 +1026,23 @@ impl ReadBack {
         self.days.values().map(Vec::len).sum()
     }
 
+    /// Days on or before this one may not all have been read: every day, when the answer was
+    /// partial.
+    pub fn incomplete_before(&self) -> Option<NaiveDate> {
+        if self.partial.is_some() { Some(NaiveDate::MAX) } else { self.truncated_before }
+    }
+
     /// The reply's `history` object.
     pub fn json(&self) -> Value {
         let message = if !self.reachable {
             Some(format!("in the history store · not reachable{}", self.message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()))
         } else {
-            self.message.clone()
+            let said: Vec<&str> = self.partial.iter().chain(self.message.iter()).map(String::as_str).collect();
+            (!said.is_empty()).then(|| said.join("; "))
         };
         json!({ "asked": true, "from": self.from, "to": self.to, "reachable": self.reachable,
                 "days": self.count(), "truncated": self.truncated_before.is_some(),
-                "truncatedBefore": self.truncated_before.map(day_key),
+                "truncatedBefore": self.truncated_before.map(day_key), "partial": self.partial,
                 "templateMissing": self.template_missing, "message": message })
     }
 }
@@ -1997,6 +2024,9 @@ impl Core {
             }
             rb.reachable = true;
             *self.history_store.unreachable.lock() = None;
+            if rb.partial.is_none() {
+                rb.partial = store_partial(&res);
+            }
             let hits = res.pointer("/json/hits/hits").and_then(Value::as_array).cloned().unwrap_or_default();
             let total = res.pointer("/json/hits/total/value").and_then(Value::as_u64).unwrap_or(hits.len() as u64);
             for h in &hits {
@@ -2091,7 +2121,7 @@ impl Core {
             .filter_map(|h| h.get("_source").cloned()).collect();
         let total = res.pointer("/json/hits/total/value").and_then(Value::as_u64).unwrap_or(docs.len() as u64);
         json!({ "ok": true, "stream": stream, "clusterId": id, "from": day_key(from), "to": day_key(to),
-                "total": total, "truncated": total > docs.len() as u64, "docs": docs })
+                "partial": store_partial(&res), "total": total, "truncated": total > docs.len() as u64, "docs": docs })
     }
 }
 

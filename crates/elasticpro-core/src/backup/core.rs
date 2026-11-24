@@ -192,6 +192,9 @@ impl Core {
     pub(crate) async fn backup_collect(&self, sections: &[Section]) -> Collected {
         let mut out = Collected::default();
         let (raw, yaml, note) = self.config_for_backup().await;
+        // Only the sections that take something from the config file are short of it.
+        let reads_config = [Section::Clusters, Section::Trust, Section::Alerts, Section::Requests, Section::Zabbix, Section::Reports];
+        out.config_unread = note.is_some() && sections.iter().any(|s| reads_config.contains(s));
         out.notes.extend(note);
         let hosted = self.edition() == Edition::Hosted;
         for &s in sections {
@@ -424,14 +427,17 @@ impl Core {
     /// Make a backup and keep it in `backups/`, named for `local` (when it was asked for), rotating
     /// to `keep`. Answers the file name.
     async fn backup_keep(&self, sections: &[Section], kind: Kind, by: &str, keep: usize, local: chrono::NaiveDateTime)
-        -> Result<(String, u64, usize), Refusal> {
+        -> Result<KeptNow, Refusal> {
         if !self.backup.keeps() {
             return Err(Refusal::new("unsupported", "this edition keeps no backups on the server: download one instead"));
         }
         let (text, collected, _) = self.backup_text(sections, kind, by, None, true).await?;
         let name = self.backup.write_kept(&file_name(local, kind), &text).map_err(|e| Refusal::new("io", format!("the backup could not be written: {e}")))?;
-        self.backup.prune(keep, by);
-        Ok((name, text.len() as u64, collected.secrets.len()))
+        // A copy without the config file never rotates out one that has it.
+        if !collected.config_unread {
+            self.backup.prune(keep, by);
+        }
+        Ok(KeptNow { name, bytes: text.len() as u64, secrets: collected.secrets.len(), notes: collected.notes, config_unread: collected.config_unread })
     }
 
     /* ------------------------------------- restoring ------------------------------------- */
@@ -1123,7 +1129,9 @@ impl Core {
                         Err(e) => return bad("io", format!("the backup could not be kept: {e}")),
                     }
                     let keep_n = self.backup.schedule.read().keep;
-                    self.backup.prune(keep_n, &by);
+                    if !collected.config_unread {
+                        self.backup.prune(keep_n, &by);
+                    }
                     kept = true;
                 }
                 tracing::info!(target: "audit", user = %by, kind = "manual", sections = %sections.iter().map(|s| s.id()).collect::<Vec<_>>().join(","),
@@ -1136,7 +1144,9 @@ impl Core {
                 }.await;
                 run.end(if out["ok"] == json!(true) {
                     let kept = if out["kept"] == json!(true) { ", kept on the server" } else { ", downloaded only" };
-                    crate::jobs::Outcome::completed(None).with_note(Some(format!("{}, {} bytes{kept}", out["name"].as_str().unwrap_or(""), out["bytes"])))
+                    let missing: Vec<&str> = out["notes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let missing = if missing.is_empty() { String::new() } else { format!("; not complete: {}", missing.join("; ")) };
+                    crate::jobs::Outcome::completed(None).with_note(Some(format!("{}, {} bytes{kept}{missing}", out["name"].as_str().unwrap_or(""), out["bytes"])))
                 } else {
                     crate::jobs::Outcome::failed(out["message"].as_str().unwrap_or("the backup failed"), None)
                 });
@@ -1241,7 +1251,7 @@ impl Core {
                 let before = if self.backup.keeps() {
                     let keep = self.backup.schedule.read().keep;
                     match self.backup_keep(&Section::ALL, Kind::BeforeRestore, &by, keep.max(DEFAULT_KEEP), crate::volume::schedule::local_now()).await {
-                        Ok((n, _, _)) => Some(n),
+                        Ok(k) => Some(k.name),
                         Err(r) => {
                             let mut out = r.to_json();
                             out["message"] = json!(format!("the current state could not be kept before restoring, so nothing was restored: {}", r.message));
@@ -1284,10 +1294,10 @@ impl Core {
         };
         let result = self.backup_keep(&s.sections, Kind::Manual, by, s.keep, crate::volume::schedule::local_now()).await;
         match result {
-            Ok((name, bytes, secrets)) => {
-                run.end(crate::jobs::Outcome::completed(None).with_note(Some(format!("{name}, {bytes} bytes"))));
-                tracing::info!(target: "audit", user = %by, kind = "manual", name = %name, bytes, secrets, "backup created");
-                json!({ "ok": true, "name": name, "bytes": bytes })
+            Ok(k) => {
+                run.end(kept_outcome(&k));
+                tracing::info!(target: "audit", user = %by, kind = "manual", name = %k.name, bytes = k.bytes, secrets = k.secrets, "backup created");
+                json!({ "ok": true, "name": k.name, "bytes": k.bytes, "notes": k.notes })
             }
             Err(r) => {
                 run.end(crate::jobs::Outcome::failed(r.message.clone(), None));
@@ -1314,23 +1324,26 @@ impl Core {
         if let Some(run) = logged {
             run.end(match &result {
                 // One file, of these sections: the count of what it holds is not a figure it keeps.
-                Ok((name, bytes, _)) => crate::jobs::Outcome::completed(None).with_note(Some(format!("{name}, {bytes} bytes"))),
+                Ok(k) => kept_outcome(k),
                 Err(r) => crate::jobs::Outcome::failed(r.message.clone(), None),
             });
         }
         let day = crate::volume::schedule::day_key(local.date());
         let mut next = self.backup.schedule.read().clone();
         next.last = Some(match &result {
-            Ok((name, bytes, _)) => LastRun { at: crate::fleet::now_ms(), ok: true, name: Some(name.clone()), bytes: *bytes, message: None, local_day: day },
+            Ok(k) => LastRun { at: crate::fleet::now_ms(), ok: !k.config_unread, name: Some(k.name.clone()), bytes: k.bytes, message: k.missing(), local_day: day },
             Err(r) => LastRun { at: crate::fleet::now_ms(), ok: false, name: None, bytes: 0, message: Some(r.message.clone()), local_day: day },
         });
         if let Err(e) = self.backup.save_schedule(&next) {
             tracing::warn!("backup schedule: the run record could not be written: {e}");
         }
         Some(match result {
-            Ok((name, bytes, secrets)) => {
-                tracing::info!(target: "audit", kind = "scheduled", name = %name, bytes, secrets, "backup created");
-                Ok(name)
+            Ok(k) => {
+                tracing::info!(target: "audit", kind = "scheduled", name = %k.name, bytes = k.bytes, secrets = k.secrets, "backup created");
+                if let Some(m) = k.missing() {
+                    tracing::warn!(target: "audit", kind = "scheduled", name = %k.name, reason = %m, "backup is not complete");
+                }
+                Ok(k.name)
             }
             Err(r) => {
                 tracing::warn!(target: "audit", kind = "scheduled", reason = %r.message, "backup failed");
@@ -1355,6 +1368,15 @@ impl Core {
             }
         });
     }
+}
+
+/// How a run that kept a backup ends: one without the config file it should hold is not a
+/// backup of these sections.
+fn kept_outcome(k: &KeptNow) -> crate::jobs::Outcome {
+    if k.config_unread {
+        return crate::jobs::Outcome::failed(k.note(), None);
+    }
+    crate::jobs::Outcome::completed(None).with_note(Some(k.note()))
 }
 
 #[cfg(test)]

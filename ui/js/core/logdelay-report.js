@@ -20,6 +20,7 @@
  */
 
 import { bridge } from './transport.js';
+import { pct } from '../lib/fmt.js';
 import { STATE_LABEL, isLate, levelState } from './delay-levels.js';
 import { parseHash } from '../reports/route.js';
 import { zonedParts } from './log-range.js';
@@ -29,11 +30,15 @@ export const LD_PAGE = 'log-delay';
 export const LD_SECTION = 'log-delay';
 
 /**
- * Chart colours (owner's rule, 0.3.62, "cool blue"): green below the delay line, light blue for
- * the delay band, blue above the critical line, violet for another time zone, grey for silent —
- * never red with yellow. Theme tokens (ui/css/app.css), so each theme mixes its own inks.
+ * The colours of the levels (the owner, 2026-11-24): No delay green, the delay band yellow, above the
+ * critical line red — the states' tokens every page uses (ui/css/app.css --state-*) — violet for
+ * another time zone, grey for silent and can't measure. `delayLine` / `critLine`: a level's line, the
+ * same hue a step stronger, so a thin line shows on a light page.
  */
-export const LD_COLOURS = Object.freeze({ ok: 'var(--ld-ok)', delay: 'var(--ld-delay)', crit: 'var(--ld-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)' });
+export const LD_COLOURS = Object.freeze({
+  ok: 'var(--state-ok)', delay: 'var(--state-late)', crit: 'var(--state-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)',
+  delayLine: 'color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink))', critLine: 'color-mix(in srgb, var(--state-crit) 72%, var(--state-crit-ink))',
+});
 
 /**
  * What the boards and the Clusters › Overview card say about the scheduled measurement — one
@@ -419,20 +424,96 @@ export function docsText(n) {
   return String(Math.round(n));
 }
 
-export const pctText = (p, digits = 1) => (finite(p) ? `${p.toFixed(digits)} %` : '—');
+export const pctText = (p, digits = 1) => (finite(p) ? pct(p, digits, ' ') : '—');
 export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
+
+/* ------------------------------------ no delay ------------------------------------ */
+
+/**
+ * Shares in tenths of a percent that add up to exactly 100.0 % (largest remainder); null of nothing.
+ * The core's own rounding (logdelay/summary.rs `tenths`), so a figure computed here agrees with it:
+ * a part that has any is at least 0.1 %, taken from the largest, so nothing reads 0 % or 100 % that is not.
+ */
+export function shareTenths(parts) {
+  const all = parts.reduce((n, p) => n + p, 0);
+  if (!(all > 0)) return null;
+  const out = parts.map((p) => Math.floor((p * 1000) / all));
+  const rest = parts.map((p, i) => [(p * 1000) % all, i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  let left = 1000 - out.reduce((n, p) => n + p, 0);
+  for (const [, i] of rest) { if (left <= 0) break; out[i] += 1; left -= 1; }
+  parts.forEach((p, i) => { if (p > 0 && out[i] === 0) { out[out.indexOf(Math.max(...out))] -= 1; out[i] = 1; } });
+  return out;
+}
+
+/**
+ * The owner's "No delay" (2026-11-24), the ONE definition for every tile, percentage, bar, ring and
+ * sentence: on time + silent + can't measure (a clock ahead is can't measure) — every device not
+ * shown to be late — always with its split. Another time zone stays apart. `t` is the core's
+ * `totals`, a `byCluster` row or a day; the core's own `noDelay` / `pct…` are used when it sends
+ * them, else the same sum is made here. `why` (or the row's `notMeasured`): no percentage, and the
+ * reason — never measured, its last run failed, no device.
+ */
+export function noDelayOf(t, { why = '' } = {}) {
+  const x = t || {};
+  const n = (v) => (finite(v) ? v : 0);
+  const first = (...vs) => { const v = vs.find(finite); return v === undefined ? null : v; };
+  // A core before 0.3.89 sends `noDelay` as the count strictly on time, and counts a clock ahead on time.
+  const fresh = finite(x.cantMeasure) || x.pctNoDelay !== undefined;
+  const said = first(x.onTimeAll, x.onTime, x.below);
+  const onTime = fresh || said === null ? said : Math.max(0, said - n(x.clockAhead));
+  const silent = n(x.silent); const cant = finite(x.cantMeasure) ? x.cantMeasure : n(x.unmeasured) + n(x.clockAhead);
+  const late = first(x.late, x.lateNow, finite(x.critical) && finite(first(x.delay, x.delayed)) ? n(first(x.delay, x.delayed)) + x.critical : null);
+  const count = fresh && finite(x.noDelay) ? x.noDelay : onTime === null ? null : onTime + silent + cant;
+  const devices = first(x.devices);
+  const reason = why || (typeof x.notMeasured === 'string' ? x.notMeasured : '') || (neverRan(x) ? 'never measured' : '') || (devices === 0 || count === null ? 'no device measured' : '');
+  const of = x.pctOf && finite(x.pctOf.clusters) && x.pctOf.clusters < x.pctOf.ofClusters ? x.pctOf : null;
+  let p = null;
+  if (!reason && x.pctNoDelay !== undefined) {
+    if (finite(x.pctNoDelay)) p = { noDelay: x.pctNoDelay, onTime: x.pctOnTime, silent: x.pctSilent, cant: x.pctCantMeasure, late: x.pctLate, tz: x.pctOtherTz };
+  } else if (!reason) {
+    const parts = shareTenths([n(onTime), silent, cant, n(late), n(x.otherTz)]);
+    if (parts) p = { noDelay: (parts[0] + parts[1] + parts[2]) / 10, onTime: parts[0] / 10, silent: parts[1] / 10, cant: parts[2] / 10, late: parts[3] / 10, tz: parts[4] / 10 };
+  }
+  return { count, devices, onTime, silent, cant, late, lateBeforeSilent: n(x.lateBeforeSilent), pct: p,
+    of, why: p ? '' : reason || (of && of.clusters === 0 ? 'no cluster was measured in its last run' : 'not measured') };
+}
+const neverRan = (x) => 'lastRunAt' in x && !finite(x.lastRunAt);
+
+/** noDelayOf for a browser measurement (core/log-delay.js summarise: `devices`, `by` status): the same sum. */
+export function noDelayOfStatuses(s) {
+  const by = (s && s.by) || {};
+  const n = (k) => Number(by[k]) || 0;
+  return noDelayOf({ devices: Number(s && s.devices) || 0, onTime: n('OK'), silent: n('NO_DATA'), cantMeasure: n('ERROR') + n('CLOCK_AHEAD'), late: n('DELAYED') + n('CRITICAL'), otherTz: n('OTHER_TZ') },
+    { why: n('UNKNOWN') ? 'the levels of some devices are not known' : '' });
+}
+
+/** A share as it is written: "95 %", "94.7 %"; unknown "—". */
+export const shareText = (p) => (finite(p) ? pct(p, Number.isInteger(p) ? 0 : 1, ' ') : '—');
+
+/** The split beside "No delay": "on time 89 % · silent 6 % · can't measure 0 %", counts when there is no percentage. */
+export function noDelaySplit(nd, { counts = false } = {}) {
+  if (!nd || nd.count === null) return nd ? nd.why : '';
+  const v = (p, n) => (counts || !nd.pct ? countText(n) : shareText(p));
+  const p = nd.pct || {};
+  const l = nd.lateBeforeSilent;
+  return `on time ${v(p.onTime, nd.onTime)} · silent ${v(p.silent, nd.silent)} · can't measure ${v(p.cant, nd.cant)}`
+    + (l > 0 ? ` · ${countText(l)} of them ${l === 1 ? 'was' : 'were'} late before ${l === 1 ? 'it' : 'they'} went silent` : '');
+}
+/** "of 30 of 32 clusters": how much of the fleet a percentage speaks for; '' when all of it. */
+export const noDelayOfText = (nd) => (nd && nd.of ? `of ${countText(nd.of.clusters)} of ${countText(nd.of.ofClusters)} clusters` : '');
 
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
 export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
 /**
  * The pill tone per state (the three configured levels and the two states apart): green below
- * the delay line (clock ahead too: measured, under the line), light blue in the delay band, blue
- * above the critical line, violet for another time zone, grey for silent and can't measure.
+ * the delay line, light blue in the delay band, blue
+ * above the critical line, violet for another time zone, grey for silent and can't measure (a clock ahead is one: how late
+ * its logs are cannot be told from it).
  * `little` is what a core before 0.3.62 stored: below the line, so green.
  */
 export const STATE_TONE = Object.freeze({
-  critical: 'ld-crit', delay: 'ld-delay', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'ld-ok', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
+  critical: 'ld-crit', delay: 'ld-delay', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'grey', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
 });
 export const stateTone = (s) => STATE_TONE[s] || 'grey';
 
@@ -450,8 +531,10 @@ export function nowText(row) {
 export function startedSolvedText(row, now = Date.now()) {
   if (!row) return '—';
   if (row.state === 'silent' && finite(row.silentSince)) return `no logs since ${whenText(row.silentSince, now).replace(/^today /, '')}`;
-  if (finite(row.lateSince)) return `${whenText(row.lateSince, now)} → still late`;
-  if (finite(row.lastStarted)) return `${whenText(row.lastStarted, now)} → ${finite(row.lastSolved) ? whenText(row.lastSolved, now) : 'still late'}`;
+  // Not measured since: what is known of it ends at the last measurement.
+  const open = row.stale === true && finite(row.lastMeasuredMs) ? `not solved · last measured ${whenText(row.lastMeasuredMs, now).replace(/^today /, '')}` : 'still late';
+  if (finite(row.lateSince)) return `${whenText(row.lateSince, now)} → ${open}`;
+  if (finite(row.lastStarted)) return `${whenText(row.lastStarted, now)} → ${finite(row.lastSolved) ? whenText(row.lastSolved, now) : open}`;
   return 'never late in this period';
 }
 
@@ -473,13 +556,14 @@ export function filterRows(rows, q) {
 
 /**
  * The Devices tab's state filters (the KPI tiles open the list on one of them): `all`, `late`
- * (the delay band and above), the three configured levels (`ok` below the delay line, clock
- * ahead too; `delay`; `critical`), `tz` (another time zone) and `silent` (silent or can't
- * measure — neither has a figure). `little` is a core-before-0.3.62 state: below the line.
+ * (the delay band and above), the three configured levels (`ok` below the delay line; `delay`;
+ * `critical`), `tz` (another time zone), `silent` (silent or can't measure, a clock ahead among
+ * them — none has a figure) and `noDelay` (noDelayOf: ok and silent together). `little` is a core-before-0.3.62 state: below the line.
  */
-export const DEVICE_FILTERS = Object.freeze(['all', 'late', 'critical', 'delay', 'ok', 'tz', 'silent']);
+export const DEVICE_FILTERS = Object.freeze(['all', 'late', 'critical', 'delay', 'noDelay', 'ok', 'tz', 'silent']);
 const FILTER_STATES = Object.freeze({
-  late: ['delay', 'critical'], critical: ['critical'], delay: ['delay'], ok: ['no_delay', 'little', 'clock_ahead'], tz: ['other_tz'], silent: ['silent', 'unmeasured'],
+  late: ['delay', 'critical'], critical: ['critical'], delay: ['delay'], ok: ['no_delay', 'little'], tz: ['other_tz'], silent: ['silent', 'unmeasured', 'clock_ahead'],
+  noDelay: ['no_delay', 'little', 'silent', 'unmeasured', 'clock_ahead'],
 });
 export function matchesFilter(row, filter) {
   if (!filter || filter === 'all') return true;
@@ -532,25 +616,22 @@ export function ringsOrder(byCluster) {
 }
 
 /**
- * A ring's two arcs on a circumference of 100 — above the critical line first, then the delay band
- * after it: `[{kind, dash, offset}]`, a sliver at least for a count above 0. Null when the share is
- * not known (no device, a figure missing): drawn as an empty ring with "—", never 0 %.
+ * A ring's arcs on a circumference of 100 — above the critical line first, then the delay band, then
+ * No delay (`noDelay`, when known): `[{kind, dash, offset}]`, a sliver at least for a count above 0.
+ * What is left is another time zone. Null when the share is not known (no device, a figure missing):
+ * drawn as an empty ring with "—", never 0 %.
  */
-export function ringArcs(delay, critical, devices) {
+export function ringArcs(delay, critical, devices, noDelay = null) {
   if (!finite(devices) || devices <= 0 || !finite(delay) || !finite(critical)) return null;
   const len = (n) => (n > 0 ? Math.max((n / devices) * 100, 1.5) : 0);
   const c = Math.min(100, len(critical)); const d = Math.min(100 - c, len(delay));
+  const o = finite(noDelay) ? Math.min(100 - c - d, len(noDelay)) : 0;
   const arc = (kind, l, at) => ({ kind, dash: `${l.toFixed(2)} ${(100 - l).toFixed(2)}`, offset: (-at).toFixed(2) });
-  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null].filter(Boolean);
+  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null, o ? arc('ok', o, c + d) : null].filter(Boolean);
 }
 
-/**
- * A Summary ring turns red above this share of its devices delayed (percent; the owner, 0.3.77):
- * at or below it the ring keeps the level colours. One figure for every ring, All clusters too.
- */
-export const LD_RING_RED_PCT = 2;
-/** Whether a ring's delayed share (`latePct`, `pctLate`, percent) is above LD_RING_RED_PCT; unknown is not red. */
-export const ringAlert = (pct) => finite(pct) && pct > LD_RING_RED_PCT;
+/** A grid cell's hue: red when a device was above the critical line at that measurement, yellow when one was late, '' for none. */
+export const gridHue = (w, v) => (!(v > 0) ? '' : finite(w && w.criticalAt) && w.criticalAt > 0 ? 'crit' : 'late');
 
 /**
  * The documents the last runs read with no device name, summed over the clusters that said a
@@ -573,30 +654,31 @@ export function noDeviceLine(sum) {
 }
 
 /**
- * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz, unk}`
- * in pixels — on time (`onTimeAll`: under the delay line), the delay band, above the critical line,
- * another time zone, silent + can't measure. A day without totals is a gap (drawn hatched,
+ * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz}`
+ * in pixels — no delay (noDelayOf: on time, silent, can't measure), the delay band, above the
+ * critical line, another time zone. A day without totals is a gap (drawn hatched,
  * "no measurement"), never 0.
  */
 export function dayBars(days, height) {
   const list = days || [];
   const gap = (d) => !d || !finite(d.devices) || d.devices <= 0;
   const n = (v) => (finite(v) ? v : 0);
-  const total = (d) => n(d.onTimeAll) + n(d.delayed) + n(d.critical) + n(d.otherTz) + n(d.silent) + n(d.unmeasured);
+  const free = (d) => n(noDelayOf(d).count);
+  const total = (d) => free(d) + n(d.delayed) + n(d.critical) + n(d.otherTz);
   const max = Math.max(1, ...list.filter((d) => !gap(d)).map(total));
   const px = (v) => (finite(v) && v > 0 ? Math.max(1, Math.round((v / max) * height)) : 0);
   return list.map((d) => (gap(d)
-    ? { day: d && d.day, gap: true, ok: 0, delay: 0, critical: 0, tz: 0, unk: 0 }
-    : { day: d.day, gap: false, ok: px(d.onTimeAll), delay: px(d.delayed), critical: px(d.critical), tz: px(d.otherTz), unk: px(n(d.silent) + n(d.unmeasured)) }));
+    ? { day: d && d.day, gap: true, ok: 0, delay: 0, critical: 0, tz: 0 }
+    : { day: d.day, gap: false, ok: px(free(d)), delay: px(d.delayed), critical: px(d.critical), tz: px(d.otherTz) }));
 }
 
 /** One day's bar in words, for its title, on the levels' own names. */
 export function dayTitle(d, b = bands(null)) {
   if (!d || !finite(d.devices) || d.devices <= 0) return `${dayText(d && d.day)} · no measurement`;
-  const unk = (finite(d.silent) ? d.silent : 0) + (finite(d.unmeasured) ? d.unmeasured : 0);
-  return `${dayText(d.day)} · ${countText(d.onTimeAll)} on time, ${countText(d.delayed)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}`
+  const nd = noDelayOf(d);
+  return `${dayText(d.day)} · No delay ${countText(nd.count)} (${noDelaySplit(nd, { counts: true })}), ${countText(d.delayed)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}`
     + (finite(d.otherTz) && d.otherTz ? `, ${countText(d.otherTz)} in another time zone` : '')
-    + (unk ? `, ${countText(unk)} silent or can't measure` : '') + (d.complete === false ? ' · day not over' : '');
+    + (d.complete === false ? ' · day not over' : '');
 }
 
 /**
@@ -657,10 +739,11 @@ export function behindSeries(res, period) {
   if (!res) return [];
   if (period === 'today') {
     return (res.windows || []).map((w) => ({
-      t: w.from, label: String(w.label || '').split(/[–-]/)[0].trim(), gap: false, split: finite(w.delay) && finite(w.critical),
-      behind: finite(w.stillLate) ? w.stillLate : finite(w.delay) && finite(w.critical) ? w.delay + w.critical : null,
-      delay: finite(w.delay) ? w.delay : null, critical: finite(w.critical) ? w.critical : null,
-      back: finite(w.solved) ? w.solved : null, complete: w.complete !== false,
+      // Not measured (the core says so): a gap, never an earlier reading carried on or a 0.
+      t: w.from, label: String(w.label || '').split(/[–-]/)[0].trim(), gap: w.measured === false, split: finite(w.delay) && finite(w.critical),
+      behind: w.measured === false ? null : finite(w.stillLate) ? w.stillLate : finite(w.delay) && finite(w.critical) ? w.delay + w.critical : null,
+      delay: w.measured !== false && finite(w.delay) ? w.delay : null, critical: w.measured !== false && finite(w.critical) ? w.critical : null,
+      back: w.measured !== false && finite(w.solved) ? w.solved : null, complete: w.complete !== false,
     }));
   }
   return (res.days || []).map((d) => {
@@ -847,21 +930,23 @@ export function timeZoneChipText(zones, tz, offsetText) {
 
 /**
  * The counts the tiles show for a list of rows (the time-zone filter on): the same figures as
- * the core's `totals` — on time = under the delay line (an old `little` and clock ahead too),
- * the delay band, above the critical line, another time zone, silent, can't measure.
+ * the core's `totals` — on time = under the delay line (an old `little` too), the delay band, above
+ * the critical line, another time zone, silent, can't measure (a clock ahead among them).
  */
 export function tileCounts(rows) {
-  const t = { devices: 0, onTime: 0, delay: 0, critical: 0, otherTz: 0, silent: 0, unmeasured: 0 };
+  const t = { devices: 0, onTime: 0, delay: 0, critical: 0, otherTz: 0, silent: 0, unmeasured: 0, clockAhead: 0, cantMeasure: 0, lateBeforeSilent: 0 };
   for (const r of rows || []) {
     t.devices += 1;
     const s = r && r.state;
-    if (s === 'no_delay' || s === 'little' || s === 'clock_ahead') t.onTime += 1;
+    if (s === 'no_delay' || s === 'little') t.onTime += 1;
     else if (s === 'delay') t.delay += 1;
     else if (s === 'critical') t.critical += 1;
     else if (s === 'other_tz') t.otherTz += 1;
-    else if (s === 'silent') t.silent += 1;
+    else if (s === 'silent') { t.silent += 1; if (finite(r.lateSince)) t.lateBeforeSilent += 1; }
     else if (s === 'unmeasured') t.unmeasured += 1;
+    else if (s === 'clock_ahead') t.clockAhead += 1;
   }
+  t.cantMeasure = t.unmeasured + t.clockAhead;
   return t;
 }
 
@@ -895,7 +980,74 @@ export function deviceGraph(points, { fromMs, toMs, height = 240, levels } = {})
     else if (cur.length) { segments.push(cur.join(' ')); cur = []; }
   }
   if (cur.length) segments.push(cur.join(' '));
-  return { segments, scaleMax, X, Y, lo, hi };
+  // Every measured point has its dot: a device measured once is a dot, not an empty graph.
+  const dots = pts.filter((p) => finite(p.m)).map((p) => ({ x: X(p.t), y: Y(p.m), t: p.t, m: p.m }));
+  return { segments, dots, scaleMax, X, Y, lo, hi };
+}
+
+/**
+ * When a device was last measured, and whether that is too old to be "now": `{at, stale}`. The
+ * core's `lastMeasuredMs` and `stale`; a core that does not say them: its last point, stale when
+ * older than one measurement interval.
+ */
+export function measuredAge(res, now = Date.now(), everyHours = null) {
+  const points = ((res && res.points) || []).filter((p) => p && finite(p.t) && finite(p.m)).map((p) => p.t);
+  const at = res && finite(res.lastMeasuredMs) ? res.lastMeasuredMs : points.length ? Math.max(...points) : null;
+  const stale = res && typeof res.stale === 'boolean' ? res.stale : at !== null && finite(everyHours) && now - at > everyHours * 3600000;
+  return { at, stale };
+}
+/** What an open delay of a device not measured since says: never "still late". */
+export const staleText = (at, now) => `late when last measured ${whenText(at, now).replace(/^today /, '')}, not measured since`;
+
+/**
+ * The time a device spent late, and what share of what: `{ms, pct, of}`. A core that says how long
+ * it was measured (`measuredMs`): late of that. An older one counted an open delay up to now: with
+ * the last measurement old, the periods are counted to it and no share is given.
+ */
+export function lateTime(res, age) {
+  if (res && finite(res.measuredMs)) return { ms: finite(res.lateMeasuredMs) ? res.lateMeasuredMs : res.lateMs, pct: res.latePct, of: res.measuredMs > 0 ? `of the ${durationText(res.measuredMs)} measured` : 'measured once: no stretch of time' };
+  if (age && age.stale && age.at !== null) {
+    const ms = ((res && res.periods) || []).reduce((n, p) => n + Math.max(0, Math.min(finite(p.solved) ? p.solved : age.at, age.at) - p.started), 0);
+    return { ms, pct: null, of: `up to ${whenText(age.at, res.now)}` };
+  }
+  return { ms: res && res.lateMs, pct: res && res.latePct, of: 'of the period' };
+}
+
+/**
+ * The x labels under the device graph, five of them, each its own: hours on a range up to two days
+ * (the day with it when it changes), the day and hour up to seven, else the day.
+ */
+export function axisTicks(lo, hi) {
+  const H = 3600000;
+  const days = (hi - lo) / (24 * H);
+  let last = '';
+  return [0, 0.25, 0.5, 0.75, 1].map((f) => lo + f * (hi - lo)).map((ms) => {
+    const [, day, hm] = /^(.*) (\d\d:\d\d)$/.exec(whenText(ms, 0)) || [null, '', ''];
+    const changed = day !== last; const first = last === '';
+    last = day;
+    if (days <= 2) return changed && !first ? `${day} ${hm}` : hm;
+    return days <= 7 ? `${day} ${hm}` : day;
+  });
+}
+
+/** Logs a day with what it rests on: `{text, label}`; less than a day counted is a count, not a rate. */
+export function logsADay(res) {
+  if (finite(res.docsPerDay)) return { text: docsText(res.docsPerDay), label: `logs a day${finite(res.docsCountedHours) ? ` · from ${Math.round(res.docsCountedHours)} h counted` : ''}` };
+  if (finite(res.docsCounted) && finite(res.docsCountedHours)) return { text: countText(res.docsCounted), label: `logs in the ${Math.round(res.docsCountedHours * 10) / 10} h counted: less than a day` };
+  return { text: 'unknown', label: 'logs a day' };
+}
+
+/** The fields the rows' event times came from, as the core says per row (`eventField`); else the ones configured. */
+export function eventFieldsText(rows, configured) {
+  const used = new Map();
+  let unsaid = 0;
+  for (const r of rows || []) { if (r && r.eventField) used.set(r.eventField, (used.get(r.eventField) || 0) + 1); else if (r) unsaid += 1; }
+  if (used.size) {
+    const list = [...used.entries()].sort((a, b) => b[1] - a[1]);
+    return (list.length === 1 && !unsaid ? list[0][0] : list.map(([k, n]) => `${k} (${countText(n)} device${n === 1 ? '' : 's'})`).join(', ')) + (unsaid ? `, not said (${countText(unsaid)})` : '');
+  }
+  const c = Array.isArray(configured) ? configured.filter(Boolean) : [];
+  return !c.length ? 'field not known' : c.length === 1 ? c[0] : `the first of ${c.join(', ')} a device’s log has`;
 }
 
 function niceCeil(v) {
@@ -903,11 +1055,14 @@ function niceCeil(v) {
   return steps.find((s) => s >= v) || Math.ceil(v / 1440) * 1440;
 }
 
-/** The band for a delay period on the graph: left/width in % of [lo,hi], pink when it went critical. */
-export function periodBand(p, lo, hi, now = Date.now()) {
+/**
+ * The band for a delay period on the graph: left/width in % of [lo,hi]. One that is not over ends at
+ * `until`, the last measurement — nothing was measured after it, so nothing is shaded after it.
+ */
+export function periodBand(p, lo, hi, until = Date.now()) {
   const span = hi - lo || 1;
   const a = Math.max(lo, finite(p.started) ? p.started : lo);
-  const b = Math.min(hi, finite(p.solved) ? p.solved : now);
+  const b = Math.min(hi, finite(p.solved) ? p.solved : finite(p.ended) ? Math.min(p.ended, finite(p.lastMeasuredMs) ? p.lastMeasuredMs : p.ended) : finite(p.measuredUntilMs) ? p.measuredUntilMs : until);
   if (b < lo || a > hi) return null;
   return { left: ((a - lo) / span) * 100, width: Math.max(((b - a) / span) * 100, 0.6), critical: p.worstState === 'critical' };
 }
@@ -915,8 +1070,8 @@ export function periodBand(p, lo, hi, now = Date.now()) {
 /** Is this row late now (for colouring)? */
 export const rowLate = (r) => !!r && isLate(r.state);
 
-/** The finding step's pill tone: a time-zone step violet, a fix on the path the delay band's blue, unknown grey. */
-export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-delay', forwarder: 'ld-delay', parser: 'ld-delay', device_clock: 'ld-delay', device_time_zone: 'ld-tz', device_link: 'ld-delay', cluster: 'ld-tz', unknown: 'grey' });
+/** The finding step's pill tone: a time-zone step violet, a fix on the path blue (where to look, not a level), unknown grey. */
+export const STEP_TONE = Object.freeze({ elasticsearch: 'blue', forwarder: 'blue', parser: 'blue', device_clock: 'blue', device_time_zone: 'ld-tz', device_link: 'blue', cluster: 'ld-tz', unknown: 'grey' });
 export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_time_zone: 'Device clock / parser', device_link: 'Device', cluster: 'Cluster', unknown: 'Not enough evidence' });
 export const stepLabel = (f) => (f && (f.stepLabel || STEP_LABEL[f.step])) || 'Not known yet';
 

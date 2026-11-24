@@ -177,7 +177,8 @@ actually present on the cluster and in the repositories, and the same for the sn
 repository once its size has been measured.
 
 Repository size is not a number Elasticsearch reports cheaply, so it stays behind a
-*Measure* button — one `_status` call per snapshot — and reads "not measured" until asked.
+*Measure* button — one `_status` call per snapshot — and reads "not measured" until asked, or
+"measured N of M snapshots: at least X" until every snapshot was read.
 Rows that cannot be known say so rather than showing a confident zero.
 
 The page reads as a spreadsheet: **one row per cluster**, every parameter a column, grouped

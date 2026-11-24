@@ -213,6 +213,29 @@ pub struct Collected {
     pub sections: BTreeMap<Section, SectionData>,
     pub secrets: BTreeMap<String, Value>,
     pub notes: Vec<String>,
+    /// The config file is there and could not be read: whatever the sections take from it is
+    /// missing from this backup.
+    pub config_unread: bool,
+}
+
+/// A backup kept on the server: what its run says of it.
+pub(crate) struct KeptNow {
+    pub name: String,
+    pub bytes: u64,
+    pub secrets: usize,
+    pub notes: Vec<String>,
+    pub config_unread: bool,
+}
+
+impl KeptNow {
+    /// What is not in it, in words; `None` when nothing is missing.
+    pub fn missing(&self) -> Option<String> {
+        (!self.notes.is_empty()).then(|| format!("not complete: {}", self.notes.join("; ")))
+    }
+
+    pub fn note(&self) -> String {
+        format!("{}, {} bytes{}", self.name, self.bytes, self.missing().map(|m| format!("; {m}")).unwrap_or_default())
+    }
 }
 
 /* -------------------------------------- secrets -------------------------------------- */

@@ -28,6 +28,7 @@ import { freshnessBar } from '../lib/freshness.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 import { indexQuery } from '../core/index-match.js';
+import { sumKnown, notCounted, figureWhy } from '../core/index-figures.js';
 import { INDEX_PAGE_SIZES, documentsTarget, docsHash, docsTargetOf } from '../core/documents.js';
 import { documentsView, pageSizePref } from '../ui/documents-view.js';
 import { indicesSummary, resetIndicesSummary, leaveIndicesSummary } from '../ui/indices-summary.js';
@@ -66,7 +67,19 @@ const SCOPES = [
   { id: 'snapshot', label: 'Snapshot', title: 'Only indices held in a snapshot repository' },
   { id: 'both', label: 'Live + Snapshot', title: 'Both at once — where does this index exist, anywhere' },
 ];
-const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set() };
+const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set(), clusterId: null };
+
+/**
+ * A search's answer belongs to the cluster it was asked of. On another cluster it is dropped:
+ * its Restore buttons would act on the cluster now on screen.
+ */
+export function evFor(c, e = ev) {
+  if (e.clusterId !== null && e.clusterId !== (c && c.id)) {
+    Object.assign(e, { result: null, error: null, running: false, clusterId: null });
+    e.picked.clear();
+  }
+  return e;
+}
 
 /** Back to an unfiltered list (what the toolbar's Clear does, and a hint from another page starts from). */
 function resetFilters() {
@@ -189,6 +202,7 @@ function docsPanel(c) {
 function drawPage() {
   const c = cluster();
   if (!c) return mount(host, empty('No cluster selected'));
+  evFor(c);
   // Documents: the whole page is theirs; the list waits underneath with its state intact.
   if (ui.view === 'docs' && ui.docs.target) return mount(host, docsPanel(c));
   // Summary: its own toolbar, with these tabs at its left.
@@ -200,7 +214,7 @@ function drawPage() {
   all.forEach((r) => {
     const k = r.source || '__none';
     const cur = sourcesMap.get(k) || { key: k, indices: 0, docs: 0, size: 0 };
-    cur.indices++; cur.docs += r.docs; cur.size += r.size;
+    cur.indices++; cur.docs += r.docs || 0; cur.size += r.size || 0;
     sourcesMap.set(k, cur);
   });
   const sourceList = [...sourcesMap.values()].sort((a, b) => b.size - a.size);
@@ -303,7 +317,7 @@ function redrawTable() {
   // would appear to do nothing while it walked back through pages that do not exist.
   ui.page = slice.page;
   const meta = $('#idx-meta');
-  if (meta) meta.textContent = `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`;
+  if (meta) meta.textContent = !state.indices.has(c.id) ? '' : `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`;
   mount(holder, buildTable(c, slice.rows, rows), idxPager(slice));
 }
 
@@ -335,7 +349,8 @@ async function afterChange(c) {
 function bulkBar(c, rows) {
   const names = [...selected];
   const chosen = rows.filter((r) => selected.has(r.index));
-  const size = chosen.reduce((s, r) => s + (r.size || 0), 0);
+  const total = sumKnown(chosen, 'size');
+  const size = total.sum;
   const anyClosed = chosen.some((r) => r.status !== 'open');
   const anyOpen = chosen.some((r) => r.status === 'open');
   const refresh = { onChanged: () => afterChange(c) };
@@ -347,7 +362,8 @@ function bulkBar(c, rows) {
 
   return h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
     h('span', { style: { fontWeight: 640, fontSize: '12px' } },
-      `${num(names.length)} selected`, size ? h('span.muted', { style: { fontWeight: 400 } }, ` · ${bytes(size)}`) : null),
+      `${num(names.length)} selected`, size !== null && chosen.length ? h('span.muted', { style: { fontWeight: 400 }, title: notCounted(total) || null },
+        ` · ${bytes(size)}${total.missing ? ` · ${total.missing} without a size` : ''}`) : null),
     h('button.btn.sm', { disabled: !anyClosed, title: anyClosed ? 'Open the selected indices' : 'All selected indices are already open',
       onclick: () => openIndices(c, chosen.filter((r) => r.status !== 'open').map((r) => r.index), refresh) }, 'Open'),
     h('button.btn.sm', { disabled: !anyOpen, title: anyOpen ? 'Close the selected indices' : 'All selected indices are already closed',
@@ -364,6 +380,9 @@ function bulkBar(c, rows) {
     ], { label: '⋮ Actions', title: 'Actions for the selection', hover: true }),
     h('button.btn.sm.ghost', { onclick: () => { selected.clear(); redrawTable(); } }, 'Clear selection'));
 }
+
+/** A figure Elasticsearch did not report is said so, never 0 (the row's tooltip names why). */
+const figure = (r, v, fmt) => (v === null || v === undefined ? h('span.muted', 'not reported') : fmt(v));
 
 function buildTable(c, rows, allRows = rows) {
   // `rows` is the current page; `allRows` is everything the filters matched. Counts and
@@ -391,10 +410,10 @@ function buildTable(c, rows, allRows = rows) {
     h('td.mono', r.day || '–'),
     h('td', r.status === 'open' ? h('span.pill.green', h('i.dot'), 'open') : h('span.pill.grey', h('i.dot'), r.status || '?')),
     h('td.num', `${r.pri}/${r.rep}`),
-    h('td.num', { title: num(r.docs) }, compact(r.docs)),
-    h('td.num.muted', compact(r.deleted)),
-    h('td.num', bytes(r.size)),
-    h('td.num.muted', bytes(r.priSize)),
+    h('td.num', { title: figureWhy(r) || num(r.docs) }, figure(r, r.docs, compact)),
+    h('td.num.muted', { title: figureWhy(r) || null }, figure(r, r.deleted, compact)),
+    h('td.num', { title: figureWhy(r) || null }, figure(r, r.size, bytes)),
+    h('td.num.muted', { title: figureWhy(r) || null }, figure(r, r.priSize, bytes)),
     h('td.muted', { style: { fontSize: '11.5px' } }, r.created ? dt(r.created).slice(0, 12) : '–'),
     h('td', h('div', { style: { display: 'flex', gap: '3px', justifyContent: 'flex-end' } },
       // Only the reversible action stays in the row; the rest need the menu.
@@ -438,7 +457,7 @@ function buildTable(c, rows, allRows = rows) {
       th('H', 'health'), th('Index', 'index'), th('Source', 'source'), th('Day', 'day'), th('State', 'status'),
       th('P/R', 'pri', true), th('Docs', 'docs', true), th('Deleted', 'deleted', true),
       th('Size', 'size', true), th('Primary', 'priSize', true), th('Created', 'created'), h('th', ''))),
-    h('tbody', ...(trs.length ? trs : [h('tr', h('td', { colspan: 13 }, empty('No indices match the filter')))]))));
+    h('tbody', ...(trs.length ? trs : [h('tr', h('td', { colspan: 13 }, empty(state.indices.has(c.id) ? 'No indices match the filter' : notReadText(c))))]))));
 
   return h('div',
     // The one search box, where the rows are (the owner, 2026-11-15: one search only).
@@ -479,7 +498,7 @@ function buildTable(c, rows, allRows = rows) {
         onclick: () => searchEverywhere(c),
       }, ev.running ? 'Searching…' : 'Search'),
       h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } },
-        `${num(allRows.length)} of ${num((state.indices.get(c.id) || []).length)} indices${q.active ? ` · ${q.label}` : ''}`),
+        state.indices.has(c.id) ? `${num(allRows.length)} of ${num((state.indices.get(c.id) || []).length)} indices${q.active ? ` · ${q.label}` : ''}` : 'index list not read'),
       ui.text || ui.not || ui.sourceFilter !== 'all' || ui.status !== 'all' || ui.from || ui.to
         ? h('button.btn.sm.ghost', { onclick: () => {
             ui.text = ''; ui.not = false; ui.sourceFilter = 'all'; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw();
@@ -507,28 +526,48 @@ function paintSelection(c) {
   if (bulk) mount(bulk, bulkBar(c, rows));
 }
 
+/** The index list was not read: why, when the cluster said. */
+function notReadText(c) {
+  if (ui.loading) return 'Reading the index list…';
+  const cl = client(c.id);
+  const le = (cl && cl.state !== 'online' && cl.state !== 'unknown' && cl.lastError) || null;
+  return `Index list not read${le ? `: ${hideAddress(le.message || le.kind || cl.state, c)}` : ui.error ? `: ${hideAddress(ui.error, c)}` : ''}`;
+}
+
 function tableCard(c, rows, all) {
   const slice = pageSlice(rows, ui.page, perPage());
-  return card(`Indices on ${c.name}`, `${num(rows.length)} matching of ${num(all.length)} on the cluster`,
+  const read = state.indices.has(c.id);
+  const sums = sumKnown(rows, 'size');
+  return card(`Indices on ${c.name}`, !read ? notReadText(c)
+    : h('span', { title: [`Size of the matching indices: ${sums.sum === null ? 'not reported' : bytes(sums.sum)}`, notCounted(sums)].filter(Boolean).join('; ') },
+        `${num(rows.length)} matching of ${num(all.length)} listed · hidden (.) indices not listed${sums.missing ? ` · ${num(sums.missing)} without a size` : ''}`),
     h('div#idx-table', buildTable(c, slice.rows, rows), idxPager(slice)),
     [h('span#idx-meta.muted', { style: { fontSize: '11.5px' } },
-       `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`),
+       read ? `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching` : ''),
      h('button.btn.sm', { onclick: () => download(`indices-${c.id}-${new Date().toISOString().slice(0, 10)}.csv`,
         // the rows matching now: the card is kept between redraws while it reads the same
         toCsv(rowsFor(c).map((r) => ({ index: r.index, source: r.source || '', day: r.day || '', health: r.health, status: r.status,
           pri: r.pri, rep: r.rep, docs: r.docs, deleted: r.deleted, size_bytes: r.size, primary_bytes: r.priSize,
-          created: r.created ? new Date(r.created).toISOString() : '' }))), 'text/csv') }, 'Export CSV')]);
+          // Empty figures above are not reported; this says why.
+          figures: figureWhy(r),
+          created: r.created ? new Date(r.created).toISOString() : '' }))), 'text/csv'), disabled: !read }, 'Export CSV')]);
 }
 
 /* ------------------------- live + snapshot search ------------------------- */
 
+let searches = 0;
 async function searchEverywhere(c) {
   const term = ui.text.trim();
   if (!term) return;
-  ev.running = true; ev.error = null; ev.term = ui.not ? `not ${term}` : term; ev.picked.clear(); draw();
-  try { ev.result = await findIndexEverywhere(c, term, { not: ui.not }); }
-  catch (e) { ev.error = e.message || String(e); ev.result = null; }
-  ev.running = false;
+  const asked = { clusterId: c.id, n: (searches += 1) };
+  ev.running = true; ev.error = null; ev.result = null; ev.clusterId = c.id; ev.term = ui.not ? `not ${term}` : term; ev.picked.clear(); draw();
+  let result = null, error = null;
+  try { result = await findIndexEverywhere(c, term, { not: ui.not }); }
+  catch (e) { error = e.message || String(e); }
+  // The page moved to another cluster, or asked again, while this ran: not this answer's place.
+  const now = cluster();
+  if (asked.n !== searches || ev.clusterId !== asked.clusterId || !now || now.id !== asked.clusterId) return;
+  ev.result = result; ev.error = error; ev.running = false;
   draw();
 }
 
@@ -544,6 +583,8 @@ function everywherePanel(c) {
   const both = r.snapshotted.filter((s) => s.alsoLive);
 
   const canRestore = (s) => !!restoreSourceOf(s);
+  // "In no snapshot" is said only of listings read whole, and of a search that was not cut.
+  const proven = !r.unverified.length && !r.truncated;
   const listed = [...gone, ...both].slice(0, 200);
   const pickable = listed.filter(canRestore);
   for (const k of [...ev.picked]) if (!pickable.some((s) => s.index === k)) ev.picked.delete(k);
@@ -558,7 +599,7 @@ function everywherePanel(c) {
       onchange: (e) => { if (e.target.checked) ev.picked.add(s.index); else ev.picked.delete(s.index); redraw(); },
     })),
     h('td.mono', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, s.index),
-    h('td', s.alsoLive ? pill('live + snapshot', 'green') : pill('snapshot only', 'yellow')),
+    h('td', s.alsoLive ? pill('live + snapshot', 'green') : r.liveRead === false ? pill('snapshot', 'grey') : pill('snapshot only', 'yellow')),
     h('td.num', String(s.snapshots.length)),
     h('td', s.successful ? pill(`${s.successful} successful`, 'green') : pill('none successful', 'red')),
     h('td.mono.muted', { style: { fontSize: '11px' } },
@@ -588,20 +629,26 @@ function everywherePanel(c) {
   const showLive = ev.scope !== 'snapshot';
   return card(
     `"${ev.term}" — ${ev.scope === 'snapshot' ? 'in snapshots' : ev.scope === 'live' ? 'live' : 'live and in snapshots'}`,
-    `${r.live.length} live · ${r.snapshotted.length} in snapshots · ${gone.length} only in snapshots`,
+    r.liveRead === false ? `live indices not read · ${r.snapshotted.length}${r.truncated ? ' or more' : ''} in snapshots`
+      : `${r.live.length} live · ${r.snapshotted.length}${r.truncated ? ' or more' : ''} in snapshots · ${gone.length} only in snapshots`,
     h('div', { style: { display: 'grid', gap: '8px' } },
       r.unverified.length
-        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `Could not read: ${r.unverified.join('; ')}`))
+        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `Not read in full: ${hideAddress(r.unverified.join('; '), c)}`))
+        : null,
+      r.truncated
+        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `More than ${r.max} names match in the snapshots: only ${r.max} were looked at. Narrow the search.`))
         : null,
       liveOnly.length && showLive
         ? h('div', { style: { fontSize: '12px' } },
-            h('b', `${liveOnly.length} live only`), h('span.muted', ' — on the cluster, in no snapshot: '),
+            h('b', proven ? `${liveOnly.length} live only` : `${liveOnly.length} live, not seen in a snapshot`),
+            h('span.muted', proven ? ' — on the cluster, in no snapshot: ' : ' — the snapshots were not all read, so they may be in one: '),
             h('span.mono', liveOnly.slice(0, 8).map((x) => x.index).join(', ')), liveOnly.length > 8 ? ` …+${liveOnly.length - 8}` : '')
         : null,
       r.snapshotted.length
         ? h('div', { style: { display: 'grid', gap: '8px' } }, restoreBar,
             table([{ label: selectAll, width: '28px' }, 'Index', 'Where', { label: 'Snapshots', num: true }, 'Good copies', 'Newest', ''],
               listed.map(snapRow)))
-        : empty(r.live.length ? 'Nothing matching is held in any snapshot.' : 'Nothing matching, live or in snapshots.')),
+        : empty(!proven ? 'Nothing matching in the snapshots that were read.'
+          : r.live.length || r.liveRead === false ? 'Nothing matching is held in any snapshot.' : 'Nothing matching, live or in snapshots.')),
     [h('button.btn.sm.ghost', { onclick: () => { ev.result = null; draw(); } }, 'Clear')]);
 }

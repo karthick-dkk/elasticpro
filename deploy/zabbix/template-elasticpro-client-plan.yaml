@@ -63,7 +63,7 @@ zabbix_export:
           key: 'elasticpro.plan[volume.day]'
           value_type: FLOAT
           units: '!GB'
-          description: 'How much the indices grow in a day: the average of the heaviest days in the window, both set in the config (volumeTopDays of volumeWindowDays, 3 of 7 by default). Heaviest-few rather than a plain average so a quiet weekend does not make the estimate too small. Today is left out because it is still being written to.'
+          description: 'How much comes in a day; what it was measured on is said beside it. On Reports: event_logsize, the mean of the last 7 finished days of the daily record. Sent to Zabbix: index sizes, the average of the heaviest days in the window, both set in the config (volumeTopDays of volumeWindowDays, 3 of 7 by default). Today is left out because it is still being written to.'
           tags:
             - tag: column
               value: '02'
@@ -119,7 +119,7 @@ zabbix_export:
           key: 'elasticpro.plan[live.days]'
           value_type: FLOAT
           units: '!days'
-          description: 'Disk free ÷ indices size per day. How long until the cluster fills at today''s rate, assuming nothing is deleted. Uses the unbuffered daily figure, because it is a projection of what is happening rather than a plan.'
+          description: 'Disk free ÷ log volume per day. How long until the cluster fills at that rate, assuming nothing is deleted. Uses the unbuffered daily figure, because it is a projection of what is happening rather than a plan. Replicas are not added: an index with one replica takes twice its size.'
           tags:
             - tag: column
               value: '06'
@@ -133,7 +133,7 @@ zabbix_export:
           key: 'elasticpro.plan[live.required.30d]'
           value_type: FLOAT
           units: '!GB'
-          description: 'Indices size per day, plus the configured headroom, × 30.'
+          description: 'Log volume per day, plus the configured headroom, × 30.'
           tags:
             - tag: column
               value: '07'
@@ -147,7 +147,7 @@ zabbix_export:
           key: 'elasticpro.plan[live.required.90d]'
           value_type: FLOAT
           units: '!GB'
-          description: 'Indices size per day, plus the configured headroom, × 90.'
+          description: 'Log volume per day, plus the configured headroom, × 90.'
           tags:
             - tag: column
               value: '08'
@@ -217,7 +217,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.required.365d]'
           value_type: FLOAT
           units: '!GB'
-          description: 'Indices size per day, plus the configured headroom, × 365 — a year of backups. An upper bound, for the same reason.'
+          description: 'Log volume per day, plus the configured headroom, × 365 — a year of backups. An upper bound, for the same reason.'
           tags:
             - tag: column
               value: '13'
@@ -231,7 +231,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.days]'
           value_type: FLOAT
           units: '!days'
-          description: 'Backup space used ÷ indices size per day. A rough sense of how much data the repository holds. It is an estimate from sizes; the two columns that follow are read from the actual dates.'
+          description: 'Backup space used ÷ log volume per day. A rough sense of how much data the repository holds. It is an estimate from sizes; the two columns that follow are read from the actual dates.'
           tags:
             - tag: column
               value: '14'
@@ -245,7 +245,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.from]'
           value_type: CHAR
           trends: '0'
-          description: 'The earliest day of data held inside any snapshot, read from the dates in the index names it contains. This is not the date the snapshot ran.'
+          description: 'The earliest day of data that can be restored from any snapshot, read from the dates in the index names it contains. Failed and running snapshots, and indices with a failed shard, are not counted. This is not the date the snapshot ran.'
           tags:
             - tag: column
               value: '15'
@@ -259,7 +259,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.to]'
           value_type: CHAR
           trends: '0'
-          description: 'The latest day of data held inside any snapshot.'
+          description: 'The latest day of data that can be restored from any snapshot.'
           tags:
             - tag: column
               value: '16'

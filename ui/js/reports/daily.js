@@ -29,7 +29,7 @@ import { configErrorOf,
   NEEDS_VERSION, collectDue, utcDay, monthName, daysCoverText,
   lastMonths, breakdownPeriods, breakdownLabel, breakdownCsvRows, BREAKDOWN_CSV, shortDay,
   addDays, eventBytesOf, perDayEventBytes, eventVsAvgPct, eventYesterday, eventMonthSoFar, eventPeak,
-  monthEventPeak, monthVsPrevious, daysInMonth, dayStatus, breakdownEventShares,
+  monthEventPeak, monthVsPrevious, daysInMonth, eventDaysOf, notesOf, dayStatus, breakdownEventShares, eventWindow, vsAvgWords, notFinalDay, notFinalText,
   reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV, recordEmptyWhy, backfillLine,
 } from '../core/volume-daily.js';
 import { forgetRecords } from './record.js';
@@ -424,8 +424,8 @@ function dailyView(c, picker) {
 
 const WEEKDAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const weekday = (ymd) => WEEKDAY[new Date(`${ymd}T00:00:00Z`).getUTCDay()];
-/** "1–2 Nov" for a run of days in one month. */
-const dayRange = (from, to) => (from === to ? shortDay(from) : `${Number(from.slice(8, 10))}–${shortDay(to)}`);
+/** "1–2 Nov" for a run of days, "28 Oct–3 Nov" over a month's end. */
+const dayRange = (from, to) => (from === to ? shortDay(from) : `${from.slice(0, 7) === to.slice(0, 7) ? Number(from.slice(8, 10)) : shortDay(from)}–${shortDay(to)}`);
 
 /** A tile's value: the figure, or "not measured" naming where to set the field. */
 function tileValue(v, field) {
@@ -438,19 +438,22 @@ function dailyCards(reply) {
   const today = utcDay();
   const y = eventYesterday(reply, { today });
   const avg = perDayEventBytes(reply, vs.avgDays, { today });
+  const win = eventWindow(reply, vs.avgDays, { today });
+  const before = eventWindow(reply, vs.avgDays, { today, before: y.day });
   const chg = eventVsAvgPct(reply, y.day, vs.avgDays, { today });
   const peak = eventPeak(reply, { today, from: addDays(today, -SHOWN_DAYS) });
   const month = eventMonthSoFar(reply, { today });
   return h('div.grid.c4.vs-cards',
     statTile(`Yesterday · ${shortDay(y.day)}`, tileValue(y.value, field),
-      `${field}${y.docs !== null ? ` · ${num(y.docs)} docs` : ''}`),
+      `${field}${y.docs !== null ? ` · ${num(y.docs)} docs` : ''}${notFinalDay(y.row) ? ' · not final' : ''}`),
     statTile(`${vs.avgDays}-day average`, tileValue(avg, field),
-      chg === null ? 'no earlier day to compare'
-        : h('span', h(`span${chg > 25 ? '.vs-high' : ''}`, signedPct(chg)), ` yesterday against the ${vs.avgDays} days before it`)),
+      h('span', win.value !== null ? `${dayRange(win.from, win.to)}${win.measured < win.of ? `, ${daysCoverText(win.measured, win.of)} measured` : ''}${win.notFinal ? `, ${notFinalText(win.notFinal)}` : ''} · ` : '',
+        chg === null ? 'no earlier day to compare'
+          : h('span', h(`span${chg > 25 ? '.vs-high' : ''}`, signedPct(chg)), ` yesterday against ${vsAvgWords(reply, y.day, vs.avgDays, { today })} (${dayRange(before.from, before.to)}: ${bytes(before.value)})`))),
     statTile('Peak day in period', peak ? bytes(peak.value) : tileValue(null, field),
       peak ? `${shortDay(peak.day)} · ${weekday(peak.day)}` : `last ${SHOWN_DAYS} days`),
     statTile('Month so far', month.days ? tileValue(month.value, field) : dash(),
-      month.days ? `${daysCoverText(month.measured, month.days)} measured · ${dayRange(month.from, month.to)}${month.docs !== null ? ` · ${num(month.docs)} docs` : ''}` : 'no finished day this month yet'));
+      month.days ? `${daysCoverText(month.measured, month.days)} measured${month.notFinal ? ` · ${notFinalText(month.notFinal)}` : ''} · ${dayRange(month.from, month.to)}${month.docs !== null ? ` · ${num(month.docs)} docs` : ''}` : 'no finished day this month yet'));
 }
 
 function dailyChart(reply) {
@@ -529,7 +532,7 @@ export function dailyCellFor(reply) {
       case 'changeVsAvg': {
         if (d.day === today) return dash();
         const p = eventVsAvgPct(reply, d.day, vs.avgDays, { today });
-        return p === null ? dash() : h(`span${p > 25 ? '.vs-high' : ''}`, signedPct(p));
+        return p === null ? dash() : h(`span${p > 25 ? '.vs-high' : ''}`, { title: `Against ${vsAvgWords(reply, d.day, vs.avgDays, { today })}` }, signedPct(p));
       }
       default: return key in TOP_KEY ? topCell(d.top, key) : '';
     }
@@ -685,8 +688,8 @@ function monthlyTable(c, rows, settings, peaks) {
     if (key === 'month') return h('span', monthName(m.month), historyMark(m));
     if (key === 'daysWithData') {
       const all = daysInMonth(m.month);
-      const short = has && (m.partial || m.daysWithData < all);
-      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days missing from the record' }, daysCoverText(m.daysWithData, all)) : num(m.daysWithData || 0);
+      const n = eventDaysOf(m); const short = has && (m.partial || n < all);
+      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far, today included' : 'Days without a measured event_logsize' }, daysCoverText(n, all)) : num(m.daysWithData || 0);
     }
     if (!has) return dash();
     switch (key) {
@@ -816,6 +819,8 @@ function breakdownCard(c, settings) {
         h('span.n', value === null ? notMeasured(field) : bytes(value)),
         h('span.p', share === null ? '—' : `${Math.round(share)} %`));
     });
+    const notes = notesOf(reply);
+    if (notes.length) items.push(h('div.muted.vs-bd-note', notes.join(' · ')));
     body = items.length ? h('div.vs-hbars', ...items) : h('div.tbl-empty', 'No value recorded in this period');
   }
   return card('Breakdown', `${p.label} · ${days} day${days === 1 ? '' : 's'}`, h('div', controls, body));

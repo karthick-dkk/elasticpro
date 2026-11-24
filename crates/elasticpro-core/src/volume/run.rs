@@ -74,8 +74,9 @@ pub(crate) struct CollectOpts<'a> {
     /// The settings are ones the record may be pruned by (`Core::volume_prunes`). Even then
     /// months go only after a run that finished without an error.
     pub prune: bool,
-    /// A day that ended less than this ago is searched but left not final (the next run makes it
-    /// final): a run moved into a heavy-job window too close to UTC midnight. 0 = the usual rule.
+    /// A day that ended less than this ago is searched but left not final (a later run makes it
+    /// final): a run moved into a heavy-job window too close to UTC midnight. Never less than
+    /// `schedule::FINAL_AFTER_MS`, the usual rule.
     pub final_margin_ms: u64,
 }
 
@@ -562,7 +563,7 @@ impl Core {
             Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, true).await,
             None => None,
         };
-        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.truncated_before)))
+        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.incomplete_before())))
             .map(|(d, cut)| Core::history_month_rows(store, id, d, s, &current, cut)).unwrap_or_default();
         let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), merged, months);
         json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
@@ -600,7 +601,7 @@ impl Core {
         for ((id, st), miss) in ids.iter().zip(&states).zip(&missing) {
             let name = self.spec_for(id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
             let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
-            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.truncated_before)))) {
+            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.incomplete_before())))) {
                 (Some((f, t)), Some((days, cut))) => {
                     let mine: Vec<super::Day> = days.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= *f && x <= *t)).cloned().collect();
                     Core::history_month_rows(store, id, &mine, &r.settings, &current, cut)
@@ -642,6 +643,8 @@ impl Core {
         let days = store.days_between(id, from, to);
         let refs: Vec<&super::Day> = days.iter().collect();
         let mut out = derive::breakdown(&refs, field, top);
+        let asked = (to.min(today) - from).num_days().max(-1) + 1;
+        out["notes"] = json!(derive::breakdown_notes(&out, asked as usize));
         out["ok"] = json!(true);
         out["clusterId"] = json!(id);
         out["period"] = json!({ "from": day_key(from), "to": day_key(to) });
@@ -1094,9 +1097,9 @@ impl Core {
         let why = |v: &Value| v.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
         let started = now_ms();
         let today = schedule::utc_day(started);
-        // What counts as over for `final`: today's rule, or — a run moved too close to UTC midnight
-        // (`final_margin_ms`) — only days that ended at least the margin ago.
-        let final_today = schedule::utc_day(started - opts.final_margin_ms as i64);
+        // What counts as over for `final`: only a day that ended `schedule::FINAL_AFTER_MS` ago (or
+        // the run's own margin, when that is longer): until then its documents still arrive.
+        let final_today = schedule::final_today(started, opts.final_margin_ms);
         let first_kept = schedule::oldest_kept_month(today, s.keep_months);
         let oldest = month_key(first_kept);
         let mut out = Collected::default();
@@ -1346,8 +1349,7 @@ impl Core {
                 if let Some(day) = file.days.get_mut(&day_key(date)) {
                     out.changed_days.insert(day_key(date));
                     if ok(&res) {
-                        collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, final_today, now_ms());
-                        if let Some(e) = &day.error {
+                        if let Some(e) = collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, final_today, now_ms()) {
                             out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
                         }
                     } else {
@@ -1615,7 +1617,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(v["days"].as_array().unwrap().len(), 14, "the rows are the window's");
         assert_eq!(v["totals"]["priBytes"], 1400, "and so is the totals row");
-        assert_eq!(v["cards"]["monthSoFar"]["value"], 2900, "1 Oct .. 29 Oct, not only the window and its average days");
+        assert_eq!(v["cards"]["monthSoFar"]["value"], 2800, "1 Oct .. 28 Oct, not only the window and its average days");
         assert_eq!(v["cards"]["eventBytes30"]["value"], 300, "29 Sep .. 28 Oct");
         assert_eq!(v["cards"]["eventBytes30"]["daysMeasured"], 30);
         assert_eq!(v["cards"]["average"]["value"], 100);
@@ -1668,10 +1670,10 @@ mod tests {
     fn the_record_reads_across_month_and_year_ends() {
         let d = |s: &str| parse_day(s).unwrap();
         for (today, months, month_so_far) in [
-            ("2026-11-01", vec!["2026-09", "2026-10", "2026-11"], 150),
-            ("2026-10-31", vec!["2026-09", "2026-10"], 31 * 150),
-            ("2027-01-01", vec!["2026-11", "2026-12", "2027-01"], 150),
-            ("2026-12-31", vec!["2026-11", "2026-12"], 31 * 150),
+            ("2026-11-01", vec!["2026-09", "2026-10", "2026-11"], None),
+            ("2026-10-31", vec!["2026-09", "2026-10"], Some(30 * 150)),
+            ("2027-01-01", vec!["2026-11", "2026-12", "2027-01"], None),
+            ("2026-12-31", vec!["2026-11", "2026-12"], Some(30 * 150)),
         ] {
             let today = d(today);
             let root = std::env::temp_dir().join(format!("ep-volume-edge-{}-{}-{today}", std::process::id(), now_ms()));
@@ -1702,7 +1704,7 @@ mod tests {
             assert_eq!(v["cards"]["yesterday"]["value"], 150);
             assert_eq!(v["cards"]["average"]["daysWithData"], 7);
             assert_eq!(v["cards"]["monthSoFar"]["month"], month_key(today));
-            assert_eq!(v["cards"]["monthSoFar"]["value"], month_so_far, "{today}: this month so far");
+            assert_eq!(v["cards"]["monthSoFar"]["value"].as_u64(), month_so_far, "{today}: this month's finished days; on the 1st there is none");
             assert_eq!(v["sources"], json!(["acme", "beta"]));
             assert_eq!(one["days"].as_array().unwrap().len(), 30, "{today}: a source's rows too");
             assert_eq!(one["totals"]["priBytes"], 30 * 50);

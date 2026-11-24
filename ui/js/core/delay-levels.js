@@ -74,8 +74,8 @@ export function statusFor(minutes, levels) {
 
 /** Late = delayed or critical (the contract's one definition). */
 export const isLate = (state) => state === 'delay' || state === 'critical';
-/** On time in totals = no_delay, little, clock_ahead. Silent and unmeasured are neither. */
-export const isOnTime = (state) => state === 'no_delay' || state === 'little' || state === 'clock_ahead';
+/** On time in totals = no_delay, little. Silent, unmeasured and clock ahead are neither (they are in No delay, logdelay-report.js noDelayOf). */
+export const isOnTime = (state) => state === 'no_delay' || state === 'little';
 
 /* ------------------------------- what the core said ------------------------------- */
 

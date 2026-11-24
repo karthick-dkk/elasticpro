@@ -871,7 +871,7 @@ by default) before its `JOB_*` message.
     value, the limits (`thresholds`), ok / watch / over (the check's own level) and its line over
     the same switch. Jobs › Requests › ElasticPro health keeps the full table.
   - *Runs, last 24h* (6h · 24h · 7d): one lane per job, a bar per run coloured by its result
-    (green ok, orange with warnings, red failed, blue running — never red and yellow together),
+    (green ok, yellow with warnings, red failed, blue running),
     the next run dashed at the right edge, a "now" line; a bar's hover has the job, its clusters,
     start, duration, result and error. From `JOBS_LIST` paged 200 at a time (at most six pages)
     back to the window's start — the run log the core already keeps; nothing new is recorded.

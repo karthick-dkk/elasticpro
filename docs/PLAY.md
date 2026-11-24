@@ -104,15 +104,16 @@ be read says "no data" / "not measured", never 0.
    open alerts, volume 7-day avg; nodes table (disk bar, heap, CPU); **volume per day chart
    cycling 7 d (3 s) → 15 d (5 s) → 30 d (5 s)** with a dashed average; Lifecycle (ILM / SLM
    Running pills); last good snapshot; backup size; delayed devices (> 30 min, > 60 min,
-   worst); volume yesterday vs 7-day avg; indices per day (yesterday's count and size).
+   worst); volume yesterday vs the 7 days before it; indices per day (yesterday's count and size).
    Empty spotlight: the slide is skipped.
-4. **Log delay**: devices sending logs, < 30, 30–60, > 60 min, worst device; "Top 10 devices
+4. **Log delay**: devices sending logs, No delay (on time + silent + can't measure, with its split),
+   30–60, > 60 min, worst device; "Top 10 devices
    by delay" (device, cluster, delay, last event, peak 24 h, status); "Top 10 clusters by
    delay" (delay, devices > 30 min).
 5. **Backups**: backed up in 26 h (x of y), older than 26 h, **snapshot failures · 24 h**
    (each FAILED / PARTIAL snapshot: cluster, time, what), and per cluster: last good snapshot,
    holds data up to, backup size. ULM clusters with SLM not used read "ULM · s3 <bucket>".
-6. **Volume and capacity**: yesterday (all clusters) vs 7-day avg, average per day, month so
+6. **Volume and capacity**: yesterday (all clusters) vs the 7 days before it, average per day, month so
    far, shortest disk runway; per cluster yesterday / 7-day avg / change; days of disk left
    (total size). From the 0.3.45 record (`VOLUME_MONTHLY_ALL` / `VOLUME_DAILY`).
 

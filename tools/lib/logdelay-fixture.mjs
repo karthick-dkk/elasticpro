@@ -87,17 +87,27 @@ function daysOf(n, now, ci, devices) {
 }
 
 function totalsOf(rows) {
-  const t = { devices: rows.length, measured: 0, onTime: 0, noDelay: 0, little: 0, delay: 0, critical: 0, clockAhead: 0, otherTz: 0, silent: 0, unmeasured: 0 };
+  const t = { devices: rows.length, measured: 0, onTime: 0, noDelay: 0, little: 0, delay: 0, critical: 0, clockAhead: 0, otherTz: 0, silent: 0, lateBeforeSilent: 0, unmeasured: 0, cantMeasure: 0 };
   for (const r of rows) {
-    if (r.state === 'no_delay') t.noDelay++; else if (r.state === 'little') t.little++; else if (r.state === 'delay') t.delay++;
+    if (r.state === 'no_delay') t.onTime++; else if (r.state === 'little') t.little++; else if (r.state === 'delay') t.delay++;
     else if (r.state === 'critical') t.critical++; else if (r.state === 'clock_ahead') t.clockAhead++; else if (r.state === 'other_tz') t.otherTz++;
-    else if (r.state === 'silent') t.silent++; else t.unmeasured++;
+    else if (r.state === 'silent') { t.silent++; if (r.lateSince) t.lateBeforeSilent++; } else t.unmeasured++;
   }
-  t.onTime = t.noDelay + t.little + t.clockAhead;
+  t.onTime += t.little;
+  t.cantMeasure = t.unmeasured + t.clockAhead;
+  // The owner's No delay (0.3.89): on time + silent + can't measure.
+  t.noDelay = t.onTime + t.silent + t.cantMeasure;
   t.late = t.delay + t.critical;
-  t.measured = t.devices - t.silent - t.unmeasured;
-  const pct = (n) => (t.devices ? Math.round((n / t.devices) * 1000) / 10 : null);
-  return { ...t, pctOnTime: pct(t.onTime), pctLate: pct(t.late), pctSilent: pct(t.silent), pctUnmeasured: pct(t.unmeasured) };
+  t.measured = t.devices - t.silent - t.cantMeasure;
+  // Shares in tenths of a percent that add up to 100.0 (largest remainder), as the core's.
+  const parts = [t.onTime, t.silent, t.unmeasured, t.clockAhead, t.delay, t.critical, t.otherTz];
+  const p = parts.map((n) => (t.devices ? Math.floor((n * 1000) / t.devices) : null));
+  if (t.devices) {
+    let left = 1000 - p.reduce((a, n) => a + n, 0);
+    for (const [, i] of parts.map((n, i) => [(n * 1000) % t.devices, i]).sort((a, b) => b[0] - a[0] || a[1] - b[1])) { if (left-- <= 0) break; p[i] += 1; }
+  }
+  const of = (...ix) => (t.devices ? ix.reduce((a, i) => a + p[i], 0) / 10 : null);
+  return { ...t, pctNoDelay: of(0, 1, 2, 3), pctOnTime: of(0), pctSilent: of(1), pctUnmeasured: of(2), pctCantMeasure: of(2, 3), pctLate: of(4, 5), pctOtherTz: of(6) };
 }
 
 function sumDays(lists) {
@@ -198,8 +208,9 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       return { id: p.c.id, name: p.c.name, devices: tt.devices, measured: tt.measured, lateNow: tt.late, delay: tt.delay, critical: tt.critical, silent: tt.silent, unmeasured: tt.unmeasured,
         windows: windowsOf(now, p.ci, tt.late), fixes: FINDINGS(p.c, p.rows),
         yesterdayWindow: { from: now - DAY, to: now - DAY + 7200000, label: 'yesterday', measured: true, lateAt: Math.max(0, tt.late - 1), criticalAt: 0 },
-        otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now),
-        below: tt.devices - tt.late, belowPct: Math.round(((tt.devices - tt.late) / tt.devices) * 1000) / 10, latePct: Math.round((tt.late / tt.devices) * 1000) / 10,
+        otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now), notMeasured: null, stale: false,
+        ...Object.fromEntries(['onTime', 'noDelay', 'cantMeasure', 'clockAhead', 'lateBeforeSilent', 'pctNoDelay', 'pctOnTime', 'pctSilent', 'pctUnmeasured', 'pctCantMeasure', 'pctLate', 'pctOtherTz'].map((k) => [k, tt[k]])),
+        below: tt.noDelay, belowPct: tt.pctNoDelay, latePct: tt.pctLate,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),
         worst: { device: p.rows[0].device, minutes: p.rows[0].nowMinutes, state: 'critical' }, levels: LEVELS, lastRunAt: now - knobs.lastRunAgoMs,
         counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now, p.ci) },

@@ -24,7 +24,7 @@ function answer({ q = 0, qMs = 0, ix = 0, del = 0, rej = 0, sq = 0, wq = 0, trip
 
 test('readingOf sums every counter over the nodes and stamps when it was read', () => {
   const r = R.readingOf(answer({ q: 10, qMs: 400, ix: 100, del: 5, rej: 1, sq: 2, wq: 3, trips: 1 }), 5000);
-  assert.deepEqual(r, { at: 5000, query: 30, queryMs: 1200, index: 300, deletes: 15, searchRejected: 3, writeRejected: 0, bulkRejected: null,
+  assert.deepEqual(r, { at: 5000, nodes: 'a,b', query: 30, queryMs: 1200, index: 300, deletes: 15, searchRejected: 3, writeRejected: 0, bulkRejected: null,
     searchQueue: 6, writeQueue: 9, trips: 3, parentTrips: null, requestTrips: 3, fielddataTrips: 0 });
   assert.equal(R.readingOf(null), null);
   assert.equal(R.readingOf({ acknowledged: true }), null, 'not a nodes answer');
@@ -92,23 +92,23 @@ test('a counter unknown on either side yields an unknown rate, not a rate from z
 
 test('recordReading keeps the last two readings per cluster and nodeRates measures from them', () => {
   assert.equal(R.readingCount('c1'), 0);
-  assert.equal(R.nodeRates('c1').measured, false);
+  assert.equal(R.nodeRates('c1', 22000).measured, false);
   R.recordReading('c1', answer({ q: 10 }), 1000);
   assert.equal(R.readingCount('c1'), 1);
   assert.equal(R.latestReadingAt('c1'), 1000);
-  assert.equal(R.nodeRates('c1').measured, false, 'one reading is a baseline');
+  assert.equal(R.nodeRates('c1', 22000).measured, false, 'one reading is a baseline');
   R.recordReading('c1', answer({ q: 40 }), 11000);
-  assert.equal(R.nodeRates('c1').measured, true);
-  assert.equal(R.nodeRates('c1').searchPerSec, 9);
+  assert.equal(R.nodeRates('c1', 22000).measured, true);
+  assert.equal(R.nodeRates('c1', 22000).searchPerSec, 9);
   // A third reading replaces the oldest; a stale answer landing late is ignored.
   R.recordReading('c1', answer({ q: 40 }), 21000);
   assert.equal(R.readingCount('c1'), 2);
-  assert.equal(R.nodeRates('c1').searchPerSec, 0);
-  assert.equal(R.nodeRates('c1').sinceMs, 10000);
+  assert.equal(R.nodeRates('c1', 22000).searchPerSec, 0);
+  assert.equal(R.nodeRates('c1', 22000).sinceMs, 10000);
   R.recordReading('c1', answer({ q: 999 }), 15000);
   assert.equal(R.latestReadingAt('c1'), 21000, 'an older answer does not replace a newer reading');
   assert.equal(R.recordReading('c1', { acknowledged: true }), null);
-  assert.equal(R.nodeRates('c1').activeTasks, null, 'no shard dataset read: tasks unknown');
+  assert.equal(R.nodeRates('c1', 22000).activeTasks, null, 'no shard dataset read: tasks unknown');
   assert.equal(R.nodeRates('other').measured, false);
 });
 
@@ -138,15 +138,39 @@ test('rejections and trips are also broken down by pool and breaker, and bulk is
 test('pressureState: rejected work, a breaker trip or a queue standing for two polls is pressure; otherwise none; unmeasured is unknown', () => {
   const q = (sq, wq) => ({ nodes: { a: { thread_pool: { search: { rejected: 0, queue: sq }, write: { rejected: 0, queue: wq } }, breakers: { parent: { tripped: 0 } } } } });
   const calm = R.ratesBetween(R.readingOf(q(0, 0), 0), R.readingOf(q(0, 0), 10000));
-  assert.deepEqual(R.pressureState(calm), { state: 'none', why: [] });
+  assert.deepEqual(R.pressureState(calm), { state: 'none', why: [], missing: [] });
   const burst = R.ratesBetween(R.readingOf(q(0, 0), 0), R.readingOf(q(3, 0), 10000));
   assert.equal(burst.queueSustained, false);
   assert.equal(R.pressureState(burst).state, 'none', 'one reading with a queue is a moment, not pressure');
   const standing = R.ratesBetween(R.readingOf(q(0, 2), 0), R.readingOf(q(0, 1), 10000));
   assert.equal(standing.queueSustained, true);
-  assert.deepEqual(R.pressureState(standing), { state: 'pressure', why: ['a queue above zero for two polls'] });
+  assert.deepEqual(R.pressureState(standing), { state: 'pressure', why: ['a queue above zero for two polls'], missing: [] });
   assert.equal(R.pressureState({ ...calm, rejected: 2 }).state, 'pressure');
   assert.deepEqual(R.pressureState({ ...calm, breakerTrips: 1 }).why, ['1 breaker trip']);
-  assert.deepEqual(R.pressureState(R.ratesBetween(null, R.readingOf(q(5, 5), 0))), { state: 'unknown', why: [] });
+  assert.deepEqual(R.pressureState(R.ratesBetween(null, R.readingOf(q(5, 5), 0))), { state: 'unknown', why: [], missing: [] });
   assert.equal(R.pressureState(null).state, 'unknown');
+});
+
+test('a figure that was not measured is never "No pressure"', () => {
+  const base = { measured: true, rejected: 0, breakerTrips: 0, searchQueue: 0, writeQueue: 0, queueSustained: false };
+  assert.equal(R.pressureState(base).state, 'none');
+  for (const k of ['rejected', 'breakerTrips', 'searchQueue', 'writeQueue']) {
+    const p = R.pressureState({ ...base, [k]: null });
+    assert.equal(p.state, 'unknown', k);
+    assert.equal(p.missing.length, 1);
+  }
+  assert.equal(R.pressureState({ ...base, rejected: 3, breakerTrips: null }).state, 'pressure', 'what was measured still counts');
+  // A restart: the counters went back, so nothing was measured over that interval.
+  const a = R.readingOf(answer({ rej: 5, trips: 2 }), 0), b = R.readingOf(answer({ rej: 1, trips: 0 }), 10000);
+  assert.equal(R.pressureState(R.ratesBetween(a, b)).state, 'unknown');
+});
+
+test('an old pair, or a pair read from different nodes, is not a measurement', () => {
+  const a = R.readingOf(answer({ q: 10 }), 0), b = R.readingOf(answer({ q: 40, sq: 2 }), 10000);
+  assert.equal(R.ratesBetween(a, b, 20000).measured, true);
+  const old = R.ratesBetween(a, b, 10000 + R.READING_MAX_AGE_MS + 1);
+  assert.deepEqual([old.measured, old.searchQueue], [false, null]);
+  assert.match(old.why, /the last reading is .* old/);
+  const one = { nodes: { a: answer({ q: 40 }).nodes.a } };
+  assert.match(R.ratesBetween(R.readingOf(one, 0), b, 20000).why, /nodes that answered changed/);
 });

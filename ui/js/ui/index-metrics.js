@@ -41,13 +41,14 @@ export function sourceSizeChart(indices, { onSelect = null } = {}) {
   (indices || []).forEach((r) => {
     const k = r.source || '__none';
     const cur = m.get(k) || { key: k, indices: 0, docs: 0, size: 0 };
-    cur.indices++; cur.docs += r.docs; cur.size += r.size;
+    cur.indices++; cur.docs += r.docs || 0; cur.size += r.size || 0;
+    if (typeof r.size !== 'number') cur.missing = (cur.missing || 0) + 1;
     m.set(k, cur);
   });
   const list = [...m.values()].sort((a, b) => b.size - a.size);
   if (!list.length) return empty('No indices');
   return hbarList(list.map((x) => ({ key: x.key, label: x.key === '__none' ? '(unparsed)' : x.key, value: x.size,
-      sub: `${num(x.indices)} indices · ${compact(x.docs)} docs` })),
+      sub: `${num(x.indices)} indices · ${compact(x.docs)} docs${x.missing ? ` · ${x.missing} without a size` : ''}` })),
     { format: bytes, topN: 12, labelWidth: 150, onSelect: onSelect || undefined });
 }
 
@@ -158,7 +159,7 @@ function analysisBody(c, a) {
            { label: 'Est. size', num: true }, 'State'],
       trs, { emptyText: 'No values returned — check that the field exists and is aggregatable.' }),
     h('div.muted', { style: { fontSize: '11px' } },
-      'Document counts are exact. Size is an estimate: Elasticsearch reports store size per index, ' +
+      `${a.notExact === null ? 'Document counts are exact.' : `Document counts are not exact: ${a.notExact || 'how they were counted is not known'}.`} Size is an estimate: Elasticsearch reports store size per index, ` +
       'never per field value, so a value’s share of the day’s documents is applied to that day’s index size.'));
 }
 
@@ -183,6 +184,7 @@ function exportAnalysis(c, a) {
         cluster: c.name, field: a.resolvedField, value: t.term, day: p.day,
         docs: p.docs, estimated_bytes: p.bytes,
         latest_day: t.latestDay || '', latest_docs: t.latest ? t.latest.docs : '',
+        counts: a.notExact === null ? 'exact' : `not exact: ${a.notExact || 'not known'}`,
         baseline_avg_docs: t.baseline === null || t.baseline === undefined ? '' : Math.round(t.baseline),
         change_pct: t.changePct === null ? '' : Math.round(t.changePct),
         spiked: t.spiked ? 'YES' : 'NO',
@@ -195,9 +197,9 @@ function exportAnalysis(c, a) {
 
 export function perDayChart(rows, { onSelect = null } = {}) {
   const byDay = new Map();
-  rows.forEach((r) => { if (!r.day) return; const v = byDay.get(r.day) || { n: 0, size: 0 }; v.n++; v.size += r.size; byDay.set(r.day, v); });
+  rows.forEach((r) => { if (!r.day) return; const v = byDay.get(r.day) || { n: 0, size: 0 }; v.n++; v.size += r.size || 0; if (typeof r.size !== 'number') v.missing = (v.missing || 0) + 1; byDay.set(r.day, v); });
   const days = [...byDay.entries()].sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 14);
   if (!days.length) return empty('No date-suffixed indices in the current filter');
-  return hbarList(days.map(([d, v]) => ({ key: d, label: d, value: v.size, sub: `${v.n} indices` })),
+  return hbarList(days.map(([d, v]) => ({ key: d, label: d, value: v.size, sub: `${v.n} indices${v.missing ? ` · ${v.missing} without a size` : ''}` })),
     { format: bytes, topN: 14, labelWidth: 100, showOther: false, sort: false, onSelect: onSelect || undefined });
 }

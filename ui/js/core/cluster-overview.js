@@ -19,9 +19,10 @@ import { isDataNode, slmCard, ilmCard } from './cluster-boxes.js';
 import { staleIndices } from './nodes-shards.js';
 import { byLevel, worstOf } from './alert-levels.js';
 import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js';
+import { sumKnown, notCounted } from './index-figures.js';
 import { clusterKind } from './cluster-kind.js';
 import { durationMs } from './snapshot-list.js';
-import { bands, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
+import { bands, noDelayOf, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
 
 /* ------------------------------------ the route ------------------------------------ */
 
@@ -157,11 +158,13 @@ export function indexHealthCounts(rows) {
   return out;
 }
 
-/** Documents and store size over the indices: { docs, size }. */
+/**
+ * Documents and store size over the listed indices: { docs, size, note }. `note` is what the two
+ * figures do not hold (closed and red indices report none, hidden ones are not listed).
+ */
 export function indexTotals(rows) {
-  let docs = 0, size = 0;
-  for (const r of Array.isArray(rows) ? rows : []) { docs += r.docs || 0; size += r.size || 0; }
-  return { docs, size };
+  const docs = sumKnown(rows, 'docs'), size = sumKnown(rows, 'size');
+  return { docs: docs.sum, size: size.sum, note: notCounted(docs.missing >= size.missing ? docs : size) };
 }
 
 /** An index's shard count: primaries × (1 + replicas); null when the row has no primary count. */
@@ -208,7 +211,7 @@ export function rateText(v) {
  *     late, bands, lastRunAt, nextDueAt }
  */
 export function devicesDelay(res, clusterId) {
-  const out = { state: 'none', message: null, inLastRun: null, delay: null, critical: null, late: null, bands: bands(null), lastRunAt: null, nextDueAt: null };
+  const out = { state: 'none', message: null, inLastRun: null, delay: null, critical: null, late: null, bands: bands(null), lastRunAt: null, nextDueAt: null, noDelay: null };
   if (!res) return out;
   if (res.unsupported) return { ...out, state: 'unsupported', message: res.message || 'This server has no log delay report yet.' };
   if (res.ok === false) return { ...out, state: 'error', message: res.message || 'the log delay summary could not be read' };
@@ -225,6 +228,8 @@ export function devicesDelay(res, clusterId) {
   out.inLastRun = n(res.devicesInLastRun);
   out.delay = n(t.delay);
   out.critical = n(t.critical);
+  // The Log Delay page's No delay (one definition), and why there is no percentage.
+  out.noDelay = noDelayOf(t, { why: (mine && mine.notMeasured) || '' });
   out.late = out.delay === null && out.critical === null ? null : (out.delay || 0) + (out.critical || 0);
   out.state = sch.enabled === false ? 'off' : 'ok';
   out.message = sch.enabled === false ? LD_SCHEDULE_OFF : null;
@@ -276,7 +281,8 @@ export function slmSummary(d, c, defaults) {
   const view = lifecycleView('SLM', d, pattern, c);
   const card = slmCard(d, view, pattern, clusterKind(c).ulm);
   const out = { pill: operationPill(d && d.slmStatus && d.slmStatus.operation_mode), kind: card.kind, policy: card.policy || null,
-    status: card.status || null, at: card.at || null, durationMs: null, indices: null, why: card.why || null, note: card.note || null };
+    status: card.status || null, headline: card.headline || null, takes: card.takes || null, part: !!card.part, failed: card.failed || [],
+    at: card.at || null, durationMs: null, indices: null, why: card.why || null, note: card.note || null };
   if (card.kind === 'unused') out.pill = { tone: 'grey', word: 'not used' };
   if (card.kind !== 'ok' || !out.policy) return out;
   const p = (d.slm || []).find((x) => x.id === out.policy);

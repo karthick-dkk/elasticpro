@@ -2,8 +2,11 @@
 
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
 
+/** Unknown is not zero: Number(null) is 0, so null is caught before it. */
+const toNum = (n) => (n === null || n === '' ? NaN : Number(n));
+
 export function bytes(n, digits) {
-  n = Number(n);
+  n = toNum(n);
   if (!isFinite(n) || n < 0) return '–';
   if (n === 0) return '0 B';
   const i = Math.min(UNITS.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
@@ -13,20 +16,36 @@ export function bytes(n, digits) {
 }
 
 export function num(n) {
-  n = Number(n);
+  n = toNum(n);
   if (!isFinite(n)) return '–';
   return n.toLocaleString();
 }
 
 export function compact(n) {
-  n = Number(n);
+  n = toNum(n);
   if (!isFinite(n)) return '–';
   return Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 }
 
-export function pct(n, digits = 1) {
-  n = Number(n);
-  return isFinite(n) ? `${n.toFixed(digits)}%` : '–';
+/**
+ * A percentage in words, the one definition. All and none are said only when they are exactly so:
+ * 99.7 at no digits is "99.7%", 99.99 is ">99.9%", 0.01 is "<0.1%" — never 100 % with one missing,
+ * never 0 % with one present. `gap` goes before the sign ("12 %").
+ */
+export function pct(n, digits = 1, gap = '') {
+  n = toNum(n);
+  if (!isFinite(n)) return '–';
+  const all = (d) => n < 100 && Number(n.toFixed(d)) >= 100;
+  const none = (d) => n > 0 && Number(n.toFixed(d)) === 0;
+  const d = all(digits) || none(digits) ? Math.max(1, digits) : digits;
+  const text = all(d) ? `>${(100 - 10 ** -d).toFixed(d)}` : none(d) ? `<${(10 ** -d).toFixed(d)}` : n.toFixed(d);
+  return `${text}${gap}%`;
+}
+
+/** `part` of `total` as a percentage (pct); '–' when either is unknown or there is no total. */
+export function sharePct(part, total, digits = 0, gap = '') {
+  const a = toNum(part), b = toNum(total);
+  return isFinite(a) && b > 0 ? pct((a / b) * 100, digits, gap) : '–';
 }
 
 /**
@@ -36,13 +55,14 @@ export function pct(n, digits = 1) {
 export function diskUseText(disk) {
   if (!disk || disk.percent === null || disk.percent === undefined || !isFinite(disk.percent)) return '';
   const used = bytes(disk.used), total = bytes(disk.total);
-  if (total === '–') return `${Math.round(disk.percent)} %`;
+  const share = pct(disk.percent, 0, ' ');
+  if (total === '–') return share;
   const u = used.split(' ')[1], t = total.split(' ')[1];
-  return `${Math.round(disk.percent)} % \u00b7 ${used === '–' ? '–' : u === t ? used.split(' ')[0] : used} of ${total}`;
+  return `${share} \u00b7 ${used === '–' ? '–' : u === t ? used.split(' ')[0] : used} of ${total}`;
 }
 
 export function dur(ms) {
-  ms = Number(ms);
+  ms = toNum(ms);
   if (!isFinite(ms) || ms < 0) return '–';
   if (ms < 1000) return `${Math.round(ms)} ms`;
   const s = ms / 1000;
@@ -66,6 +86,13 @@ const DT = new Intl.DateTimeFormat(undefined, {
   year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
 });
 export function dt(ts) { return ts ? DT.format(new Date(Number(ts))) : '–'; }
+const ZONE = new Intl.DateTimeFormat('en', { timeZoneName: 'short' });
+/** dt with its zone said ("… GMT+5:30"): for a time inside a sentence, where no column names the zone. */
+export function dtz(ts) {
+  if (!ts) return '–';
+  const z = ZONE.formatToParts(new Date(Number(ts))).find((p) => p.type === 'timeZoneName');
+  return `${dt(ts)}${z ? ` ${z.value}` : ''}`;
+}
 export function dateOnly(ts) { return ts ? new Date(Number(ts)).toISOString().slice(0, 10) : '–'; }
 
 /** yyyy.MM.dd used by logstash daily indices. */

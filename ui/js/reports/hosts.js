@@ -87,6 +87,9 @@ function headCell(c) {
   return sortTh(serverSort, c.col, c.label, { num: !!c.num, attrs: { scope: 'col', dataset: { col: c.col } }, title: c.title ? `${c.title} — click to sort` : null });
 }
 
+/** A ClientID or branch the core filled in carries a "*". */
+export const FILLED_NOTE = '* filled, not in the logs';
+
 /** What the table was last drawn from: the page redraws on every push from the core, and the table changes only with these. */
 let paintedSig = '';
 
@@ -102,25 +105,32 @@ function paintTable() {
   const d = v.data;
   // The ClientID and branch columns are the core's filled values (rows[].clientId/branch, as the
   // workbook fills them) and sort on the filled value (`clientId`/`branch`), not the raw field.
-  const metaCol = (f) => (f === d.clientIdField ? { col: 'clientId', label: f, fill: 'clientId' }
-    : f === d.branchField ? { col: 'branch', label: f, fill: 'branch' } : { col: `meta.${f}`, label: f, meta: f });
+  const metaCol = (f) => (f === d.clientIdField ? { col: 'clientId', label: f, fill: 'clientId', title: FILLED_NOTE }
+    : f === d.branchField ? { col: 'branch', label: f, fill: 'branch', title: FILLED_NOTE } : { col: `meta.${f}`, label: f, meta: f });
   const cols = [...FIXED, ...d.fields.map(metaCol)];
   const metaCell = (r, c) => {
     const val = c.fill ? (r[c.fill] ?? r.meta[c.label]) : r.meta[c.meta];
-    return h('td', val === undefined || val === null || val === '' ? h('span.muted', '—') : String(val));
+    if (val === undefined || val === null || val === '') return h('td', h('span.muted', '—'));
+    return c.fill && r[`${c.fill}Filled`] ? h('td', { title: FILLED_NOTE }, `${val}*`) : h('td', String(val));
   };
   // Event size: the documents that had no event size are said on hover, never folded into the sum silently.
   const eventCell = (r) => {
     const cell = cellOf(r.eventBytes, (x) => bytes(x));
     return r.eventMissingDocs ? h('span', { title: `${num(r.eventMissingDocs)} document(s) had no event size` }, cell, h('span.hv-inc', `${num(r.eventMissingDocs)} without`)) : cell;
   };
+  const subCell = (r) => {
+    const cell = cellOf(r.subBytes, (x) => bytes(x));
+    const n = (r.subMissingDocs || 0) + (r.subNotCountedDocs || 0);
+    return n ? h('span', { title: `${num(n)} document(s) have no counted sub size` }, cell, h('span.hv-inc', `${num(n)} without`)) : cell;
+  };
+  const notFinal = (r) => (r.notFinal ? h('span.hv-inc', { title: `Read ${r.readAt ? `${new Date(r.readAt).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'early'}, less than 24 hours after the day ended: later documents are not in it yet` }, 'not final') : null);
   const row = (r) => h(`tr${r.incomplete ? '.hv-row-inc' : ''}`,
-    h('td.mono', r.day, r.incomplete ? h('span.hv-inc', { title: 'The collection hit its page bound on this day: the rows are a lower bound' }, 'incomplete') : null),
+    h('td.mono', r.day, r.incomplete ? h('span.hv-inc', { title: 'The collection hit its page bound on this day: the rows are a lower bound' }, 'incomplete') : null, notFinal(r)),
     h('td.mono', r.index), h('td', r.source ?? ''), h('td.mono', r.host ?? h('span.muted', 'no host')),
-    h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', cellOf(r.subBytes, (x) => bytes(x))),
+    h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', subCell(r)),
     ...cols.slice(FIXED.length).map((c) => metaCell(r, c)));
   const totals = h('tr.hv-totals', h('th', { scope: 'row', colspan: 4 }, `Total · ${plural(d.total, 'row')}`),
-    h('td.num', cellOf(d.totals.docs, num)), h('td.num', cellOf(d.totals.eventBytes, (x) => bytes(x))), h('td.num', cellOf(d.totals.subBytes, (x) => bytes(x))),
+    h('td.num', cellOf(d.totals.docs, num)), h('td.num', eventCell(d.totals)), h('td.num', subCell(d.totals)),
     ...d.fields.map(() => h('td')));
   const from = d.total ? v.offset + 1 : 0;
   const to = Math.min(d.total, v.offset + d.rows.length);
@@ -131,6 +141,8 @@ function paintTable() {
   mount(table,
     d.incompleteDays.length ? h('div.banner.warn.hv-incomplete', { style: { margin: '0 0 6px', fontSize: '12px' } },
       `Incomplete: ${d.incompleteDays.join(', ')}. The collection hit its page bound on ${d.incompleteDays.length === 1 ? 'that day' : 'those days'}, so its rows are a lower bound.`) : null,
+    d.notFinalDays.length ? h('div.muted.hv-days.hv-notfinal', { style: { margin: '0 0 6px', fontSize: '12px' } },
+      `Not final: ${d.notFinalDays.map((x) => x.day).join(', ')}. Read less than 24 hours after the day ended; read once more when it can be final.`) : null,
     d.failedDays.length ? h('div.banner.warn.hv-days.hv-failed',
       `Not held: ${d.failedDays.map((x) => `${x.day} (${x.failed})`).join(', ')}. The collection is tried again on the next ticks; Run now with Collect again asks at once.`) : null,
     d.collectingDays.length ? h('div.muted.hv-days.hv-collecting',

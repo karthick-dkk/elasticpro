@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.89
+
+Every page and file was compared with raw Elasticsearch, because they are given to auditors. What was not known, not read, partial or not current now says so, on screen and in every file. Rule: the true figure; else "not measured" or "not read" with the reason; a partial figure says "N of M"; an old one says when it was read.
+
+- **Colours: critical red, delayed yellow, on time green** everywhere (pages, charts, Play, mail, reports). Another time zone stays violet; silent and can't measure stay grey. The word is always written beside the colour.
+- **Log delay: No delay = on time + silent + can't measure**, one definition, always with its split ("No delay 95 % · on time 89 % · silent 6 %"), and how many of the silent devices were late before they went silent. Percentages add up to 100; a cluster never measured, or whose last run failed, has none.
+- **Log delay: a late device is never called another time zone.** A device's zone is kept once confirmed. A device in another zone that becomes late, or is exactly 30 or 60 minutes late, was counted on time or "other time zone"; it is now late. A steady new offset becomes the device's zone after 12 runs, and its delay ends as "time zone changed", never "solved". A clock ahead is can't measure, not on time.
+- **Log delay: a delay is only as long as it was measured.** An open delay counts to the last measurement ("late when last measured 14:00, not measured since"). Each event time names the field it came from. A cluster never measured draws no zero line. *Live* past its device cap, or with failed shards, calls no device silent.
+- **Snapshots: only what can be restored counts as backed up.** Data span, "Data inside covers", availability and the evidence files leave out FAILED and IN PROGRESS snapshots and the failed indices of PARTIAL ones, and say the days missing inside a span ("15 → 22 Nov · 4 of 8 days"; CSV `data_missing_days`, `data_note`). A repository that could not be read says so, never 0 snapshots. A list cut at 500 says "newest 500 of N".
+- **Backups (SLM): green only when every policy that takes log indices succeeded last**; a policy that takes part of the log pattern says "part of".
+- **Indices: a red or closed index has no document count or size**, not 0; totals say how many are not counted, and that hidden indices are left out. A cluster that cannot be reached says "not read".
+- **Reports: a day is final 24 hours after it ended** (was: minutes after UTC midnight), and is read again once it is. A month, a breakdown and "month so far" are the finished days of the period everywhere (page, mail, files), never today, and say how many were measured and how many are not final. Days already final before the upgrade keep their figures, with a note when they were read too soon; a held host day is never replaced by a shorter read. Closed, unreadable and deleted indices, documents without an event size, and filled ClientID/branch values are marked. A size is never rounded to 0 GB. Counts from a cut list are "approximate ±N".
+- **Reports: every file has an About sheet** (about.csv in a zip): cluster, period, when it was read and built, by which version, and what is missing. The log delay report lists, per cluster, its last run, levels and devices read.
+- **Reports: Overview and Planning** say "N of M clusters measured" where they said 0, use 1 GB = 1024³, and drop the 1 GB a day floor.
+- **Percentages are never rounded to all or none** ("> 99.9 %" with one missing).
+- **Query pressure after a node restart, Clusters CSV of an unreachable cluster, REST and Indices answers of another cluster, alert times**: not measured, left blank, dropped, and in one named zone.
+- **The disk alert** says what was measured (shard data not in the index list) and claims no cause.
+- **Fleet: the repository list is read for every snapshot fetch** (one light request more); a 502–504 from a proxy is not a reachable cluster. A backup without a readable configuration is failed and rotates nothing out.
+
+CSV columns were added at the end of several files (docs/VOLUME.md, docs/REPORT-TYPES.md, docs/LOGDELAY.md); none was renamed or removed. The alerts and client-plan Zabbix templates were regenerated.
+
 ## 0.3.88
 
 - **Clusters: a row opens again.** ▸, a click on the row, or its ILM or SLM button opens the cluster's details, as before 0.3.64: cluster health (with the red or yellow indices on hover), endpoint, jump host and log bucket; the Shard allocation, ILM, Backups and Activity cards; the snapshot repositories; the nodes. Columns ▾ again chooses the tiles, sections and columns of an open row and *Expand details by default*. *Overview →* on the name stays. A repository whose snapshots are switched off (Edit cluster › Collection) or not read yet says so instead of 0.

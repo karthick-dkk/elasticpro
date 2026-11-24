@@ -115,7 +115,7 @@ pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> 
     let mut by_offset: BTreeMap<i32, Vec<String>> = BTreeMap::new();
     for (name, d) in &t.devices {
         if d.state == State::OtherTz {
-            if let Some(o) = d.tz_offset.or(d.applied_offset) {
+            if let Some(o) = d.zone_offset(cluster_offset).or(d.applied_offset) {
                 by_offset.entry(o).or_default().push(name.clone());
             }
         }
@@ -165,7 +165,7 @@ pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> 
 #[allow(clippy::too_many_arguments)]
 pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_ms: i64, facts: &ClusterFacts, zone: &LogTimeZone) -> Vec<Finding> {
     let mut out = tz_findings(cluster, t, now, zone);
-    let episodes: Vec<Episode> = t.all_episodes().into_iter()
+    let episodes: Vec<Episode> = t.all_episodes(now).into_iter()
         .filter(|e| e.started_ms < to && e.end_ms(now) >= from).collect();
     if episodes.is_empty() {
         return out;
@@ -270,7 +270,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             // device on time to compare against, "others were on time" cannot be said, and
             // nothing is claimed.
             let moments: Vec<(i64, i64)> = episodes.iter().filter(|e| late.contains(&e.device))
-                .map(|e| (e.started_ms.max(from), e.solved_ms.or(e.ended_ms).unwrap_or(i64::MAX).min(to))).collect();
+                .map(|e| (e.started_ms.max(from), e.end_ms(i64::MAX).min(to))).collect();
             let (mut others_all, mut others_late, mut others_on_time) = (0usize, 0usize, 0usize);
             for (_, (members, _)) in groups.iter().filter(|(v, _)| *v != value) {
                 for name in members {
@@ -470,7 +470,7 @@ mod tests {
         if !parser.is_empty() {
             extras.insert("parser_tag".into(), parser.into());
         }
-        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, extras }
+        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, event_field: None, extras }
     }
 
     fn run(t: &mut Tracker, at: i64, rs: Vec<Reading>) {

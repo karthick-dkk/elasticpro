@@ -30,39 +30,42 @@
      white or near-black wins depends entirely on how light the accent is. */
   --on-accent:   #ffffff;
 
-  /* Categorical. Owner rule: a chart never shows red and yellow together, so neither is a
-     series colour — blue, orange, green, pink first, then violet, teal, sky and sand. */
+  /* Categorical: what a series is, never how bad it is — red, yellow and green are the states'
+     (below). Blue, orange, green, pink first, then violet, teal, sky and sand. */
   --series-1: #3b82d6; --series-2: #f0943f; --series-3: #4caf6a; --series-4: #e57ba8;
   --series-5: #8b7be0; --series-6: #2fa8a0; --series-7: #6fb0ea; --series-8: #b8946a;
-  /* Status in a chart or a bar (a meter, a coverage strip, a donut): light green, blue, pink
-     and orange — the owner's chart colours — never the red and yellow of the status fills.
-     A shade deeper here than in the dark themes so a bar still stands off its track. */
-  --chart-good: #6cc070; --chart-info: #5b9be6; --level-crit: #d93a3a; --chart-bad: var(--level-crit); --chart-warn: #f0943f;
+  /* States (the owner, 2026-11-24), one set for every page: critical (above 60 min, the critical
+     level) red, delayed / warning (30–60 min) yellow, on time / ok green. Always with the word.
+       --state-X       a chart's fill: bars, arcs, cells, the line of a level — soft
+       --state-X-ink   the same state as text on a page
+       --state-X-bg    the ground of a row or a banner
+       --state-X-pill  a pill's ground and --state-X-on the ink on it: a yellow pill is dark ink
+                       on yellow in every theme, the others are -ink on -bg.
+     The names used elsewhere (--good-ink, --warning-bg, --chart-bad …) are these, below. */
+  --state-crit: #e4716c; --state-late: #f0c843; --state-ok: #74c67e;
+  --state-crit-ink: #a82323; --state-late-ink: #6b4d00; --state-ok-ink: #0a6e0a;
+  --state-crit-bg: #fae6e6; --state-late-bg: #fff4c9; --state-ok-bg: #e6f5e6;
+  --state-late-pill: #ffe07a; --state-late-on: #3d2f00;
+  --state-crit-pill: var(--state-crit-bg); --state-crit-on: var(--state-crit-ink);
+  --state-ok-pill: var(--state-ok-bg); --state-ok-on: var(--state-ok-ink);
+  --chart-good: var(--state-ok); --chart-warn: var(--state-late); --chart-bad: var(--state-crit); --chart-info: #5b9be6;
 
   /* sequential blue ramp */
   --seq-100: #cde2fb; --seq-250: #86b6ef; --seq-400: #3987e5; --seq-550: #1c5cab; --seq-700: #0d366b;
 
   /* Status FILLS - the colour of the thing itself: bars, dots, borders. Tuned to read on
      a dark surface, not themed. */
-  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good: #0ca30c; --warning: #f2c01e; --serious: #ec835a; --critical: #d03b3b;
   --high: #ff8c42;
-  --good-bg: #e6f5e6; --warning-bg: #fdf3dc; --critical-bg: #fae6e6; --serious-bg: #fceee7;
+  --good-bg: var(--state-ok-bg); --warning-bg: var(--state-late-bg); --critical-bg: var(--state-crit-bg); --serious-bg: #fceee7;
   /* Status INKS - the same status rendered as TEXT on its own -bg. A fill colour and a
-     text colour have different jobs, and #fab219 on #fdf3dc is 1.48:1 - a warning pill
+     text colour have different jobs, and a yellow fill on its own tint is 1.5:1 - a warning pill
      nobody can read. Inks are themed, because ink must contrast with what it sits on. */
   /* A step darker than they were (#0a7a0a, #8a5300, #a03c14, #b02525): a pill's edge is now
      its own ink, and at the old values that edge fell under 3:1 against a hovered row. */
-  --good-ink: #0a6e0a; --warning-ink: #7d4b00; --serious-ink: #953811; --critical-ink: #a82323;
+  --good-ink: var(--state-ok-ink); --warning-ink: var(--state-late-ink); --serious-ink: #953811; --critical-ink: var(--state-crit-ink);
   /* High, the level between warning and critical (core/alert-levels.js): orange. */
   --high-bg: #ffeedd; --high-ink: #a8340d;   /* redder than --warning-ink so the two pills part */
-  /* The log delay report's tones (reports/logdelay.js): pink late, blue delayed, green on
-     time, orange clock ahead. Ink for text, -bg for a pill's fill — themed like every other
-     tone. They used to be scoped to .ld and set for light and dark only, so Dark blue and
-     Warm drew the light inks (dark pink, dark green) on a pink- or green-tinted navy. */
-  --ld-pink-ink: #9c2a5f;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 28%, var(--surface-1));
-  --ld-blue-ink: #1b4a88;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 28%, var(--surface-1));
-  --ld-green-ink: #276b27; --ld-green-bg: color-mix(in srgb, #bfe6bf 28%, var(--surface-1));
-  --ld-orange-ink: #8f4a0b; --ld-orange-bg: color-mix(in srgb, #f5b77a 28%, var(--surface-1));
   /* Node roles in an open Clusters row (.cl-role); the console's JSON booleans use the master one. */
   --role-master-ink: #6d28d9; --role-ingest-ink: #0b5e57;
 
@@ -93,15 +96,12 @@
     --on-accent: #0b0b0b;
     --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
     --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-    --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
+    --chart-info: #a9c8f0;
+    --state-crit: #f08a84; --state-late: #f3d36b; --state-ok: #9fd89f; --state-late-pill: #f0cf63; --state-late-on: #2b2100;
     --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
-    --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
-    --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+    --state-ok-bg: #122a12; --state-late-bg: #3a2f10; --state-crit-bg: #3a1717; --serious-bg: #3a2418;
+    --state-ok-ink: #3fbf3f; --state-late-ink: #f5c451; --serious-ink: var(--serious); --state-crit-ink: #ef6a6a;
     --high-bg: #3a2414; --high-ink: #ff9f5f;
-    --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
-    --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
-    --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
-    --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
     --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
     --grid: #2b2b29;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
@@ -125,15 +125,12 @@
   --on-accent: #0b0b0b;
   --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
+  --chart-info: #a9c8f0;
+  --state-crit: #f08a84; --state-late: #f3d36b; --state-ok: #9fd89f; --state-late-pill: #f0cf63; --state-late-on: #2b2100;
   --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
-  --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
-  --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+  --state-ok-bg: #122a12; --state-late-bg: #3a2f10; --state-crit-bg: #3a1717; --serious-bg: #3a2418;
+  --state-ok-ink: #3fbf3f; --state-late-ink: #f5c451; --serious-ink: var(--serious); --state-crit-ink: #ef6a6a;
   --high-bg: #3a2414; --high-ink: #ff9f5f;
-  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
-  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
-  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
-  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
   --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #2b2b29;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
@@ -168,15 +165,12 @@
   --on-accent: #0a111f;
   --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
+  --chart-info: #a9c8f0;
+  --state-crit: #f08a84; --state-late: #f3d36b; --state-ok: #9fd89f; --state-late-pill: #f0cf63; --state-late-on: #2b2100;
   --seq-100: #17325c; --seq-250: #24518f; --seq-400: #3d7fd4; --seq-550: #79aaea; --seq-700: #c6ddf8;
-  --good-bg: #10281f; --warning-bg: #322a12; --critical-bg: #331a20; --serious-bg: #33241a;
-  --good-ink: #52c78a; --warning-ink: #e8bf5f; --serious-ink: #ef9a72; --critical-ink: #f07b83;
+  --state-ok-bg: #10281f; --state-late-bg: #322a12; --state-crit-bg: #331a20; --serious-bg: #33241a;
+  --state-ok-ink: #52c78a; --state-late-ink: #e8bf5f; --serious-ink: #ef9a72; --state-crit-ink: #f07b83;
   --high-bg: #33231a; --high-ink: #ffa166;
-  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
-  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
-  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
-  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
   --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #1d2a42;
   --shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
@@ -207,20 +201,17 @@
   --accent:      #e3a44e;
   --accent-soft: #3a2a12;
   --on-accent:   #16120c;
-  /* Categorical steps. The owner's chart colours hold here too (no red, no yellow); blue
+  /* Categorical steps: no red, yellow or green of the states; blue
      is kept, at the soft step, because a chart's series must stay apart by hue. */
   --series-1: #a9c8f0; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
   --series-5: #c9b6e8; --series-6: #8fcfc0; --series-7: #e3c59a; --series-8: #d7bfa0;
-  --chart-good: #9fd89f; --chart-info: #a9c8f0; --level-crit: #ef5350; --chart-bad: var(--level-crit); --chart-warn: #f5b77a;
+  --chart-info: #a9c8f0;
+  --state-crit: #f08a84; --state-late: #f3d36b; --state-ok: #9fd89f; --state-late-pill: #f0cf63; --state-late-on: #2b2100;
   /* The sequential ramp is amber here rather than blue — it is a ramp, not a brand. */
   --seq-100: #3d2e14; --seq-250: #6b5220; --seq-400: #a67c2e; --seq-550: #d1a552; --seq-700: #f0d49a;
-  --good-bg: #14240f; --warning-bg: #2e2410; --critical-bg: #2e1813; --serious-bg: #2e2014;
-  --good-ink: #6fbf73; --warning-ink: #e8c168; --serious-ink: #eda179; --critical-ink: #f08a7a;
+  --state-ok-bg: #14240f; --state-late-bg: #2e2410; --state-crit-bg: #2e1813; --serious-bg: #2e2014;
+  --state-ok-ink: #6fbf73; --state-late-ink: #e8c168; --serious-ink: #eda179; --state-crit-ink: #f08a7a;
   --high-bg: #2e1f12; --high-ink: #f6a064;
-  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
-  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
-  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
-  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
   --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #2b2318;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.42);
@@ -499,18 +490,18 @@ label.field > select { text-overflow: ellipsis; }
    old edges, a third of the status FILL colour, did no better: a grey "silent" pill on navy was
    a word floating in space. The ink edge clears 3:1 on a card, a hovered row and a chosen row. */
 .pill.green, .pill.yellow, .pill.orange, .pill.high, .pill.red, .pill.grey, .pill.blue,
-.pill.ld-pink, .pill.ld-blue, .pill.ld-green, .pill.ld-orange {
+.pill.ld-ok, .pill.ld-delay, .pill.ld-crit, .pill.ld-tz {
   border-color: color-mix(in srgb, currentColor 75%, transparent);
 }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
-.pill.green  { color: var(--good-ink);     background: var(--good-bg); }
-.pill.yellow { color: var(--warning-ink);  background: var(--warning-bg); }
+.pill.green  { color: var(--state-ok-on);   background: var(--state-ok-pill); }
+.pill.yellow { color: var(--state-late-on); background: var(--state-late-pill); }
 .pill.orange { color: var(--serious-ink);  background: var(--serious-bg); }
 .pill.high   { color: var(--high-ink);     background: var(--high-bg); }
 /* Top bar: requests paused, with Resume for an admin (ui/paused-pill.js). */
 .btn.paused-btn { color: var(--serious-ink); background: var(--serious-bg); border-color: color-mix(in srgb, var(--serious) 45%, transparent); white-space: nowrap; }
 .btn.paused-btn:hover { border-color: var(--serious); }
-.pill.red    { color: var(--critical-ink); background: var(--critical-bg); }
+.pill.red    { color: var(--state-crit-on); background: var(--state-crit-pill); }
 .pill.grey   { color: var(--text-secondary); background: var(--surface-2); }
 
 /* --------------------------------- tables ---------------------------------- */
@@ -888,8 +879,8 @@ a.agroup-name:hover { text-decoration: underline; }
 .adot.high { background: var(--high); }
 .apill { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 0 8px; border-radius: 10px; white-space: nowrap;
          box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent); }   /* the pill's edge, as .pill's */
-.apill.crit { color: var(--critical-ink); background: var(--critical-bg); }
-.apill.warn { color: var(--warning-ink); background: var(--warning-bg); }
+.apill.crit { color: var(--state-crit-on); background: var(--state-crit-pill); }
+.apill.warn { color: var(--state-late-on); background: var(--state-late-pill); }
 .apill.high { color: var(--high-ink); background: var(--high-bg); }
 .apill.grey { color: var(--text-secondary); background: var(--surface-3); }
 .split { display: inline-flex; }
@@ -1708,7 +1699,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--chart-good); }
 .cl-mini i.low { background: var(--chart-warn); }
 .cl-mini i.high { background: var(--chart-bad); }
-.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel): orange, a chart colour already */
+.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel): orange, the High level's colour */
 .cl-star { color: var(--warning-ink); }
 .cl-roles { display: inline-flex; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .cl-role {
@@ -1923,7 +1914,7 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .tv {
   --tv-bg: #0b0d10; --tv-panel: #12161b; --tv-panel-2: #181d24; --tv-line: #262d36;
   --tv-text: #f2f4f7; --tv-text-2: #b9c0ca; --tv-muted: #7d8794;
-  --tv-green: #2fbf5b; --tv-yellow: #f2b632; --tv-red: #ef4b4b; --tv-blue: #4c93f0; --tv-amber: #f0a020;
+  --tv-green: #2fbf5b; --tv-yellow: #f4cd3c; --tv-red: #ef4b4b; --tv-blue: #4c93f0; --tv-amber: #f0a020;
   --tv-orange: #ff8c42;   /* High (core/alert-levels.js), between yellow and red */
   --surface-1: var(--tv-panel); --surface-3: var(--tv-line); --text-muted: var(--tv-muted);
   --text-secondary: var(--tv-text-2); --series-1: var(--tv-blue); --border: var(--tv-line); --grid: var(--tv-line);
@@ -2330,8 +2321,8 @@ button.pn-link:hover { text-decoration: underline; }
 .colmenu-foot { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 /* Indices: the Indices | Templates | Summary tabs */
 .ix-views { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
-/* Indices › Summary (0.3.71): index size per day. Light blue bars, an orange average (never red
-   with yellow in a chart), 32 px table rows, no subtitle lines. */
+/* Indices › Summary (0.3.71): index size per day. Light blue bars, an orange average,
+   32 px table rows, no subtitle lines. */
 .isum { display: grid; gap: 10px; }
 .isum-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .isum-gap { flex: 1; }
@@ -2440,7 +2431,7 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
 /* Cluster health: the list is a popover on hover and keyboard focus only. */
 .cl-hp { position: relative; display: inline-flex; }
 .cl-hp-btn { height: 22px; padding: 0 8px; border-radius: 4px; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit; border: 1px solid; }
-.cl-hp-btn.yellow { background: var(--warning-bg); color: var(--warning-ink); border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
+.cl-hp-btn.yellow { background: var(--state-late-pill); color: var(--state-late-on); border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
 .cl-hp-btn.red { background: var(--critical-bg); color: var(--critical-ink); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
 .cl-hp-pop { display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: min(780px, 80vw); background: var(--surface-1);
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; box-shadow: var(--shadow); font-size: 12px; white-space: normal; }
@@ -2833,7 +2824,7 @@ tr.zr-none-row td { background: var(--surface-0); font-size: 12px; white-space: 
 .zr-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; margin-left: 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; vertical-align: 1px;
   background: var(--surface-2); color: var(--text-secondary); box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent); }
 .zr-badge.blue { background: var(--accent-soft); color: var(--accent); }
-.zr-badge.yellow { background: var(--warning-bg); color: var(--warning-ink); }
+.zr-badge.yellow { background: var(--state-late-pill); color: var(--state-late-on); }
 .zr-badge.red { background: var(--critical-bg); color: var(--critical-ink); }
 .zr-sync { font-size: 11.5px; margin-top: 2px; }
 .zr-sync .zr-badge { margin-left: 0; }
@@ -2845,22 +2836,13 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .zr-gcell { white-space: normal; }
 
 /* ---------------- Reports › Log delay (0.3.57, reports/logdelay.js) ----------------
- * Chart colours: light green #bfe6bf, blue #a9c8f0, pink #f2a7c3, orange — never red with yellow.
- * Compact: 32 px rows. Figures in pink ink for late, blue ink for 30–60, green ink for on time. */
-/* The inks and fills (--ld-*-ink, --ld-*-bg) are theme tokens, at the top of this file. */
-.ld .ld-pink { color: var(--ld-pink-ink); font-weight: 600; }
-.ld .ld-blue { color: var(--ld-blue-ink); font-weight: 600; }
-.ld .ld-green { color: var(--ld-green-ink); }
-.ld .pill.ld-pink { color: var(--ld-pink-ink); background: var(--ld-pink-bg); }
-.ld .pill.ld-blue { color: var(--ld-blue-ink); background: var(--ld-blue-bg); }
-.ld .pill.ld-green { color: var(--ld-green-ink); background: var(--ld-green-bg); }
-.ld .pill.ld-orange { color: var(--ld-orange-ink); background: var(--ld-orange-bg); }
+ * Compact: 32 px rows. Colours are the states' (--state-*, at the top of this file). */
 .ld .pill.ld-pill { white-space: nowrap; font-weight: 600; }
 .ld table.tbl td { height: 32px; padding-top: 0; padding-bottom: 0; white-space: nowrap; }
 .ld table.tbl td.ld-wrap { white-space: normal; min-width: 180px; max-width: 420px; padding-top: 5px; padding-bottom: 5px; }
 .ld table.tbl.ld-ctr th, .ld table.tbl.ld-ctr td { text-align: center; }
 .ld table.tbl.ld-ctr th:first-child, .ld table.tbl.ld-ctr td:first-child { text-align: left; }
-.ld table.tbl tr.ld-open td { background: color-mix(in srgb, #f2a7c3 12%, transparent); }
+.ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--state-crit) 14%, transparent); }
 .ld-head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 16px; }
 .ld-title { flex: 1 1 320px; min-width: 0; }
 .rp-page .ld-title h2, .ld-title h2 { margin: 2px 0 0; font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
@@ -2881,14 +2863,12 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 @media (max-width: 1180px) { .ld-kpis.ld-6, .ld-kpis.ld-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .ld-kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ld-kpi > b { font-size: 20px; font-weight: 650; line-height: 1.2; font-variant-numeric: tabular-nums; }
-.ld-kpi > b.ld-pink { color: var(--ld-pink-ink); }
-.ld-kpi > b.ld-green { color: var(--ld-green-ink); }
 .ld-kpi > span { font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .ld-kpi .ld-small { font-size: 11.5px; }
 .ld-kpi.ld-wide { grid-column: span 2; }
 .ld-reduced { display: flex; align-items: flex-end; gap: 10px; height: 64px; margin-top: 2px; border-bottom: 1px solid var(--border); }
 .ld-red { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 2px; }
-.ld-red b { font-size: 11.5px; color: var(--ld-green-ink); }
+.ld-red b { font-size: 11.5px; color: var(--state-ok-ink); }
 .ld-red i { display: block; width: 70%; max-width: 34px; border-radius: 3px 3px 0 0; }
 .ld-red-labels { display: flex; gap: 10px; font-size: 10.5px; color: var(--text-muted); }
 .ld-red-labels span { flex: 1; text-align: center; }
@@ -2924,7 +2904,6 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld[data-ld="summary"] .ld-ring-pic { width: 84px; height: 84px; }
 .ld[data-ld="summary"] .ld-ring-mid b { font-size: 15px; }
 .ld[data-ld="summary"] .ld-ring[data-known="false"] .ld-ring-mid b { color: var(--text-muted); }
-.ld[data-ld="summary"] .ld-ring[data-alert="true"] .ld-ring-mid b { color: var(--critical-ink); }
 .ld-spark { display: inline-block; line-height: 0; }
 .ld-foot { padding: 7px 2px 0; font-size: 12px; color: var(--text-secondary); }
 .ld-note { font-size: 12px; }
@@ -2933,8 +2912,6 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface-2); font-size: 12px; color: var(--text-secondary); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .ld-chip b { color: var(--text); font-weight: 600; }
-.ld-tz-chip[data-mode="none"] { color: var(--ld-orange-ink); }
-.ld-tz-chip[data-mode="detected"], .ld-tz-chip[data-mode="set"] { color: var(--ld-blue-ink); }
 .ld-q-row { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; padding: 10px 12px; }
 .ld-q { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-secondary); min-width: 0; }
 .ld-q input, .ld-q select { height: 30px; max-width: 190px; }
@@ -2947,6 +2924,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-plot { flex: 1; min-width: 0; position: relative; border-left: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .ld-plot .ld-graph-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .ld-band { position: absolute; top: 0; bottom: 0; }
+.ld-tail { position: absolute; top: 0; bottom: 0; right: 0; background: repeating-linear-gradient(135deg, var(--surface-2) 0 4px, transparent 4px 8px); }
 .ld-hline { position: absolute; left: 0; right: 0; border-top: 1px dashed; }
 .ld-marks { position: relative; height: 16px; margin-left: 56px; }
 .ld-mark { position: absolute; top: 1px; font-size: 10px; }
@@ -3009,11 +2987,6 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld table.tbl.ld-logs td.ld-msg.ld-open-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ld table.tbl.ld-logs tr.ld-log { cursor: pointer; }
 .ld table.tbl.ld-logs td.ld-json { background: var(--surface-2); white-space: normal; height: auto; }
-.ld .ld-band { background: color-mix(in srgb, var(--ld-blue-ink) 22%, transparent); }
-.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--ld-pink-ink) 22%, transparent); }
-.ld .ld-mark-start { color: var(--ld-blue-ink); }
-.ld .ld-mark-solved { color: var(--ld-green-ink); }
-.ld .ld-mark-open { color: var(--ld-pink-ink); }
 .ld-loading { display: flex; align-items: center; gap: 6px; }
 .rp-nav a.rp-moved { color: var(--accent); }
 .ld .tbl-wrap + .tbl-wrap, .ld .banner + .tbl-wrap { margin-top: 8px; }
@@ -3047,10 +3020,11 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-lwarn .ld-warn-anyway { border-color: color-mix(in srgb, var(--warning) 70%, transparent); }
 .ld-dbar-cell { white-space: nowrap; }
 .ld-dbar { display: inline-block; vertical-align: middle; width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; margin-right: 8px; }
-.ld-dbar i { display: block; height: 100%; border-radius: 3px; background: var(--ld-ok); }
-.ld-dbar[data-state="delay"] i { background: var(--ld-delay); }
-.ld-dbar[data-state="critical"] i { background: var(--ld-crit); }
-.ld-dbar[data-state="clock_ahead"] i, .ld-dbar[data-state="other_tz"] i { background: var(--ld-tz); }
+.ld-dbar i { display: block; height: 100%; border-radius: 3px; background: var(--state-ok); }
+.ld-dbar[data-state="delay"] i { background: var(--state-late); }
+.ld-dbar[data-state="critical"] i { background: var(--state-crit); }
+.ld-dbar[data-state="clock_ahead"] i { background: var(--ld-silent); }
+.ld-dbar[data-state="other_tz"] i { background: var(--ld-tz); }
 .ld-dbar-cell b { font-weight: 600; font-variant-numeric: tabular-nums; }
 .ld tr.ld-watched > td { background: var(--accent-soft); }
 .ld .ld-acts .ld-watch-btn { display: inline-flex; align-items: center; gap: 5px; }
@@ -3074,7 +3048,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 @media (max-width: 760px) { .ld-lf input, .ld-lf select, .ld-lf.ld-lf-q input { width: 100%; } .ld-lf { flex: 1 1 140px; } }
 
 /* ------------------------------- Jobs (docs/JOBS.md "Jobs page") ------------------------------- */
-/* Dense: 32 px rows, no empty bands. Bars light blue / green / pink / orange (never red and yellow). */
+/* Dense: 32 px rows, no empty bands. Bars: running blue, done green, failed red, waiting yellow. */
 .jb-page { display: grid; gap: 10px; min-width: 0; }
 /* Jobs › Requests: the Jobs tab row over the Request Centre, which keeps its own card styles (not .jb-page's). */
 .jb-host { display: grid; gap: 10px; min-width: 0; }
@@ -3094,7 +3068,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .jb-chip .k { color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
 .jb-chip .v { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 640; }
 .jb-chip .d { color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.jb-chip.warn { border-color: color-mix(in srgb, var(--serious) 50%, var(--border)); background: var(--serious-bg); }
+.jb-chip.warn { border-color: color-mix(in srgb, var(--warning) 50%, var(--border)); background: var(--warning-bg); }
 .jb-chip.run { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .jb-page .card > header { padding: 7px 12px; }
 .jb-page .card > .body { padding: 0; }
@@ -3112,10 +3086,10 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 td.jb-prog { min-width: 150px; }
 .jb-bar { display: inline-block; vertical-align: middle; width: 90px; height: 8px; margin-right: 6px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
 .jb-bar i { display: block; height: 100%; border-radius: 4px; transition: width .4s ease; }
-.jb-bar.blue i { background: #a9c8f0; }
-.jb-bar.green i { background: #bfe6bf; }
-.jb-bar.pink i { background: #f2a7c3; }
-.jb-bar.orange i { background: #f5c79a; }
+.jb-bar.blue i { background: var(--chart-info); }
+.jb-bar.green i { background: var(--state-ok); }
+.jb-bar.red i { background: var(--state-crit); }
+.jb-bar.yellow i { background: var(--state-late); }
 .jb-pct { font-variant-numeric: tabular-nums; }
 .jb-of { margin-left: 6px; font-size: 11px; }
 td.jb-err { color: var(--critical-ink); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
@@ -3144,7 +3118,7 @@ td.jb-nm .jb-cr, td.jb-nm .jb-x { flex: none; }
 .jb-page table.tbl td.jb-why.jb-err { max-width: 420px; }
 .jb-page table.tbl td.jb-why { max-width: 0; width: 30%; }
 /* The Jobs tab's graphical view (approved canvas, 0.3.77): Now, Health, ElasticPro health, Runs.
-   Existing tokens only; result colours are the chart status ones (never red and yellow together). */
+   Existing tokens only; result colours are the states'. */
 .jg-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; padding: 8px 12px; }
 .jg-tile { display: flex; flex-direction: column; gap: 1px; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px 5px; background: var(--surface); }
 .jg-tile .k { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3180,7 +3154,7 @@ td.jb-nm .jb-cr, td.jb-nm .jb-x { flex: none; }
 .jg-chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px; font-size: 11.5px; line-height: 20px; max-width: 100%; min-width: 0; white-space: nowrap; }
 .jg-chip > span { overflow: hidden; text-overflow: ellipsis; }
 .jg-chip.ok { background: var(--good-bg); } .jg-chip.ok b { color: var(--good-ink); }
-.jg-chip.warn { background: var(--serious-bg); } .jg-chip.warn b { color: var(--serious-ink); }
+.jg-chip.warn { background: var(--warning-bg); } .jg-chip.warn b { color: var(--warning-ink); }
 .jg-chip.bad { background: var(--critical-bg); } .jg-chip.bad b { color: var(--critical-ink); }
 .jg-chip-n { color: var(--text-primary); }
 .jg-chart { padding: 4px 8px 0; }
@@ -3204,7 +3178,7 @@ tr.jb-detail td.jb-more { white-space: normal; height: auto; background: var(--s
 .jb-kv .k { color: var(--text-muted); width: 84px; flex: none; }
 .jb-kv .v { overflow-wrap: anywhere; white-space: pre-wrap; min-width: 0; }
 /* All jobs › a job opened (0.3.81, docs/JOBS.md "Run details"): its last run's summary, exceptions and log. */
-.jb-subl .jb-warn { color: var(--serious-ink); }
+.jb-subl .jb-warn { color: var(--warning-ink); }
 .jb-page table.tbl td.jb-res .pill { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .jb-exp { display: grid; gap: 8px; padding: 6px 8px 8px 22px; font-size: 12px; min-width: 0; }
 .jb-exp > * { min-width: 0; }
@@ -3220,7 +3194,7 @@ tr.jb-detail td.jb-more { white-space: normal; height: auto; background: var(--s
 .jb-grid small { color: var(--text-muted); font-size: 10.5px; white-space: nowrap; }
 .jb-grid b { font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .t-ok { color: var(--good-ink); }
-.t-warn { color: var(--serious-ink); }
+.t-warn { color: var(--warning-ink); }
 .t-bad { color: var(--critical-ink); }
 .jb-sum .jb-details { padding: 6px 0 0; }
 .jb-scroll { max-height: 330px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
@@ -3229,12 +3203,12 @@ tr.jb-detail td.jb-more { white-space: normal; height: auto; background: var(--s
 .jb-page table.tbl.jb-inner td.jb-perr { white-space: nowrap; }
 .jb-perr .jb-code, .jb-code { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--surface-3); margin-right: 6px; }
 .jb-perr .sub { display: inline; color: var(--text-secondary); }
-tr.jb-defer td { background: var(--serious-bg); }
+tr.jb-defer td { background: var(--warning-bg); }
 pre.jb-log { margin: 0; max-height: 300px; overflow: auto; padding: 6px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border);
   font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.jb-log .m { color: var(--text-muted); }
 pre.jb-log .e { color: var(--critical-ink); }
-pre.jb-log .w { color: var(--serious-ink); }
+pre.jb-log .w { color: var(--warning-ink); }
 /* Slow searches now (0.3.81, docs/JOBS.md "Slow searches"): a query is two lines; Open shows all of it. */
 .jb-slow-tiles { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .jb-page table.tbl.jb-slow th:nth-child(1) { width: 18%; }
@@ -3270,43 +3244,36 @@ tr.jb-focus td { background: var(--accent-soft); }
 .jc-mode { align-self: start; }
 
 /* ---------------- Log Delay redesign (0.3.62, lead): tokens, title bar, tiles, charts, heat map, chips, split ----------------
-   The owner's palette ("cool blue", prototype v17): green below the delay line, light blue for the delay band, blue
-   above the critical line, violet for another time zone, grey for silent — never red with yellow. The fills are the
-   same in every theme; each theme mixes its own pill fill (-bg: 28 % of the fill with the surface) and ink (-ink:
-   35 % of the fill with the text colour), so the pill text keeps AA on dark, dark-blue and warm too. The heat ramp
-   is one blue (--ld-hx) mixed with the surface at 7 / 24 / 45 / 70 / 100 % (Late devices over the day). */
+   Levels are the states' colours (--state-*, the owner, 2026-11-24): green No delay, yellow the delay band, red above
+   the critical line; violet another time zone, grey silent or can't measure. The violet and the grey are the page's
+   own: a fill, a pill ground (28 % of it) and an ink (35 % of it with the text colour). Late devices over the day
+   takes the state's hue at 22 / 40 / 80 / 100 % over the surface; the two strong steps carry dark ink in every theme. */
 :root {
-  --ld-ok: #8fd19e; --ld-delay: #a9cbee; --ld-crit: #5b8fd1; --ld-tz: #a77fd6; --ld-silent: #9aa1ab; --ld-hx: #3f78c0;
-  --ld-ok-bg: color-mix(in srgb, var(--ld-ok) 28%, var(--surface-1)); --ld-delay-bg: color-mix(in srgb, var(--ld-delay) 28%, var(--surface-1));
-  --ld-crit-bg: color-mix(in srgb, var(--ld-crit) 28%, var(--surface-1)); --ld-tz-bg: color-mix(in srgb, var(--ld-tz) 28%, var(--surface-1));
-  --ld-silent-bg: color-mix(in srgb, var(--ld-silent) 28%, var(--surface-1));
-  --ld-ok-ink: color-mix(in srgb, var(--ld-ok) 35%, var(--text-primary)); --ld-delay-ink: color-mix(in srgb, var(--ld-delay) 35%, var(--text-primary));
-  --ld-crit-ink: color-mix(in srgb, var(--ld-crit) 35%, var(--text-primary)); --ld-tz-ink: color-mix(in srgb, var(--ld-tz) 35%, var(--text-primary));
+  --ld-tz: #a77fd6; --ld-silent: #9aa1ab;
+  --ld-tz-bg: color-mix(in srgb, var(--ld-tz) 28%, var(--surface-1)); --ld-tz-ink: color-mix(in srgb, var(--ld-tz) 35%, var(--text-primary));
   --ld-silent-ink: color-mix(in srgb, var(--ld-silent) 35%, var(--text-primary));
-  --ld-heat-0: color-mix(in srgb, var(--ld-hx) 7%, var(--surface-1)); --ld-heat-1: color-mix(in srgb, var(--ld-hx) 24%, var(--surface-1));
-  --ld-heat-2: color-mix(in srgb, var(--ld-hx) 45%, var(--surface-1)); --ld-heat-3: color-mix(in srgb, var(--ld-hx) 70%, var(--surface-1)); --ld-heat-4: var(--ld-hx);
 }
 /* Dark themes: the same fills (the violet a shade lighter so it stands off a dark surface); -bg and -ink follow from them. */
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ld-tz: #b994ec; --ld-silent: #7a828d; } }
 :root[data-theme="dark"], :root[data-theme="dark-blue"], :root[data-theme="warm"] { --ld-tz: #b994ec; --ld-silent: #7a828d; }
 /* Pills and figures by level (core/logdelay-report.js STATE_TONE). */
-.ld .pill.ld-ok { color: var(--ld-ok-ink); background: var(--ld-ok-bg); }
-.ld .pill.ld-delay { color: var(--ld-delay-ink); background: var(--ld-delay-bg); }
-.ld .pill.ld-crit { color: var(--ld-crit-ink); background: var(--ld-crit-bg); }
+.ld .pill.ld-ok { color: var(--state-ok-on); background: var(--state-ok-pill); }
+.ld .pill.ld-delay { color: var(--state-late-on); background: var(--state-late-pill); }
+.ld .pill.ld-crit { color: var(--state-crit-on); background: var(--state-crit-pill); }
 .ld .pill.ld-tz { color: var(--ld-tz-ink); background: var(--ld-tz-bg); }
-.ld .ld-ok { color: var(--ld-ok-ink); }
-.ld .ld-delay { color: var(--ld-delay-ink); font-weight: 600; }
-.ld .ld-crit { color: var(--ld-crit-ink); font-weight: 600; }
+.ld .ld-ok { color: var(--state-ok-ink); }
+.ld .ld-delay { color: var(--state-late-ink); font-weight: 600; }
+.ld .ld-crit { color: var(--state-crit-ink); font-weight: 600; }
 .ld .ld-tz { color: var(--ld-tz-ink); }
-.ld .ld-kpi > b.ld-delay { color: var(--ld-delay-ink); }
-.ld .ld-kpi > b.ld-crit { color: var(--ld-crit-ink); }
-.ld .ld-band { background: color-mix(in srgb, var(--ld-delay) 35%, transparent); }
-.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--ld-crit) 35%, transparent); }
-.ld .ld-mark-start { color: var(--ld-delay-ink); }
-.ld .ld-mark-solved { color: var(--ld-ok-ink); }
-.ld .ld-mark-open { color: var(--ld-crit-ink); }
-.ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--ld-crit) 14%, transparent); }
-.ld .ld-rec { border-color: color-mix(in srgb, var(--ld-delay) 60%, var(--border)); }
+.ld .ld-kpi > b.ld-delay { color: var(--state-late-ink); }
+.ld .ld-kpi > b.ld-crit { color: var(--state-crit-ink); }
+.ld .ld-band { background: color-mix(in srgb, var(--state-late) 35%, transparent); }
+.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--state-crit) 35%, transparent); }
+.ld .ld-mark-start { color: var(--state-late-ink); }
+.ld .ld-mark-solved { color: var(--state-ok-ink); }
+.ld .ld-mark-open { color: var(--state-crit-ink); }
+.ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--state-crit) 14%, transparent); }
+.ld .ld-rec { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .ld-page .ld-tz-chip { cursor: default; }
 .ld-page .ld-tz-chip[data-mode="none"] { color: var(--ld-silent-ink); }
 .ld-page .ld-tz-chip[data-mode="detected"], .ld-page .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
@@ -3389,8 +3356,8 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
 .ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }
 /* The cluster × time heat map. */
-/* Late devices over the day (0.3.82): a compact grid, the cluster column kept in view, one hue per
-   row on its own scale (--ld-heat-0…4, one blue mixed with the surface), a missing window hatched. */
+/* Late devices over the day (0.3.82): a compact grid, the cluster column kept in view; a cell is
+   green at 0, yellow late, red when a device is above the critical line, stronger on its own row's scale; a missing window hatched. */
 .ld-grid-wrap { overflow-x: auto; }
 .ld-grid { border-collapse: separate; border-spacing: 2px; width: 100%; font-size: 12px; }
 .ld-grid th, .ld-grid td { height: 28px; padding: 0 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -3398,16 +3365,18 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-grid thead th.num { text-align: right; }
 .ld-grid .ld-g-nm { position: sticky; left: 0; z-index: 1; background: var(--surface-1); text-align: left; font-weight: 600; min-width: 130px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .ld-grid td.num { text-align: right; }
-.ld-grid .ld-g-up { color: var(--ld-crit-ink); font-weight: 600; }
-.ld-grid .ld-g-dn { color: var(--ld-ok-ink); font-weight: 600; }
+.ld-grid .ld-g-up { color: var(--state-crit-ink); font-weight: 600; }
+.ld-grid .ld-g-dn { color: var(--state-ok-ink); font-weight: 600; }
 .ld-grid td.ld-gc { text-align: center; border-radius: 4px; min-width: 36px; }
 .ld-grid td.ld-gc[role="button"] { cursor: pointer; }
 .ld-grid td.ld-gc[role="button"]:hover, .ld-grid td.ld-gc[role="button"]:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -1px; }
-.ld-gs-0 { background: var(--ld-heat-0); color: var(--text-muted); }
-.ld-gs-1 { background: var(--ld-heat-1); color: var(--text-primary); }
-.ld-gs-2 { background: var(--ld-heat-2); color: var(--text-primary); }
-.ld-gs-3 { background: var(--ld-heat-3); color: #fff; }
-.ld-gs-4 { background: var(--ld-heat-4); color: #fff; font-weight: 700; }
+.ld-gs-late { --gs: var(--state-late); }
+.ld-gs-crit { --gs: var(--state-crit); }
+.ld-gs-0 { background: color-mix(in srgb, var(--state-ok) 16%, var(--surface-1)); color: var(--text-secondary); }
+.ld-gs-1 { background: color-mix(in srgb, var(--gs) 22%, var(--surface-1)); color: var(--text-primary); }
+.ld-gs-2 { background: color-mix(in srgb, var(--gs) 40%, var(--surface-1)); color: var(--text-primary); }
+.ld-gs-3 { background: color-mix(in srgb, var(--gs) 80%, var(--surface-1)); color: #171717; }
+.ld-gs-4 { background: var(--gs); color: #171717; font-weight: 700; }
 .ld-g-na { background: repeating-linear-gradient(135deg, var(--surface-2) 0 4px, transparent 4px 8px); color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border); }
 .ld-grid td.ld-g-fut { background: transparent; }
 .ld-g-pend { background-image: radial-gradient(var(--border) 1px, transparent 1.2px); background-size: 6px 6px; }
@@ -3415,7 +3384,7 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-g-legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .ld-key i.ld-g-key { display: inline-block; width: 14px; height: 12px; border-radius: 3px; vertical-align: -2px; border: 1px solid var(--border); }
 /* The clusters the last run did not measure: one quiet line, only when there are some. */
-.ld-notmeasured { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 6px 12px; border: 1px solid var(--border); border-left: 3px solid var(--ld-crit); border-radius: 8px; background: var(--surface-1); font-size: 12px; }
+.ld-notmeasured { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 6px 12px; border: 1px solid var(--border); border-left: 3px solid var(--ld-silent); border-radius: 8px; background: var(--surface-1); font-size: 12px; }
 .ld-notmeasured .ld-nm-head { color: var(--text-primary); }
 .ld-notmeasured .ld-nm-item { color: var(--text-secondary); }
 .ld-notmeasured .ld-nm-jobs { margin-left: auto; }

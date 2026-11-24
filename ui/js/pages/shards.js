@@ -11,7 +11,7 @@
 import { h, mount, reconcile } from '../lib/dom.js';
 import { tableSort } from '../lib/table-sort.js';
 import { nodeCache } from '../lib/keyed.js';
-import { bytes, num, compact, ago } from '../lib/fmt.js';
+import { bytes, num, compact, pct, sharePct, ago } from '../lib/fmt.js';
 import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
          datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy, setDangling, danglingFor } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
@@ -411,7 +411,7 @@ function loadBody(c) {
 
   return {
     sub: `${num(real.length)} task(s) · ${num(active)} active · ${num(queued)} queued · `
-       + `${num(rejected)} rejected · ${num(pending.length)} pending state change(s)`,
+       + `${num(rejected)} rejected since node start · ${num(pending.length)} pending state change(s)`,
     node: h('div', { style: { display: 'grid', gap: '10px' } },
       // The state and what it means share a line. An idle cluster is one fact, and it
       // was taking two rows: a pill, then a sentence under it in the empty half.
@@ -559,7 +559,7 @@ function loadCell(n, coreCount) {
 /** Disk as the same bar and the free space beside the number — one short line; the sizes in its tooltip. */
 function diskBar(used, total, p) {
   if (!total) return h('span.muted', '–');
-  return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`,
+  return usageBar(p, 'disk', `disk ${pct(p, 1, ' ')} — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`,
     { suffix: `· ${bytes(total - used)} free`, digits: 0 });
 }
 
@@ -628,7 +628,7 @@ function allocationCard(c, all, d) {
           // Compact (0.3.71): 120 wide (60 % of the 200 it was), stroke 12, a 20 px figure; the
           // "N of M shards assigned" line under the gauge, which is too narrow to hold it.
           splitGauge(segments, { total: mix.total, format: (v) => num(v), half: true, width: 120, stroke: 12, legend: false,
-            centreLabel: 'shards', centre: { big: `${Math.round((split.started / mix.total) * 100)}%`, bigPx: 20, smallBelow: true,
+            centreLabel: 'shards', centre: { big: sharePct(split.started, mix.total), bigPx: 20, smallBelow: true,
               small: `${num(split.started)} of ${num(mix.total)} shards assigned` } }),
           h('div.ns-alloc-tiles',
             edgeTile(num(split.started), 'assigned', { edge: STATUS.good, title: `${num(split.started)} shards started` }),
@@ -713,12 +713,13 @@ function pressureCard(c) {
     if (z.size === null) return `pool sizes differ across the ${num(z.nodes)} nodes`;
     return `of ${z.size === -1 ? 'an unbounded queue' : num(z.size)} per node · ${num(z.nodes)} node${z.nodes === 1 ? '' : 's'}`;
   };
-  const headPill = ps.state === 'unknown' ? pill('measuring', 'grey')
+  const headPill = ps.state === 'unknown' ? pill(r.measured || r.why ? 'not measured' : 'measuring', 'grey')
     : ps.state === 'pressure' ? pill('Under pressure', 'red') : pill('No pressure', 'green');
   const note = r.measured
-    ? `between the last two polls, ${Math.round(r.sinceMs / 1000)} s apart${ps.why.length ? ` · ${ps.why.join(' · ')}` : ''}`
+    ? `between the last two polls, ${Math.round(r.sinceMs / 1000)} s apart${[...ps.why, ...ps.missing].map((x) => ` · ${x}`).join('')}`
     : fleetView ? 'not measured with All clusters — pick one cluster'
     : io && io.error ? `could not read _nodes/stats: ${io.error}`
+    : r.why ? `not measured: ${r.why}`
     : 'measuring · next poll';
   const by = r.rejectedBy || {}, tb = r.tripsBy || {};
   return snug(card('Query pressure', `${c.name} · between the last two polls`,
@@ -746,7 +747,7 @@ function pressureCard(c) {
 function diskCard(c, d) {
   const io = diskInfo.get(c.id) || null;
   const u = diskUse(d.disk && d.disk.nodes);
-  const pct = (v) => (u.total && v !== null ? `${((v / u.total) * 100).toFixed(1)} %` : '');
+  const share = (v) => (u.total && v !== null ? sharePct(v, u.total, 1, ' ') : '');
   const known = u.total && u.used !== null && u.free !== null;
   const parts = [
     { label: 'Index data', value: u.indices, color: 'var(--chart-info)' },
@@ -757,11 +758,11 @@ function diskCard(c, d) {
   const sub = known ? `${c.name} · ${bytes(u.used)} of ${bytes(u.total)} in use` : `${c.name} · disk use not known`;
   return focusable(snug(card('Disk & dangling indices', sub,
     h('div.ns-disk',
-      ringGauge(drawn, { total: u.total || 0, size: 92, stroke: 16, centre: known ? `${Math.round((u.used / u.total) * 100)}%` : '–',
+      ringGauge(drawn, { total: u.total || 0, size: 92, stroke: 16, centre: known ? sharePct(u.used, u.total) : '–',
         label: parts.map((p) => `${p.label} ${p.value === null ? 'not known' : bytes(p.value)}`).join(', ') }),
       h('div.ns-disk-legend', ...parts.map((p) => h('div',
         h('i', { style: { background: p.color } }), h('span', p.label),
-        h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', pct(p.value))))),
+        h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', share(p.value))))),
       h('div.ns-disk-dangling', danglingBody(c, io))),
     [diskHelp(c)])), 'dangling');
 }

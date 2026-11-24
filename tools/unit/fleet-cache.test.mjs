@@ -281,9 +281,19 @@ test('a repository listing that answered with an HTTP error is "could not be rea
   cs.datasets.snapshots = entry({ byRepo: { daily: { ...httpErr(500, 'repository_missing_exception'), source: 'cat' } } });
   applyFleetEntry('c1', cs);
   const d = state.data.get('c1');
-  assert.deepEqual(d.snapshots.daily, []);
+  // Absent, not []: an empty listing reads as "0 snapshots" on every page (0.3.89).
+  assert.equal(d.snapshots.daily, undefined);
   assert.match(d.repos[0].error, /repository_missing/);
   assert.ok(alerts().some((a) => a.key === 'c1:repo:daily:unreadable'));
+});
+
+test('a listing that answered 200 with the repository\'s error is "could not be read", not empty', () => {
+  const cs = fullCluster();
+  cs.datasets.snapshots = entry({ byRepo: { daily: { ...ans({ snapshots: [], responses: [] }, { source: 'verbose' }), repoError: 'repository_exception: could not read data' } } });
+  applyFleetEntry('c1', cs);
+  const d = state.data.get('c1');
+  assert.equal(d.snapshots.daily, undefined);
+  assert.match(d.repos[0].error, /could not read data/);
 });
 
 test('indices and shards entries land where the pages read them', () => {

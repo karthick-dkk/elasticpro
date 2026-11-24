@@ -134,7 +134,7 @@ function panel(ctx, c, days) {
               h('b.red', String(sum.by.CRITICAL || 0)), ` over ${ctx.watch.delayRedAboveMin} min`,
               sum.worst && sum.worst.delayMinutes !== null ? ` · worst ${sum.worst.device} ${minutes(sum.worst.delayMinutes)}` : '')
             : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : '')),
-          h('div.pl-fact', h('span.pl-fk', 'Yesterday vs 7-day avg'), yv === null ? unknown(noVol)
+          h('div.pl-fact', h('span.pl-fk', 'Yesterday vs the 7 days before it'), yv === null ? unknown(noVol)
             : h('span', bytes(yv), chg === null ? ' · no earlier day' : h(`b${chg > 25 ? '.yellow' : ''}`, ` ${signedPct(chg)}`))),
           h('div.pl-fact', h('span.pl-fk', 'Indices per day'), yRow ? h('span', `${num(yRow.indices)} indices · ${bytes(yRow.size)} yesterday`) : unknown(noVol))))));
 }

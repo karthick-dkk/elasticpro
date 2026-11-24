@@ -5,6 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -71,6 +72,8 @@ test('summary: the late split, Delay reduced, the rings worst first and their ar
   assert.deepEqual(arcs.map((x) => x.kind), ['critical', 'delay']);
   assert.equal(arcs[0].dash, '10.00 90.00'); assert.equal(arcs[1].dash, '20.00 80.00'); assert.equal(arcs[1].offset, '-10.00', 'the delay band starts where the critical arc ends');
   assert.equal(R.ringArcs(0, 1, 100000)[0].dash, '1.50 98.50', 'one late device still shows');
+  const three = R.ringArcs(2, 1, 10, 6);
+  assert.deepEqual(three.map((x) => [x.kind, x.dash, x.offset]), [['critical', '10.00 90.00', '0.00'], ['delay', '20.00 80.00', '-10.00'], ['ok', '60.00 40.00', '-30.00']], 'No delay after the late arcs; the rest is another time zone');
   assert.deepEqual(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 30, criticalOver: 60 } }]), { delayFrom: 30, criticalOver: 60 });
   assert.equal(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 20, criticalOver: 60 } }]), null);
   assert.equal(R.sharedLevels([]), null);
@@ -79,11 +82,11 @@ test('summary: the late split, Delay reduced, the rings worst first and their ar
 test('summary day by day: a day without totals is a gap, every tick its own date', () => {
   const day = (d, o = {}) => ({ day: d, devices: 10, onTimeAll: 6, delayed: 2, critical: 1, otherTz: 0, silent: 1, unmeasured: 0, ...o });
   const bars = R.dayBars([day('2026-11-09'), { day: '2026-11-10', devices: 0 }, day('2026-11-11', { onTimeAll: 1, delayed: 0, critical: 0, silent: 0 })], 100);
-  assert.equal(bars[1].gap, true); assert.equal(bars[1].ok + bars[1].delay + bars[1].critical + bars[1].unk, 0);
-  assert.deepEqual([bars[0].ok, bars[0].delay, bars[0].critical, bars[0].unk], [60, 20, 10, 10]);
+  assert.equal(bars[1].gap, true); assert.equal(bars[1].ok + bars[1].delay + bars[1].critical, 0);
+  assert.deepEqual([bars[0].ok, bars[0].delay, bars[0].critical], [70, 20, 10], 'No delay: on time and silent together');
   assert.equal(bars[2].ok, 10);
   assert.match(R.dayTitle({ day: '2026-11-10', devices: 0 }), /10 Nov · no measurement/);
-  assert.match(R.dayTitle(day('2026-11-09'), R.bands({ delayFrom: 30, criticalOver: 60 })), /6 on time, 2 at 30–60 min, 1 above 60 min, 1 silent/);
+  assert.match(R.dayTitle(day('2026-11-09'), R.bands({ delayFrom: 30, criticalOver: 60 })), /No delay 7 \(on time 6 · silent 1 · can't measure 0\), 2 at 30–60 min, 1 above 60 min/);
   // The old board's ticks read "10 Nov" five times over a short period; each is its own day now.
   assert.deepEqual(R.dayTicks([day('2026-11-10')]), ['10 Nov']);
   assert.deepEqual(R.dayTicks([day('2026-11-16'), day('2026-11-17')]), ['16 Nov', '17']);
@@ -196,6 +199,8 @@ test('started → solved: still late, solved, silent, never late', () => {
   assert.equal(R.startedSolvedText({ state: 'no_delay', lastStarted: at(3, 22, 0), lastSolved: at(4, 1, 15) }, now), '3 Nov 22:00 → 4 Nov 01:15');
   assert.equal(R.startedSolvedText({ state: 'silent', silentSince: at(5, 12, 40) }, now), 'no logs since 12:40');
   assert.equal(R.startedSolvedText({ state: 'no_delay' }, now), 'never late in this period');
+  // Not measured since: never "still late".
+  assert.equal(R.startedSolvedText({ state: 'critical', lateSince: at(5, 11, 15), stale: true, lastMeasuredMs: at(5, 11, 40) }, now), 'today 11:15 → not solved · last measured 11:40');
 });
 
 test('devices behind: a day without totals is a gap, not zero; today is one series per window', () => {
@@ -272,11 +277,11 @@ test('late grid: each row is shaded on its own scale, its worst window darkest',
 
 test('device filters: the three levels, late, another time zone, silent (can\'t measure too); counts per chip', () => {
   const rows = ['no_delay', 'little', 'clock_ahead', 'delay', 'critical', 'other_tz', 'silent', 'unmeasured'].map((state) => ({ state }));
-  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, ok: 3, tz: 1, silent: 2 });
+  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, noDelay: 5, ok: 2, tz: 1, silent: 3 });
   assert.ok(R.matchesFilter({ state: 'little' }, 'ok'), 'an old little row is under the line');
   assert.ok(!R.matchesFilter({ state: 'silent' }, 'late'), 'silent is not late: it has no figure');
   assert.ok(R.matchesFilter({ state: 'silent' }, 'all'));
-  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'ok', 'tz', 'silent']);
+  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'noDelay', 'ok', 'tz', 'silent']);
 });
 
 test('time zones: a device\'s zone, the filter, the counts behind Expand, the chip\'s words, the By cluster cell', () => {
@@ -296,7 +301,7 @@ test('time zones: a device\'s zone, the filter, the counts behind Expand, the ch
   assert.equal(R.timeZoneChipText(z, 480, off), '+08:00 · only these devices');
   assert.equal(R.timeZoneChipText(z, 'none', off), 'not detected · only these devices');
   assert.equal(R.timeZoneChipText([{ key: 'none', offsetMinutes: null, devices: 3 }], null, off), 'not detected');
-  assert.deepEqual(R.tileCounts(rows), { devices: 6, onTime: 2, delay: 1, critical: 1, otherTz: 1, silent: 1, unmeasured: 0 });
+  assert.deepEqual(R.tileCounts(rows), { devices: 6, onTime: 2, delay: 1, critical: 1, otherTz: 1, silent: 1, unmeasured: 0, clockAhead: 0, cantMeasure: 0, lateBeforeSilent: 0 });
   const by = [
     { id: 'a', name: 'A', lastRunAt: 1, timeZone: { mode: 'detected', offset: '+05:30', offsetMinutes: 330, agree: 12, of: 13, pct: 92.3 } },
     { id: 'c', name: 'C', lastRunAt: 1, timeZone: { mode: 'none', pct: 41.7 } },
@@ -319,6 +324,9 @@ test('device graph: unknown points break the line; the scale holds the critical 
   const g = R.deviceGraph([{ t: 0, m: 5 }, { t: 1, m: 10 }, { t: 2, m: null }, { t: 3, m: 40 }], { fromMs: 0, toMs: 3, height: 100, levels: { criticalOver: 60 } });
   assert.equal(g.segments.length, 2);
   assert.ok(g.scaleMax >= 90, `scale ${g.scaleMax} holds 1.5 × critical`);
+  assert.equal(R.periodBand({ started: 1, ended: 4, lastMeasuredMs: 2 }, 0, 4, 4).width, 25, 'a period that ended unsolved is shaded to its last measurement');
+  assert.deepEqual(R.shareTenths([4999, 0, 1]), [999, 0, 1], 'one late of 5,000 is never 0 %');
+  assert.deepEqual(R.shareTenths([5000, 5000, 1]), [499, 500, 1], 'the core takes it from the same one');
   const band = R.periodBand({ started: 1, solved: null, worstState: 'critical' }, 0, 4, 3);
   assert.equal(band.critical, true);
   assert.equal(Math.round(band.left), 25);
@@ -346,8 +354,7 @@ test('periods: today, last N days, this month, last month', () => {
 });
 
 test('chart colours: the theme tokens for the three levels, another time zone and silent — never a hex of its own', () => {
-  const fills = Object.entries(R.LD_COLOURS).filter(([k]) => k !== 'line').map(([, v]) => v);
-  assert.deepEqual(fills, ['var(--ld-ok)', 'var(--ld-delay)', 'var(--ld-crit)', 'var(--ld-tz)', 'var(--ld-silent)']);
+  const fills = Object.values(R.LD_COLOURS);
   assert.ok(fills.every((v) => !/#/.test(v)), 'a theme draws its own tones');
 });
 
@@ -407,13 +414,31 @@ test('Live: a device silent in the range is a silent row, its last arrival kept;
   assert.deepEqual(R.scheduleOf(null), { supported: null, enabled: null, everyHours: null, lastRunAt: null, nextDueAt: null }, 'no answer: nothing known');
 });
 
-test('summary rings: red above LD_RING_RED_PCT delayed, one figure for every ring (0.3.77)', () => {
-  assert.equal(R.LD_RING_RED_PCT, 2, 'the owner’s line: 2 %');
-  assert.equal(R.ringAlert(2.0), false, '2.0 % is at the line: not red');
-  assert.equal(R.ringAlert(2.1), true, '2.1 % is above it: red');
-  assert.equal(R.ringAlert(0), false);
-  assert.equal(R.ringAlert(null), false, 'unknown is not red (nor 0)');
-  assert.equal(R.ringAlert(undefined), false);
+test('states have one colour everywhere: critical red, delayed yellow, No delay green (owner, 2026-11-24)', () => {
+  const C = R.LD_COLOURS;
+  assert.deepEqual([C.ok, C.delay, C.crit, C.tz, C.silent], ['var(--state-ok)', 'var(--state-late)', 'var(--state-crit)', 'var(--ld-tz)', 'var(--ld-silent)']);
+  assert.match(C.delayLine, /--state-late\b/); assert.match(C.critLine, /--state-crit\b/);
+  // A grid cell: red when a device was above the critical line then, yellow late, none at 0; unknown split is not red.
+  assert.deepEqual([R.gridHue({ criticalAt: 1 }, 3), R.gridHue({ criticalAt: 0 }, 3), R.gridHue({ criticalAt: null }, 3), R.gridHue({ criticalAt: 0 }, 0)], ['crit', 'late', 'late', '']);
+  // A fix on the path is not a level.
+  assert.ok(!Object.values(R.STEP_TONE).some((t) => /ld-(ok|delay|crit)/.test(t)));
+});
+
+test('the state tokens: set in every theme, one set (good/warning/critical and the chart fills are these), none of the old ones left', () => {
+  const css = fs.readFileSync(new URL('../../ui/css/app.css', import.meta.url), 'utf8');
+  for (const s of ['crit', 'late', 'ok']) {
+    for (const k of ['', '-ink', '-bg']) assert.equal((css.match(new RegExp(`--state-${s}${k}: #`, 'g')) || []).length, 5, `--state-${s}${k}: light, dark by system, dark, dark-blue, warm`);
+  }
+  for (const [a, b] of [['good-ink', 'ok-ink'], ['warning-ink', 'late-ink'], ['critical-ink', 'crit-ink'], ['good-bg', 'ok-bg'], ['warning-bg', 'late-bg'], ['critical-bg', 'crit-bg'], ['chart-good', 'ok'], ['chart-warn', 'late'], ['chart-bad', 'crit']]) {
+    assert.equal((css.match(new RegExp(`--${a}:`, 'g')) || []).length, 1, `--${a} is set once`);
+    assert.ok(css.includes(`--${a}: var(--state-${b});`), `--${a} is the state's`);
+  }
+  assert.ok(!/--ld-(pink|blue|green|orange|ok|delay|crit|hx|heat)|--level-crit/.test(css));
+  // A yellow pill is dark ink on yellow in every theme: 4.5:1 and more.
+  const lum = (hex) => { const v = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
+  const pills = [...css.matchAll(/--state-late-pill: (#\w{6}); --state-late-on: (#\w{6});/g)];
+  assert.equal(pills.length, 5);
+  for (const [, bg, on] of pills) assert.ok((lum(bg) + 0.05) / (lum(on) + 0.05) >= 4.5, `${on} on ${bg}`);
 });
 
 test('documents without a device name: one summed line, never a note per cluster (0.3.77)', () => {
@@ -447,4 +472,88 @@ test('lastRunChange: became late and came back in the window of the last run; un
   assert.equal(lastRunChange({ lastRunAt: 999, windows }), null, 'the last run is not today: not known');
   assert.equal(lastRunChange({ lastRunAt: null, windows }), null, 'never measured');
   assert.equal(lastRunChange({ lastRunAt: 150 }), null, 'no windows');
+});
+
+test('No delay = on time + silent + can\'t measure, with its split; the shares add up to 100', () => {
+  // The owner's example: on time 89 %, delayed 5 %, silent 6 % → No delay 95 %, Delayed 5 %.
+  const nd = R.noDelayOf({ devices: 100, onTime: 89, late: 5, silent: 6, unmeasured: 0, otherTz: 0 });
+  assert.equal(nd.count, 95);
+  assert.equal(R.shareText(nd.pct.noDelay), '95 %');
+  assert.equal(R.shareText(nd.pct.late), '5 %');
+  assert.equal(nd.pct.noDelay + nd.pct.late + nd.pct.tz, 100);
+  assert.equal(R.noDelaySplit(nd), "on time 89 % · silent 6 % · can't measure 0 %");
+  assert.equal(R.noDelaySplit(R.noDelayOf({ devices: 100, onTime: 89, late: 5, silent: 6, unmeasured: 0, lateBeforeSilent: 1 })), "on time 89 % · silent 6 % · can't measure 0 % · 1 of them was late before it went silent");
+  // Thirds never add up to 99.9 or 100.1.
+  for (const [onTime, silent, cant, late, tz] of [[1, 1, 1, 0, 0], [2, 1, 0, 4, 0], [7, 11, 13, 17, 19], [1, 0, 0, 999999, 0]]) {
+    const p = R.noDelayOf({ devices: onTime + silent + cant + late + tz, onTime, silent, unmeasured: cant, late, otherTz: tz }).pct;
+    assert.equal(Math.round((p.noDelay + p.late + p.tz) * 10), 1000);
+  }
+  // The core's own figures are used when it sends them; a clock ahead is can't measure, not on time.
+  const core = R.noDelayOf({ devices: 4, onTime: 1, noDelay: 3, silent: 1, unmeasured: 0, clockAhead: 1, cantMeasure: 1, late: 1, pctNoDelay: 75, pctOnTime: 25, pctSilent: 25, pctCantMeasure: 25, pctLate: 25, pctOtherTz: 0 });
+  assert.deepEqual([core.count, core.onTime, core.cant, core.pct.noDelay], [3, 1, 1, 75]);
+  const rows = R.tileCounts(['no_delay', 'clock_ahead', 'silent', 'critical'].map((state) => ({ state })));
+  assert.deepEqual([R.noDelayOf(rows).count, rows.onTime, rows.cantMeasure], [3, 1, 1]);
+  // A browser measurement, the same sum.
+  assert.equal(R.noDelayOfStatuses({ devices: 4, by: { OK: 1, ERROR: 1, CLOCK_AHEAD: 1, DELAYED: 1 } }).count, 3);
+});
+
+test('No delay: no percentage for a cluster never measured, whose last run failed, or with no device — with the reason', () => {
+  for (const [t, why] of [
+    [{ lastRunAt: null, devices: 0, below: 0, silent: 0, unmeasured: 0, critical: 0, delay: 0 }, /never measured/],
+    [{ lastRunAt: 5, devices: 3, onTime: 3, noDelay: 3, notMeasured: 'last run failed: refused', pctNoDelay: null }, /refused/],
+    [{ devices: 0, onTime: 0, silent: 0, unmeasured: 0, critical: 0, delay: 0 }, /no device/],
+    [{ devices: 4, onTime: 4, noDelay: 4, pctNoDelay: null, pctOf: { clusters: 0, ofClusters: 2 } }, /no cluster was measured/],
+  ]) { const nd = R.noDelayOf(t); assert.equal(nd.pct, null); assert.match(nd.why, why); }
+  // A core before 0.3.89: `noDelay` is the strict count and a clock ahead is inside `onTime`; the sum is the same.
+  const old = R.noDelayOf({ devices: 100, onTime: 90, noDelay: 88, little: 0, clockAhead: 2, late: 4, silent: 5, unmeasured: 1, otherTz: 0 });
+  assert.deepEqual([old.count, old.onTime, old.cant, old.silent, old.pct.noDelay], [96, 88, 3, 5, 96]);
+  assert.equal(R.noDelayOfText(R.noDelayOf({ devices: 4, onTime: 4, noDelay: 4, pctNoDelay: 100, pctOf: { clusters: 30, ofClusters: 32 } })), 'of 30 of 32 clusters');
+});
+
+test('a window the core did not measure is a gap in the panels, never 0', () => {
+  const [a, b] = R.behindSeries({ windows: [
+    { from: 0, label: '00:00–02:00', measured: false, delay: 0, critical: 0, solved: 0, stillLate: 0 },
+    { from: 1, label: '02:00–04:00', measured: true, delay: 2, critical: 1, solved: 0, stillLate: 3 }] }, 'today');
+  assert.deepEqual([a.gap, a.delay, a.critical, a.back, a.behind], [true, null, null, null, null]);
+  assert.deepEqual([b.gap, b.delay, b.critical, b.back, b.behind], [false, 2, 1, 0, 3]);
+});
+
+test('a device measured once: a dot, the band and the mark end at the measurement, nothing says now', () => {
+  const H = 3600000; const at = Date.UTC(2026, 10, 24, 4, 35); const now = at + 8 * H + 3 * 60000;
+  const res = { points: [{ t: at, m: 95 }], periods: [{ started: at, solved: null, worstState: 'critical' }], lateMs: now - at, latePct: 44.4, docsPerDay: 195, now };
+  const g = R.deviceGraph(res.points, { fromMs: at - 10 * H, toMs: now, height: 100, levels: { criticalOver: 60 } });
+  assert.equal(g.dots.length, 1, 'a one-point line has no length: the dot is what is seen');
+  const age = R.measuredAge(res, now, 2);
+  assert.deepEqual(age, { at, stale: true }, 'an older core: the last point, older than one interval');
+  assert.deepEqual(R.measuredAge({ ...res, lastMeasuredMs: at, stale: false }, now, 2), { at, stale: false }, 'the core decides when it says');
+  assert.match(R.staleText(at, now), /^late when last measured .*, not measured since$/);
+  const band = R.periodBand(res.periods[0], g.lo, g.hi, age.at);
+  assert.ok(band.width < 1, `the band ends at the measurement: ${band.width}`);
+  assert.deepEqual(R.lateTime(res, age).pct, null, 'no share of a period nothing was measured in');
+  assert.equal(R.lateTime(res, age).ms, 0);
+  const core = R.lateTime({ measuredMs: 6 * H, lateMeasuredMs: 4 * H, latePct: 66.7 }, age);
+  assert.deepEqual([core.ms, core.pct, core.of], [4 * H, 66.7, 'of the 6 h 00 min measured']);
+});
+
+test('the device graph\'s x axis: hours up to two days, day and hour up to seven, else days — never one label five times', () => {
+  const H = 3600000; const t = Date.UTC(2026, 10, 24);
+  const day = R.axisTicks(t, t + 24 * H - 1000);
+  assert.ok(day.every((x) => /\d\d:\d\d$/.test(x)) && new Set(day).size === 5, day.join(' | '));
+  const week = R.axisTicks(t - 6 * 24 * H, t);
+  assert.ok(week.every((x) => /^\d+ Nov \d\d:\d\d$/.test(x)) && new Set(week).size === 5, week.join(' | '));
+  const month = R.axisTicks(t - 20 * 24 * H, t);
+  assert.ok(month.every((x) => /^\d+ Nov$/.test(x)), month.join(' | '));
+});
+
+test('logs a day says what it rests on; less than a day counted is a count', () => {
+  assert.deepEqual(R.logsADay({ docsPerDay: null, docsCounted: 195, docsCountedHours: 2 }), { text: '195', label: 'logs in the 2 h counted: less than a day' });
+  assert.deepEqual(R.logsADay({ docsPerDay: 4100, docsCountedHours: 30 }), { text: '4k', label: 'logs a day · from 30 h counted' });
+  assert.equal(R.logsADay({}).text, 'unknown');
+});
+
+test('event time: the fields the devices\' times really came from', () => {
+  assert.equal(R.eventFieldsText([{ eventField: 'ingested_time' }, { eventField: 'ingested_time' }], ['ingested_time', 'event_created']), 'ingested_time');
+  assert.equal(R.eventFieldsText([{ eventField: 'ingested_time' }, { eventField: 'event_created' }, { eventField: 'ingested_time' }], []), 'ingested_time (2 devices), event_created (1 device)');
+  assert.equal(R.eventFieldsText([{}], ['ingested_time', 'event_created']), 'the first of ingested_time, event_created a device’s log has');
+  assert.equal(R.eventFieldsText([], []), 'field not known');
 });

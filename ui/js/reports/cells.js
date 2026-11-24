@@ -21,6 +21,8 @@ export const changeText = (pct) => (typeof pct === 'number' && Number.isFinite(p
 
 /** Days as the runway reads: "11 days", "> 1 year". */
 export const daysText = (d) => (d === null || d === undefined || !Number.isFinite(d) ? null : d >= 365 ? '> 1 year' : `${Math.floor(d)} day${Math.floor(d) === 1 ? '' : 's'}`);
+/** "all 5 clusters" / "3 of 5 clusters": how many of the clusters shown a fleet figure covers. */
+export const clustersOf = (n, of) => (n === of ? (of === 1 ? '1 cluster' : `all ${of} clusters`) : `${n} of ${of} cluster${of === 1 ? '' : 's'}`);
 /** Red under 2 weeks, amber under 6, green past it. */
 export const runwayLevel = (d) => (d === null || !Number.isFinite(d) ? 'na' : d < 14 ? 'red' : d < 42 ? 'yellow' : 'green');
 

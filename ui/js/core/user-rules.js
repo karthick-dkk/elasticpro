@@ -323,11 +323,13 @@ function testCondition(c, row, coverage) {
       const s = parseSize(v);
       if (!s) return false;
       const bytes = s.gb * 1024 ** 3;
-      return c.op === 'greaterThan' ? (row.size || 0) > bytes : (row.size || 0) < bytes;
+      if (typeof row.size !== 'number') return false;   // not reported (closed, red): matches no size test
+      return c.op === 'greaterThan' ? row.size > bytes : row.size < bytes;
     }
     case 'docs': {
       const n = Number(v);
-      return c.op === 'greaterThan' ? (row.docs || 0) > n : (row.docs || 0) < n;
+      if (typeof row.docs !== 'number') return false;
+      return c.op === 'greaterThan' ? row.docs > n : row.docs < n;
     }
     case 'status':
       return String(row.status || '') === v;

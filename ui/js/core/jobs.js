@@ -39,22 +39,21 @@ export function statusTone(status) {
     case 'running': return 'blue';
     case 'completed': return 'green';
     case 'failed': return 'red';
-    case 'deferred': return 'orange';
+    case 'deferred': return 'yellow';
     case 'paused': return 'yellow';
     default: return 'grey';
   }
 }
 
 /**
- * The colour of a progress bar (owner rule: never red and yellow together in a bar set; light
- * green, blue, pink, orange): running light blue, completed light green, failed light pink,
- * waiting (queued, deferred, cancelled while asked) light orange.
+ * The colour of a progress bar, the states' (the owner, 2026-11-24): running blue, completed green,
+ * failed red, waiting (queued, deferred, cancelled while asked) yellow.
  */
 export function barTone(status) {
   if (status === 'completed') return 'green';
-  if (status === 'failed') return 'pink';
+  if (status === 'failed') return 'red';
   if (status === 'running') return 'blue';
-  return 'orange';
+  return 'yellow';
 }
 
 /** Who started a run: "timer" → Automatic, "manual:ann" → by ann, "retry" → Retry. */

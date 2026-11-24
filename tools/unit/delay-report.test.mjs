@@ -123,3 +123,11 @@ test('the filename sorts and is unique per minute', () => {
   assert.equal(n, 'log-delay-2026-09-20-1530.xlsx');
   assert.ok(n < reportFilename(Date.UTC(2026, 8, 20, 15, 31)), 'names do not sort by time');
 });
+
+test('the cut line counts documents, as Elasticsearch does, and is labelled so; No delay carries its split', () => {
+  const rows = sheet(reportSheets([], { devices: 4, by: { OK: 1, ERROR: 1, NO_DATA: 1, CRITICAL: 1 }, truncated: 900, gaps: ['es-1: 1 of 4 shards failed'] }, {}), 'Summary').rows;
+  const cut = rows.find((r) => r[1] === 900);
+  assert.match(cut[0], /^Documents of devices beyond/);
+  assert.deepEqual(rows.find((r) => /^No delay/.test(r[0] || '')).slice(1), [3, '75 %', "on time 1 · silent 1 · can't measure 1"]);
+  assert.ok(rows.some((r) => r[0] === 'es-1: 1 of 4 shards failed'));
+});

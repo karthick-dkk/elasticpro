@@ -13,7 +13,8 @@ import { modal, confirmDialog, nameList, field, text, select, checkbox, val, che
 import { toast } from './menu.js';
 import { trackTask, snapshotPoll, restorePoll, restoredNames } from './tasks.js';
 import { ensureWrites } from '../core/writes.js';
-import { client, parseIndexName, coveredDays } from '../core/state.js';
+import { client, parseIndexName, coveredDays, snapshotRowsVerbose } from '../core/state.js';
+import { restorableIndices, restorableNote, failedIndexNames } from '../core/snapshot-restorable.js';
 import { evidenceRows, evidenceHeader, evidenceCsv, evidenceText, coverLine, NO_DATE,
          EVIDENCE_SORTS, DEFAULT_EVIDENCE_SORT, sortEvidenceRows } from '../core/snapshot-evidence.js';
 import { cycleSort, sortCaption } from '../lib/sort-order.js';
@@ -218,7 +219,7 @@ export async function restoreSnapshotDialog(cluster, repo, snapshotId, { onChang
  * A PARTIAL or FAILED one may not hold this index whole, so it is never offered.
  */
 export function restoreSourceOf(found) {
-  return (found.snapshots || []).find((x) => x.state === 'SUCCESS') || null;
+  return (found.snapshots || []).find((x) => x.state === 'SUCCESS' && x.good !== false) || null;
 }
 
 /**
@@ -486,14 +487,28 @@ export async function deleteSnapshot(cluster, repo, snapshotId, { onChanged } = 
  * Delete indices from the CLUSTER — the usual "it is safely in a snapshot, reclaim the
  * disk" step. The snapshot copy is untouched; this only removes the live index.
  */
+/**
+ * Which of a snapshot's indices may be offered for deletion: restorable whole, and still live.
+ * `restorable` null (which ones failed was not read) offers none. → {offer, notRestorable, gone}
+ */
+export function freeable(inSnapshot, restorable, live) {
+  const ok = new Set(restorable || []);
+  const safe = inSnapshot.filter((n) => ok.has(n));
+  const offer = safe.filter((n) => live.size === 0 || live.has(n));
+  return { offer, notRestorable: inSnapshot.length - safe.length, gone: safe.length - offer.length };
+}
+
 export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged } = {}) {
   if (!(await ensureWrites())) return false;
   const cl = client(cluster.id);
 
-  let inSnapshot = [];
+  let inSnapshot = [], restorable = null, row = null;
   try {
-    const j = await cl.snapshotDetail(repo, snapshotId);
-    inSnapshot = (((j.snapshots || [])[0] || {}).indices || []).slice().sort();
+    [row] = snapshotRowsVerbose(await cl.snapshotDetail(repo, snapshotId));
+    if (!row) throw new Error('the cluster returned no such snapshot');
+    inSnapshot = row.indexNames.slice().sort();
+    // Only what this snapshot can give back whole is offered (core/snapshot-restorable.js).
+    restorable = restorableIndices(row);
   } catch (e) {
     toast("Could not read the snapshot's index list", 'err', 10000, { meta: cluster.name, detail: [e.message] });
     return false;
@@ -505,8 +520,7 @@ export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged
     for (const r of await cl.indexNames('*')) live.set(r.index, r);
   } catch (_) { /* sizes are a nicety, not a requirement */ }
 
-  const present = inSnapshot.filter((n) => live.size === 0 || live.has(n));
-  const gone = inSnapshot.length - present.length;
+  const { offer: present, notRestorable, gone } = freeable(inSnapshot, restorable, live);
   const chosen = new Set();
   const totalEl = h('div.muted', { style: { fontSize: '11.5px' } }, '');
 
@@ -531,8 +545,10 @@ export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged
   const body = [
     h('div.banner.warn', { style: { margin: '0 0 4px' } },
       h('div', h('div.ttl', 'This deletes indices from the cluster, not from the snapshot'),
-        h('div', `Everything listed is held in "${snapshotId}", so it can be restored from ${repo} later. ` +
+        h('div', `Only indices "${snapshotId}" holds with no failed shard are listed; a restore from ${repo} has not been tried. ` +
                  'Deleting frees the disk the live index uses. This cannot be undone.'))),
+    notRestorable ? h('div.muted', { style: { fontSize: '11.5px' } },
+      `${num(notRestorable)} index/indices in the snapshot are not offered: ${restorableNote(row)}.`) : null,
     gone ? h('div.muted', { style: { fontSize: '11.5px' } },
       `${num(gone)} index/indices in the snapshot no longer exist in the cluster and are not listed.`) : null,
     h('div', { style: { display: 'flex', gap: '6px', marginBottom: '4px' } },
@@ -547,7 +563,7 @@ export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged
         });
       } }, 'Clear')),
     h('div', { style: { maxHeight: '230px', overflow: 'auto', border: '1px solid var(--border)', borderRadius: '6px', padding: '7px' } },
-      rows.length ? rows : h('div.muted', { style: { fontSize: '12px' } }, 'No index from this snapshot is still in the cluster.')),
+      rows.length ? rows : h('div.muted', { style: { fontSize: '12px' } }, present.length || notRestorable ? 'No index this snapshot can restore is still in the cluster.' : 'No index from this snapshot is still in the cluster.')),
     totalEl,
   ];
 
@@ -557,7 +573,7 @@ export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged
         if (!chosen.size) throw new Error('Select at least one index.');
         const list = [...chosen];
         const go = await confirmDialog(`Delete ${list.length} index/indices from ${cluster.name}?`,
-          h('div', h('div', `They remain in snapshot "${snapshotId}" and can be restored from ${repo}. ` +
+          h('div', h('div', `Snapshot "${snapshotId}" in ${repo} holds them with no failed shard. ` +
                             'Removing them from the cluster cannot be undone.'), nameList(list)),
           { yes: `delete ${list.length === 1 ? 'it' : `all ${list.length}`}`, danger: true });
         if (!go) return;
@@ -573,7 +589,7 @@ export async function deleteIndicesDialog(cluster, repo, snapshotId, { onChanged
         }
         toast(`Deleted: ${list.length} ${list.length === 1 ? 'index' : 'indices'}`, 'ok', 8000, { meta: cluster.name,
           detail: [`${list.slice(0, 4).join(', ')}${list.length > 4 ? ` +${list.length - 4} more` : ''}`,
-                   `still restorable from ${repo} / ${snapshotId}`] });
+                   `held in ${repo} / ${snapshotId}`] });
         ctx.done(list.length);
       }) }, 'Delete selected indices'),
       h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
@@ -774,7 +790,12 @@ export async function snapshotIndicesDialog(cluster, repo, snap, opts = {}) {
 
   const facts = () => {
     const names = ev.names || [];
-    const cover = ev.names ? coveredDays(names, reSrc) : null;
+    // Covered days are those of the indices that can be restored, as on the list.
+    const row = { status: ev.state, indexNames: ev.names, failed: (ev.shards || {}).failed,
+      failedIndices: failedIndexNames(ev.failures, (ev.shards || {}).failed) };
+    const ok = restorableIndices(row);
+    const cover = ok ? coveredDays(ok, reSrc) : null;
+    const note = ev.loading && ok === null ? 'reading the failed shards' : restorableNote(row);
     const header = evidenceHeader({
       repository: repo, snapshot: snap.id,
       state: ev.state, taken: ev.start, ended: ev.end,
@@ -782,14 +803,15 @@ export async function snapshotIndicesDialog(cluster, repo, snap, opts = {}) {
       durationText: typeof ev.duration === 'string' ? ev.duration : ev.duration != null ? dur(ev.duration) : '',
       shards: ev.shards,
       indexCount: ev.names ? names.length : (snap.indices ?? null),
-      cover: coverLine(cover, { named: !!ev.names }),
+      cover: coverLine(cover, { named: !!ev.names, note }),
     });
-    return { header, cover, rows: sortEvidenceRows(evidenceRows(names, dayOf, ev.failures), sort) };
+    return { header, cover, rows: sortEvidenceRows(evidenceRows(names, dayOf, ev.failures, ev.state), sort) };
   };
 
   const statusCell = (r) => (r.status === 'failed'
     ? h('span.pill.red', { title: r.detail }, h('i.dot'), `${r.failedShards} failed`)
     : r.status === 'ok' ? h('span.pill.green', h('i.dot'), 'ok')
+    : r.status !== 'unknown' ? h('span.muted', { title: r.detail }, r.status)
     : h('span.muted', { title: ev.loading ? 'Reading the snapshot detail…' : `The snapshot detail could not be read${ev.detailError ? `: ${ev.detailError}` : ''}` },
         ev.loading ? 'Loading…' : 'unknown'));
 

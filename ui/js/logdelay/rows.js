@@ -13,7 +13,7 @@ import { h, svg } from '../lib/dom.js';
 import { sortTh } from '../lib/table-sort.js';
 import { clusters } from '../core/state.js';
 import {
-  ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, startedSolvedText, whenText, extraOf,
+  ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, logsADay, startedSolvedText, whenText, extraOf,
 } from '../core/logdelay-report.js';
 import { deviceZoneText, delaySumText } from '../core/log-tz.js';
 import { fixButton, fixesFor } from './fix-popover.js';
@@ -49,7 +49,7 @@ const COLS = {
     ? h('span', { title: `Its logs are stamped in another time zone (${deviceZoneText(r)}) than the cluster’s: the gap sits at that offset run after run. Not late.` }, statePill(r.state))
     : statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],
   // The figure after the zone step; its title spells the sum out (docs/LOGDELAY.md "Time zones").
-  now: ['Delay now', true, (r, ctx) => h('td.num', { title: delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true })) || null }, nowText(r)),
+  now: ['Delay now', true, (r, ctx) => h(`td.num${r.stale ? '.muted' : ''}`, { title: [r.stale && finite(r.lastMeasuredMs) ? `last measured ${whenText(r.lastMeasuredMs, ctx.now || Date.now())}, not measured since` : '', delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true }))].filter(Boolean).join(' · ') || null }, nowText(r)),
     { type: 'number', value: (r) => r.nowMinutes }],
   // Live's delay: a bar against the worst in the table (ctx.barMax) and the minutes; unknown is an empty track and "—", never 0.
   nowBar: ['Delay now', true, (r, ctx) => {
@@ -68,10 +68,10 @@ const COLS = {
   lateMs: ['Time late', true, (r) => h('td.num', durationText(r.lateMs)), { type: 'duration', value: (r) => r.lateMs }],
   last: ['Last delay: started → solved', false, (r, ctx) => h('td', r.live ? muted('not in one measurement') : startedSolvedText(r, ctx.now)),
     { type: 'date', value: lastDelayAt }],
-  docs: ['Logs a day', true, (r) => h('td.num', docsText(r.docsPerDay)), { type: 'number', value: (r) => r.docsPerDay }],
+  docs: ['Logs a day', true, (r) => h('td.num', { title: finite(r.docsPerDay) ? null : logsADay(r).text === 'unknown' ? null : `${logsADay(r).text} ${logsADay(r).label}` }, docsText(r.docsPerDay)), { type: 'number', value: (r) => r.docsPerDay }],
   docsIn: ['Logs in range', true, (r) => h('td.num', countText(r.docs)), { type: 'number', value: (r) => r.docs }],
   arrival: ['Last arrival', false, (r, ctx) => h('td.mono', whenText(r.lastArrival, ctx.now, { seconds: true })), { type: 'date', value: (r) => r.lastArrival }],
-  event: ['Event time', false, (r, ctx) => h('td.mono', whenText(r.lastEvent, ctx.now, { seconds: true })), { type: 'date', value: (r) => r.lastEvent }],
+  event: ['Event time', false, (r, ctx) => h('td.mono', { title: r.eventField ? `from ${r.eventField}` : null }, whenText(r.lastEvent, ctx.now, { seconds: true })), { type: 'date', value: (r) => r.lastEvent }],
   pattern: ['Looks like', false, (r) => h('td', r.pattern ? h('span', { title: r.patternNote || null }, statePill('clock_ahead', r.pattern)) : muted()),
     { type: 'text', value: (r) => r.pattern }],
 };

@@ -190,6 +190,38 @@ test('Backups card: the policy that takes logstash-* (wildcard), its newest run,
   assert.equal(B.slmCard({ slmStatus: { operation_mode: 'RUNNING' } }, view({ slmStatus: { operation_mode: 'RUNNING' } }), 'logstash-*', {}).kind, 'unread', 'policies not read: unknown, not "no policy"');
 });
 
+// Measured on a known cluster (0.3.89): two literal indices succeeded, logstash-* failed in the same
+// minute, and the card said "Success · nightly-logs".
+test('Backups card: green only when every policy that takes log indices succeeded; part is said', () => {
+  const two = slmData([pol('nightly-logs', ['logstash-2026.11.20', 'logstash-2026.11.21'], 5000), pol('bad-logs', ['logstash-*'], null, 5000)]);
+  const c = B.slmCard(two, view(two), 'logstash-*', {});
+  assert.deepEqual([c.status, c.headline, c.policy, c.failed], ['Failed', '1 of 2 failed', 'bad-logs', ['bad-logs']]);
+  assert.deepEqual([view(two).tone, view(two).covered], ['red', true]);
+  assert.match(view(two).why, /last run of 1 of 2 failed: bad-logs/);
+  const part = slmData([pol('nightly-logs', ['logstash-2026.11.20', 'logstash-2026.11.21'], 5000)]);
+  const p = B.slmCard(part, view(part), 'logstash-*', {});
+  assert.deepEqual([p.headline, p.takes, p.part], ['Success', 'part of logstash-*', true]);
+  assert.match(view(part).why, /nightly-logs takes part of logstash-\*/);
+  assert.equal(view(part).covered, 'part');
+  const never = slmData([pol('a', ['logstash-*'], 5), pol('b', ['logstash-*'])]);
+  assert.deepEqual([B.slmCard(never, view(never), 'logstash-*', {}).status, B.slmCard(never, view(never), 'logstash-*', {}).headline, view(never).tone],
+    [null, '1 of 2 never ran', 'grey']);
+  const all = slmData([pol('a', ['logstash-*'], 5), pol('b', ['*'], 9)]);
+  assert.deepEqual([B.slmCard(all, view(all), 'logstash-*', {}).status, view(all).tone], ['Success', 'green']);
+});
+
+test('slmTakes: whole only when the selection contains the pattern', () => {
+  const t = (indices, pattern = 'logstash-*') => LC.slmTakes({ policy: { config: { indices } } }, pattern);
+  assert.equal(t(undefined), 'all');
+  assert.equal(t(['*']), 'all');
+  assert.equal(t('logstash-*,audit-*'), 'all');
+  assert.equal(t(['log*']), 'all');
+  assert.equal(t(['logstash-2026*']), 'part');
+  assert.equal(t(['logstash-*', '-logstash-tmp*']), 'part');
+  assert.equal(t(['audit-*']), null);
+  assert.equal(t(['logstash-*'], 'logstash-*,filebeat-*'), 'part');
+});
+
 test('ULM on: SLM is Not used - the summary cell and the card read the same view, even when SLM runs', () => {
   const d = slmData([pol('nightly-logs', ['logstash-*'], 2000)]);
   const cluster = { id: 'x', type: 'ci', ulm: { bucket: 'client-a-logs' } };

@@ -165,7 +165,7 @@ export const STATUS = {
   OK: { label: 'ok', cls: 'green' },
   DELAYED: { label: 'delayed', cls: 'yellow' },
   CRITICAL: { label: 'critical', cls: 'red' },
-  CLOCK_AHEAD: { label: 'clock ahead', cls: 'orange' },
+  CLOCK_AHEAD: { label: 'clock ahead', cls: 'grey' },
   OTHER_TZ: { label: 'other time zone', cls: 'blue' },
   ERROR: { label: 'error', cls: 'grey' },
   NO_DATA: { label: 'no data', cls: 'grey' },
@@ -481,6 +481,22 @@ export async function measureDelay(esClient, cluster, pre, hours = 24, levels = 
  * time). The Log Delay page's Live Watch asks its own range with it; `opts.signal` lets go of
  * the request when the view is left.
  */
+/**
+ * What an answer does not hold, in words; [] when it is whole. `truncated` is the documents of the
+ * devices past the terms size (Elasticsearch counts documents, not devices); `gaps` the shards
+ * that failed and a search that timed out. A device missing from such an answer is not known —
+ * never "silent".
+ */
+export function answerGaps(res, size = LATE_MAX) {
+  const out = [];
+  const agg = (res && res.aggregations && res.aggregations.devices) || {};
+  if (agg.sum_other_doc_count > 0) out.push(`only the ${size} devices with the most logs were read; ${Number(agg.sum_other_doc_count).toLocaleString('en')} documents of other devices were not`);
+  const sh = (res && res._shards) || {};
+  if (sh.failed > 0) out.push(`${sh.failed} of ${sh.total ?? '?'} shards failed`);
+  if (res && res.timed_out) out.push('the search timed out');
+  return out;
+}
+
 export async function measureDelayIn(esClient, cluster, pre, { from, to }, levels = levelsOf(cluster.id), opts = {}, tz = zoneOf(cluster.id)) {
   const t = levels;
   const body = buildSearchBody(pre.resolved, { from, to, size: 500 });
@@ -493,6 +509,7 @@ export async function measureDelayIn(esClient, cluster, pre, { from, to }, level
     // Devices beyond the terms size are not in the answer. Saying so beats implying
     // the list is everything.
     truncated: agg.sum_other_doc_count || 0,
+    gaps: answerGaps(res),
   };
 }
 
@@ -519,6 +536,7 @@ export async function measureSeenIn(esClient, cluster, pre, { from, to }, opts =
   return {
     devices: (agg.buckets || []).map((b) => ({ device: String(b.key), lastArrival: b.last && Number.isFinite(b.last.value) ? b.last.value : null })),
     truncated: agg.sum_other_doc_count || 0,
+    gaps: answerGaps(res),
   };
 }
 

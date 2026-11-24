@@ -52,15 +52,37 @@ function overlap(a, b) {
   return pa.startsWith(pb) || pb.startsWith(pa);
 }
 
-/** Does an SLM policy's index selection cover any of the log patterns? */
-export function slmCoversPattern(policy, pattern) {
+/** Does glob `a` select everything glob `b` can? `b`'s own stars stand for any text, so only a star of `a` may take them. */
+const contains = (a, b) => a === '_all' || globRe(a).test(b);
+
+/**
+ * How much of the log pattern an SLM policy's index selection takes: 'all' (its selection contains
+ * every log pattern whole, with nothing of it left out), 'part' (some of those indices: two literal
+ * names, a narrower wildcard), or null (none).
+ */
+export function slmTakes(policy, pattern) {
   const cfg = (policy && policy.policy && policy.policy.config) || {};
   let sel = cfg.indices;
   if (typeof sel === 'string') sel = sel.split(',');
-  if (!Array.isArray(sel) || !sel.length) return true;      // no selection = all indices
+  if (!Array.isArray(sel) || !sel.length) return 'all';      // no selection = all indices
   const mine = patternsOf(pattern);
-  return sel.map((s) => String(s).trim()).filter((s) => s && !s.startsWith('-'))
-    .some((s) => mine.some((m) => overlap(s, m)));
+  const names = sel.map((s) => String(s).trim()).filter(Boolean);
+  const take = names.filter((s) => !s.startsWith('-'));
+  const drop = names.filter((s) => s.startsWith('-')).map((s) => s.slice(1));
+  if (!take.some((s) => mine.some((m) => overlap(s, m)))) return null;
+  const whole = mine.every((m) => take.some((s) => contains(s, m))) && !drop.some((s) => mine.some((m) => overlap(s, m)));
+  return whole ? 'all' : 'part';
+}
+
+/** Does an SLM policy's index selection cover any of the log patterns? */
+export const slmCoversPattern = (policy, pattern) => slmTakes(policy, pattern) !== null;
+
+/** A policy's last run: 'Success' | 'Failed' | null (never ran), and when. */
+export function slmLastRun(p) {
+  const t = (r) => { const n = r && Number(r.time); return isFinite(n) && n > 0 ? n : null; };
+  const ok = t(p && p.last_success), bad = t(p && p.last_failure);
+  if (bad !== null && (ok === null || bad > ok)) return { status: 'Failed', at: bad };
+  return ok !== null ? { status: 'Success', at: ok } : { status: null, at: null };
 }
 
 /** { known, count, names, details } — see the header. `pattern` is the cluster's logIndexPattern. */
@@ -83,8 +105,8 @@ export function slmErrorsOf(d, pattern) {
   if (String(mode).toUpperCase() !== 'RUNNING') return { known: true, count: 0, names: [], failures: [] };
   const failures = [];
   for (const p of (d && d.slm) || []) {
-    const lf = p.last_failure, ls = p.last_success;
-    if (!lf || (ls && !(lf.time > ls.time))) continue;
+    const lf = p.last_failure;
+    if (slmLastRun(p).status !== 'Failed') continue;
     if (!(p.policy && p.policy.schedule)) continue;          // not scheduled = not applied
     if (!slmCoversPattern(p, pattern)) continue;
     failures.push({ id: p.id, at: lf.time, details: String(lf.details || '') });
@@ -109,7 +131,7 @@ export function ilmErrorTitle(e) {
 export function slmErrorTitle(e) {
   if (!e.count) return '';
   const lines = e.failures.slice(0, 8).map((f) => {
-    const t = Number.isFinite(f.at) ? new Date(f.at).toISOString().replace('T', ' ').slice(0, 16) : '?';
+    const t = Number.isFinite(f.at) ? `${new Date(f.at).toISOString().replace('T', ' ').slice(0, 16)} UTC` : '?';
     return `${f.id} failed at ${t}${f.details ? `: ${f.details.slice(0, 120)}` : ''}`;
   });
   return `SLM policy failing:\n${lines.join('\n')}`;
@@ -181,15 +203,21 @@ export function ilmUnreadWhy(pattern) {
 
 /**
  * Does SLM look after the log indices: a scheduled policy whose indices take them?
- * `d.slm` is the policy list (undefined when not read). → { known, ok, policies: [ids], others: [ids] }
+ * `d.slm` is the policy list (undefined when not read). `whole` are the policies that take the
+ * whole log pattern, `policies` all that take any of it.
+ * → { known, ok, policies: [ids], whole: [ids], others: [ids] }
  */
 export function slmCoverage(d, pattern) {
-  if (!d || !Array.isArray(d.slm)) return { known: false, ok: false, policies: [], others: [] };
+  if (!d || !Array.isArray(d.slm)) return { known: false, ok: false, policies: [], whole: [], others: [] };
   const scheduled = d.slm.filter((p) => p && p.policy && p.policy.schedule);
   const policies = scheduled.filter((p) => slmCoversPattern(p, pattern)).map((p) => p.id).sort();
   const others = scheduled.filter((p) => !slmCoversPattern(p, pattern)).map((p) => p.id).sort();
-  return { known: true, ok: policies.length > 0, policies, others };
+  const whole = scheduled.filter((p) => slmTakes(p, pattern) === 'all').map((p) => p.id).sort();
+  return { known: true, ok: policies.length > 0, policies, whole, others };
 }
+
+/** "logstash-*" when some policy takes the whole pattern, else "part of logstash-*". */
+export const slmTakesText = (cov, pattern) => (cov.whole.length ? logsOf(pattern) : `part of ${logsOf(pattern)}`);
 
 export const logsOf = (pattern) => patternsOf(pattern).join(', ');
 const listOf = (a, n = 5) => `${a.slice(0, n).join(', ')}${a.length > n ? `, +${a.length - n} more` : ''}`;
@@ -232,5 +260,12 @@ export function lifecycleView(kind, d, pattern, cluster = null) {
     why: `SLM is running, but its policies could not be read (it needs manage_slm or read_slm).` };
   if (!c.ok) return { tone: 'red', word, covered: false,
     why: `SLM is running, but no scheduled SLM policy takes ${logs}${c.others.length ? ` (${listOf(c.others, 3)} take${c.others.length === 1 ? 's' : ''} other indices)` : ''}.` };
-  return { tone: 'green', word, covered: true, why: `SLM is running and ${listOf(c.policies, 3)} snapshot${c.policies.length === 1 ? 's' : ''} ${logs}.` };
+  const covered = c.whole.length ? true : 'part';
+  const takes = `${listOf(c.policies, 3)} take${c.policies.length === 1 ? 's' : ''} ${slmTakesText(c, pattern)}`;
+  // Green only when every policy that takes log indices succeeded last time it ran.
+  const failed = slmErrorsOf(d, pattern).names;
+  if (failed.length) return { tone: 'red', word, covered, why: `SLM is running and ${takes}, but the last run of ${failed.length} of ${c.policies.length} failed: ${listOf(failed, 3)}.` };
+  const never = d.slm.filter((p) => c.policies.includes(p.id) && slmLastRun(p).status === null).map((p) => p.id);
+  if (never.length) return { tone: 'grey', word, covered, why: `SLM is running and ${takes}, but ${listOf(never, 3)} has never run.` };
+  return { tone: 'green', word, covered, why: `SLM is running and ${takes}.` };
 }

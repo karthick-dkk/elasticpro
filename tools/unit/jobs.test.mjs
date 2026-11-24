@@ -26,13 +26,12 @@ test('status words and tones', () => {
   assert.equal(J.statusWord('deferred'), 'Deferred');
   assert.equal(J.statusWord('brand_new'), 'brand_new', 'a status the page does not know is shown as sent');
   assert.equal(J.statusWord(null), '—');
-  assert.deepEqual(['running', 'completed', 'failed', 'deferred', 'paused', 'skipped'].map(J.statusTone), ['blue', 'green', 'red', 'orange', 'yellow', 'grey']);
+  assert.deepEqual(['running', 'completed', 'failed', 'deferred', 'paused', 'skipped'].map(J.statusTone), ['blue', 'green', 'red', 'yellow', 'yellow', 'grey']);
 });
 
-test('bars are light green, blue, pink or orange — never red or yellow', () => {
+test('bars take the states\' colours: running blue, completed green, failed red, waiting yellow (owner, 2026-11-24)', () => {
   const tones = ['running', 'completed', 'failed', 'queued', 'deferred', 'cancelled', 'pending'].map(J.barTone);
-  for (const t of tones) assert.ok(['green', 'blue', 'pink', 'orange'].includes(t), t);
-  assert.equal(J.barTone('failed'), 'pink');
+  assert.deepEqual(tones, ['blue', 'green', 'red', 'yellow', 'yellow', 'yellow', 'yellow']);
 });
 
 test('who started a run', () => {

@@ -182,9 +182,10 @@ test('the Backups (SLM) card: "No policy for logstash-*" and nothing else, the w
   assert.ok(!/No policy/.test(wild.textContent) && /daily/.test(wild.textContent), `a policy on logstash-2026* still takes logstash-*: "${wild.textContent}"`);
 });
 
-test('SLM is green when a scheduled policy takes the log indices', () => {
-  const v = (slm, mode = RUN) => L.lifecycleView('SLM', { slmStatus: mode, slm }, 'logstash-*');
+test('SLM is green when a scheduled policy takes the log indices and its last run succeeded', () => {
+  const v = (slm, mode = RUN) => L.lifecycleView('SLM', { slmStatus: mode, slm: slm && slm.map((p) => ({ ...p, last_failure: p.fail ? p.last_failure : undefined })) }, 'logstash-*');
   assert.deepEqual([v([pol('daily')]).tone, v([pol('daily')]).word], ['green', 'Running']);
+  assert.equal(v([pol('daily', { fail: true })]).tone, 'red', 'running, but the last run failed: not green (0.3.89)');
   assert.equal(v([pol('all', { policy: { schedule: 'x', config: {} } })]).tone, 'green', 'no indices named: every index');
   assert.equal(v([pol('star', { policy: { schedule: 'x', config: { indices: '*' } } })]).tone, 'green');
   const other = v([pol('metrics', { policy: { schedule: 'x', config: { indices: ['metrics-*'] } } })]);

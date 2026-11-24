@@ -16,6 +16,7 @@
  */
 
 import { STATUS } from './log-delay.js';
+import { noDelayOfStatuses, noDelaySplit, shareText } from './logdelay-report.js';
 
 /** The column order, in one place, so the header and the rows cannot drift apart. */
 export const DEVICE_COLUMNS = [
@@ -82,9 +83,11 @@ function summaryRows(records, summary, meta) {
   for (const [key, label] of Object.entries(STATUS).map(([k, v]) => [k, v.label])) {
     rows.push([label, Number(by[key]) || 0]);
   }
-  if (s.truncated) {
-    rows.push([], ['Devices beyond the per-cluster limit', Number(s.truncated) || 0]);
-  }
+  const nd = noDelayOfStatuses(s);
+  rows.push([], ['No delay (on time, silent and can\'t measure)', nd.count, nd.pct ? shareText(nd.pct.noDelay) : `no percentage: ${nd.why}`, noDelaySplit(nd, { counts: true })]);
+  // Elasticsearch counts the documents of the devices it left out, not the devices.
+  if (s.truncated) rows.push([], ['Documents of devices beyond the per-cluster limit (how many devices is not known)', Number(s.truncated) || 0]);
+  if ((s.gaps || []).length) rows.push([], ['Read in part'], ...s.gaps.map((g) => [g]));
   return rows;
 }
 

@@ -169,10 +169,19 @@ pub fn answer(mut v: Value) -> Value {
     v
 }
 
-/// Did this answer come back from Elasticsearch at all? A 401 or a 500 did; a refused
-/// connection, a timeout or a tunnel that is down did not.
-pub fn reached(a: &Value) -> bool {
+/// Was there an HTTP answer? An error answer is kept under its request, as it came.
+pub fn answered(a: &Value) -> bool {
     a.get("status").and_then(Value::as_u64).unwrap_or(0) != 0
+}
+
+/// Did this answer come back from Elasticsearch at all? A 401 or a 500 did; a refused
+/// connection, a timeout or a tunnel that is down did not, and neither did a 502, 503 or 504
+/// that is not Elasticsearch's own (`{"error": …}`): that is the proxy in front of it speaking.
+pub fn reached(a: &Value) -> bool {
+    match a.get("status").and_then(Value::as_u64).unwrap_or(0) {
+        502..=504 => a.pointer("/json/error").is_some_and(|e| !e.is_null()),
+        _ => answered(a),
+    }
 }
 
 /// The error to show for an attempt, from the answer that failed.
@@ -217,5 +226,21 @@ pub struct Reach {
 impl Default for Reach {
     fn default() -> Self {
         Reach { state: ReachState::Unknown, since: None, last_error: None, next_probe_at: None, failures: 0, seq: 0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proxy_error_is_not_the_cluster_answering() {
+        for status in [502, 503, 504] {
+            assert!(!reached(&answer(json!({ "ok": false, "status": status, "kind": "http_error", "text": "<html>Bad Gateway</html>" }))), "{status}");
+            assert!(!reached(&answer(json!({ "ok": false, "status": status, "json": { "message": "no upstream" } }))), "a gateway's own JSON");
+        }
+        let own = json!({ "ok": false, "status": 503, "json": { "error": { "type": "cluster_block_exception" }, "status": 503 } });
+        assert!(reached(&answer(own)), "Elasticsearch said it");
+        assert!(reached(&json!({ "status": 401 })) && reached(&json!({ "status": 500 })) && !reached(&json!({ "status": 0 })));
     }
 }

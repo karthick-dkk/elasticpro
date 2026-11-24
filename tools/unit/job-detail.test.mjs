@@ -16,16 +16,16 @@ const counts = (o) => ({ succeeded: 0, partial: 0, failed: 0, deferred: 0, skipp
 
 test('the result names how many clusters did not succeed, of how many', () => {
   assert.deepEqual(D.resultOf({ status: 'completed', parts: counts({ succeeded: 67, partial: 1, failed: 3 }) }),
-    { text: 'Partial · 4 of 71 clusters', tone: 'orange', warn: true });
+    { text: 'Partial · 4 of 71 clusters', tone: 'yellow', warn: true });
   assert.equal(D.resultOf({ status: 'completed', parts: counts({ succeeded: 71 }) }).text, 'Succeeded · 71 clusters');
   assert.equal(D.resultOf({ status: 'failed', parts: counts({ failed: 3 }) }).text, 'Failed · 3 clusters');
   assert.equal(D.resultOf({ status: 'failed', parts: counts({ failed: 3 }) }).tone, 'red');
   // A busy cluster's deferral: amber, a warning — not red.
   const d = D.resultOf({ status: 'deferred', parts: counts({ deferred: 1 }) });
-  assert.deepEqual(d, { text: 'Deferred · 1 cluster', tone: 'orange', warn: true });
+  assert.deepEqual(d, { text: 'Deferred · 1 cluster', tone: 'yellow', warn: true });
   // A run that reported no parts: its status, said plainly.
   assert.equal(D.resultOf({ status: 'completed' }).text, 'Succeeded');
-  assert.equal(D.resultOf({ status: 'deferred' }).tone, 'orange');
+  assert.equal(D.resultOf({ status: 'deferred' }).tone, 'yellow');
   assert.equal(D.resultOf({ status: 'running' }).text, 'Running');
   assert.equal(D.resultOf(null).text, '—');
 });
@@ -81,7 +81,7 @@ test('the summary grid adds up and says what is not known as —', () => {
 test('exceptions, elapsed and exact times', () => {
   const detail = { parts: [{ cluster: 'a', status: 'failed' }, { cluster: 'b', status: 'succeeded' }, { cluster: 'c', status: 'deferred' }] };
   assert.deepEqual(D.exceptionsOf(detail).map((p) => p.cluster), ['a', 'c']);
-  assert.equal(D.partTone('deferred'), 'orange');
+  assert.equal(D.partTone('deferred'), 'yellow');
   assert.equal(D.partTone('failed'), 'red');
   assert.equal(D.elapsedText(400), '0.4 s');
   assert.equal(D.elapsedText(30000), '30.0 s');

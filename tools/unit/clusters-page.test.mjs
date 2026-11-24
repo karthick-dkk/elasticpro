@@ -127,6 +127,13 @@ test('the CSV: several figures per column, unknown left empty, renamed twins kep
   assert.equal(data[1]['Disk usage (%)'], '', 'unknown is empty, not 0');
   assert.equal(data[1]['Size (bytes)'], '');
   assert.equal(data[2].Health, 'auth error', 'an unreachable cluster says why');
+  for (const k of headers.filter((x) => !/^(Name|Cluster|Health|.*alerts.*)/i.test(x))) assert.equal(data[2][k], '', `${k}: a down cluster has no figures now`);
+  // The health column hidden: the state is still in the file.
+  const gone = down('gone', 'auth_error');
+  gone.d.disk = { percent: 50, used: 5, total: 10 };
+  const noHealth = P.csvTable([ROWS[0], gone], [{ id: 'name', name: 'Name' }, { id: 'disk', name: 'Disk' }]);
+  assert.equal(noHealth.data[1].State, 'auth error');
+  assert.equal(noHealth.data[1]['Disk (%)'], '');
 });
 
 test('the CSV says where disk stands against the watermarks, from the same function as the bar', () => {

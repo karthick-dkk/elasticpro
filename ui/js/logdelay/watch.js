@@ -24,9 +24,9 @@ import { tableSort } from '../lib/table-sort.js';
 import { activeClusters, client, setDelaySummary, clusters } from '../core/state.js';
 import { card, pill, table } from '../pages/common.js';
 import {
-  preflight, measureDelayIn, measureSeenIn, SEEN_LOOKBACK, summarise, delayCoverage, LATE_MAX, buildLateSearchBody, recordFrom, logFilterFields,
+  preflight, measureDelayIn, answerGaps, measureSeenIn, SEEN_LOOKBACK, summarise, delayCoverage, LATE_MAX, buildLateSearchBody, recordFrom, logFilterFields,
 } from '../core/log-delay.js';
-import { levelsOf, zoneOf, loadLevels, levelState, isLate, fleetLevels } from '../core/delay-levels.js';
+import { levelsOf, zoneOf, loadLevels, isLate, fleetLevels } from '../core/delay-levels.js';
 import { offsetLabel } from '../core/log-tz.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
 import { reportSheets, reportFilename } from '../core/delay-report.js';
@@ -234,7 +234,7 @@ async function fetchDelay(list, scope) {
         const aborted = s.error.res && s.error.res.kind === 'aborted';
         setEntry(id, aborted ? { state: 'not-asked' } : { state: 'failed', fetchError: (es && (es.reason || es.type)) || s.error.message || String(s.error) });
       } else {
-        setEntry(id, { state: 'done', records: s.value.records, truncated: s.value.truncated, seen: s.value.seen });
+        setEntry(id, { state: 'done', records: s.value.records, truncated: s.value.truncated, gaps: s.value.gaps || [], seen: s.value.seen });
         // What this run found becomes the cluster's log-delay alert, as the scraper's does in Zabbix.
         setDelaySummary(id, summarise(s.value.records));
       }
@@ -273,7 +273,16 @@ function mergeDelay() {
   for (const { c, d } of done) for (const r of d.records) all.push({ ...r, cluster: c.name, clusterId: c.id });
   delay.records = all;
   delay.summary = summarise(all);
+  delay.summary.gaps = gapLines();
   delay.summary.truncated = done.reduce((n, { d }) => n + (d.truncated || 0), 0);
+}
+
+/** Each cluster whose answer was cut, in words: "es-1: 3 of 10 shards failed; silent devices not listed". */
+function gapLines() {
+  return delayRows().filter(({ d }) => d.records && ((d.gaps || []).length || (d.seen && (d.seen.gaps || []).length))).map(({ c, d }) => {
+    const own = d.gaps || []; const seen = (d.seen && d.seen.gaps) || [];
+    return `${c.name}: ${[...own, ...seen.map((x) => `the 7 days before: ${x}`)].join('; ')}${own.length && d.seen ? ' — which devices are silent is not known' : ''}`;
+  });
 }
 
 /** What the fan-out did not cover, in one line (delayCoverage is the one count). */
@@ -326,6 +335,10 @@ async function remeasure() {
     const res = await client(c.id).search(c.logIndexPattern || 'logstash-*', body, { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000, signal: signal() });
     if (delay.watched !== w) return;
     const b = (((res.aggregations || {}).devices || {}).buckets || []).find((x) => String(x.key) === String(w.device));
+    const gaps = answerGaps(res, 1);
+    // Named alone: nothing is cut by the size, but a failed shard can hide its logs — not silent.
+    const lost = (res._shards && res._shards.failed > 0) || res.timed_out;
+    if (!b && lost) throw new Error(`not read in full: ${gaps.join('; ')}`);
     w.row = b ? { ...liveDeviceRow(recordFrom(b, p.resolved, levelsOf(c.id), zoneOf(c.id)), c, levelsOf(c.id)), fix: w.row.fix || null } : { ...w.row, state: 'silent', nowMinutes: null };
     w.at = Date.now();
   } catch (e) {
@@ -403,7 +416,8 @@ function liveRows() {
   }));
   if (delay.ran === 'cluster') {
     for (const { c, d } of delayRows()) {
-      if (!d.seen) continue;
+      // A cut answer: a device that is not in it may have sent logs, so it is not called silent.
+      if (!d.seen || (d.gaps || []).length) continue;
       const inRange = new Set((d.records || []).map((r) => String(r.device)));
       for (const s of d.seen.devices) if (!inRange.has(s.device)) rows.push({ ...silentDeviceRow(s.device, s.lastArrival, c), fix: delay.fixes.get(`${c.id}|${s.device}`) || null });
     }
@@ -431,9 +445,11 @@ function devicesBody() {
   const w = delay.watched;
   return W.get('w:dev:body', `${delay.ver}|${ctx.tz ? ctx.tz() : ''}|${sortLate.sort ? `${sortLate.sort.key}${sortLate.sort.dir}` : '-'}`, () => {
     const note = coverageNote('fetch');
+    const gaps = gapLines();
     const max = Math.max(0, ...ordered.map((r) => (Number.isFinite(r.nowMinutes) ? r.nowMinutes : 0)));
     return [
       note ? h('div.banner.warn.ld-flat', note) : null,
+      gaps.length ? h('div.banner.warn.ld-flat#ld-live-gaps', 'Not the whole cluster: ', ...gaps.map((x) => h('div', x))) : null,
       deviceTable({ id: 'ld-watch-devices', sort: sortLate, rows: ordered, keys, extra,
         ctx: { now: delay.at || Date.now(), mode: 'live', barMax: max, onWatch: watch, watching: (r) => !!(w && w.clusterId === r.cluster && w.device === r.device) },
         labels: { state: 'Level' },
@@ -682,20 +698,22 @@ function maybeScheduledReport() {
  */
 function exportDelayCsv() {
   if (!delay.records) return;
-  const rows = delay.records.map((x) => {
-    const st = levelState(x.delayMinutes, levelsOf(x.clusterId));
-    return {
-      cluster: x.cluster, device: x.device, zone: extraOf(x, 'zone') ?? '', tag1: extraOf(x, 'tag1') ?? '',
-      state: st ? stateText(st) : 'levels unknown',
-      delay_minutes: x.delayMinutes === null ? '' : x.delayMinutes.toFixed(2),
-      raw_gap_minutes: x.rawGapMinutes === null || x.rawGapMinutes === undefined ? '' : x.rawGapMinutes.toFixed(2),
-      time_zone_offset: x.tzOffsetMinutes === null || x.tzOffsetMinutes === undefined ? '' : offsetLabel(x.tzOffsetMinutes),
-      pattern: x.pattern === '-' ? '' : x.pattern, docs: x.docs,
-      last_seen: x.arrival ? new Date(x.arrival).toISOString() : '', detail: x.patternNote || x.reason || '',
-    };
-  });
+  // The rows on screen (the fetch's scope and the time-zone filter), the silent ones too.
+  const rows = liveRows().map((x) => ({
+    cluster: x.clusterName, device: x.device, zone: extraOf(x, 'zone') ?? '', tag1: extraOf(x, 'tag1') ?? '',
+    state: x.state === 'unknown' ? 'levels unknown' : stateText(x.state),
+    delay_minutes: Number.isFinite(x.nowMinutes) ? x.nowMinutes.toFixed(2) : '',
+    raw_gap_minutes: Number.isFinite(x.rawGapMinutes) ? x.rawGapMinutes.toFixed(2) : '',
+    time_zone_offset: Number.isFinite(x.tzOffsetMinutes) ? offsetLabel(x.tzOffsetMinutes) : '',
+    pattern: x.pattern || '', docs: x.docs ?? '',
+    last_seen: x.lastArrival ? new Date(x.lastArrival).toISOString() : '', detail: x.patternNote || '',
+  }));
+  const noteRow = (detail) => ({ cluster: '', device: '', zone: '', tag1: '', state: '', delay_minutes: '', raw_gap_minutes: '', time_zone_offset: '', pattern: '', docs: '', last_seen: '', detail });
   const missed = delayRows().filter(({ d }) => !d.records).map(({ c, d }) => `${c.name} (${d.state})`);
-  if (missed.length) rows.push({ cluster: '', device: '', zone: '', tag1: '', state: '', delay_minutes: '', raw_gap_minutes: '', time_zone_offset: '', pattern: '', docs: '', last_seen: '', detail: `not measured: ${missed.join('; ')}` });
+  if (missed.length) rows.push(noteRow(`not measured: ${missed.join('; ')}`));
+  for (const x of gapLines()) rows.push(noteRow(`read in part: ${x}`));
+  const scope = `rows: ${delay.ran === 'delayed' ? 'delayed devices only' : delay.ran === 'cluster' ? 'every device, the silent ones too' : 'the devices that sent logs'}${ctx.tz && ctx.tz() !== null && ctx.tz() !== undefined ? ', in the time-zone filter' : ''}${delay.window ? ` · ${delay.window.text}` : ''}`;
+  rows.push(noteRow(scope));
   download(`log-delay-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(rows));
 }
 

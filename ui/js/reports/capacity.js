@@ -15,13 +15,13 @@ import { bytes, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, fetchIndices, ensureFullSnapshots, demandDataset, fleetMode, isOnDemand, clusterRev } from '../core/state.js';
 import { runBounded } from '../core/fleet.js';
 import { card, snapshotStatusByKey } from '../pages/common.js';
-import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, measureRepoBytes, liveHeldDays, parseRetention } from '../core/volume.js';
+import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, measureRepoBytes, repoMeasureText, liveHeldDays, parseRetention } from '../core/volume.js';
 import { utcDay } from '../core/volume-daily.js';
 import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { sharePut } from '../play/api.js';
 import { columnsMenu } from '../lib/columns.js';
-import { clusterFigures, repoBytes, RATE_DAYS, recordState } from './record.js';
+import { clusterFigures, repoBytes, repoPartial, RATE_DAYS, recordState } from './record.js';
 import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout } from './layouts.js';
 import { layoutTable, layoutCsv, layoutSortCols } from './table.js';
 import { tableSort, sortTh } from '../lib/table-sort.js';
@@ -83,7 +83,9 @@ async function measureRepos(c) {
     await cache.ready;
     const m = await measureRepoBytes(cl, d, { cache: cache.map });
     ({ counted, failed } = m);
-    if (m.total !== null) repoBytes.set(c.id, m.total);
+    // Only a whole measurement is the repository's size; a short one is shown as "at least".
+    if (m.total !== null) { repoBytes.set(c.id, m.total); repoPartial.delete(c.id); }
+    else repoPartial.set(c.id, m);
     if (m.total !== null) sharePut('repoSize', c.id, Date.now(), { bytes: m.total, counted: m.counted, failed: m.failed }).catch(() => {});
     await cache.flush((key) => snapshotStatusByKey(d, key));
   } finally {
@@ -151,7 +153,7 @@ export function capacityDefs(rows = []) {
     { key: 'backupDisk', label: 'Backup disk (repository)', group: GROUP_BACKUP, title: 'The snapshot repository: its size now against its capacity (backupCapacity)',
       cell: (r) => backupDiskCell(r),
       csv: (r) => (r.plan.ulm ? 'in S3' : r.plan.backupCapacity === null ? 'not measured · set backupCapacity'
-        : r.plan.repoBytes === null ? `size not measured of ${gbCell(r.plan.backupCapacity)} GB`
+        : r.plan.repoBytes === null ? `size ${repoMeasureText(repoPartial.get(r.cluster.id), bytes) || 'not measured'} of ${gbCell(r.plan.backupCapacity)} GB`
           : `${gbCell(r.plan.repoBytes)} of ${gbCell(r.plan.backupCapacity)} GB`),
       sortType: 'bytes', sortValue: (r) => (r.plan.ulm ? null : r.plan.repoBytes) },
     { key: 'backupRequired', label: 'Required backup disk', num: true, group: GROUP_BACKUP, title: 'Per day × backup retention × buffer',
@@ -186,10 +188,12 @@ function backupDiskCell(r) {
   if (r.plan.repoBytes !== null) return diskBar(r.plan.repoBytes, r.plan.backupCapacity, { what: 'Backup repository' });
   const repos = (r.data && r.data.repos) || [];
   const measuring = ui.measuring.has(r.cluster.id);
-  return h('span.rp-measure', amber(`size not measured · of ${bytes(r.plan.backupCapacity)}`),
+  const part = repoMeasureText(repoPartial.get(r.cluster.id), bytes);
+  return h('span.rp-measure', amber(part ? `${part} · of ${bytes(r.plan.backupCapacity)}` : `size not measured · of ${bytes(r.plan.backupCapacity)}`,
+    part ? 'At most 60 snapshots of a repository are asked at once; Measure again goes on with the rest' : null),
     ' ', h('button.linkish', { type: 'button', disabled: measuring || !repos.length,
       title: repos.length ? 'Sum the incremental bytes of every snapshot — one call per snapshot' : 'No repository registered on this cluster',
-      onclick: () => measureRepos(r.cluster) }, measuring ? 'Measuring…' : 'Measure'));
+      onclick: () => measureRepos(r.cluster) }, measuring ? 'Measuring…' : part ? 'Measure the rest' : 'Measure'));
 }
 
 let menuState = null;
@@ -380,5 +384,5 @@ const built = nodeCache();
 function dataSig(list) {
   return [JSON.stringify(PLAN_SORT.sort), JSON.stringify(SHEET_SORT.sort), recordState.rev, layoutNote(TABLE), JSON.stringify(layoutOf(TABLE)), [...ui.measuring].join(','),
     ...list.map((c) => [c.id, clusterRev(c.id), objId(state.data.get(c.id)), objId(state.indices.get(c.id)), objId(c),
-      repoBytes.has(c.id) ? repoBytes.get(c.id) : '-'].join(':')), new Date().toISOString().slice(0, 10)].join('|');
+      repoBytes.has(c.id) ? repoBytes.get(c.id) : '-', objId(repoPartial.get(c.id))].join(':')), new Date().toISOString().slice(0, 10)].join('|');
 }

@@ -98,7 +98,7 @@ export async function saveDataRouting() {
   return true;
 }
 
-const toneClass = { ok: 'green', warn: 'orange', muted: 'grey' };
+const toneClass = { ok: 'green', warn: 'yellow', muted: 'grey' };
 
 function modeSelect(id, value, disabled) {
   const modes = (dr.get && Array.isArray(dr.get.modes) && dr.get.modes.length ? dr.get.modes.map((m) => [m.id, m.label]) : MODES);
