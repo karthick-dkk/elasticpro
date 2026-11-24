@@ -39,8 +39,10 @@ each one counts in one of two ways:
   (`VOLUME_SETTINGS`, `VOLUME_FIELDS_CHECK`, and in `settings`) says which is in force:
   `"format"`, `"pattern"`, or `"default"` (the built-in pattern). `dayFrom: time` under the
   format splits the names that fit by time.
-- **A day is finished** when its date is before today's UTC date. Today is collected too
-  but stays `final: false` and is shown "as of HH:MM". Records written before 0.3.53 are read
+- **A day is final** when it was read at least 24 hours after it ended (UTC midnight;
+  `schedule::FINAL_AFTER_MS`, the one number, since 0.3.89): documents keep arriving after
+  midnight. Until then its figures are shown as "not final: read <time>" (`readAt`, `notes`), and
+  the daily run reads it again — yesterday and the day before, one search each. Records written before 0.3.53 are read
   as they are and never rewritten.
 
 | Figure | Source | When it cannot be read | Kind |
@@ -49,9 +51,9 @@ each one counts in one of two ways:
 | Total size per day | `_cat/indices` `store.size` (with replicas) | as above | measured |
 | Indices per day | count of the day's dated indices + time-split indices with documents on it | — | measured |
 | Documents per day | `hits.total` of the day's `_search` (`track_total_hits`) | day not aggregated yet → `null` | measured |
-| Event bytes | `sum` of the Event size field (default `event_logsize`, then `event_log_size`) | no numeric field in the mapping → `null`, shown "not measured" | measured |
+| Event bytes | `sum` of the Event size field (default `event_logsize`, then `event_log_size`), with a `value_count` beside it | no numeric field in the mapping, or no document of the day carries it → `null`, shown "not measured" (Elasticsearch's sum over nothing is 0, which is not a size). Some documents without it → the sum, and how many (`eventMissingDocs`, `subMissingDocs`) | measured |
 | Sub size | `sum` of the Sub size field (default `sub_size`, then `fwd_log_size`) | as above | measured |
-| Documents per value | `terms` on the resolved field within the day's indices | field not found → `error`, never 0 | measured |
+| Documents per value | `terms` on the resolved field within the day's indices (`shard_size` 500) | field not found → `error`, never 0 | measured; `errorBound` (Elasticsearch's `doc_count_error_upper_bound`) above 0 → "approximate ±N" |
 | Primary size per value | Σ over days of (value docs ÷ day docs) × day primary size | — | **estimate**, always labelled "est." |
 
 `null` is "not measured". It is never rendered as 0.
@@ -197,7 +199,7 @@ defaults:
      searched, to resolve each row.
   3. For each day within `keepMonths` that is live with an open dated index or time-split
      documents, and is not yet aggregated as final (plus today, every run), one search — except
-     the days before yesterday within `backfillDays`, which are the backfill's (below, "Backfill"):
+     the days before the run's own three (today, yesterday, the day before) within `backfillDays`, which are the backfill's (below, "Backfill"):
      at most `backfillPerRun` of them a run, after the run's own days, each only while the
      cluster is not under query pressure.
      Legacy format, `dayFrom: name`:
@@ -243,6 +245,11 @@ defaults:
   - `_field_caps` failed → "not aggregated: _field_caps: …; asked again on the next run";
   - all its indices are closed → not searched, "not aggregated: N of its indices are closed;
     asked again on a later run while they are open";
+  - some of its indices are closed or unreadable (red) → the open ones are counted, the day is
+    never final and its sizes are not the day's (`closedIndices`, `unreadableIndices`): a closed
+    index has no size in `_cat`, and that is not 0;
+  - some of a final day's indices were deleted or cannot be read any more → the recorded figures
+    are kept and the day says "N of M indices deleted since" (`goneIndices`);
   - its indices went before it was final → `live: false` for good, "its indices went before
     the day was aggregated as final: the figures are the last ones measured" (or "only the
     sizes were measured");
@@ -255,7 +262,7 @@ defaults:
     some of the indices split by time are closed; asked again on a later run while they are
     open".
   A later whole answer makes the day final and clears `error`. A time-split day is final
-  under the same rule as a dated one: its first whole answer after the day is over.
+  under the same rule as a dated one: its first whole answer 24 hours after the day is over.
 - **`listedAt`** is set only by a run whose time split is known for every time-split index
   (none closed, none unknown): a day with no record may otherwise still have documents.
 
@@ -266,7 +273,7 @@ was down — is a gap in Reports › Daily & monthly although the cluster may st
 indices. The backfill fills such days on later runs, gently.
 
 - **Which days** (`volume::backfill`, one definition): every day of the **window** — from
-  `backfillDays` days before today (UTC) to the day before yesterday, none before the first day
+  `backfillDays` days before today (UTC) to three days ago, none before the first day
   `keepMonths` keeps — that the record does not hold as **final and measured** (`final: true`
   with a document count). After step 1 of the run every day that has an index on the cluster has
   a record, so each day of the window is one of:
@@ -278,7 +285,8 @@ indices. The backfill fills such days on later runs, gently.
     again ("indices no longer on the cluster"), never shown as 0;
   - *no index* — no record: the cluster has no index on it, so there is nothing to fill it from;
   - *waiting* — its indices are there but all closed, or the time split is not known this run.
-  Today and yesterday are the run's own days and are collected as before, whatever the pressure.
+  Today, yesterday and the day before (read once more to be final) are the run's own days and are
+  collected whatever the pressure.
   Days older than the window keep the rule above (asked every run while not final).
 - **When**: in the daily run (the timer) and in Collect now (`VOLUME_RUN`), after the run's own
   days: the oldest fillable days first, at most `backfillPerRun` per cluster per run, so a long
@@ -348,13 +356,13 @@ the all-cluster Monthly view reads one small file per cluster. Written tmp + ren
 ```text
 Day = { day, final, live, aggregatedAt|null, totalsAt,
         indices, priBytes|null, totalBytes|null, docs|null, eventBytes|null, subBytes|null,
-        unmeasuredSizeIndices,
+        unmeasuredSizeIndices, unreadableIndices, closedIndices, goneIndices, eventMissingDocs|null, subMissingDocs|null,
         sources: { "<source>": { indices, priBytes|null, totalBytes|null, docs|null, eventBytes|null, subBytes|null,
-                                 unmeasuredSizeIndices } },
+                                 unmeasuredSizeIndices, unreadableIndices } },
         fields:  { tag|forwarder|sourceHost|sourceIp|extra:
                    { field|null, error|null,
                      top: [ { value, docs, eventBytes|null, subBytes|null } ],
-                     otherDocs, missingDocs, otherEventBytes|null, missingEventBytes|null,
+                     otherDocs, missingDocs, errorBound|null, otherEventBytes|null, missingEventBytes|null,
                      otherSubBytes|null, missingSubBytes|null } },
         error|null }
 ```
@@ -367,6 +375,8 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   above 0 the day's size is **not measured**: every derived figure (rows, totals, month sums,
   cards, CSV, .xlsx) shows `null` for it, never the dated part as the day's size, never 0,
   never an apportioned share (`Day::sizes`, the one definition). Per source the same.
+- `unreadableIndices` (0.3.89; absent, read as 0, on older records): dated indices whose size
+  `_cat` did not give (closed, red). They leave the day's size not measured, as above.
 - `indices`: dated indices + `unmeasuredSizeIndices`.
 
 ### History store: write and read-back (0.3.53, docs/HISTORY.md)
@@ -406,10 +416,16 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   documents and event bytes still count). Rows carry `unmeasuredSizeIndices`.
 - **Average over N days for day d**: mean of basis over the N calendar days before d that
   have a record (d itself excluded). `changeVsAvgPct = (basis(d) − avg) / avg × 100`,
-  `null` when there is no earlier day.
+  `null` when there is no earlier day. A row carries how many days were averaged (`avgDays`,
+  never assumed to be N) and how many earlier days the record has (`earlierDays`): a file says
+  "no earlier day" only when that is 0.
+- **Rows say what they rest on** (0.3.89): `readAt` (when the day's figures were read) and `notes`
+  (`derive::day_notes`: not final, closed or deleted indices, documents without a size, failed
+  shards), the same text in the tables, the workbook, the CSV and the mail.
 - **Cards**: yesterday's basis; "Average per day · N days" = mean of the last N finished
   days (yesterday included); "This month so far" = Σ basis of the current month's days
-  (today as of the last run); "Event bytes · 30 days" = Σ eventBytes over the last 30
+  (today as of the last run; `days`, `daysMeasured`, `todayIncluded`, `todayValue` beside it);
+  "Event bytes · 30 days" = Σ eventBytes over the last 30
   finished days (`null` if none measured). The cards do not depend on the table's window:
   the record is read from `derive::cards_from(today, N)` (the earliest of the N days before
   yesterday, the first of the month, 30 days back) whatever `days` is; rows, totals and
@@ -427,9 +443,11 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   eventSize: ÷ days with event bytes measured), `peakDay` `{day, bytes}` (max basis), and
   beside them on primary size whatever the basis: `avgPriPerDay` (Σ priBytes ÷ daysWithData)
   and `peakPrimary` `{day, bytes}`; liveDays/keptDays, top value per field over the month
-  (by summed docs).
+  (by summed docs). `daysMeasured {docs, eventBytes, size, subBytes}`, `finalDays` and
+  `daysInMonth` say how much of the month each figure covers.
 - **Breakdown** (field, from, to, top): per value Σ docs, Σ eventBytes (measured),
-  Σ estimated primary (rule above), share % of the estimated total, days seen. Rows
+  Σ estimated primary (rule above; `null`, never 0, when no day of it had a size), `errorBound`
+  (days whose record predates it: `errorBoundUnknownDays`), share % of the estimated total, days seen. Rows
   "(not set)" (missing) and "all others" (other) are listed and counted.
 - **Source filter**: totals per source come from `_cat` and `by_index`. Top values are kept
   for all sources together; under a source filter they are not available (shown "—").
@@ -477,8 +495,10 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
 
 ## CSV columns
 
-- daily: `cluster, day, indices, docs, primary_bytes, total_bytes, event_bytes, event_bytes_measured, sub_bytes, change_vs_avg_pct, avg_days`
-- monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days`
+- daily: `cluster, day, indices, docs, primary_bytes, total_bytes, event_bytes, event_bytes_measured, sub_bytes, change_vs_avg_pct, avg_days, final, read_at_utc, note`
+  — one row per day of the period, a day without a record included; `avg_days` is the days averaged
+- monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days, period_from, period_to, days_in_period, docs_days_measured, event_bytes_days_measured, primary_bytes_days_measured`
+  — the part of the month inside the report's period, its **final** days only (never today)
   — the primary columns are the month row's `priBytes`, `avgPriPerDay` and `peakPrimary`,
   never the basis figures (`avgPerDay`, `peakDay`), whatever `sizeBasis` is. In the .xlsx
   Monthly sheet the Average per day / Peak day columns follow the basis, as on the page, and
@@ -489,7 +509,7 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
 - Indices › Summary: `cluster, day, status, indices, docs, size_basis, size_bytes, avg_7d_bytes,
   avg_7d_days_recorded, <tag>=<value>_bytes_estimated…`; a value's size is always headed
   "estimated by document share" on the page
-- breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen`
+- breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen, note`
 
 ## Reports and mail
 
@@ -569,7 +589,11 @@ files are built on the report's own blocking slots too, and a file over
   (`VOLUME_LAYOUT_*`: order, names, hidden). Byte columns are numbers (bytes) with a GB
   column beside primary size; `null` cells read "not measured". Breakdown estimate column
   header says "est.". Written by the core (zip + SpreadsheetML), no external tool.
-- `.zip` of `daily.csv`, `monthly.csv`, `breakdown.csv` with the CSV columns above.
+- `.zip` of `daily.csv`, `monthly.csv`, `breakdown.csv` with the CSV columns above, and `about.csv`.
+- **About** (0.3.89; every generated file, the last sheet of a workbook, `about.csv` in a zip,
+  `report::about`): what it covers, when each cluster's figures were read from Elasticsearch (UTC
+  and server time), when and by which version it was built, what the figures mean, and every
+  warning — the same warnings stand in the mail's body and on the rows they affect.
 - Name: `volume-<cluster>-<from>_<to>.xlsx`.
 
 ### Mail server (Config › Volume fields › Mail server (SMTP))
@@ -640,7 +664,8 @@ files are built on the report's own blocking slots too, and a file over
   retried — it may have gone out). A cluster that fails to collect does not fail the mailed
   report: its sheets hold what the record has and the job carries `warning`.
 - One mail, one attachment: an .xlsx with one sheet set per cluster (sheet names prefixed by
-  cluster name, ≤31 chars). Body: per cluster yesterday, average per day (7), month so far.
+  cluster name, ≤31 chars). Body: per cluster yesterday, average per day (7), month so far ("N of M days
+  measured"), when it was read, and every warning.
 - config.txt: `UI_REPORT_TO` text (comma list), `UI_REPORT_SCHEDULE` enum
   monthly,weekly,daily,manual, `UI_REPORT_AT` text HH:MM, `UI_REPORT_SHEETS` text.
 - `REPORT_SCHEDULE_GET` (and `REPORT_SCHEDULE_SET`'s reply) carries `nextPeriod: {from, to,

@@ -253,6 +253,10 @@ enum Msg {
 pub struct ActivityLog {
     cfg: ActivityConfig,
     ring: Mutex<VecDeque<Value>>,
+    /// Events the list no longer holds; the file does, when there is one.
+    rolled: AtomicU64,
+    /// When this process began to hold them: nothing before it is in the list.
+    since_ms: u64,
     tx: Option<SyncSender<Msg>>,
     dropped: AtomicU64,
     last_drop_warn: Mutex<Option<Instant>>,
@@ -275,7 +279,7 @@ impl ActivityLog {
     }
 
     fn with_sender(cfg: ActivityConfig, tx: Option<SyncSender<Msg>>) -> ActivityLog {
-        ActivityLog { cfg, ring: Mutex::new(VecDeque::new()), tx, dropped: AtomicU64::new(0), last_drop_warn: Mutex::new(None) }
+        ActivityLog { cfg, ring: Mutex::new(VecDeque::new()), rolled: AtomicU64::new(0), since_ms: crate::fleet::now_ms(), tx, dropped: AtomicU64::new(0), last_drop_warn: Mutex::new(None) }
     }
 
     /// The file events are written to, if any.
@@ -297,7 +301,10 @@ impl ActivityLog {
         }
         {
             let mut ring = self.ring.lock();
-            if ring.len() == RING { ring.pop_front(); }
+            if ring.len() == RING {
+                ring.pop_front();
+                self.rolled.fetch_add(1, Ordering::Relaxed);
+            }
             ring.push_back(v);
         }
         let Some(tx) = &self.tx else { return };
@@ -324,6 +331,15 @@ impl ActivityLog {
         if tx.send(Msg::Flush(ack)).is_ok() {
             let _ = wait.recv_timeout(Duration::from_secs(10));
         }
+    }
+
+    /// What `list` covers: the events this process holds, since when, and how many it has
+    /// already let go. An empty list is "none since then", never "none".
+    pub fn coverage(&self) -> Value {
+        let ring = self.ring.lock();
+        let rolled = self.rolled.load(Ordering::Relaxed);
+        let since = if rolled > 0 { ring.front().and_then(|e| e.get("@timestamp").cloned()) } else { None };
+        serde_json::json!({ "held": ring.len(), "max": RING, "rolledOut": rolled, "since": self.since_ms, "oldest": since, "notInFile": self.dropped() })
     }
 
     /// Newest first. `user` is a case-insensitive substring of the user name.
@@ -615,6 +631,9 @@ mod tests {
             log.record(ActivityEvent { action: "es".into(), ok: true, user: Some(format!("u{i}")), ..Default::default() });
         }
         let all = log.list(usize::MAX, None, false);
+        let cover = log.coverage();
+        assert_eq!((cover["held"].as_u64(), cover["rolledOut"].as_u64()), (Some(RING as u64), Some(5)), "{cover}");
+        assert!(cover["since"].as_u64() > Some(0) && cover["oldest"] == all[RING - 1]["@timestamp"], "{cover}");
         assert_eq!(all.len(), RING);
         assert_eq!(all[0]["user"]["name"], format!("u{}", RING + 4));
         assert_eq!(all[RING - 1]["user"]["name"], "u5");

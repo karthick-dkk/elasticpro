@@ -620,20 +620,27 @@ impl Core {
         let today = vsched::utc_day(now_ms());
         // The month files read and the file built on a report thread, not a runtime worker.
         let (core, j, s2, layouts) = (self.clone(), job.clone(), s.clone(), self.volume_layouts());
+        let warned: Vec<String> = warning.iter().cloned().collect();
         let built = self.report_cpu(move || {
             let Some(store) = core.volume.store.as_ref() else { return Err("no data directory".to_string()) };
-            let data = ClusterData::load(store, &j.cluster_id, &j.cluster_name, s2, &j.period);
+            let data = ClusterData::load(store, &j.cluster_id, &j.cluster_name, s2, &j.period).with_warnings(&warned);
+            let mut about = build::volume_about(&j.period, now_ms());
+            data.describe(&j.period, today, &mut about);
             match j.format {
                 Format::Xlsx => {
                     let all: Vec<String> = build::SHEETS.iter().map(|s| s.to_string()).collect();
-                    let sheets = build::sheets(&data, &j.period, &layouts, today, &all, false);
-                    xlsx::workbook(&sheets).map(|b| (build::file_name(&j.cluster_id, &j.period, "xlsx"), b))
+                    let mut sheets = build::sheets(&data, &j.period, &layouts, today, &all, false);
+                    sheets.push(about.sheet());
+                    xlsx::workbook(&sheets).map(|b| (build::file_name(&j.cluster_id, &j.period, "xlsx"), b, about.mail_lines()))
                 }
-                Format::CsvZip => zip::write(&build::csv_files(&data, &j.period, today))
-                    .map(|b| (build::file_name(&j.cluster_id, &j.period, "zip"), b)),
+                Format::CsvZip => {
+                    let mut files = build::csv_files(&data, &j.period, today);
+                    files.push(about.entry());
+                    zip::write(&files).map(|b| (build::file_name(&j.cluster_id, &j.period, "zip"), b, about.mail_lines()))
+                }
             }
         }).await.and_then(|r| r);
-        let (name, bytes) = match built {
+        let (name, bytes, about_lines) = match built {
             Ok(x) => x,
             Err(e) => return JobEnd::failed(format!("the file could not be built: {e}")),
         };
@@ -654,7 +661,7 @@ impl Core {
                 Some(store) => build::mail_summary(store, &job.cluster_id, &job.cluster_name, &s, today),
                 None => String::new(),
             };
-            let body = format!("ElasticPro volume report · {} · {}\n\n{}\n{}", job.cluster_name, job.period.label, summary, MAIL_FOOTER);
+            let body = format!("ElasticPro volume report · {} · {}\n\n{}\n{}\n{}", job.cluster_name, job.period.label, summary, about_lines, MAIL_FOOTER);
             if let Err(e) = self.report_mail_file(ReportKind::Volume, &job.by, &subject, &body, (&job.id, &name, job.format.mime())).await {
                 end.mail_error = Some(e);
             }
@@ -670,9 +677,10 @@ impl Core {
         };
         let (mut done, mut counted) = (0u64, 0u64);
         let mut warnings = vec![];
-        let mut each: Vec<(String, VolumeSettings)> = vec![];
+        let mut each: Vec<(String, VolumeSettings, Vec<String>)> = vec![];
         for id in &job.cluster_ids {
             let s = self.volume_resolve(raw.as_ref(), Some(id), None).settings;
+            let before = warnings.len();
             match self.report_collect(&job.id, id, &s, &job.period, (done, counted)).await {
                 Ok((w, d, t)) => {
                     done += d;
@@ -687,7 +695,7 @@ impl Core {
                 Err(end) => warnings.push(format!("{id}: {}; its sheets hold what the record already had",
                                                   end.error.unwrap_or_else(|| "not collected".into()))),
             }
-            each.push((id.clone(), s));
+            each.push((id.clone(), s, warnings[before..].to_vec()));
         }
         if let Some(by) = self.report_stop_asked(&job.id) {
             return JobEnd::stopped(by);
@@ -695,8 +703,8 @@ impl Core {
         let today = vsched::utc_day(now_ms());
         let layouts = self.volume_layouts();
         let which: Vec<String> = if job.sheets.is_empty() { build::SHEETS.iter().map(|s| s.to_string()).collect() } else { job.sheets.clone() };
-        let named: Vec<(String, String, VolumeSettings)> = each.iter()
-            .map(|(id, s)| (id.clone(), self.spec_for(id).and_then(|x| x.name).unwrap_or_else(|| id.clone()), s.clone())).collect();
+        let named: Vec<(String, String, VolumeSettings, Vec<String>)> = each.into_iter()
+            .map(|(id, s, w)| (id.clone(), self.spec_for(&id).and_then(|x| x.name).unwrap_or(id), s, w)).collect();
         let _ = store;
         // The month files read and the book built on a report thread, not a runtime worker.
         let (core, period) = (self.clone(), job.period.clone());
@@ -704,17 +712,22 @@ impl Core {
             let Some(store) = core.volume.store.as_ref() else { return Err("no data directory".to_string()) };
             let mut sheets = vec![];
             let mut body = format!("ElasticPro volume report · {}\n\n", period.label);
-            for (id, name, s) in &named {
-                let data = ClusterData::load(store, id, name, s.clone(), &period);
+            let mut about = build::volume_about(&period, now_ms());
+            for (id, name, s, w) in &named {
+                let data = ClusterData::load(store, id, name, s.clone(), &period).with_warnings(w);
+                data.describe(&period, today, &mut about);
                 sheets.extend(build::sheets(&data, &period, &layouts, today, &which, true));
                 drop(data);
                 body.push_str(&build::mail_summary(store, id, name, s, today));
                 body.push('\n');
             }
+            body.push_str(&about.mail_lines());
+            body.push('\n');
             body.push_str(MAIL_FOOTER);
             if sheets.is_empty() {
                 return Err("no cluster to report on".to_string());
             }
+            sheets.push(about.sheet());
             xlsx::workbook(&sheets).map(|b| (b, body)).map_err(|e| format!("the file could not be built: {e}"))
         }).await.and_then(|r| r);
         let (bytes, body) = match built {

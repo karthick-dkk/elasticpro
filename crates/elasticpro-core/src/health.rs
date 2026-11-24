@@ -370,6 +370,11 @@ struct RingFile {
     samples: VecDeque<Sample>,
 }
 
+/// The cumulative CPU time of one container never falls.
+fn restarted(before: Option<u64>, after: Option<u64>) -> bool {
+    before.zip(after).is_some_and(|(b, a)| a < b)
+}
+
 impl Ring {
     pub fn push(&mut self, s: Sample) {
         let now = s.t;
@@ -423,12 +428,23 @@ impl Ring {
     }
 
     /// OOM kills in the last day: the rises of the cumulative counter across the day's samples
-    /// and `current`. A counter that went down was reset (a new container): its new value is
-    /// all new kills. `None` when nothing in the day read the counter.
-    pub fn oom_kills_24h(&self, now: u64, current: Option<u64>) -> Option<u64> {
-        let seq: Vec<u64> = self.within(now, DAY_MS).filter_map(|s| s.oom).chain(current).collect();
+    /// and `current` (the counter and the container's CPU time). A counter that went down, or
+    /// CPU time that did, is a new container: its value is all new kills. `None` when nothing
+    /// in the day read the counter. A kill that ended the container itself went with its counter
+    /// and is not in this figure: `restarts_24h`.
+    pub fn oom_kills_24h(&self, now: u64, current: Option<u64>, cpu_usec: Option<u64>) -> Option<u64> {
+        let seq: Vec<(u64, Option<u64>)> = self.within(now, DAY_MS).filter_map(|s| Some((s.oom?, s.cpu_usec)))
+            .chain(current.map(|c| (c, cpu_usec))).collect();
         seq.first()?;
-        Some(seq.windows(2).map(|w| if w[1] >= w[0] { w[1] - w[0] } else { w[1] }).sum())
+        Some(seq.windows(2).map(|w| if w[1].0 >= w[0].0 && !restarted(w[0].1, w[1].1) { w[1].0 - w[0].0 } else { w[1].0 }).sum())
+    }
+
+    /// How often a new container began in the last day: its CPU time went down. `None` when
+    /// CPU time was not read.
+    pub fn restarts_24h(&self, now: u64, cpu_usec: Option<u64>) -> Option<u64> {
+        let seq: Vec<u64> = self.within(now, DAY_MS).filter_map(|s| s.cpu_usec).chain(cpu_usec).collect();
+        seq.first()?;
+        Some(seq.windows(2).filter(|w| restarted(Some(w[0]), Some(w[1]))).count() as u64)
     }
 
     /// The share of CPU periods throttled over the last `ms`, to `current`.
@@ -483,6 +499,8 @@ pub struct MemoryFigures {
     /// OOM kills since the container started (`memory.events`).
     pub oom_kills: Option<u64>,
     pub oom_kills_24h: Option<u64>,
+    /// New containers in the last day: a kill that ended the one before is in no counter here.
+    pub restarts_24h: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -573,7 +591,8 @@ pub fn figures_from(r: &Raw, ring: &Ring, pct_1m: Option<f64>) -> (MemoryFigures
         peak_bytes_24h: ring.peak_rss(r.at, r.rss),
         hwm_bytes: r.hwm,
         oom_kills: r.oom_kills,
-        oom_kills_24h: ring.oom_kills_24h(r.at, r.oom_kills),
+        oom_kills_24h: ring.oom_kills_24h(r.at, r.oom_kills, r.cpu.as_ref().map(|c| c.usage_usec)),
+        restarts_24h: ring.restarts_24h(r.at, r.cpu.as_ref().map(|c| c.usage_usec)),
     };
     let cpu = CpuFigures {
         readable: r.cpu.is_some(),
@@ -1310,13 +1329,20 @@ fn memory_check(who: &str, id: &str, m: &MemoryFigures, fix: &str) -> Check {
     let label = format!("{who} memory of limit");
     let base = Check { id: id.into(), threshold: "memory".into(), label, ..Default::default() };
     let oom = m.oom_kills_24h.unwrap_or(0);
+    // Never "within its limit" alone after a restart nothing here can explain.
+    let restarts = m.restarts_24h.unwrap_or(0);
+    let unseen = if restarts > 0 {
+        format!(" Its container started again {restarts} time(s) in the last 24 h; whether that was an OOM kill is not known here.")
+    } else {
+        String::new()
+    };
     let Some(rss) = m.rss_bytes else {
         return Check { level: Level::Unknown, value: "not known".into(), text: format!("{who} resident memory cannot be read here (no cgroup or /proc)."), ..base };
     };
     let Some(limit) = m.limit_bytes else {
         let level = if oom > 0 { Level::Bad } else { Level::Ok };
         return Check { level, value: format!("{} · no limit", bytes_text(rss)),
-            text: if oom > 0 { format!("{oom} OOM kill(s) in the last 24 h.") } else { format!("{who} has no memory limit: nothing to compare against.") },
+            text: (if oom > 0 { format!("{oom} OOM kill(s) in the last 24 h.") } else { format!("{who} has no memory limit: nothing to compare against.") }) + &unseen,
             fix: (oom > 0).then(|| fix.to_string()), ..base };
     };
     let pct = m.used_pct.unwrap_or(rss as f64 * 100.0 / limit.max(1) as f64);
@@ -1330,7 +1356,7 @@ fn memory_check(who: &str, id: &str, m: &MemoryFigures, fix: &str) -> Check {
         Level::Bad => format!("{who} is at {pct:.0}% of its memory limit: close to being OOM-killed."),
         Level::Warn => format!("{who} is at {pct:.0}% of its memory limit."),
         _ => format!("{who} memory is within its limit."),
-    };
+    } + &unseen;
     Check { level, value, text, fix: (level.rank() > 0).then(|| fix.to_string()), ..base }
 }
 
@@ -1790,8 +1816,8 @@ mod tests {
         let back = Ring::load(&fx.0, "core", now);
         assert_eq!(back.samples.len(), 2, "older than a day at load: dropped");
         assert_eq!(back.peak_rss(now, Some(100)), Some(900));
-        assert_eq!(back.oom_kills_24h(now, Some(1)), Some(1));
-        assert_eq!(back.oom_kills_24h(now, Some(0)), Some(1), "0 → 1, then a reset to 0 adds nothing");
+        assert_eq!(back.oom_kills_24h(now, Some(1), None), Some(1));
+        assert_eq!(back.oom_kills_24h(now, Some(0), None), Some(1), "0 → 1, then a reset to 0 adds nothing");
         // Garbage on disk: an empty day, nothing invented.
         std::fs::write(fx.0.join("health/core.json"), b"{nope").unwrap();
         assert!(Ring::load(&fx.0, "core", now).samples.is_empty());
@@ -1807,7 +1833,16 @@ mod tests {
         let mut r = Ring::default();
         r.push(Sample { oom: Some(3), periods: Some(1_000), throttled: Some(100), overloaded: Some(2), queue_timeout: Some(1), ..s(now - 4 * MINUTE_MS) });
         r.push(Sample { oom: Some(0), overloaded: Some(1), queue_timeout: Some(0), ..s(now - 2 * MINUTE_MS) });
-        assert_eq!(r.oom_kills_24h(now, Some(2)), Some(2), "3 → 0 is a new container; 0 → 2 is two kills");
+        assert_eq!(r.oom_kills_24h(now, Some(2), None), Some(2), "3 → 0 is a new container; 0 → 2 is two kills");
+        // A new container whose counter is already as high as the old one's: its CPU time tells.
+        let mut n = Ring::default();
+        n.push(Sample { oom: Some(1), cpu_usec: Some(9_000_000), ..s(now - 4 * MINUTE_MS) });
+        assert_eq!((n.oom_kills_24h(now, Some(1), Some(1_000)), n.restarts_24h(now, Some(1_000))), (Some(1), Some(1)));
+        assert_eq!((n.oom_kills_24h(now, Some(1), Some(9_500_000)), n.restarts_24h(now, Some(9_500_000))), (Some(0), Some(0)));
+        assert_eq!(Ring::default().restarts_24h(now, None), None, "not read is not 0");
+        let m = MemoryFigures { restarts_24h: Some(1), oom_kills_24h: Some(0), ..mem(100, Some(1000), 0) };
+        let c = memory_check("Core", "core.memory", &m, "");
+        assert!(c.level == Level::Ok && c.text.contains("started again 1 time(s)") && c.text.contains("not known"), "{}", c.text);
         let cur = CpuStat { usage_usec: 0, nr_periods: Some(2_000), nr_throttled: Some(400), throttled_usec: None };
         assert_eq!(r.throttled_pct(now, 5 * MINUTE_MS, Some(&cur)), Some(30.0));
         assert_eq!(r.refusals_within(now, 60 * MINUTE_MS), Some((3, 1)));

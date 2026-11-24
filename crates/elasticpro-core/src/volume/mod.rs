@@ -157,6 +157,24 @@ pub struct Day {
     /// written before 0.3.53.
     #[serde(default)]
     pub unmeasured_size_indices: u64,
+    /// Indices dated on this day whose size `_cat` could not give (closed, red): no figure is
+    /// not 0 bytes, so the day's size is not measured while there is one (`Day::sizes`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_indices: u64,
+    /// Of the indices dated on this day, how many were closed when it was searched: their
+    /// documents are in no figure, and the day is not final.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub closed_indices: u64,
+    /// Of the indices recorded on a final day, how many the cluster no longer has, or can no
+    /// longer size: the figures are the recorded ones.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gone_indices: u64,
+    /// Documents that carry no event size / sub size: in no sum. `None`: not counted (before
+    /// 0.3.89, or the field did not resolve).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_missing_docs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_missing_docs: Option<u64>,
     #[serde(default)]
     pub sources: BTreeMap<String, SourceTotals>,
     #[serde(default)]
@@ -166,17 +184,21 @@ pub struct Day {
 
 impl Day {
     /// The day's primary and total size **as a figure for the whole day**: `None` (not
-    /// measured) while any index that counts on it was split by time. The one definition
-    /// every derived figure reads (`derive`); the record itself keeps the dated part.
+    /// measured) while any index that counts on it was split by time or has no size. The one
+    /// definition every derived figure reads (`derive`); the record itself keeps the rest.
     pub fn sizes(&self) -> (Option<u64>, Option<u64>) {
-        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices)
+        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices + self.unreadable_indices)
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl SourceTotals {
     /// As `Day::sizes`, for one source.
     pub fn sizes(&self) -> (Option<u64>, Option<u64>) {
-        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices)
+        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices + self.unreadable_indices)
     }
 }
 
@@ -199,6 +221,8 @@ pub struct SourceTotals {
     pub sub_bytes: Option<u64>,
     #[serde(default)]
     pub unmeasured_size_indices: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_indices: u64,
 }
 
 /// One breakdown row on one day. `error` set means the field could not be resolved: the
@@ -216,6 +240,10 @@ pub struct FieldAgg {
     pub missing_event_bytes: Option<u64>,
     pub other_sub_bytes: Option<u64>,
     pub missing_sub_bytes: Option<u64>,
+    /// How far each value's document count may be off (`doc_count_error_upper_bound` of the
+    /// terms aggregation); 0 is exact. `None`: not recorded (before 0.3.89).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_bound: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

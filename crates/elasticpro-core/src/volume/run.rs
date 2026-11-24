@@ -74,8 +74,9 @@ pub(crate) struct CollectOpts<'a> {
     /// The settings are ones the record may be pruned by (`Core::volume_prunes`). Even then
     /// months go only after a run that finished without an error.
     pub prune: bool,
-    /// A day that ended less than this ago is searched but left not final (the next run makes it
-    /// final): a run moved into a heavy-job window too close to UTC midnight. 0 = the usual rule.
+    /// A day that ended less than this ago is searched but left not final (a later run makes it
+    /// final): a run moved into a heavy-job window too close to UTC midnight. Never less than
+    /// `schedule::FINAL_AFTER_MS`, the usual rule.
     pub final_margin_ms: u64,
 }
 
@@ -562,7 +563,7 @@ impl Core {
             Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, true).await,
             None => None,
         };
-        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.truncated_before)))
+        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.incomplete_before())))
             .map(|(d, cut)| Core::history_month_rows(store, id, d, s, &current, cut)).unwrap_or_default();
         let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), merged, months);
         json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
@@ -600,7 +601,7 @@ impl Core {
         for ((id, st), miss) in ids.iter().zip(&states).zip(&missing) {
             let name = self.spec_for(id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
             let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
-            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.truncated_before)))) {
+            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.incomplete_before())))) {
                 (Some((f, t)), Some((days, cut))) => {
                     let mine: Vec<super::Day> = days.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= *f && x <= *t)).cloned().collect();
                     Core::history_month_rows(store, id, &mine, &r.settings, &current, cut)
@@ -1094,9 +1095,9 @@ impl Core {
         let why = |v: &Value| v.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
         let started = now_ms();
         let today = schedule::utc_day(started);
-        // What counts as over for `final`: today's rule, or — a run moved too close to UTC midnight
-        // (`final_margin_ms`) — only days that ended at least the margin ago.
-        let final_today = schedule::utc_day(started - opts.final_margin_ms as i64);
+        // What counts as over for `final`: only a day that ended `schedule::FINAL_AFTER_MS` ago (or
+        // the run's own margin, when that is longer): until then its documents still arrive.
+        let final_today = schedule::final_today(started, opts.final_margin_ms);
         let first_kept = schedule::oldest_kept_month(today, s.keep_months);
         let oldest = month_key(first_kept);
         let mut out = Collected::default();
@@ -1346,8 +1347,7 @@ impl Core {
                 if let Some(day) = file.days.get_mut(&day_key(date)) {
                     out.changed_days.insert(day_key(date));
                     if ok(&res) {
-                        collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, final_today, now_ms());
-                        if let Some(e) = &day.error {
+                        if let Some(e) = collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, final_today, now_ms()) {
                             out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
                         }
                     } else {

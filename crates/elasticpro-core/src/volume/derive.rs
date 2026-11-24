@@ -27,6 +27,7 @@ pub struct Totals {
     pub sub_bytes: Option<u64>,
     /// Time-split indices whose size is not in the day's size (`Day::unmeasured_size_indices`).
     pub unmeasured_size_indices: u64,
+    pub is_final: bool,
 }
 
 impl Totals {
@@ -38,14 +39,16 @@ impl Totals {
                     indices: d.indices, pri_bytes: pri, total_bytes: total,
                     docs: d.docs, event_bytes: d.event_bytes, sub_bytes: d.sub_bytes,
                     unmeasured_size_indices: d.unmeasured_size_indices,
+                    is_final: d.is_final,
                 })
             }
-            Some(s) => d.sources.get(s).map(|s| {
+            Some(name) => d.sources.get(name).map(|s| {
                 let (pri, total) = s.sizes();
                 Totals {
                     indices: s.indices, pri_bytes: pri, total_bytes: total,
                     docs: s.docs, event_bytes: s.event_bytes, sub_bytes: s.sub_bytes,
                     unmeasured_size_indices: s.unmeasured_size_indices,
+                    is_final: d.is_final,
                 }
             }),
         }
@@ -100,6 +103,50 @@ pub fn change_vs_avg_pct(v: Option<u64>, avg: Option<f64>) -> Option<f64> {
     Some(((v - a) / a * 100.0 * 100.0).round() / 100.0)
 }
 
+/// What makes a day's figures less than the whole day, in words: the one list every file and
+/// page shows beside the figures. Empty: whole and final.
+pub fn day_notes(d: &Day) -> Vec<String> {
+    let at = crate::report::about::utc;
+    let of = |n: Option<u64>| n.map_or("its".to_string(), |n| format!("{n}"));
+    let mut out = vec![];
+    if d.aggregated_at.is_none() && d.docs.is_none() {
+        out.push("documents and event bytes not measured: not searched yet".to_string());
+    }
+    if let Some(e) = &d.error {
+        out.push(e.clone());
+    }
+    let read = d.aggregated_at.unwrap_or(d.totals_at);
+    let late = parse_day(&d.day).is_some_and(|x| read >= super::schedule::final_from(x));
+    if !d.is_final && read > 0 {
+        out.push(format!("not final: read {}", at(read)));
+    } else if d.is_final && !late && read > 0 {
+        out.push(format!("read {}, less than 24 hours after the day ended: later documents are not in it", at(read)));
+    }
+    if d.unmeasured_size_indices > 0 {
+        out.push(format!("{} of {} indices split by time: size not measured", d.unmeasured_size_indices, d.indices));
+    }
+    if d.unreadable_indices > 0 {
+        out.push(format!("{} of {} indices closed or unreadable: size not measured", d.unreadable_indices, d.indices));
+    }
+    if d.gone_indices > 0 {
+        out.push(format!("{} of {} indices deleted or closed since: the recorded figures of {}", d.gone_indices, d.indices, at(d.totals_at)));
+    }
+    if !d.live {
+        out.push("kept from the record: its indices are no longer on the cluster".to_string());
+    }
+    for (n, what) in [(d.event_missing_docs, "event size"), (d.sub_missing_docs, "sub size")] {
+        if let Some(n) = n.filter(|n| *n > 0) {
+            out.push(format!("{n} of {} documents without {what}: not in its sum", of(d.docs)));
+        }
+    }
+    out
+}
+
+/// When a day's figures were read: its search, else its sizes. `None`: never.
+pub fn read_at(d: &Day) -> Option<i64> {
+    d.aggregated_at.or((d.totals_at > 0).then_some(d.totals_at))
+}
+
 /// **Top value** of a field on a day: the first `top` entry, share = docs ÷ day docs.
 pub fn top_value(d: &Day, key: &str) -> Value {
     let Some(f) = d.fields.get(key).filter(|f| f.error.is_none()) else { return Value::Null };
@@ -122,7 +169,8 @@ fn avg_bytes(a: Option<f64>) -> Option<u64> {
 pub fn daily_row(d: &Day, t: &Totals, history: &BTreeMap<NaiveDate, Totals>, avg_days: u32, b: SizeBasis, source: Option<&str>) -> Value {
     let date = parse_day(&d.day).unwrap_or_default();
     let v = basis(t, b);
-    let (avg, _) = avg_before(history, date, avg_days, b);
+    let (avg, avg_n) = avg_before(history, date, avg_days, b);
+    let earlier = history.range(date - Duration::days(avg_days as i64)..date).count();
     let mut top = Map::new();
     for key in FIELD_KEYS {
         top.insert(key.into(), if source.is_some() { Value::Null } else { top_value(d, key) });
@@ -133,6 +181,11 @@ pub fn daily_row(d: &Day, t: &Totals, history: &BTreeMap<NaiveDate, Totals>, avg
         "docs": t.docs, "eventBytes": t.event_bytes, "subBytes": t.sub_bytes, "error": d.error,
         "unmeasuredSizeIndices": t.unmeasured_size_indices,
         "basis": v, "avg": avg_bytes(avg), "changeVsAvgPct": change_vs_avg_pct(v, avg),
+        // Days the average was really taken over, of the days in its window that have a record.
+        "avgDays": avg_n, "earlierDays": earlier,
+        "unreadableIndices": d.unreadable_indices, "closedIndices": d.closed_indices, "goneIndices": d.gone_indices,
+        "eventMissingDocs": d.event_missing_docs, "subMissingDocs": d.sub_missing_docs,
+        "readAt": read_at(d), "notes": day_notes(d),
         "top": top,
     })
 }
@@ -150,7 +203,9 @@ pub fn cards_from(today: NaiveDate, avg_days: u32) -> NaiveDate {
 /// * yesterday's basis;
 /// * "Average per day · N days": the mean of the last N finished days, yesterday included
 ///   — which is `avg_before(today, N)`, the same rule as a row's average, on purpose;
-/// * "This month so far": Σ basis of the current month's days, today as of the last run;
+/// * "This month so far": Σ basis of the current month's days, today as of the last run; beside
+///   it how many of the month's finished days were measured (`daysMeasured` of `days`), and
+///   whether today is in it (`todayIncluded`): nine days out of twenty-three is not the month;
 /// * "Event bytes · 30 days": Σ eventBytes over the last 30 finished days.
 pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: u32, b: SizeBasis, today_as_of: Option<i64>) -> Value {
     let yesterday = today - Duration::days(1);
@@ -160,12 +215,17 @@ pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: 
     let (yavg, _) = avg_before(history, yesterday, avg_days, b);
     let month_start = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap_or(today);
     let month = sum_opt(history.range(month_start..=today).map(|(_, t)| basis(t, b)));
+    let finished_measured = history.range(month_start..today).filter(|(_, t)| basis(t, b).is_some()).count();
+    let today_value = history.get(&today).and_then(|t| basis(t, b));
     let ev30: Vec<Option<u64>> = history.range(today - Duration::days(30)..today).map(|(_, t)| t.event_bytes).collect();
     json!({
         "basis": b,
-        "yesterday": { "day": day_key(yesterday), "value": yv, "changeVsAvgPct": change_vs_avg_pct(yv, yavg) },
+        "yesterday": { "day": day_key(yesterday), "value": yv, "changeVsAvgPct": change_vs_avg_pct(yv, yavg),
+                       "final": history.get(&yesterday).map(|t| t.is_final) },
         "average": { "days": avg_days, "daysWithData": n, "value": avg_bytes(avg) },
         "monthSoFar": { "month": month_key(today), "value": month,
+                        "days": (today - month_start).num_days(), "daysMeasured": finished_measured,
+                        "todayIncluded": today_value.is_some(), "todayValue": today_value,
                         "asOf": history.contains_key(&today).then_some(today_as_of).flatten() },
         "eventBytes30": { "days": 30, "daysMeasured": ev30.iter().filter(|x| x.is_some()).count(),
                           "value": sum_opt(ev30.into_iter()) },
@@ -229,6 +289,14 @@ pub struct MonthSummary {
     /// the size sums and of the size averages' divisor. Absent (0) before 0.3.53.
     #[serde(default)]
     pub size_unmeasured_days: u64,
+    /// Days whose documents / sub size were measured, and days that are final. `None`: a summary
+    /// kept before 0.3.89 (worked out again when its month is next written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_days: Option<u64>,
     /// Σ of the days' sizes that were measured; `None` when none was.
     pub pri_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
@@ -253,6 +321,10 @@ pub fn month_summary(month: &str, days: &BTreeMap<String, Day>) -> MonthSummary 
         }
     };
     let mut by_value: BTreeMap<&str, BTreeMap<String, u64>> = BTreeMap::new();
+    let count = |f: &dyn Fn(&Day) -> bool| Some(days.values().filter(|d| f(d)).count() as u64);
+    s.docs_days = count(&|d| d.docs.is_some());
+    s.sub_days = count(&|d| d.sub_bytes.is_some());
+    s.final_days = count(&|d| d.is_final);
     for d in days.values() {
         s.days_with_data += 1;
         if d.live { s.live_days += 1 } else { s.kept_days += 1 }
@@ -313,8 +385,17 @@ pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
         // On primary size whatever the basis: what a column named for primary size shows.
         "avgPriPerDay": mean(s.pri_bytes, size_days), "peakPrimary": s.peak_primary,
         "sizeUnmeasuredDays": s.size_unmeasured_days,
+        // Days each figure was measured on, of `daysWithData` recorded and `daysInMonth`.
+        "daysMeasured": { "docs": s.docs_days, "eventBytes": s.event_days, "size": size_days, "subBytes": s.sub_days },
+        "finalDays": s.final_days, "daysInMonth": days_in_month(&s.month),
         "liveDays": s.live_days, "keptDays": s.kept_days, "top": top,
     })
+}
+
+/// Days of a `YYYY-MM` month.
+pub fn days_in_month(month: &str) -> Option<i64> {
+    let first = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").ok()?;
+    Some((first.checked_add_months(chrono::Months::new(1))? - first).num_days())
 }
 
 /* -------------------------------------- breakdown -------------------------------------- */
@@ -323,8 +404,16 @@ pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
 struct Acc {
     docs: u64,
     event: Option<u64>,
-    est: f64,
+    /// `None`: on no day with a measured size, so there is no estimate — not 0.
+    est: Option<f64>,
     days: u64,
+}
+
+fn sum_f(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
 }
 
 /// **Breakdown** of one field over `[from, to]`: per value Σ docs, Σ eventBytes (measured),
@@ -335,7 +424,10 @@ struct Acc {
 pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     let mut values: BTreeMap<String, Acc> = BTreeMap::new();
     let (mut missing, mut other) = (Acc::default(), Acc::default());
-    let (mut total_docs, mut total_pri, mut measured_days, mut size_unmeasured) = (0u64, 0u64, 0u64, 0u64);
+    let (mut total_docs, mut total_pri, mut measured_days, mut size_unmeasured) = (0u64, None::<u64>, 0u64, 0u64);
+    // How far a value's count may be off, summed over the days that recorded it; the days that
+    // did not are counted: their bound is unknown, not 0.
+    let (mut bound, mut bound_unknown) = (None::<u64>, 0u64);
     let mut fields: Vec<String> = vec![];
     let mut error: Option<String> = None;
     // A day whose size is not measured (split by time) adds its documents and event bytes,
@@ -343,7 +435,7 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     let add = |a: &mut Acc, docs: u64, ev: Option<u64>, day_docs: u64, pri: Option<u64>| {
         a.docs += docs;
         a.event = sum_opt([a.event, ev].into_iter());
-        a.est += pri.map_or(0.0, |p| docs as f64 / day_docs as f64 * p as f64);
+        a.est = sum_f(a.est, pri.map(|p| docs as f64 / day_docs as f64 * p as f64));
         a.days += (docs > 0) as u64;
     };
     for d in days {
@@ -361,8 +453,10 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
         measured_days += 1;
         total_docs += day_docs;
         let pri = d.sizes().0;
-        total_pri += pri.unwrap_or(0);
+        total_pri = sum_opt([total_pri, pri].into_iter());
         size_unmeasured += pri.is_none() as u64;
+        bound = sum_opt([bound, f.error_bound].into_iter());
+        bound_unknown += f.error_bound.is_none() as u64;
         for t in &f.top {
             add(values.entry(t.value.clone()).or_default(), t.docs, t.event_bytes, day_docs, pri);
         }
@@ -375,14 +469,14 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     for (_, a) in ranked.drain(keep..) {
         other.docs += a.docs;
         other.event = sum_opt([other.event, a.event].into_iter());
-        other.est += a.est;
+        other.est = sum_f(other.est, a.est);
         other.days = other.days.max(a.days);
     }
-    let est_total: f64 = ranked.iter().map(|(_, a)| a.est).sum::<f64>() + missing.est + other.est;
+    let est_total = ranked.iter().map(|(_, a)| a.est).chain([missing.est, other.est]).fold(None, sum_f);
     let row = |value: &str, kind: &str, a: &Acc| json!({
         "value": value, "kind": kind, "docs": a.docs, "eventBytes": a.event,
-        "estPriBytes": a.est.round() as u64,
-        "sharePct": (est_total > 0.0).then(|| (a.est / est_total * 100.0 * 100.0).round() / 100.0),
+        "estPriBytes": a.est.map(|e| e.round() as u64),
+        "sharePct": a.est.zip(est_total.filter(|t| *t > 0.0)).map(|(e, t)| (e / t * 100.0 * 100.0).round() / 100.0),
         "daysSeen": a.days,
     });
     let mut rows: Vec<Value> = ranked.iter().map(|(v, a)| row(v, "value", a)).collect();
@@ -390,8 +484,9 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     rows.push(row("all others", "other", &other));
     let mut out = json!({
         "field": key, "resolved": fields.last(), "resolvedAll": fields, "rows": rows,
-        "totals": { "docs": total_docs, "priBytes": total_pri, "estPriBytes": est_total.round() as u64, "days": measured_days,
+        "totals": { "docs": total_docs, "priBytes": total_pri, "estPriBytes": est_total.map(|e| e.round() as u64), "days": measured_days,
                     "sizeUnmeasuredDays": size_unmeasured },
+        "errorBound": bound, "errorBoundUnknownDays": bound_unknown, "daysInPeriod": days.len(),
     });
     if measured_days == 0 {
         out["error"] = json!(error.unwrap_or_else(|| "no aggregated day in this period".into()));
@@ -408,7 +503,7 @@ mod tests {
         parse_day(s).unwrap()
     }
     fn t(pri: u64, ev: Option<u64>) -> Totals {
-        Totals { indices: 1, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs: Some(pri / 10), event_bytes: ev, sub_bytes: None, unmeasured_size_indices: 0 }
+        Totals { indices: 1, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs: Some(pri / 10), event_bytes: ev, ..Totals::default() }
     }
     fn hist(rows: &[(&str, u64, Option<u64>)]) -> BTreeMap<NaiveDate, Totals> {
         rows.iter().map(|(k, p, e)| (d(k), t(*p, *e))).collect()
@@ -449,10 +544,11 @@ mod tests {
             ("2026-10-29", 1000, Some(100)), // today, as of the last run
         ]);
         let c = super::cards(&h, d("2026-10-29"), 3, SizeBasis::Primary, Some(123));
-        assert_eq!(c["yesterday"], json!({ "day": "2026-10-28", "value": 400, "changeVsAvgPct": 100.0 }),
+        assert_eq!(c["yesterday"], json!({ "day": "2026-10-28", "value": 400, "changeVsAvgPct": 100.0, "final": false }),
                    "against the 25th..27th: only the 27th (200) has a record");
         assert_eq!(c["average"], json!({ "days": 3, "daysWithData": 2, "value": 300 }), "26th, 27th, 28th: two with a record");
-        assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 1700, "asOf": 123 }), "today included");
+        assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 1700, "days": 28, "daysMeasured": 3, "todayIncluded": true,
+                                            "todayValue": 1000, "asOf": 123 }), "today included; three of the 28 finished days");
         assert_eq!(c["eventBytes30"]["value"], 46, "29 Sep .. 28 Oct, measured only; today excluded");
         assert_eq!(c["eventBytes30"]["daysMeasured"], 3);
         assert_eq!(cards_from(d("2026-10-29"), 3), d("2026-09-29"), "30 days back reaches furthest");
@@ -462,15 +558,16 @@ mod tests {
         assert_eq!(none["eventBytes30"]["value"], Value::Null, "nothing measured is null, not 0");
         assert_eq!(none["yesterday"]["value"], Value::Null);
         assert_eq!(none["monthSoFar"]["value"], Value::Null);
+        assert_eq!((none["monthSoFar"]["days"].as_i64(), none["monthSoFar"]["daysMeasured"].as_u64()), (Some(28), Some(0)), "0 of 28 finished days measured");
         assert_eq!(none["yesterday"]["changeVsAvgPct"], Value::Null, "no earlier day, no change");
     }
 
     #[test]
     fn window_totals_keep_unmeasured_null() {
-        let a = Totals { indices: 2, pri_bytes: Some(10), total_bytes: Some(20), docs: Some(5), event_bytes: None, sub_bytes: None, unmeasured_size_indices: 0 };
-        let b = Totals { indices: 1, pri_bytes: Some(1), total_bytes: Some(2), docs: None, event_bytes: Some(7), sub_bytes: None, unmeasured_size_indices: 0 };
+        let a = Totals { indices: 2, pri_bytes: Some(10), total_bytes: Some(20), docs: Some(5), ..Totals::default() };
+        let b = Totals { indices: 1, pri_bytes: Some(1), total_bytes: Some(2), docs: None, event_bytes: Some(7), ..Totals::default() };
         // Split by time: documents and event bytes count, the size is not measured.
-        let c = Totals { indices: 1, pri_bytes: None, total_bytes: None, docs: Some(3), event_bytes: Some(1), sub_bytes: None, unmeasured_size_indices: 1 };
+        let c = Totals { indices: 1, pri_bytes: None, total_bytes: None, docs: Some(3), event_bytes: Some(1), unmeasured_size_indices: 1, ..Totals::default() };
         let t = super::window_totals(&[&a, &b, &c]);
         assert_eq!(t, json!({ "days": 3, "indices": 4, "priBytes": 11, "totalBytes": 22, "sizeUnmeasuredDays": 1,
                               "docs": 8, "eventBytes": 8, "subBytes": null }));
@@ -507,6 +604,10 @@ mod tests {
         let r = daily_row(&x, &Totals::of(&x, None).unwrap(), &h, 7, SizeBasis::Primary, None);
         assert_eq!((r["basis"].as_u64(), r["avg"].as_u64(), r["changeVsAvgPct"].as_f64()), (Some(1000), Some(500), Some(100.0)));
         assert_eq!(r["top"]["tag"]["value"], "fw");
+        assert_eq!((r["avgDays"].as_u64(), r["earlierDays"].as_u64()), (Some(1), Some(1)), "one day averaged, not 7");
+        let e = daily_row(&x, &Totals::of(&x, None).unwrap(), &h, 7, SizeBasis::EventSize, None);
+        assert_eq!((e["avgDays"].as_u64(), e["earlierDays"].as_u64(), e["changeVsAvgPct"].clone()), (Some(0), Some(1), Value::Null),
+                   "an earlier day whose event bytes are not measured is an earlier day");
         let r = daily_row(&x, &Totals::of(&x, None).unwrap(), &h, 7, SizeBasis::Primary, Some("linux"));
         assert_eq!(r["top"]["tag"], Value::Null, "under a source filter top values are not available");
     }
@@ -574,8 +675,10 @@ mod tests {
         assert_eq!((t.pri_bytes, t.docs, t.unmeasured_size_indices), (None, Some(30), 1));
         assert_eq!(basis(&t, SizeBasis::Primary), None);
         let b = breakdown(&[&split], "tag", 25);
-        assert_eq!((b["rows"][0]["docs"].as_u64(), b["rows"][0]["estPriBytes"].as_u64()), (Some(30), Some(0)));
+        assert_eq!((b["rows"][0]["docs"].as_u64(), b["rows"][0]["estPriBytes"].clone()), (Some(30), Value::Null), "no size measured: no estimate, not 0");
+        assert_eq!((b["totals"]["priBytes"].clone(), b["totals"]["estPriBytes"].clone(), b["rows"][0]["sharePct"].clone()), (Value::Null, Value::Null, Value::Null));
         assert_eq!(b["totals"]["sizeUnmeasuredDays"], 1);
+        assert_eq!((b["errorBound"].clone(), b["errorBoundUnknownDays"].as_u64()), (Value::Null, Some(1)), "a day that recorded no bound is unknown, not exact");
     }
 
     #[test]

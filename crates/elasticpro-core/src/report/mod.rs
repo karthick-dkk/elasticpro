@@ -25,6 +25,7 @@
 //! first tick after; a scheduled job the stop (or a restart) cuts short gives its period
 //! back to the schedule, so that tick tries it again.
 
+pub mod about;
 pub mod build;
 pub mod control;
 pub mod created;
@@ -85,6 +86,9 @@ pub struct Reports {
     /// A cluster moved to its quietest hour: when (server local time) the timer may start it
     /// again. In memory.
     pub(crate) hosts_quiet: parking_lot::Mutex<std::collections::HashMap<String, chrono::NaiveDateTime>>,
+    /// Held day files that are final, or cannot be read again without losing what they hold
+    /// (cluster, day): not looked into again. In memory.
+    pub(crate) hosts_settled: parking_lot::Mutex<std::collections::HashSet<(String, String)>>,
     /// The waits before a failed page is asked again (2 s, 10 s, 30 s); the tests shorten them.
     pub(crate) backoff_ms: parking_lot::Mutex<[u64; 3]>,
     /// The hosts job watchdog in ms instead of `UI_REPORT_HOSTS_MAX_MINUTES` (the tests).
@@ -196,7 +200,7 @@ impl Reports {
                           // The tries the hosts collection made today, as its process last wrote them
                           // (only the process that runs it reads them back).
                           hosts_attempts: parking_lot::Mutex::new(tries),
-                          hosts_deferrals: Default::default(), hosts_quiet: Default::default(),
+                          hosts_deferrals: Default::default(), hosts_quiet: Default::default(), hosts_settled: Default::default(),
                           backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]), watchdog_ms: Default::default() };
         if !failed.is_empty() {
             tracing::warn!(jobs = failed.len(), "volume report: jobs running when the core stopped were marked failed");

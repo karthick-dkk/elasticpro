@@ -28,7 +28,7 @@ use crate::bridge::Core;
 use crate::http::EsRequest;
 use asks::Answered;
 use catalogue::{Class, Dataset, Query, ALL};
-use entry::{answer, error_of, reached, Entry, Outcome, ReachState, Status};
+use entry::{answer, answered, error_of, reached, Entry, Outcome, ReachState, Status};
 use events::{EventsOwner, FleetEvent, Reauth, Tickets};
 use parking_lot::{Mutex, RwLock};
 use policy::Policy;
@@ -416,44 +416,28 @@ impl Core {
         a
     }
 
-    /// Repository names from the cached `policies` answer, when there is a good one.
-    fn fleet_known_repos(&self, cluster: &str) -> Option<Vec<String>> {
-        // The body out from under the lock first; then only its `repos` part is parsed.
-        let body = self.fleet.state.lock().entries.get(&(cluster.to_string(), Dataset::Policies))?.data.clone()?;
-        let repos = body.field("repos")?;
-        if repos.get("ok") != Some(&json!(true)) {
-            return None;
-        }
-        let mut names: Vec<String> = repos.get("json")?.as_object()?.keys().cloned().collect();
-        names.sort();
-        Some(names)
-    }
-
     /// One dataset, request by request. Sequential on purpose: two jobs per cluster at
     /// most, each asking one thing at a time, is the load this was built to keep to.
     async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>, class: crate::gate::Class, slowest: &mut u64) -> Outcome {
         let mut map = Map::new();
         match ds {
             Dataset::Snapshots | Dataset::SnapshotsFull => {
-                let repos = match self.fleet_known_repos(cluster) {
-                    Some(r) => r,
-                    None => {
-                        let q = Query { key: "repos".into(), path: catalogue::REPOS_PATH.into(), timeout_ms: 15_000 };
-                        let a = self.fleet_get(cluster, &q, class, slowest).await;
-                        if !reached(&a) {
-                            return Outcome::Failed(error_of("repos", &a));
-                        }
-                        let mut names: Vec<String> = a.get("json").and_then(Value::as_object)
-                            .map(|m| m.keys().cloned().collect()).unwrap_or_default();
-                        names.sort();
-                        if a.get("ok") != Some(&json!(true)) {
-                            // Which repositories exist could not be read. Said so, rather
-                            // than answering "no snapshots".
-                            map.insert("repos".into(), a);
-                        }
-                        names
-                    }
-                };
+                // Asked now, every time: the cached `policies` answer may be hours old, and a
+                // repository it does not know would be left out as if it held nothing.
+                let q = Query { key: "repos".into(), path: catalogue::REPOS_PATH.into(), timeout_ms: 15_000 };
+                let a = self.fleet_get(cluster, &q, class, slowest).await;
+                if !answered(&a) {
+                    return Outcome::Failed(error_of("repos", &a));
+                }
+                let mut repos: Vec<String> = a.get("json").and_then(Value::as_object)
+                    .map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                repos.sort();
+                if a.get("ok") != Some(&json!(true)) {
+                    // Which repositories exist could not be read. Said so, rather
+                    // than answering "no snapshots".
+                    repos.clear();
+                    map.insert("repos".into(), a);
+                }
                 let mut by = Map::new();
                 for r in repos {
                     let Some(q) = ds.repo_query(&r) else { continue };
@@ -465,15 +449,16 @@ impl Core {
                     if ds == Dataset::SnapshotsFull && a.get("ok") != Some(&json!(true)) {
                         let cat = Query { key: r.clone(), path: catalogue::snapshots_cat_path(&r), timeout_ms: 30_000 };
                         let b = self.fleet_get(cluster, &cat, class, slowest).await;
-                        if reached(&b) {
+                        if answered(&b) {
                             a = b;
                             source = "cat";
                         }
                     }
-                    if !reached(&a) {
+                    if !answered(&a) {
                         return Outcome::Failed(error_of(&r, &a));
                     }
                     a["source"] = json!(source);
+                    catalogue::note_listing(&mut a);
                     by.insert(r, a);
                 }
                 map.insert("byRepo".into(), Value::Object(by));
@@ -495,7 +480,7 @@ impl Core {
             _ => {
                 for q in ds.queries(log_pattern) {
                     let a = self.fleet_get(cluster, &q, class, slowest).await;
-                    if !reached(&a) {
+                    if !answered(&a) {
                         return Outcome::Failed(error_of(&q.key, &a));
                     }
                     map.insert(q.key, a);

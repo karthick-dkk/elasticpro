@@ -2,8 +2,9 @@
 //! record does not hold as final and measured, filled a few a run, oldest first, while the
 //! cluster is not under query pressure.
 //!
-//! The daily run's own days are today and yesterday. Every day before yesterday within
-//! `backfillDays` (and within `keepMonths`) is the backfill's: a day the record holds as final
+//! The daily run's own days are today, yesterday and the day before: a day is final when it was
+//! read at least 24 hours after it ended (`schedule::FINAL_AFTER_MS`), so the day before
+//! yesterday is read once more and then left. Every day before that within `backfillDays` (and within `keepMonths`) is the backfill's: a day the record holds as final
 //! with a document count is done; one whose indices are still on the cluster (an open index
 //! dated on it, or time-split documents on it — `Listing` and `Split`, the collector's own
 //! day mapping) is searched by the backfill, `backfillPerRun` a run, oldest first; one whose
@@ -19,15 +20,15 @@ use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The days the backfill covers on `today`: from `backfill_days` days back to the day before
-/// yesterday (yesterday is the daily run's own day), none before `first_kept` (the first day
+/// The days the backfill covers on `today`: from `backfill_days` days back to three days ago
+/// (yesterday and the day before are the daily run's own days), none before `first_kept` (the first day
 /// `keepMonths` keeps). `None` when off (`backfill_days` 0) or when that leaves no day.
 pub fn window(today: NaiveDate, backfill_days: u32, first_kept: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
     if backfill_days == 0 {
         return None;
     }
     let from = (today - Duration::days(backfill_days as i64)).max(first_kept);
-    let to = today - Duration::days(2);
+    let to = today - Duration::days(3);
     (from <= to).then_some((from, to))
 }
 
@@ -61,6 +62,7 @@ pub fn classify(day: Option<&Day>, group: Option<&DayGroup>, in_split: bool) -> 
         None => Kind::NoIndex,
         Some(d) if !wanted(d) => Kind::Done,
         Some(d) if !d.live => Kind::Gone,
+        Some(d) if super::collect::waits_for_closed(d, group) => Kind::Waiting,
         Some(_) if in_split || group.is_some_and(|g| g.open > 0) => Kind::Fillable,
         Some(_) => Kind::Waiting,
     }
@@ -110,7 +112,7 @@ pub fn plan(from: NaiveDate, to: NaiveDate, kinds: &BTreeMap<NaiveDate, Kind>, p
 pub struct Status {
     /// When the run began (epoch ms).
     pub at: i64,
-    /// The window, `YYYY-MM-DD`: `backfillDays` back to the day before yesterday.
+    /// The window, `YYYY-MM-DD`: `backfillDays` back to three days ago.
     pub from: String,
     pub to: String,
     /// Days of the window the record did not hold as final and measured when the run began:
@@ -198,16 +200,17 @@ mod tests {
         DayGroup { indices: n.max(1), open: n, ..DayGroup::default() }
     }
 
-    /// The window: backfillDays back to the day before yesterday; never today or yesterday,
-    /// never before keepMonths' first day; off at 0.
+    /// The window: backfillDays back to three days ago; never the daily run's own days (today,
+    /// yesterday, the day before: read once more to be final), never before keepMonths' first
+    /// day; off at 0.
     #[test]
-    fn the_window_is_the_days_before_yesterday() {
+    fn the_window_is_the_days_before_the_daily_runs_own() {
         let t = d("2026-11-17");
-        assert_eq!(window(t, 30, d("2025-11-01")), Some((d("2026-10-18"), d("2026-11-15"))), "30 days back, today and yesterday out");
+        assert_eq!(window(t, 30, d("2025-11-01")), Some((d("2026-10-18"), d("2026-11-14"))), "30 days back, the run's own three days out");
         assert_eq!(window(t, 0, d("2025-11-01")), None, "0 is off");
-        assert_eq!(window(t, 1, d("2025-11-01")), None, "only yesterday: the daily run's own day");
-        assert_eq!(window(t, 2, d("2025-11-01")), Some((d("2026-11-15"), d("2026-11-15"))));
-        assert_eq!(window(t, 30, d("2026-11-01")), Some((d("2026-11-01"), d("2026-11-15"))), "keepMonths 1 keeps this month only");
+        assert_eq!(window(t, 2, d("2025-11-01")), None, "only the daily run's own days");
+        assert_eq!(window(t, 3, d("2025-11-01")), Some((d("2026-11-14"), d("2026-11-14"))));
+        assert_eq!(window(t, 30, d("2026-11-01")), Some((d("2026-11-01"), d("2026-11-14"))), "keepMonths 1 keeps this month only");
         assert_eq!(window(d("2026-11-01"), 30, d("2026-11-01")), None, "on the 1st with keepMonths 1 nothing is left");
     }
 

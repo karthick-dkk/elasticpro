@@ -299,7 +299,8 @@ impl Core {
         let dir = HostsDir::new(store.root(), &id);
         // What a run cut short left beside held days, and checkpoint writes a kill cut off:
         // gone before anything is written (one collection per cluster holds from here).
-        let again_days: HashSet<String> = if opts.again { days.iter().map(|d| day_key(*d)).collect() } else { HashSet::new() };
+        let refresh = if opts.again { None } else { self.hosts_refresh(&id, &days, now_ms()) };
+        let again_days: HashSet<String> = if opts.again { days.iter().map(|d| day_key(*d)).collect() } else { refresh.iter().map(|d| day_key(*d)).collect() };
         let d2 = dir.clone();
         if let Ok(n) = self.report_cpu(move || d2.tidy(|day| again_days.contains(day))).await {
             if n > 0 {
@@ -415,7 +416,8 @@ impl Core {
                 break;
             }
             let k = day_key(d);
-            if !opts.again && dir.held(&k) {
+            let refreshing = refresh == Some(d);
+            if !opts.again && dir.held(&k) && !refreshing {
                 continue;
             }
             let header = DayHeader { v: 1, day: k.clone(), fields: cfg.fields.clone(), resolved: resolved.clone(), started_at: now };
@@ -423,9 +425,22 @@ impl Core {
             if opts.from_tick && existing.as_ref().is_some_and(|c| !c.resumable(now, RETRY_WAIT_MS)) {
                 continue;
             }
+            let dated: Vec<String> = listing.days.get(&d).map(|g| g.index_source.keys().cloned().collect()).unwrap_or_default();
+            let all: Vec<(String, u64)> = dated.iter().chain(split_names.iter())
+                .map(|n| (n.clone(), docs_of.get(n).copied().unwrap_or(0))).collect();
+            // A held day read once more to be final, never at the price of what it holds.
+            if refreshing {
+                let names: HashSet<String> = all.iter().map(|(n, _)| n.clone()).collect();
+                let (d2, k2) = (dir.clone(), k.clone());
+                if !self.report_cpu(move || d2.held_within(&k2, &names)).await.unwrap_or(false) {
+                    self.reports.hosts_settled.lock().insert((id.clone(), k.clone()));
+                    tracing::info!(cluster = %id, day = %k, "volume by host: not read again, some of its indices are gone; the collected day stays, not final");
+                    continue;
+                }
+            }
             taken += 1;
             let resumed = match existing {
-                Some(cp) if cp.header.fields == header.fields && cp.header.resolved == header.resolved => {
+                Some(cp) if cp.header.fields == header.fields && cp.header.resolved == header.resolved && (!refreshing || hosts::header_final(&cp.header)) => {
                     let (d2, c2) = (dir.clone(), cp.clone());
                     match self.report_cpu(move || d2.resume(&c2)).await {
                         Ok(Ok(())) => Some(cp),
@@ -437,9 +452,6 @@ impl Core {
             let cp = match resumed {
                 Some(cp) => cp,
                 None => {
-                    let dated: Vec<String> = listing.days.get(&d).map(|g| g.index_source.keys().cloned().collect()).unwrap_or_default();
-                    let all: Vec<(String, u64)> = dated.iter().chain(split_names.iter())
-                        .map(|n| (n.clone(), docs_of.get(n).copied().unwrap_or(0))).collect();
                     let d2 = dir.clone();
                     if all.is_empty() {
                         let mut notes = day_notes.clone();
@@ -725,6 +737,31 @@ impl Core {
         }).collect()
     }
 
+    /// The one held day a run reads once more: the newest of `days` that was collected before it
+    /// was final (`header_final`) and may be final now. `None`: nothing to settle. At most one a
+    /// run, so a run costs at most one day's search more than its missing days.
+    fn hosts_refresh(&self, id: &str, days: &[NaiveDate], now: i64) -> Option<NaiveDate> {
+        let store = self.volume.store.as_ref()?;
+        let dir = HostsDir::new(store.root(), id);
+        days.iter().copied().filter(|d| vsched::final_from(*d) <= now).rev().find(|d| {
+            let key = (id.to_string(), day_key(*d));
+            if !dir.held(&key.1) || self.reports.hosts_settled.lock().contains(&key) {
+                return false;
+            }
+            if dir.held_final(&key.1) {
+                self.reports.hosts_settled.lock().insert(key);
+                return false;
+            }
+            dir.checkpoint(&key.1).is_none_or(|c| c.resumable(now, RETRY_WAIT_MS))
+        })
+    }
+
+    /// Days a run looks through for one to settle: the last month's, and a few more (the first
+    /// days of a month settle the previous one's last).
+    fn hosts_refresh_days(today: NaiveDate) -> Vec<NaiveDate> {
+        (2..=35).rev().map(|n| today - chrono::Duration::days(n)).collect()
+    }
+
     /// The hosts schedule's clusters have their days (or are unreachable), and none is being
     /// collected: what a daily hosts mail waits for.
     pub(super) fn hosts_collected(&self, s: &ReportSchedule, local: NaiveDateTime) -> bool {
@@ -878,6 +915,8 @@ impl Core {
                 let ended = |d: &NaiveDate| (*d + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX);
                 missing.retain(|d| ended(d) + margin_ms as i64 <= now);
             }
+            missing.extend(self.hosts_refresh(&id, &Self::hosts_refresh_days(today), now));
+            missing.sort();
             if missing.is_empty() {
                 self.reports.hosts_quiet.lock().remove(&id);
                 continue;
@@ -1028,7 +1067,9 @@ impl Core {
                 // Switched off, or outside its heavy-job hours (a hard rule, a person's run too).
                 skipped.push(json!({ "clusterId": id, "reason": why }));
             } else {
-                let missing = self.hosts_missing(&id, &days, now);
+                let mut missing = self.hosts_missing(&id, &days, now);
+                missing.extend(self.hosts_refresh(&id, &Self::hosts_refresh_days(today), now));
+                missing.sort();
                 if missing.is_empty() {
                     skipped.push(json!({ "clusterId": id, "reason": "nothing missing this month" }));
                     continue;
@@ -1311,11 +1352,12 @@ impl Core {
                 };
                 drop(res);
                 let out = indices::read_rows(&rows, &ind);
+                let read_at = now_ms();
                 core.cluster_progress(Some(&job_id), &id, |c| {
                     c.state = "done".into();
                     c.rows = out.len() as u64;
                 });
-                Ok(out)
+                Ok((out, read_at))
             }
         }).await;
         if stopped.is_some() {
@@ -1336,17 +1378,18 @@ impl Core {
             for (id, name) in &names {
                 let record = store.days_between(id, period.from_date(), period.to_date());
                 clusters.push(match listed.remove(id) {
-                    Some(rows) => indices::assemble(id, name, rows, &period, &record),
+                    Some((rows, read_at)) => indices::assemble(id, name, rows, &period, &record, Some(read_at)),
                     None => {
                         let why = failed2.iter().find(|(c, _)| c == id).map(|(_, r)| r.clone()).unwrap_or_else(|| "not read".into());
                         indices::failed(id, name, why, &period, &record)
                     }
                 });
             }
-            let text = indices::mail_text(&clusters);
+            let text = indices::mail_text(&clusters, &period);
+            let built_at = now_ms();
             let bytes = match format {
-                Format::Xlsx => xlsx::workbook(&indices::sheets(&clusters, &period))?,
-                Format::CsvZip => zip::write(&indices::csv_files(&clusters))?,
+                Format::Xlsx => xlsx::workbook(&indices::sheets(&clusters, &period, built_at))?,
+                Format::CsvZip => zip::write(&indices::csv_files(&clusters, &period, built_at))?,
             };
             Ok((bytes, text))
         }).await.and_then(|r| r);
@@ -1361,7 +1404,7 @@ impl Core {
         };
         let warning = (!failed.is_empty()).then(|| failed.iter().map(|(c, r)| format!("{c}: {r}")).collect::<Vec<_>>().join("; "));
         let end = JobEnd::done(file, warning);
-        let body = format!("ElasticPro indices report · {}\n\nIndex store size (pri.store.size), as listed when the report was built.\n\n{text}", job.period.label);
+        let body = format!("ElasticPro indices report · {}\n\nIndex store size (pri.store.size), as listed when read.\n\n{text}", job.period.label);
         self.report_mail_job(job, end, &name, body).await
     }
 
@@ -1445,12 +1488,12 @@ impl Core {
                 match format {
                     Format::Xlsx => {
                         let mut book = xlsx::StreamBook::new(w);
-                        hosts::write_xlsx(&mut book, &clusters, &cfg, &period, &failed2)?;
+                        hosts::write_xlsx(&mut book, &clusters, &cfg, &period, &failed2, now_ms())?;
                         book.finish()
                     }
                     Format::CsvZip => {
                         let mut z = zip::StreamZip::new(w);
-                        hosts::write_csvzip(&mut z, &clusters, &cfg, &period, &failed2)?;
+                        hosts::write_csvzip(&mut z, &clusters, &cfg, &period, &failed2, now_ms())?;
                         z.finish()
                     }
                 }
@@ -1543,6 +1586,31 @@ mod tests {
         e.status = EntryStatus::Ok;
         e.data = Some(Body::from_value(&json!({ "health": { "json": { "status": status } } })));
         core.fleet.state.lock().entries.insert((id.to_string(), Dataset::Health), e);
+    }
+
+    /// One held day a run is read once more: the newest that was read before it was final, once
+    /// 24 hours have passed since it ended; never one that is final, or just collected.
+    #[tokio::test]
+    async fn one_held_day_is_read_again_once_it_can_be_final() {
+        let dir = std::env::temp_dir().join(format!("ep-hosts-refresh-{}-{}", std::process::id(), rand::random::<u32>()));
+        let core = Core::new_with_rounds(Some(dir.clone()), Edition::Portable, 1);
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let now = vsched::final_from(today - chrono::Duration::days(2)) + 30 * 60_000; // 21 Nov 00:30 UTC
+        let files = HostsDir::new(core.volume.store.as_ref().unwrap().root(), "c");
+        let ago = |n: i64| today - chrono::Duration::days(n);
+        let hold = |n: i64, started_at: i64| files.write_empty(hosts::DayHeader { v: 1, day: day_key(ago(n)), fields: vec![], resolved: Default::default(), started_at }, vec![], 1).unwrap();
+        hold(1, now); // yesterday, just collected: not yet
+        hold(2, vsched::final_from(ago(2)) - 1); // read too soon, settled now
+        hold(3, vsched::final_from(ago(3)) - 1);
+        hold(4, vsched::final_from(ago(4)) + 1); // final
+        let days = Core::hosts_refresh_days(today);
+        assert_eq!(core.hosts_refresh("c", &days, now), Some(ago(2)), "the newest, and only one");
+        hold(2, now);
+        assert_eq!(core.hosts_refresh("c", &days, now), Some(ago(3)));
+        core.reports.hosts_settled.lock().insert(("c".into(), day_key(ago(3)))); // its indices went
+        assert_eq!(core.hosts_refresh("c", &days, now), None);
+        assert_eq!(core.hosts_refresh("c", &[ago(1)], now + 86_400_000), Some(ago(1)), "yesterday's, a day later");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// Owner rule (docs/JOBS.md "Quiet hours"): the first busy wait of the day keeps today's words

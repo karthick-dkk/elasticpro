@@ -254,7 +254,9 @@ cluster has no log pattern; 1800 s since 0.3.81, 900 s before), `policies`
 per repo, 1800 s), `snapshot_status` (`/_snapshot/_status` with a `filter_path`, one request,
 only the snapshots in progress, 300 s — see "Snapshot running" below) — the background set,
 kept for every cluster; and `snapshots_full`
-(verbose `_snapshot/<repo>/_all`, `_cat` fallback), `indices`, `shards` (+ tasks, thread
+(verbose `_snapshot/<repo>/_all`, `_cat` fallback; both snapshot sets ask `/_snapshot` first, every
+time, so a repository added since is never left out; a listing Elasticsearch cut short carries
+`cut {shown, total, remaining}`, a repository that could not be listed `repoError`), `indices`, `shards` (+ tasks, thread
 pools, pending tasks) — on demand, polled only while somebody asked in the last 15 minutes.
 The request paths are the ones `ui/js/core/es.js` built, so the bodies are the same.
 
@@ -280,7 +282,8 @@ answer, in `error` and in `reach.lastError`, so the trust buttons work from the 
 
 **Reach** per cluster, from `health` transport failures only:
 `{ "state": "reachable|unreachable|unknown", "since", "lastError", "nextProbeAt", "failures", "seq" }`.
-An unreachable cluster gets a health probe every 120 s ± 10 % and nothing else.
+An unreachable cluster gets a health probe every 120 s ± 10 % and nothing else. A 502, 503 or 504
+that is not Elasticsearch's own (`{"error": …}`) is the proxy in front of it: not reachable (0.3.89).
 
 | Message | Role | Answer |
 |---|---|---|
@@ -891,7 +894,7 @@ under origin `history-store`.
 | `HISTORY_STORE_TEST` | admin; not a limited admin | As GET, `ok` = the test passed: `GET /` (version, cluster name) and `_has_privileges` for `create_doc`, `create_index`, `read` on `<prefix>-*` and the cluster privilege `manage_index_templates`, each `true`/`false`/`null` (not checked: security is off on the store, which passes). A connection failure carries the transport's `kind`, `cert`, `help`. Reads only. |
 | `HISTORY_STORE_ARM {on}` | admin; not a limited admin | As GET. `on: true` is refused (`kind: "refused"`, naming `HISTORY_STORE_WRITES=true` or the test) unless config.txt permits and the last test passed on the current settings. `on: false` always works; the next tick writes nothing. |
 | `HISTORY_STORE_BACKFILL` | admin; not a limited admin | As GET with `status.backfill.running`. *Copy existing history*: every local month file of every cluster, in bulks of at most 500, with progress (`done`/`total` files, `docs`). Refused unless both gates are open and the volume stream is on, or while one runs. |
-| `HISTORY_QUERY {stream: "volume"\|"capacity"\|"delay", clusterId, from?, to?}` | user; a scoped caller or a limited admin only on clusters they see; the cluster must exist | `{ok, stream, clusterId, from, to, total, truncated, docs}` — the store's documents, oldest first, at most 5000, one search (interactive class). Unreachable: `{ok: false, kind: "unreachable", message: "in the history store · not reachable: …"}`. |
+| `HISTORY_QUERY {stream: "volume"\|"capacity"\|"delay", clusterId, from?, to?}` | user; a scoped caller or a limited admin only on clusters they see; the cluster must exist | `{ok, stream, clusterId, from, to, total, truncated, partial, docs}` — `partial` says why days may be missing (failed shards, a search out of time), `null` when none — the store's documents, oldest first, at most 5000, one search (interactive class). Unreachable: `{ok: false, kind: "unreachable", message: "in the history store · not reachable: …"}`. |
 
 `DELAY_SINK_SET` takes `destination: "cluster"` (default; a file without it is unchanged) or
 `"history"` (to `<prefix>-delay-YYYY.MM` under the store's gates, every primed cluster measured);
@@ -1511,7 +1514,10 @@ audited (`backup rotated out`). **Every restore first keeps the current state** 
 `before-restore` backup (every section, server-sealed), so it can be undone by restoring that; if
 that copy cannot be written — or this server has no key to seal its credentials with
 (`no_server_key`) — nothing is restored. The same refusal stops a scheduled or `keep: true`
-backup: a kept copy is never silently written without its credentials.
+backup: a kept copy is never silently written without its credentials. **What a kept copy lacks is
+said** (0.3.89): the run's note and `schedule.last.message` name it ("not complete: …"). When the
+config file itself could not be read, a copy of sections that take something from it is kept, its
+run is `failed` (`last.ok: false`, `name` set) and it rotates no older copy out.
 
 | Message | Role | Answer |
 |---|---|---|

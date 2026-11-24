@@ -49,6 +49,8 @@ pub struct Fake {
     pub paged_total: Option<u64>,
     /// Searches fail with this status.
     pub search_status: Option<u16>,
+    /// Searches answer with one of four shards failed.
+    pub partial: bool,
 }
 
 pub type Shared = Arc<Mutex<Fake>>;
@@ -136,7 +138,12 @@ pub fn respond(f: &Shared, hit: &Hit) -> (u16, String) {
                 return (200, json!({ "hits": { "total": { "value": total }, "hits": hits } }).to_string());
             }
             let hits: Vec<Value> = f.docs.iter().map(|s| json!({ "_source": s, "sort": [s["day"], s["clusterId"]] })).collect();
-            (200, json!({ "hits": { "total": { "value": hits.len() }, "hits": hits } }).to_string())
+            let shards = if f.partial {
+                json!({ "total": 4, "successful": 3, "failed": 1, "failures": [{ "reason": { "reason": "node left" } }] })
+            } else {
+                json!({ "total": 4, "successful": 4, "failed": 0 })
+            };
+            (200, json!({ "_shards": shards, "hits": { "total": { "value": hits.len() }, "hits": hits } }).to_string())
         }
         _ => (400, json!({ "error": { "reason": format!("unexpected {} {}", hit.method, hit.path) } }).to_string()),
     }

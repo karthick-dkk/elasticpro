@@ -124,6 +124,33 @@ async fn days_the_local_record_lacks_come_from_the_store_marked_as_such() {
     assert!(h::writes(&store).is_empty(), "reading back writes nothing");
 }
 
+/// Part of the store's shards failed: what came back is shown, and that days may be missing is
+/// said — in the read-back, on every month that uses it, and in a direct query.
+#[tokio::test]
+async fn a_partial_answer_of_the_store_is_said() {
+    let dir = TempDir::new("histg-partial");
+    let old = h::yesterday() - Duration::days(45);
+    let fs = h::fake_with(vec![h::volume_doc("prod", old, 7)]);
+    fs.lock().unwrap().partial = true;
+    let store = h::store(fs).await;
+    let prod = h::cluster().await;
+    let c = hosted(&dir);
+    let s = h::admin(&c).await;
+    h::prime(&c, &s, &prod.url(), true).await;
+    h::configure(&c, &s, &store.url()).await;
+    let daily = c.handle(json!({ "type": "VOLUME_DAILY", "session": &s, "clusterId": "prod", "days": 60, "avgDays": 3 })).await;
+    let said = "part of the history store did not answer (1 of 4 shards failed (node left)): days may be missing";
+    assert_eq!(daily["history"]["partial"], json!(said), "{daily}");
+    assert_eq!(daily["history"]["message"], json!(said));
+    assert_eq!(daily["days"].as_array().unwrap().iter().filter(|r| r["source"] == "history").count(), 1, "what was read is shown: {daily}");
+    let monthly = c.handle(json!({ "type": "VOLUME_MONTHLY", "session": &s, "clusterId": "prod", "months": 3 })).await;
+    let row = monthly["months"].as_array().unwrap().iter().find(|m| m["source"] == "history").unwrap_or_else(|| panic!("{monthly}"));
+    assert_eq!(row["incomplete"], json!(true), "{row}");
+    let q = c.handle(json!({ "type": "HISTORY_QUERY", "session": &s, "stream": "volume", "clusterId": "prod",
+                             "from": h::dash(old), "to": h::dash(old) })).await;
+    assert_eq!((q["ok"].clone(), q["partial"].clone()), (json!(true), json!(said)), "{q}");
+}
+
 /// F4: the month the local record starts in counts the store's earlier days of that month, a
 /// local day wins over the store's, and Monthly agrees with Daily.
 #[tokio::test]

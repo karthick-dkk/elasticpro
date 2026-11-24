@@ -37,6 +37,12 @@ pub const MAJORITY_PERCENT: u64 = 60;
 pub const STEADY_RUNS: usize = 3;
 /// A device's gap must sit at the same other offset this many runs in a row to be "other time zone".
 pub const DEVICE_STEADY_RUNS: u32 = 2;
+/// Runs in a row a device whose zone is known sits at another real offset before its zone is
+/// taken as changed. Until then the gap against the zone it was known in is its delay: a late
+/// device can sit exactly 30 or 60 min off for a few runs, and that is not a zone.
+pub const REHOME_RUNS: u32 = 12;
+/// Readings closer together than this are one run of those (*Fetch now* pressed again).
+pub const REHOME_RUN_GAP_MS: i64 = 30 * 60_000;
 
 /// A cluster's `logTimeZone` setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -179,6 +185,55 @@ pub struct DeviceZone {
 impl DeviceZone {
     fn at(o: i32) -> DeviceZone {
         DeviceZone { zone: o, gap: o }
+    }
+}
+
+/// Where a device's logs sit when they are on time, kept once its zone was confirmed
+/// (`DEVICE_STEADY_RUNS`): from then on its delay is the raw gap with this taken out, whatever
+/// offset the gap itself happens to match (docs/LOGDELAY.md "A device's own zone").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Home {
+    /// The raw gap of an on-time log (arrival − event), minutes, when it was confirmed.
+    pub home_gap: i32,
+    /// The device's zone as the pages write it.
+    pub zone: i32,
+    /// The cluster's offset then.
+    pub cluster: i32,
+    pub since_ms: i64,
+}
+
+impl Home {
+    pub fn found(z: DeviceZone, cluster: i32, since_ms: i64) -> Home {
+        Home { home_gap: z.gap, zone: z.zone, cluster, since_ms }
+    }
+
+    /// In the cluster's own zone: it moves with the cluster's.
+    pub fn same_as_cluster(&self) -> bool {
+        self.home_gap == self.cluster
+    }
+
+    /// The gap of an on-time log now that the cluster's offset is `co`. `named`: the cluster's
+    /// zone is set by name, so an offset that moved by at most two hours is its daylight saving.
+    /// `None`: the cluster's zone itself was changed, and this has to be found again.
+    pub fn expected(&self, co: i32, named: bool) -> Option<i32> {
+        let moved = co - self.cluster;
+        if self.same_as_cluster() {
+            Some(co)
+        } else if moved == 0 {
+            Some(self.home_gap)
+        } else if named && moved.abs() <= 120 {
+            // Stamped in its own offset: the gap is that offset. Ahead of the cluster: the gap is
+            // the cluster's offset less the device's.
+            Some(if self.home_gap == self.zone { self.home_gap } else { self.home_gap + moved })
+        } else {
+            None
+        }
+    }
+
+    /// Its zone as the pages write it, the cluster being at `co`.
+    pub fn zone_now(&self, co: i32) -> i32 {
+        if self.same_as_cluster() { co } else { self.zone }
     }
 }
 
@@ -341,6 +396,19 @@ impl Detection {
 
 /* ------------------------------------------ the view ------------------------------------------ */
 
+/// A run's window is cut on the arrival field as it is stored, up to the run's own time
+/// (`measure::page_body`). Where the arrival is written in local time that window is another
+/// one: east of UTC the newest logs are stored past its end, so the ones it reads are older by
+/// the offset; west of UTC its logs are stored before it begins. Which of the two times the zone
+/// shifts cannot be told from a reading (the gap is the same), so it is said, not corrected.
+/// `None` without an offset.
+pub fn window_note(offset: Option<i32>) -> Option<String> {
+    let o = offset.filter(|o| *o != 0)?;
+    let by = super::time::duration(i64::from(o.abs()) * 60_000);
+    let what = if o > 0 { format!("the newest logs measured are {by} older than the run") } else { format!("logs of the last {by} may be missed and a device look silent") };
+    Some(format!("logs are read by arrival time as stored, up to the run's time: if this cluster's arrival time is written at {}, {what}", offset_text(o)))
+}
+
 /// The cluster's zone as every message says it (`timeZone`): mode `set` | `detected` | `none`,
 /// the zone's name when one is known, the offset, how many devices agree, since when.
 pub fn view(setting: &LogTimeZone, d: &Detection, now: i64, hints: &[Tz]) -> serde_json::Value {
@@ -354,7 +422,7 @@ pub fn view(setting: &LogTimeZone, d: &Detection, now: i64, hints: &[Tz]) -> ser
     };
     serde_json::json!({
         "setting": setting.setting(), "mode": mode, "zone": zone,
-        "offsetMinutes": offset, "offset": offset.map(offset_text),
+        "offsetMinutes": offset, "offset": offset.map(offset_text), "windowNote": window_note(offset),
         "agree": (last.of > 0).then_some(last.agree), "of": (last.of > 0).then_some(last.of), "pct": last.pct(),
         "pluralityOffset": last.offset, "pluralityOffsetText": last.offset.map(offset_text),
         "since": since, "steadyRuns": d.steady_runs(), "runsNeeded": STEADY_RUNS,
@@ -487,6 +555,7 @@ mod tests {
         }
         let v = view(&LogTimeZone::Detect, &d, NOV, &hints);
         assert_eq!(v["mode"], "detected");
+        assert!(v["windowNote"].as_str().unwrap().ends_with("written at +05:30, the newest logs measured are 5 h 30 min older than the run"), "{v}");
         assert_eq!(v["zone"], "Asia/Kolkata");
         assert_eq!(v["offset"], "+05:30");
         assert_eq!((v["agree"].as_u64(), v["of"].as_u64(), v["pct"].as_f64()), (Some(9), Some(10), Some(90.0)));
@@ -496,5 +565,12 @@ mod tests {
         assert_eq!(v["setting"], "Europe/Berlin");
         let v = view(&LogTimeZone::Utc, &Detection::default(), NOV, &[]);
         assert_eq!((v["mode"].as_str(), v["offsetMinutes"].as_i64()), (Some("set"), Some(0)));
+        assert!(v["windowNote"].is_null());
+        // What the note says, shown: a log that arrived a minute before the run, stored at +05:30,
+        // is past the end of the window the run asks for.
+        let fields = crate::logdelay::measure::Fields { pattern: "p".into(), device: "d".into(), arrival: "@timestamp".into(), event_time: vec![], extras: vec![] };
+        let q = crate::logdelay::measure::page_body(&fields, NOV - 7_200_000, NOV, 10, None, &crate::logdelay::measure::DeviceFilter::All);
+        let end = q.pointer("/query/bool/filter/0/range/@timestamp/lte").and_then(serde_json::Value::as_i64).unwrap();
+        assert!(NOV - 60_000 + 330 * 60_000 > end);
     }
 }

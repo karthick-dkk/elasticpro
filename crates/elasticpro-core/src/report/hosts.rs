@@ -20,12 +20,13 @@
 //! branch when a report or the view shows them — one function for the workbook, the CSV and
 //! `HOSTS_QUERY`.
 
-use super::build::{csv_escape, GB, NOT_MEASURED};
+use super::about::{self, About};
+use super::build::{csv_escape, gb_cell, human_bytes, NOT_MEASURED};
 use super::period::Period;
 use super::xlsx::{Cell, StreamBook};
 use crate::http::EsRequest;
 use crate::volume::collect::{self, Indices};
-use crate::volume::schedule::{day_key, parse_day};
+use crate::volume::schedule::{day_key, final_from, parse_day};
 use crate::volume::VolumeSettings;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -207,6 +208,7 @@ pub fn composite_body(query: &Value, r: &Resolved, size: usize, after: Option<&V
     }
     if let Some(f) = &r.sub_size {
         aggs.insert("sub".into(), json!({ "sum": { "field": f } }));
+        aggs.insert("m_sub".into(), json!({ "missing": { "field": f } }));
     }
     for (i, m) in r.meta.iter().enumerate() {
         if let Some(f) = m {
@@ -244,17 +246,49 @@ pub struct HostRow {
     pub host: Option<String>,
     #[serde(rename = "d")]
     pub docs: u64,
-    /// `None`: the event size field did not resolve — not measured, never 0.
+    /// `None`: not measured, never 0 — the event size field did not resolve, or not one of the
+    /// row's documents has it (`measured`).
     #[serde(rename = "e", default)]
     pub event_bytes: Option<u64>,
     #[serde(rename = "s", default)]
     pub sub_bytes: Option<u64>,
-    /// Documents with no event size.
+    /// Documents with no event size (the field in the mapping, the document without it).
     #[serde(rename = "me", default)]
     pub event_missing: u64,
+    /// Documents with no forwarded size; `None` in files written before 0.3.89.
+    #[serde(rename = "ms", default, skip_serializing_if = "Option::is_none")]
+    pub sub_missing: Option<u64>,
     /// Per metadata field of the file's header, its value.
     #[serde(rename = "m", default)]
     pub meta: Vec<Option<String>>,
+}
+
+impl HostRow {
+    /// What the row measured. Elasticsearch's sum over documents without the field is 0.0, not
+    /// null: a size none of the row's documents has is not measured. Applied to every row as it
+    /// is read — from a page, and from a day file written before 0.3.89 (which kept the 0, and
+    /// no count for the forwarded size: a 0 there may be either, so it is not a measurement).
+    pub fn measured(mut self) -> HostRow {
+        if self.docs > 0 {
+            if self.event_missing >= self.docs {
+                self.event_bytes = None;
+            }
+            if self.sub_missing.map_or(self.sub_bytes == Some(0), |m| m >= self.docs) {
+                self.sub_bytes = None;
+            }
+        }
+        self
+    }
+
+    /// Documents the event size sum does not cover.
+    pub fn without_event(&self) -> u64 {
+        if self.event_bytes.is_none() { self.docs } else { self.event_missing }
+    }
+
+    /// Documents the forwarded size sum does not cover; `None`: not counted in this file.
+    pub fn without_sub(&self) -> Option<u64> {
+        if self.sub_bytes.is_none() { Some(self.docs) } else { self.sub_missing }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -274,8 +308,9 @@ fn key_text(v: &Value) -> Option<String> {
     }
 }
 
-fn sum(b: &Value, name: &str) -> u64 {
-    b.pointer(&format!("/{name}/value")).and_then(Value::as_f64).map(|f| f.max(0.0).round() as u64).unwrap_or(0)
+/// A sum, or `None` when the answer carries none.
+fn sum(b: &Value, name: &str) -> Option<u64> {
+    b.pointer(&format!("/{name}/value")).and_then(Value::as_f64).map(|f| f.max(0.0).round() as u64)
 }
 
 /// Why a page could not be read.
@@ -325,11 +360,12 @@ pub fn read_page(res: &Value, r: &Resolved, size: usize) -> Result<Page, PageErr
         rows.push(HostRow {
             index, host,
             docs: b.get("doc_count").and_then(Value::as_u64).unwrap_or(0),
-            event_bytes: r.event_size.as_ref().map(|_| sum(b, "ev")),
-            sub_bytes: r.sub_size.as_ref().map(|_| sum(b, "sub")),
+            event_bytes: r.event_size.as_ref().and_then(|_| sum(b, "ev")),
+            sub_bytes: r.sub_size.as_ref().and_then(|_| sum(b, "sub")),
             event_missing: b.pointer("/m_ev/doc_count").and_then(Value::as_u64).unwrap_or(0),
+            sub_missing: b.pointer("/m_sub/doc_count").and_then(Value::as_u64),
             meta,
-        });
+        }.measured());
     }
     let after = h.get("after_key").filter(|v| v.is_object()).cloned();
     let done = buckets.len() < size || after.is_none();
@@ -622,7 +658,7 @@ impl HostsDir {
     /// so nothing else writes here meanwhile): every `*.tmp` — a checkpoint write
     /// (`<day>.partial.tmp`) a crash or a kill cut short, never read by anything — and, beside a
     /// day file that is held, that day's checkpoint, `.part` files and half-assembled day file,
-    /// unless `again(day)` (this run collects the day again and starts it afresh). A held day's
+    /// unless `again(day)` (this run collects the day again). Any other held day's
     /// checkpoint is never resumed (a normal run skips the day, *Collect again* starts over), so
     /// such files would only stay on disk. Returns how many files went.
     pub fn tidy(&self, again: impl Fn(&str) -> bool) -> usize {
@@ -643,6 +679,17 @@ impl HostsDir {
             }
         }
         gone
+    }
+
+    /// The held day's collection began when the day was already settled (`header_final`).
+    pub fn held_final(&self, day: &str) -> bool {
+        self.read(day).is_some_and(|r| header_final(&r.header))
+    }
+
+    /// The indices the held day was read from are all among `now`: reading it again cannot lose
+    /// what was collected. With one gone, the held file is the fuller evidence and stays.
+    pub fn held_within(&self, day: &str, now: &std::collections::HashSet<String>) -> bool {
+        self.read(day).is_some_and(|mut r| r.all(|row| now.contains(&row.index)))
     }
 
     pub fn read(&self, day: &str) -> Option<DayReader> {
@@ -684,7 +731,7 @@ impl Iterator for DayReader {
                 return None;
             }
             if let Ok(r) = serde_json::from_str::<HostRow>(&line) {
-                return Some(r);
+                return Some(r.measured());
             }
         }
     }
@@ -699,6 +746,15 @@ pub fn is_missing(v: Option<&str>) -> bool {
         Some(s) => s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("nan"),
     }
 }
+
+/// The Summary's client for rows with no ClientID of their own: a group of its own, so their
+/// bytes are nobody else's.
+pub const NO_CLIENT: &str = "(no ClientID)";
+/// The Summary's client of a cluster none of whose rows has a ClientID.
+pub const CLIENT_NOT_IN_LOGS: &str = "(not in the logs)";
+/// Said on every row whose ClientID or branch is the report's, not the documents'.
+pub const CLIENT_FILLED: &str = "ClientID filled";
+pub const BRANCH_DEFAULT: &str = "branch default";
 
 /// What a cluster's rows are filled with: the first ClientID of its rows in the period (day,
 /// then index order), and the branch for a row that has none.
@@ -722,9 +778,19 @@ pub fn fill_client_branch(client: Option<&str>, branch: Option<&str>, fill: &Fil
     (c, b)
 }
 
-/// The Summary's Client ID for a cluster: its first ClientID, or its name when no row has one.
-pub fn summary_client(fill: &Fill, cluster_name: &str) -> String {
-    fill.first_client.clone().unwrap_or_else(|| cluster_name.to_string())
+/// The Client ID beside a cluster's total: the ClientIDs its documents carry (`NO_CLIENT` among
+/// them when some carry none), or that the logs carry none at all — the cluster's name is not a
+/// client id, and one client's id is not the whole cluster's.
+pub fn summary_client<'a>(clients: impl Iterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = clients.collect();
+    names.sort_by_key(|n| (*n == NO_CLIENT, n.to_string()));
+    names.dedup();
+    match names.len() {
+        0 => CLIENT_NOT_IN_LOGS.to_string(),
+        1 if names[0] == NO_CLIENT => CLIENT_NOT_IN_LOGS.to_string(),
+        1..=3 => names.join(", "),
+        n => format!("{n} client IDs"),
+    }
 }
 
 /// Where a configured field is in a day file's metadata (its header's fields).
@@ -754,16 +820,68 @@ pub struct Shown {
     pub meta: Vec<Option<String>>,
     pub client: Option<String>,
     pub branch: String,
+    /// `client` / `branch` are the fill's, not the documents'.
+    pub client_filled: bool,
+    pub branch_filled: bool,
     pub incomplete: bool,
+    /// When the row's day was read, and whether that was late enough to be final.
+    pub read_at: i64,
+    pub is_final: bool,
+}
+
+impl Shown {
+    /// What the sheets and the CSV say beside the row.
+    pub fn notes(&self) -> String {
+        let mut n: Vec<String> = vec![];
+        if self.incomplete {
+            n.push("incomplete".into());
+        }
+        if !self.is_final {
+            n.push(format!("not final: read {}", about::utc(self.read_at)));
+        }
+        let r = &self.row;
+        if r.event_bytes.is_some() && r.event_missing > 0 {
+            n.push(format!("event size: {} of {} documents without it", r.event_missing, r.docs));
+        }
+        if let Some(m) = r.sub_missing.filter(|m| *m > 0 && r.sub_bytes.is_some()) {
+            n.push(format!("forwarded size: {m} of {} documents without it", r.docs));
+        }
+        if self.client_filled {
+            n.push(CLIENT_FILLED.into());
+        }
+        if self.branch_filled {
+            n.push(BRANCH_DEFAULT.into());
+        }
+        n.join("; ")
+    }
+}
+
+/// A day file is final when its collection began late enough after the day ended
+/// (`FINAL_AFTER_MS`): its first page then already read a settled day.
+pub fn header_final(h: &DayHeader) -> bool {
+    parse_day(&h.day).is_some_and(|d| h.started_at >= final_from(d))
+}
+
+/// One day of a period as a cluster holds it.
+pub struct DayFlag {
+    pub day: String,
+    pub end: Option<DayEnd>,
+    /// Being collected, interrupted or failed (a day not held).
+    pub cp: Option<Checkpoint>,
+    pub is_final: bool,
+    /// The fields its mapping did not have, as the file's header says it.
+    pub unresolved: Vec<String>,
 }
 
 /// The days of a period a cluster holds, with each day's end line (read once per file).
-pub fn day_flags(c: &ClusterHosts, p: &Period) -> Vec<(String, Option<DayEnd>, Option<Checkpoint>)> {
+pub fn day_flags(c: &ClusterHosts, p: &Period) -> Vec<DayFlag> {
     p.days().into_iter().map(|d| {
         let k = day_key(d);
-        let end = c.dir.read(&k).and_then(DayReader::finish);
+        let r = c.dir.read(&k);
+        let (is_final, unresolved) = r.as_ref().map(|r| (header_final(&r.header), r.header.resolved.notes.clone())).unwrap_or_default();
+        let end = r.and_then(DayReader::finish);
         let cp = if end.is_none() { c.dir.checkpoint(&k) } else { None };
-        (k, end, cp)
+        DayFlag { day: k, is_final: is_final && end.is_some(), end, cp, unresolved }
     }).collect()
 }
 
@@ -795,115 +913,191 @@ impl ClusterHosts {
             let pos = positions(&cfg.fields, &r.header);
             // The end line comes last; whether the day is incomplete is known only there, so
             // the day is read twice when it is (rare: the page bound).
-            let incomplete = self.dir.read(&k).and_then(DayReader::finish).is_some_and(|e| e.incomplete);
+            let end = self.dir.read(&k).and_then(DayReader::finish);
+            // No end line: the file is cut short, whatever it holds.
+            let incomplete = end.as_ref().is_none_or(|e| e.incomplete);
+            let read_at = end.map_or(r.header.started_at, |e| e.collected_at);
+            let is_final = header_final(&r.header);
             for row in r.by_ref() {
                 let meta: Vec<Option<String>> = pos.iter().map(|p| p.and_then(|i| row.meta.get(i).cloned().flatten())).collect();
                 let get = |i: Option<usize>| i.and_then(|i| meta.get(i).cloned().flatten());
                 let (client, branch) = fill_client_branch(get(ci).as_deref(), get(bi).as_deref(), fill);
                 let source = self.ind.as_ref().map(|ind| ind.source_of(&row.index)).unwrap_or_else(|| row.index.clone());
-                f(Shown { day: k.clone(), source, row, meta, client, branch, incomplete })?;
+                let client_filled = client.is_some() && is_missing(get(ci).as_deref());
+                let branch_filled = is_missing(get(bi).as_deref());
+                f(Shown { day: k.clone(), source, row, meta, client, branch, client_filled, branch_filled, incomplete, read_at, is_final })?;
             }
         }
         Ok(())
     }
 }
 
-/// Bytes as GB (1024³), not rounded: a host's share of a day is often far below 0.01 GB.
-fn gb_cell(v: Option<u64>) -> Cell {
-    match v {
-        Some(b) => Cell::Dec(b as f64 / GB),
-        None => Cell::text(NOT_MEASURED),
+/// `a` + `b`: what was measured. `None` only while nothing was.
+fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (a, b) => a.or(b),
     }
 }
 
-fn add(a: &mut Option<u64>, b: Option<u64>, seen: &mut bool) {
-    // Unknown is not zero: one row not measured makes the sum not measured.
-    match (*seen, b) {
-        (false, x) => {
-            *a = x;
-            *seen = true;
-        }
-        (true, Some(x)) => *a = a.map(|s| s + x),
-        (true, None) => *a = None,
-    }
-}
-
-/// A sum of documents and sizes; `None` sizes stay "not measured".
+/// A sum of documents and sizes. A size is the sum over the documents that carry it — `None`
+/// when none does — and beside it how many do not: the figure is never shown without them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sums {
     pub docs: u64,
     pub event_bytes: Option<u64>,
     pub sub_bytes: Option<u64>,
-    seen: bool,
+    /// Documents whose event size / forwarded size is not in the sum.
+    pub event_missing: u64,
+    pub sub_missing: u64,
+    /// Documents whose file did not count how many lack the forwarded size (before 0.3.89).
+    pub sub_not_counted: u64,
 }
 
 impl Sums {
     pub fn add(&mut self, r: &HostRow) {
         self.docs += r.docs;
-        let mut s1 = self.seen;
-        add(&mut self.event_bytes, r.event_bytes, &mut s1);
-        let mut s2 = self.seen;
-        add(&mut self.sub_bytes, r.sub_bytes, &mut s2);
-        self.seen = true;
+        self.event_bytes = plus(self.event_bytes, r.event_bytes);
+        self.sub_bytes = plus(self.sub_bytes, r.sub_bytes);
+        self.event_missing += r.without_event();
+        match r.without_sub() {
+            Some(n) => self.sub_missing += n,
+            None => self.sub_not_counted += r.docs,
+        }
+    }
+
+    /// Documents without a forwarded size, for a CSV cell: empty where a file did not count them.
+    fn without_sub(&self) -> String {
+        if self.sub_not_counted > 0 { String::new() } else { self.sub_missing.to_string() }
+    }
+
+    /// What a size's sum does not cover, in words; nothing when it covers every document (or
+    /// nothing was measured, which the figure says itself).
+    pub fn notes(&self) -> Vec<String> {
+        let mut n = vec![];
+        if self.event_bytes.is_some() && self.event_missing > 0 {
+            n.push(format!("event size: {} of {} documents without it", self.event_missing, self.docs));
+        }
+        if self.sub_bytes.is_some() && self.sub_missing > 0 {
+            n.push(format!("forwarded size: {} of {} documents without it", self.sub_missing, self.docs));
+        }
+        if self.sub_bytes.is_some() && self.sub_not_counted > 0 {
+            n.push(format!("forwarded size: how many of {} documents lack it was not counted", self.sub_not_counted));
+        }
+        n
     }
 }
 
-/// The Summary of one cluster: per (day, ClientID, branch) — the script's Monthly_Summary
-/// groups by those after the fill — and the cluster's total.
+/// One line of the Summary: a day, the documents' own ClientID (`NO_CLIENT` when they have
+/// none — never another client's line) and the branch, the default apart from a real one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GroupKey {
+    pub day: String,
+    pub client: String,
+    pub branch: String,
+    pub branch_filled: bool,
+}
+
+/// The Summary of one cluster: per (day, ClientID, branch) and the cluster's total.
 pub struct Summary {
     pub client: String,
-    pub groups: BTreeMap<(String, String, String), Sums>,
+    pub groups: BTreeMap<GroupKey, Sums>,
     pub total: Sums,
 }
 
 pub fn summarize(c: &ClusterHosts, cfg: &HostsConfig, p: &Period, fill: &Fill) -> Result<Summary, String> {
-    let client = summary_client(fill, &c.name);
-    let mut groups: BTreeMap<(String, String, String), Sums> = BTreeMap::new();
+    let mut groups: BTreeMap<GroupKey, Sums> = BTreeMap::new();
     let mut total = Sums::default();
     c.each(cfg, p, fill, |s| {
-        let cl = s.client.clone().unwrap_or_else(|| client.clone());
-        groups.entry((s.day.clone(), cl, s.branch.clone())).or_default().add(&s.row);
+        let client = s.client.clone().filter(|_| !s.client_filled).unwrap_or_else(|| NO_CLIENT.to_string());
+        let key = GroupKey { day: s.day.clone(), client, branch: s.branch.clone(), branch_filled: s.branch_filled };
+        groups.entry(key).or_default().add(&s.row);
         total.add(&s.row);
         Ok(())
     })?;
+    let client = summary_client(groups.keys().map(|k| k.client.as_str()));
     Ok(Summary { client, groups, total })
+}
+
+/// What one day's flag says in words, for the Summary and the About table. Empty: held, whole
+/// and final.
+fn day_note(f: &DayFlag) -> String {
+    match &f.end {
+        Some(e) => {
+            let mut n = vec![];
+            if e.incomplete {
+                n.push("incomplete (the page bound was reached)".to_string());
+            }
+            if !f.is_final {
+                n.push(format!("not final: read {}", about::utc(e.collected_at)));
+            }
+            n.join("; ")
+        }
+        None => match f.cp.as_ref().and_then(|c| c.failed.clone()) {
+            Some(why) => format!("not collected, failed: {why}"),
+            None => "not collected".into(),
+        },
+    }
+}
+
+/// What the period's total is short of: days not collected, incomplete or not final.
+fn total_notes(flags: &[DayFlag], total: &Sums) -> String {
+    let days = flags.len();
+    let held = flags.iter().filter(|f| f.end.is_some()).count();
+    let incomplete = flags.iter().filter(|f| f.end.as_ref().is_some_and(|e| e.incomplete)).count();
+    let open = flags.iter().filter(|f| f.end.is_some() && !f.is_final).count();
+    let mut n = vec![];
+    if held < days {
+        n.push(format!("{held} of {days} days collected"));
+    }
+    if incomplete > 0 {
+        n.push(format!("{incomplete} day(s) incomplete"));
+    }
+    if open > 0 {
+        n.push(format!("{open} day(s) not final"));
+    }
+    n.extend(total.notes());
+    n.join("; ")
 }
 
 /// Header notes of a cluster's sheet: why it could not be collected, the fields that did not
 /// resolve (once), incomplete days and days not collected.
-fn cluster_notes(c: &ClusterHosts, p: &Period) -> Vec<String> {
+fn cluster_notes(c: &ClusterHosts, flags: &[DayFlag]) -> Vec<String> {
     let mut notes = vec![];
     if let Some(f) = &c.failure {
         notes.push(format!("{}: not collected this time — {f}; the rows below are the days already held", c.name));
     }
-    let mut unresolved: Vec<String> = vec![];
+    let mut unresolved: Vec<(String, Vec<String>)> = vec![];
     let (mut incomplete, mut missing, mut failed) = (vec![], vec![], vec![]);
-    for (day, end, cp) in day_flags(c, p) {
-        match end {
+    let mut open = vec![];
+    for f in flags {
+        match &f.end {
             Some(e) => {
                 if e.incomplete {
-                    incomplete.push(format!("{day} ({} rows)", e.rows));
+                    incomplete.push(format!("{} ({} rows)", f.day, e.rows));
                 }
-                for n in e.notes {
-                    if !unresolved.contains(&n) {
-                        unresolved.push(n);
+                if !f.is_final {
+                    open.push(format!("{} (read {})", f.day, about::utc(e.collected_at)));
+                }
+                // A note is one day's: said with the days it is of.
+                for n in e.notes.iter().chain(&f.unresolved) {
+                    match unresolved.iter_mut().find(|(x, _)| x == n) {
+                        Some((_, days)) => days.push(f.day.clone()),
+                        None => unresolved.push((n.clone(), vec![f.day.clone()])),
                     }
                 }
             }
-            None => match cp.and_then(|c| c.failed) {
-                Some(why) => failed.push(format!("{day} ({why})")),
-                None => missing.push(day),
+            None => match f.cp.as_ref().and_then(|c| c.failed.clone()) {
+                Some(why) => failed.push(format!("{} ({why})", f.day)),
+                None => missing.push(f.day.clone()),
             },
         }
     }
-    if let Some(r) = c.dir.read(&p.days().iter().map(|d| day_key(*d)).find(|d| c.dir.held(d)).unwrap_or_default()) {
-        for n in r.header.resolved.notes {
-            if !unresolved.contains(&n) {
-                unresolved.push(n);
-            }
-        }
+    let held = flags.iter().filter(|f| f.end.is_some()).count();
+    notes.extend(unresolved.into_iter().map(|(n, days)| if days.len() == held { n } else { format!("{n} (on {})", days.join(", ")) }));
+    if !open.is_empty() {
+        notes.push(format!("not final (read less than 24 hours after the day ended, read again later): {}", open.join(", ")));
     }
-    notes.extend(unresolved);
     if !incomplete.is_empty() {
         notes.push(format!("incomplete (the page bound, UI_REPORT_HOSTS_MAX_PAGES, was reached): {}", incomplete.join(", ")));
     }
@@ -916,27 +1110,67 @@ fn cluster_notes(c: &ClusterHosts, p: &Period) -> Vec<String> {
     notes
 }
 
-pub const SUMMARY_HEAD: &[&str] = &["Cluster", "Client ID", "Branch", "Month", "Day", "Documents", "Event size (GB)", "Forwarded size (GB)"];
-pub const SHEET_HEAD: &[&str] = &["Day", "Index", "Source", "Host", "Documents", "Event size (GB)", "Forwarded size (GB)"];
+pub const SUMMARY_HEAD: &[&str] = &["Cluster", "Client ID", "Branch", "Month", "Day", "Documents", "Event size (GB)", "Forwarded size (GB)",
+    "Docs without event size", "Note"];
+pub const SHEET_HEAD: &[&str] = &["Day", "Index", "Source", "Host", "Documents", "Event size (GB)", "Forwarded size (GB)", "Docs without event size"];
+
+/// One Summary line's note: its branch is the default, and what its sizes do not cover.
+fn group_note(k: &GroupKey, s: &Sums) -> String {
+    let mut n = if k.branch_filled { vec![BRANCH_DEFAULT.to_string()] } else { vec![] };
+    n.extend(s.notes());
+    n.join("; ")
+}
+
+/// The file's About: what was read when, the fill's rule, and every day that is not whole.
+fn about_of(clusters: &[(&ClusterHosts, Vec<DayFlag>)], cfg: &HostsConfig, p: &Period, failed: &[(String, String)], built_at: i64) -> About {
+    let mut a = About::new("ElasticPro volume by host", p, built_at);
+    a.notes.push("GB = 1024³ bytes. Event size and forwarded size are the sums of what the documents carry; \"not measured\": no document of the row carries it.".into());
+    a.notes.push(about::FINAL_RULE.into());
+    a.notes.push(format!("ClientID ({}): a row whose documents carry none shows the cluster's first ClientID of the period, marked \"{CLIENT_FILLED}\"; \
+                          the Summary keeps those rows apart as {NO_CLIENT}.", cfg.client_id_field));
+    a.notes.push(format!("Branch ({}): a row whose documents carry none shows {}, marked \"{BRANCH_DEFAULT}\".", cfg.branch_field, cfg.branch_default));
+    a.table.push(["Cluster", "Day", "Read at (UTC)", "Read at (server time)", "Rows", "Note"].map(String::from).to_vec());
+    for (c, flags) in clusters {
+        a.clusters.push((format!("{} ({})", c.name, c.id), about::span(flags.iter().filter_map(|f| f.end.as_ref().map(|e| e.collected_at)))));
+        a.warnings.extend(cluster_notes(c, flags).into_iter().map(|n| format!("{}: {n}", c.name)));
+        for f in flags {
+            let at = f.end.as_ref().map(|e| e.collected_at);
+            a.table.push(vec![c.name.clone(), f.day.clone(), at.map(about::utc).unwrap_or_default(), at.map(about::server).unwrap_or_default(),
+                              f.end.as_ref().map(|e| e.rows.to_string()).unwrap_or_default(), day_note(f)]);
+        }
+    }
+    a.warnings.extend(failed.iter().filter(|(id, _)| !clusters.iter().any(|(c, _)| c.id == *id && c.failure.is_some()))
+        .map(|(id, why)| format!("{id}: not collected: {why}")));
+    a
+}
 
 /// The workbook (docs/REPORT-TYPES.md "Workbook"), streamed: *Summary* first, then one sheet
 /// per cluster continuing past the row limit. The day files are read three times — the
 /// first ClientID, the Summary, the rows — and never held.
-pub fn write_xlsx<W: Write>(book: &mut StreamBook<W>, clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, failed: &[(String, String)]) -> Result<(), String> {
+pub fn write_xlsx<W: Write>(book: &mut StreamBook<W>, clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, failed: &[(String, String)], built_at: i64) -> Result<(), String> {
+    let with_flags: Vec<(&ClusterHosts, Vec<DayFlag>)> = clusters.iter().map(|c| (c, day_flags(c, p))).collect();
     let mut summary: Vec<Vec<Cell>> = vec![SUMMARY_HEAD.iter().map(|h| Cell::head(*h)).collect()];
     let mut fills = vec![];
-    for c in clusters {
+    for (c, flags) in &with_flags {
         let fill = c.fill(cfg, p);
         let s = summarize(c, cfg, p, &fill)?;
-        for ((day, client, branch), sums) in &s.groups {
+        for (k, sums) in &s.groups {
             summary.push(vec![
-                Cell::text(&c.name), Cell::text(client), Cell::text(branch), Cell::text(day.get(..7).unwrap_or("")), Cell::text(day),
+                Cell::text(&c.name), Cell::text(&k.client), Cell::text(&k.branch), Cell::text(k.day.get(..7).unwrap_or("")), Cell::text(&k.day),
                 Cell::Int(sums.docs as f64), gb_cell(sums.event_bytes), gb_cell(sums.sub_bytes),
+                Cell::Int(sums.event_missing as f64), Cell::text(group_note(k, sums)),
             ]);
         }
+        // A day with no row is a line of its own, never left out of the Summary.
+        for f in flags.iter().filter(|f| f.end.is_none()) {
+            summary.push(vec![Cell::text(&c.name), Cell::Empty, Cell::Empty, Cell::text(f.day.get(..7).unwrap_or("")), Cell::text(&f.day),
+                              Cell::text(NOT_MEASURED), Cell::text(NOT_MEASURED), Cell::text(NOT_MEASURED), Cell::Empty, Cell::text(day_note(f))]);
+        }
+        let held = flags.iter().any(|f| f.end.is_some());
         summary.push(vec![
             Cell::head(&c.name), Cell::head(&s.client), Cell::Empty, Cell::Empty, Cell::head("Actual total"),
-            Cell::Int(s.total.docs as f64), gb_cell(s.total.event_bytes), gb_cell(s.total.sub_bytes),
+            if held { Cell::Int(s.total.docs as f64) } else { Cell::text(NOT_MEASURED) }, gb_cell(s.total.event_bytes), gb_cell(s.total.sub_bytes),
+            if held { Cell::Int(s.total.event_missing as f64) } else { Cell::Empty }, Cell::text(total_notes(flags, &s.total)),
         ]);
         fills.push(fill);
     }
@@ -945,15 +1179,15 @@ pub fn write_xlsx<W: Write>(book: &mut StreamBook<W>, clusters: &[ClusterHosts],
     }
     book.sheet("Summary", &summary)?;
     drop(summary);
-    for (c, fill) in clusters.iter().zip(&fills) {
+    for ((c, flags), fill) in with_flags.iter().zip(&fills) {
         let mut head: Vec<Cell> = SHEET_HEAD.iter().map(|h| Cell::head(*h)).collect();
         head.extend(cfg.fields.iter().map(Cell::head));
         head.push(Cell::head("Note"));
-        let mut widths = vec![11, 34, 18, 28, 12, 15, 18];
+        let mut widths = vec![11, 34, 18, 28, 12, 15, 18, 22];
         widths.extend(cfg.fields.iter().map(|f| f.len().max(10) + 2));
-        widths.push(12);
+        widths.push(40);
         book.begin_sheet(&c.name, head, widths)?;
-        for n in cluster_notes(c, p) {
+        for n in cluster_notes(c, flags) {
             book.row(&[Cell::text(n)])?;
         }
         let ci = cfg.fields.iter().position(|x| *x == cfg.client_id_field);
@@ -962,17 +1196,19 @@ pub fn write_xlsx<W: Write>(book: &mut StreamBook<W>, clusters: &[ClusterHosts],
             let mut cells = vec![
                 Cell::text(&s.day), Cell::text(&s.row.index), Cell::text(&s.source),
                 Cell::text(s.row.host.as_deref().unwrap_or(NO_HOST)), Cell::Int(s.row.docs as f64),
-                gb_cell(s.row.event_bytes), gb_cell(s.row.sub_bytes),
+                gb_cell(s.row.event_bytes), gb_cell(s.row.sub_bytes), Cell::Int(s.row.without_event() as f64),
             ];
             for (i, m) in s.meta.iter().enumerate() {
                 let v = if Some(i) == ci { s.client.clone() } else if Some(i) == bi { Some(s.branch.clone()) } else { m.clone() };
                 cells.push(v.map(Cell::Text).unwrap_or(Cell::Empty));
             }
-            cells.push(if s.incomplete { Cell::text("incomplete") } else { Cell::Empty });
+            let note = s.notes();
+            cells.push(if note.is_empty() { Cell::Empty } else { Cell::Text(note) });
             book.row(&cells)
         })?;
     }
-    book.end_sheet()
+    book.end_sheet()?;
+    book.sheet(about::SHEET, &about_of(&with_flags, cfg, p, failed, built_at).rows())
 }
 
 fn csv_line(cells: &[String]) -> String {
@@ -987,39 +1223,49 @@ fn opt(v: Option<u64>) -> String {
 
 /// The CSV bundle, streamed: `summary.csv`, then one CSV per cluster. Sizes in bytes (an
 /// empty cell is not measured).
-pub fn write_csvzip<W: Write>(zip: &mut super::zip::StreamZip<W>, clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, failed: &[(String, String)]) -> Result<(), String> {
+pub fn write_csvzip<W: Write>(zip: &mut super::zip::StreamZip<W>, clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, failed: &[(String, String)], built_at: i64) -> Result<(), String> {
+    let with_flags: Vec<(&ClusterHosts, Vec<DayFlag>)> = clusters.iter().map(|c| (c, day_flags(c, p))).collect();
     zip.begin("summary.csv")?;
-    zip.write(csv_line(&["cluster", "client_id", "branch", "month", "day", "docs", "event_bytes", "sub_bytes", "note"].map(String::from)).as_bytes())?;
+    zip.write(csv_line(&["cluster", "client_id", "branch", "month", "day", "docs", "event_bytes", "sub_bytes", "note", "docs_without_event_size", "docs_without_sub_size"].map(String::from)).as_bytes())?;
     let mut fills = vec![];
-    for c in clusters {
+    let none = String::new;
+    for (c, flags) in &with_flags {
         let fill = c.fill(cfg, p);
         let s = summarize(c, cfg, p, &fill)?;
-        for ((day, client, branch), sums) in &s.groups {
-            zip.write(csv_line(&[c.id.clone(), client.clone(), branch.clone(), day.get(..7).unwrap_or("").into(), day.clone(),
-                                 sums.docs.to_string(), opt(sums.event_bytes), opt(sums.sub_bytes), String::new()]).as_bytes())?;
+        for (k, sums) in &s.groups {
+            zip.write(csv_line(&[c.id.clone(), k.client.clone(), k.branch.clone(), k.day.get(..7).unwrap_or("").into(), k.day.clone(),
+                                 sums.docs.to_string(), opt(sums.event_bytes), opt(sums.sub_bytes), group_note(k, sums),
+                                 sums.event_missing.to_string(), sums.without_sub()]).as_bytes())?;
         }
-        zip.write(csv_line(&[c.id.clone(), s.client.clone(), String::new(), String::new(), String::new(), s.total.docs.to_string(),
-                             opt(s.total.event_bytes), opt(s.total.sub_bytes), "actual total".into()]).as_bytes())?;
+        for f in flags.iter().filter(|f| f.end.is_none()) {
+            zip.write(csv_line(&[c.id.clone(), none(), none(), f.day.get(..7).unwrap_or("").into(), f.day.clone(), none(), none(), none(),
+                                 day_note(f), none(), none()]).as_bytes())?;
+        }
+        let held = flags.iter().any(|f| f.end.is_some());
+        let note = ["actual total".to_string(), total_notes(flags, &s.total)].into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("; ");
+        zip.write(csv_line(&[c.id.clone(), s.client.clone(), none(), none(), none(), opt(held.then_some(s.total.docs)),
+                             opt(s.total.event_bytes), opt(s.total.sub_bytes), note,
+                             opt(held.then_some(s.total.event_missing)), if held { s.total.without_sub() } else { none() }]).as_bytes())?;
         fills.push(fill);
     }
     for (id, why) in failed {
-        zip.write(csv_line(&[id.clone(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(),
-                             String::new(), format!("not collected: {why}")]).as_bytes())?;
+        zip.write(csv_line(&[id.clone(), none(), none(), none(), none(), none(), none(),
+                             none(), format!("not collected: {why}"), none(), none()]).as_bytes())?;
     }
     let mut used = std::collections::HashSet::new();
-    for (c, fill) in clusters.iter().zip(&fills) {
+    for ((c, flags), fill) in with_flags.iter().zip(&fills) {
         let mut name = format!("{}.csv", super::build::file_part(&c.id));
         let mut k = 2;
-        while !used.insert(name.clone()) {
+        while !used.insert(name.clone()) || name == "summary.csv" || name == about::CSV {
             name = format!("{}-{k}.csv", super::build::file_part(&c.id));
             k += 1;
         }
         zip.begin(&name)?;
         let mut head: Vec<String> = ["day", "index", "source", "host", "docs", "event_bytes", "sub_bytes"].map(String::from).to_vec();
         head.extend(cfg.fields.iter().cloned());
-        head.push("note".into());
+        head.extend(["note", "docs_without_event_size", "docs_without_sub_size"].map(String::from));
         zip.write(csv_line(&head).as_bytes())?;
-        for n in cluster_notes(c, p) {
+        for n in cluster_notes(c, flags) {
             zip.write(csv_line(&[format!("# {n}")]).as_bytes())?;
         }
         let ci = cfg.fields.iter().position(|x| *x == cfg.client_id_field);
@@ -1031,10 +1277,12 @@ pub fn write_csvzip<W: Write>(zip: &mut super::zip::StreamZip<W>, clusters: &[Cl
                 let v = if Some(i) == ci { s.client.clone() } else if Some(i) == bi { Some(s.branch.clone()) } else { m.clone() };
                 cells.push(v.unwrap_or_default());
             }
-            cells.push(if s.incomplete { "incomplete".into() } else { String::new() });
+            cells.extend([s.notes(), s.row.without_event().to_string(), opt(s.row.without_sub())]);
             zip.write(csv_line(&cells).as_bytes())
         })?;
     }
+    zip.begin(about::CSV)?;
+    zip.write(about_of(&with_flags, cfg, p, failed, built_at).csv().as_bytes())?;
     zip.end()
 }
 
@@ -1044,15 +1292,21 @@ pub fn mail_text(clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, faile
     let mut out = String::new();
     for c in clusters {
         let fill = c.fill(cfg, p);
+        let flags = day_flags(c, p);
         match summarize(c, cfg, p, &fill) {
             Ok(s) => {
-                let gb = |v: Option<u64>| v.map(|b| format!("{:.2} GB", b as f64 / GB)).unwrap_or_else(|| NOT_MEASURED.into());
-                out.push_str(&format!("{} (client {})\n  Documents: {}\n  Event size: {}\n  Forwarded size: {}\n",
-                                      c.name, s.client, s.total.docs, gb(s.total.event_bytes), gb(s.total.sub_bytes)));
+                let docs = if flags.iter().any(|f| f.end.is_some()) { s.total.docs.to_string() } else { NOT_MEASURED.into() };
+                out.push_str(&format!("{} (client {})\n  Documents: {docs}\n  Event size: {}\n  Forwarded size: {}\n  Read from Elasticsearch: {}\n",
+                                      c.name, s.client, human_bytes(s.total.event_bytes), human_bytes(s.total.sub_bytes),
+                                      about::span(flags.iter().filter_map(|f| f.end.as_ref().map(|e| e.collected_at)))));
+                let note = total_notes(&flags, &s.total);
+                if !note.is_empty() {
+                    out.push_str(&format!("  Total: {note}\n"));
+                }
             }
             Err(e) => out.push_str(&format!("{}: {e}\n", c.name)),
         }
-        for n in cluster_notes(c, p) {
+        for n in cluster_notes(c, &flags) {
             out.push_str(&format!("  Note: {n}\n"));
         }
     }
@@ -1179,18 +1433,22 @@ pub fn query(c: &ClusterHosts, cfg: &HostsConfig, p: &Period, q: &str, sort: Opt
         }).collect();
         json!({ "day": s.day, "index": s.row.index, "source": s.source, "host": s.row.host, "docs": s.row.docs,
                 "eventBytes": s.row.event_bytes, "subBytes": s.row.sub_bytes, "eventMissingDocs": s.row.event_missing,
-                "clientId": s.client, "branch": s.branch, "meta": meta, "incomplete": s.incomplete })
+                "subMissingDocs": s.row.sub_missing, "clientId": s.client, "branch": s.branch,
+                // The ClientID / branch shown is the report's fill, not the documents' own.
+                "clientIdFilled": s.client_filled, "branchFilled": s.branch_filled,
+                "meta": meta, "incomplete": s.incomplete, "final": s.is_final, "readAt": s.read_at })
     }).collect();
     let (mut incomplete_days, mut not_in_mapping): (Vec<String>, Vec<String>) = (vec![], vec![]);
-    let days: Vec<Value> = day_flags(c, p).into_iter().map(|(day, end, cp)| match end {
+    let days: Vec<Value> = day_flags(c, p).into_iter().map(|f| match f.end {
         Some(e) => {
             if e.incomplete {
-                incomplete_days.push(day.clone());
+                incomplete_days.push(f.day.clone());
             }
-            json!({ "day": day, "held": true, "incomplete": e.incomplete, "rows": e.rows, "notes": e.notes, "failed": null })
+            json!({ "day": f.day, "held": true, "incomplete": e.incomplete, "rows": e.rows, "notes": e.notes, "failed": null,
+                    "final": f.is_final, "readAt": e.collected_at })
         }
-        None => json!({ "day": day, "held": false, "incomplete": false, "rows": null, "notes": [],
-                        "failed": cp.as_ref().and_then(|c| c.failed.clone()), "collecting": cp.is_some_and(|c| c.failed.is_none()) }),
+        None => json!({ "day": f.day, "held": false, "incomplete": false, "rows": null, "notes": [], "final": false, "readAt": null,
+                        "failed": f.cp.as_ref().and_then(|c| c.failed.clone()), "collecting": f.cp.is_some_and(|c| c.failed.is_none()) }),
     }).collect();
     // The configured fields the held days' mappings did not have.
     for d in p.days() {
@@ -1206,7 +1464,9 @@ pub fn query(c: &ClusterHosts, cfg: &HostsConfig, p: &Period, q: &str, sort: Opt
         // Which of `fields` the ClientID and branch columns are filled from.
         "clientIdField": cfg.client_id_field, "branchField": cfg.branch_field,
         "rows": rows, "total": total, "offset": offset, "limit": limit,
-        "totals": { "docs": sums.docs, "eventBytes": sums.event_bytes, "subBytes": sums.sub_bytes },
+        "totals": { "docs": sums.docs, "eventBytes": sums.event_bytes, "subBytes": sums.sub_bytes,
+                    // Documents the two sums do not cover (`subNotCountedDocs`: files that did not count them).
+                    "eventMissingDocs": sums.event_missing, "subMissingDocs": sums.sub_missing, "subNotCountedDocs": sums.sub_not_counted },
         "days": days, "incompleteDays": incomplete_days, "notInMapping": not_in_mapping,
     }))
 }
@@ -1228,7 +1488,7 @@ mod tests {
 
     fn row(index: &str, host: Option<&str>, docs: u64, client: Option<&str>, branch: Option<&str>) -> HostRow {
         HostRow { index: index.into(), host: host.map(String::from), docs, event_bytes: Some(docs * 10), sub_bytes: None,
-                  event_missing: 0, meta: vec![client.map(String::from), None, branch.map(String::from)] }
+                  event_missing: 0, sub_missing: None, meta: vec![client.map(String::from), None, branch.map(String::from)] }
     }
 
     #[test]
@@ -1274,8 +1534,9 @@ mod tests {
         assert!(!p.done, "a full page with an after_key: more to come");
         assert_eq!(p.after, Some(after.clone()));
         assert_eq!(p.rows[0], HostRow { index: "logstash-a-2026.11.01".into(), host: Some("web1".into()), docs: 3, event_bytes: Some(30),
-                                        sub_bytes: None, event_missing: 1, meta: vec![Some("C42".into()), None, None] });
+                                        sub_bytes: None, event_missing: 1, sub_missing: None, meta: vec![Some("C42".into()), None, None] });
         assert_eq!(p.rows[1].host, None, "the missing bucket is a row of its own");
+        assert_eq!((p.rows[1].event_bytes, p.rows[1].event_missing), (None, 2), "a sum over documents none of which has the field is not 0 bytes");
         assert!(read_page(&page, &resolved(), 1000).unwrap().done, "fewer buckets than asked: the last page");
         assert!(read_page(&json!({ "aggregations": { "h": { "buckets": [] } } }), &resolved(), 1000).unwrap().done);
         assert!(matches!(read_page(&json!({ "_shards": { "total": 2, "failed": 1 }, "aggregations": { "h": { "buckets": [] } } }), &resolved(), 10),
@@ -1389,6 +1650,27 @@ mod tests {
     }
 
     #[test]
+    fn a_day_read_too_soon_is_not_final_and_is_not_read_again_over_fewer_indices() {
+        let root = std::env::temp_dir().join(format!("ep-hosts-final-{}-{}", std::process::id(), rand::random::<u32>()));
+        let d = HostsDir::new(&root, "prod");
+        let day = parse_day("2026-11-01").unwrap();
+        // Collected at 00:30 the next day: held, not final.
+        let soon = DayHeader { started_at: final_from(day) - 23 * 3_600_000, ..header("2026-11-01") };
+        let mut cp = d.begin(soon, vec![vec!["i1".into(), "i2".into()]], 1000, 1).unwrap();
+        d.append(&mut cp, 0, &[row("i1", Some("a"), 1, None, None), row("i2", Some("b"), 2, None, None)], None, true, 1).unwrap();
+        d.complete(&cp, &DayEnd { rows: 2, pages: 1, incomplete: false, notes: vec![], collected_at: 2 }).unwrap();
+        assert!(d.held("2026-11-01") && !d.held_final("2026-11-01"));
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<_>>();
+        assert!(d.held_within("2026-11-01", &set(&["i1", "i2", "i3"])));
+        assert!(!d.held_within("2026-11-01", &set(&["i1"])), "i2 was deleted: what was collected stays");
+        let late = DayHeader { started_at: final_from(day), ..header("2026-11-01") };
+        let cp = d.begin(late, vec![], 1000, 3).unwrap();
+        d.complete(&cp, &DayEnd { rows: 0, pages: 0, incomplete: false, notes: vec![], collected_at: 3 }).unwrap();
+        assert!(d.held_final("2026-11-01"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_failed_day_is_taken_up_three_ticks_then_waits() {
         let mut cp = Checkpoint::default();
         assert!(cp.resumable(0, 900_000), "interrupted: at once");
@@ -1413,8 +1695,10 @@ mod tests {
         assert_eq!(fill_client_branch(Some("C7"), Some("BLR"), &fill), (Some("C7".into()), "BLR".into()), "a value of its own stays");
         let none = Fill { first_client: None, branch_default: "DC".into() };
         assert_eq!(fill_client_branch(None, None, &none).0, None);
-        assert_eq!(summary_client(&none, "Production"), "Production", "no ClientID anywhere: the cluster's name");
-        assert_eq!(summary_client(&fill, "Production"), "C42");
+        assert_eq!(summary_client(std::iter::empty()), CLIENT_NOT_IN_LOGS);
+        assert_eq!(summary_client([NO_CLIENT].into_iter()), CLIENT_NOT_IN_LOGS, "no ClientID anywhere: not the cluster's name");
+        assert_eq!(summary_client(["C42", "C42"].into_iter()), "C42");
+        assert_eq!(summary_client([NO_CLIENT, "C42"].into_iter()), "C42, (no ClientID)", "a total over both says so");
 
         // The first valid ClientID in day, then index order.
         let root = tmp();
@@ -1440,8 +1724,14 @@ mod tests {
         assert!(shown[3].incomplete && !shown[0].incomplete);
         assert_eq!(shown[0].row.meta[0].as_deref(), Some("None"), "the stored row keeps what Elasticsearch said");
         let s = summarize(&c, &cfg, &p, &fill).unwrap();
-        assert_eq!((s.client.as_str(), s.total.docs, s.total.event_bytes, s.total.sub_bytes), ("C9", 4, Some(40), None));
+        assert_eq!((s.client.as_str(), s.total.docs, s.total.event_bytes, s.total.sub_bytes), ("C1, C9, (no ClientID)", 4, Some(40), None));
         assert_eq!(s.groups.len(), 4);
+        // B7: a row without a ClientID is its own Summary line, never C9's bytes.
+        let c9: Vec<&Sums> = s.groups.iter().filter(|(k, _)| k.client == "C9").map(|(_, v)| v).collect();
+        assert_eq!((c9.len(), c9[0].docs), (1, 1));
+        assert_eq!(s.groups.iter().filter(|(k, _)| k.client == NO_CLIENT).count(), 2);
+        assert_eq!(shown[1].notes(), "not final: read 1970-01-01 00:00:00 UTC; ClientID filled; branch default");
+        assert!(!shown[2].client_filled && !shown[2].branch_filled);
 
         // The view: search, sort, page, totals and the day flags.
         let v = query(&c, &cfg, &p, "b-2026", None, 0, 200).unwrap();
@@ -1462,7 +1752,7 @@ mod tests {
 
         // The workbook: Summary first, the cluster's sheet with its notes, rows and fill.
         let mut book = StreamBook::new(Vec::new());
-        write_xlsx(&mut book, &[c], &cfg, &p, &[("lost".into(), "timed out".into())]).unwrap();
+        write_xlsx(&mut book, &[c], &cfg, &p, &[("lost".into(), "timed out".into())], 1_795_500_000_000).unwrap();
         let bytes = book.finish().unwrap();
         let parts = super::super::zip::read(&bytes).unwrap();
         let text = |n: &str| String::from_utf8(parts.iter().find(|(x, _)| x == n).unwrap().1.clone()).unwrap();
@@ -1470,7 +1760,57 @@ mod tests {
         assert!(summary.contains("Actual total") && summary.contains("C9") && summary.contains("not collected: timed out"), "{summary}");
         let sheet = text("xl/worksheets/sheet2.xml");
         assert!(sheet.contains("incomplete") && sheet.contains("not collected: 2026-11-04") && sheet.contains("BLR"), "{sheet}");
-        assert!(text("xl/workbook.xml").contains(r#"name="Cluster C""#));
+        assert!(sheet.contains(CLIENT_FILLED) && sheet.contains(BRANCH_DEFAULT) && sheet.contains("Docs without event size"), "{sheet}");
+        assert!(summary.contains("3 of 4 days collected; 1 day(s) incomplete; 3 day(s) not final"), "the total says what it is short of: {summary}");
+        let about = text("xl/worksheets/sheet3.xml");
+        assert!(about.contains("Built by") && about.contains("2026-11-04") && about.contains("not collected") && about.contains(NO_CLIENT), "{about}");
+        assert!(text("xl/workbook.xml").contains(r#"name="Cluster C""#) && text("xl/workbook.xml").contains(r#"name="About""#));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A1: what the staging cluster answered — 400 documents, not one with the event size — is not
+    /// measured, in a new page and in a day file written before 0.3.89 alike; some without it
+    /// leave the sum standing, with how many.
+    #[test]
+    fn a_size_no_document_carries_is_not_measured_and_a_partial_one_says_how_many_lack_it() {
+        let old: HostRow = serde_json::from_str(r#"{"i":"a-2026.11.01","h":"h","d":400,"e":0,"s":0,"me":400,"m":[]}"#).unwrap();
+        let r = old.clone().measured();
+        assert_eq!((r.event_bytes, r.sub_bytes, r.without_event()), (None, None, 400), "a held file's 0 is not a measurement");
+        let some: HostRow = serde_json::from_str(r#"{"i":"a-2026.11.01","h":"h2","d":10,"e":50,"s":7,"me":4,"m":[]}"#).unwrap();
+        let some = some.measured();
+        assert_eq!((some.event_bytes, some.sub_bytes, some.without_sub()), (Some(50), Some(7), None));
+        let mut s = Sums::default();
+        s.add(&r);
+        assert_eq!((s.event_bytes, s.notes().len()), (None, 0), "nothing measured: the figure says so itself");
+        s.add(&some);
+        assert_eq!((s.docs, s.event_bytes, s.event_missing), (410, Some(50), 404));
+        assert_eq!(s.notes()[0], "event size: 404 of 410 documents without it");
+        assert!(s.notes().iter().any(|n| n.contains("was not counted")), "{:?}", s.notes());
+        // A measured 0 stays 0: the documents carry the field and it is 0.
+        let zero: HostRow = serde_json::from_str(r#"{"i":"a","d":3,"e":0,"s":0,"me":0,"ms":0,"m":[]}"#).unwrap();
+        let zero = zero.measured();
+        assert_eq!((zero.event_bytes, zero.sub_bytes), (Some(0), Some(0)));
+
+        let root = tmp();
+        let dir = HostsDir::new(&root, "c");
+        let mut cp = dir.begin(header("2026-11-01"), vec![vec!["all".into()]], 1000, 1).unwrap();
+        dir.append(&mut cp, 0, &[HostRow { sub_bytes: Some(0), event_bytes: Some(0), event_missing: 400, meta: vec![None, None, None], ..row("a-2026.11.01", Some("h"), 400, None, None) }], None, true, 2).unwrap();
+        dir.complete(&cp, &DayEnd { rows: 1, pages: 1, incomplete: false, notes: vec![], collected_at: 3 }).unwrap();
+        let cfg = HostsConfig { fields: vec!["ClientID".into(), "zone".into(), "branch".into()], ..HostsConfig::default() };
+        let c = ClusterHosts { id: "c".into(), name: "C".into(), dir, ind: None, failure: None };
+        let p: Period = serde_json::from_value(json!({ "from": "2026-11-01", "to": "2026-11-01", "label": "x" })).unwrap();
+        let v = query(&c, &cfg, &p, "", None, 0, 10).unwrap();
+        assert_eq!((v["rows"][0]["eventBytes"].clone(), v["totals"]["eventBytes"].clone(), v["totals"]["eventMissingDocs"].as_u64()),
+                   (Value::Null, Value::Null, Some(400)));
+        assert_eq!((v["rows"][0]["clientIdFilled"].as_bool(), v["rows"][0]["branchFilled"].as_bool()), (Some(false), Some(true)));
+        assert_eq!((v["days"][0]["final"].as_bool(), v["days"][0]["readAt"].as_i64()), (Some(false), Some(3)));
+        let mut z = super::super::zip::StreamZip::new(Vec::new());
+        write_csvzip(&mut z, &[c], &cfg, &p, &[], 1_795_500_000_000).unwrap();
+        let parts = super::super::zip::read(&z.finish().unwrap()).unwrap();
+        let text = |n: &str| String::from_utf8(parts.iter().find(|(x, _)| x == n).unwrap().1.clone()).unwrap();
+        let line = text("summary.csv").lines().nth(1).unwrap().to_string();
+        assert_eq!(line, "c,(no ClientID),DC,2026-11,2026-11-01,400,,,branch default,400,400", "an empty size and 400 without it, never 0");
+        assert!(text("about.csv").contains("ElasticPro"));
         std::fs::remove_dir_all(root).ok();
     }
 }

@@ -101,6 +101,7 @@ async fn the_background_set_arrives_and_snapshots_use_the_cat_listing_per_repo()
     assert_eq!(cl["reach"]["state"], json!("reachable"));
     assert!(cl["datasets"].get("indices").is_none(), "on-demand datasets are not in the default set");
     assert_eq!(cl["datasets"]["snapshots"]["data"]["byRepo"]["repo1"]["json"][0]["id"], json!("snap-1"));
+    assert!(hits_on(&es, "/_snapshot?") >= 2, "the repositories are listed for the snapshots, not taken from a policies answer of any age");
     assert!(es.hits().iter().any(|h| h.path.starts_with("/logs-*/_settings?filter_path=")), "the cluster's own log pattern");
     assert!(state["catalogue"].as_array().unwrap().len() == 10);
 

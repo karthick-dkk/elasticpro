@@ -428,6 +428,8 @@ pub fn search_request(cluster: &str, ind: &Indices, d: NaiveDate, group: &DayGro
 pub struct DayGroup {
     pub indices: u64,
     pub open: u64,
+    /// Indices `_cat` gave no size for (closed, red): not in the two sums below.
+    pub unreadable: u64,
     pub pri_bytes: u64,
     pub total_bytes: u64,
     pub sources: BTreeMap<String, SourceTotals>,
@@ -527,17 +529,18 @@ fn has_time_split(day: &Day) -> bool {
 
 pub const SKIPPED_KEEP: usize = 500;
 
-fn bytes(v: Option<&Value>) -> u64 {
+/// A size `_cat` gives. A closed or red index has none (`null`): not measured, never 0.
+pub fn cat_bytes(v: Option<&Value>) -> Option<u64> {
     match v {
-        Some(Value::String(s)) => s.parse().unwrap_or(0),
-        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
-        _ => 0,
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        Some(Value::Number(n)) => n.as_u64(),
+        _ => None,
     }
 }
 
 /// Group a `_cat/indices?format=json&bytes=b` answer by the day in each name; an index that
-/// is split by time is listed apart. A closed index counts as an index of its day, with no
-/// size (`_cat` reports none for it).
+/// is split by time is listed apart. A closed or red index counts as an index of its day, with
+/// no size (`_cat` reports none for it): the day's size is then not measured.
 pub fn read_cat(rows: &Value, ind: &Indices) -> Listing {
     let mut out = Listing::default();
     for r in rows.as_array().into_iter().flatten() {
@@ -559,14 +562,17 @@ pub fn read_cat(rows: &Value, ind: &Indices) -> Listing {
             Placement::Dated(day, source) => (day, source),
         };
         out.matched += 1;
-        let (pri, total) = (bytes(r.get("pri.store.size")), bytes(r.get("store.size")));
+        let sizes = cat_bytes(r.get("pri.store.size")).zip(cat_bytes(r.get("store.size")));
+        let (pri, total) = sizes.unwrap_or((0, 0));
         let g = out.days.entry(day).or_default();
         g.indices += 1;
         g.open += open as u64;
+        g.unreadable += sizes.is_none() as u64;
         g.pri_bytes += pri;
         g.total_bytes += total;
         let s = g.sources.entry(source.clone()).or_default();
         s.indices += 1;
+        s.unreadable_indices += sizes.is_none() as u64;
         s.pri_bytes = Some(s.pri_bytes.unwrap_or(0) + pri);
         s.total_bytes = Some(s.total_bytes.unwrap_or(0) + total);
         g.index_source.insert(name.to_string(), source);
@@ -585,6 +591,10 @@ pub fn read_cat(rows: &Value, ind: &Indices) -> Listing {
 /// The size is the dated indices' (`None` when the day has none); the time-split part keeps
 /// what its last search counted (`unmeasured_size_indices`, per source too) until the next.
 ///
+/// A final day that lists fewer dated indices than recorded, or an index with no size now, keeps
+/// its recorded sizes and sources — they are the day's, what is left is not — and counts them
+/// (`Day::gone_indices`).
+///
 /// Days outside `[oldest, ..)` are left alone; the caller prunes those.
 pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Listing, split: &Split, now_ms: i64) -> bool {
     let mut changed = false;
@@ -598,6 +608,17 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
         }
         let g = listing.days.get(&d);
         day.live = true;
+        let recorded = day.indices.saturating_sub(day.unmeasured_size_indices);
+        let readable = g.map_or(0, |g| g.indices - g.unreadable);
+        if day.is_final && day.pri_bytes.is_some() && day.unreadable_indices == 0 && readable < recorded {
+            if day.gone_indices != recorded - readable {
+                day.gone_indices = recorded - readable;
+                changed = true;
+            }
+            continue;
+        }
+        day.gone_indices = 0;
+        day.unreadable_indices = g.map_or(0, |g| g.unreadable);
         day.totals_at = now_ms;
         day.indices = g.map_or(0, |g| g.indices) + day.unmeasured_size_indices;
         day.pri_bytes = g.map(|g| g.pri_bytes);
@@ -612,12 +633,12 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
             day.sources.insert(name.clone(), SourceTotals {
                 indices: s.indices + split_n, pri_bytes: s.pri_bytes, total_bytes: s.total_bytes,
                 docs: prev.and_then(|p| p.docs), event_bytes: prev.and_then(|p| p.event_bytes),
-                sub_bytes: prev.and_then(|p| p.sub_bytes), unmeasured_size_indices: split_n,
+                sub_bytes: prev.and_then(|p| p.sub_bytes), unmeasured_size_indices: split_n, unreadable_indices: s.unreadable_indices,
             });
         }
         // A source that only had time-split documents: no size, and its counts as searched.
         for (name, p) in old.into_iter().filter(|(_, p)| p.unmeasured_size_indices > 0) {
-            day.sources.insert(name, SourceTotals { indices: p.unmeasured_size_indices, pri_bytes: None, total_bytes: None, ..p });
+            day.sources.insert(name, SourceTotals { indices: p.unmeasured_size_indices, pri_bytes: None, total_bytes: None, unreadable_indices: 0, ..p });
         }
         changed = true;
     }
@@ -642,8 +663,24 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
 /// Whether a day is to be searched this run: live, with an open index dated on it or
 /// time-split documents on it (`in_split`), and not yet aggregated as final. Today is
 /// never final, so it is searched every run.
+///
+/// A day already searched 24 hours after it ended whose only lack is closed indices is asked
+/// again when one of them is opened, not on every run.
 pub fn needs_search(day: &Day, group: Option<&DayGroup>, in_split: bool) -> bool {
-    day.live && !day.is_final && (in_split || group.is_some_and(|g| g.open > 0))
+    let searchable = in_split || group.is_some_and(|g| g.open > 0);
+    day.live && !day.is_final && searchable && !waits_for_closed(day, group)
+}
+
+/// Read late enough to be final, whole, but for the indices that were closed — and are still.
+pub fn waits_for_closed(day: &Day, group: Option<&DayGroup>) -> bool {
+    let closed = group.map_or(0, |g| g.indices.saturating_sub(g.open));
+    let late = parse_day(&day.day).zip(day.aggregated_at).is_some_and(|(d, at)| at >= super::schedule::final_from(d));
+    closed > 0 && day.closed_indices == closed && late && day.error.as_deref() == Some(closed_note(closed, group.map_or(0, |g| g.indices)).as_str())
+}
+
+/// Why a searched day with closed indices is not final.
+pub fn closed_note(closed: u64, of: u64) -> String {
+    format!("{closed} of its {of} indices closed: their documents are in no figure; asked again when one is opened")
 }
 
 /// Why a past day that is not final is not searched this run, as its `error` says it —
@@ -784,16 +821,24 @@ fn resolved<'a>(rows: &'a [RowResolution], key: &str) -> Option<&'a str> {
 /* ------------------------------------ the day search ------------------------------------ */
 
 /// `ev`/`sub` sum aggs, for whichever of the two fields resolved.
+///
+/// Each with a count of the values summed (`ev_n`, `sub_n`): a sum over documents that all lack
+/// the field answers 0.0, and only the count tells that 0 from a measured one.
 fn sums(rows: &[RowResolution]) -> Map<String, Value> {
     let mut m = Map::new();
-    if let Some(f) = resolved(rows, "eventSize") {
-        m.insert("ev".into(), json!({ "sum": { "field": f } }));
-    }
-    if let Some(f) = resolved(rows, "subSize") {
-        m.insert("sub".into(), json!({ "sum": { "field": f } }));
+    for (name, key) in [("ev", "eventSize"), ("sub", "subSize")] {
+        if let Some(f) = resolved(rows, key) {
+            m.insert(name.into(), json!({ "sum": { "field": f } }));
+            m.insert(format!("{name}_n"), json!({ "value_count": { "field": f } }));
+        }
     }
     m
 }
+
+/// Values a terms aggregation asks of each shard. Larger than the values kept: the counts of
+/// the kept ones are then exact unless a shard holds more distinct values than this
+/// (`FieldAgg::error_bound`).
+pub const SHARD_VALUES: u32 = 500;
 
 /// The one search per day (docs/VOLUME.md, step 3).
 pub fn search_body(rows: &[RowResolution], top_values: u32) -> Value {
@@ -811,7 +856,7 @@ pub fn search_body(rows: &[RowResolution], top_values: u32) -> Value {
     for key in FIELD_KEYS {
         let Some(f) = resolved(rows, key) else { continue };
         let mut t = Map::new();
-        t.insert("terms".into(), json!({ "field": f, "size": top_values }));
+        t.insert("terms".into(), json!({ "field": f, "size": top_values, "shard_size": SHARD_VALUES.max(top_values) }));
         aggs.insert(format!("f_{key}"), with_sums(t));
         let mut m = Map::new();
         m.insert("missing".into(), json!({ "field": f }));
@@ -820,14 +865,29 @@ pub fn search_body(rows: &[RowResolution], top_values: u32) -> Value {
     json!({ "size": 0, "track_total_hits": true, "aggs": aggs })
 }
 
-/// A sum agg's value as whole bytes. Absent is `None` — the field did not resolve — and
-/// never 0.
-fn sum_of(v: &Value, name: &str, on: bool) -> Option<u64> {
+/// A sum agg's value as whole bytes, of `docs` documents. `None` when the field did not resolve,
+/// or when it did and not one of the documents carries it (`<name>_n` is 0): not measured, never 0.
+fn sum_of(v: &Value, name: &str, on: bool, docs: u64) -> Option<u64> {
     if !on {
         return None;
     }
-    let x = v.get(name)?.get("value")?;
-    Some(x.as_f64().map(|f| f.max(0.0).round() as u64).unwrap_or(0))
+    let x = v.get(name)?.get("value")?.as_f64()?;
+    match count_of(v, name) {
+        Some(0) if docs > 0 => None,
+        _ => Some(x.max(0.0).round() as u64),
+    }
+}
+
+/// How many values a sum was taken over; `None` when the answer does not say.
+fn count_of(v: &Value, name: &str) -> Option<u64> {
+    v.get(format!("{name}_n"))?.get("value")?.as_u64()
+}
+
+fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
 }
 
 fn total_hits(res: &Value) -> Option<u64> {
@@ -849,13 +909,19 @@ fn bucket_key(b: &Value) -> Option<String> {
 
 /// Write one search answer into its day. `today` decides `final`: a day before today's
 /// UTC date is done, and is never asked again — unless the time-split part of it was not
-/// measured (`group.split_missing`).
-pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &DayGroup, today: NaiveDate, now_ms: i64) {
+/// measured (`group.split_missing`), or some of its indices were closed (`closed_note`).
+/// Callers pass `schedule::final_today` as `today`. Returns what went wrong with the answer:
+/// closed indices are said on the day, and are no fault of the run.
+pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &DayGroup, today: NaiveDate, now_ms: i64) -> Option<String> {
     let (ev_on, sub_on) = (resolved(rows, "eventSize").is_some(), resolved(rows, "subSize").is_some());
     let aggs = res.get("aggregations").cloned().unwrap_or(Value::Null);
     day.docs = total_hits(res);
-    day.event_bytes = sum_of(&aggs, "ev", ev_on);
-    day.sub_bytes = sum_of(&aggs, "sub", sub_on);
+    let docs = day.docs.unwrap_or(0);
+    day.event_bytes = sum_of(&aggs, "ev", ev_on, docs);
+    day.sub_bytes = sum_of(&aggs, "sub", sub_on, docs);
+    let lacking = |name: &str, on: bool| count_of(&aggs, name).filter(|_| on).map(|n| docs.saturating_sub(n));
+    day.event_missing_docs = lacking("ev", ev_on);
+    day.sub_missing_docs = lacking("sub", sub_on);
 
     // Per source, from the per-index buckets. An index with no bucket had no documents —
     // unless the terms agg ran out of room, and then it is not known.
@@ -871,15 +937,11 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
             (None, Some(s)) => (s, true),
             (None, None) => continue,
         };
-        let e = per.entry(src.clone()).or_insert((0, ev_on.then_some(0), sub_on.then_some(0), 0));
+        let e = per.entry(src.clone()).or_insert((0, None, None, 0));
         e.0 += docs;
         e.3 += (split && docs > 0) as u64;
-        if let (Some(t), Some(v)) = (e.1.as_mut(), sum_of(b, "ev", ev_on)) {
-            *t += v;
-        }
-        if let (Some(t), Some(v)) = (e.2.as_mut(), sum_of(b, "sub", sub_on)) {
-            *t += v;
-        }
+        e.1 = plus(e.1, sum_of(b, "ev", ev_on, docs));
+        e.2 = plus(e.2, sum_of(b, "sub", sub_on, docs));
     }
     // The time-split part: how many of its indices count on the day, and their sources. Not
     // counted this run (`split_missing`): what the last count said stands, and the day is
@@ -908,6 +970,7 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
             s.indices = dated.map_or(0, |d| d.indices) + s.unmeasured_size_indices;
             s.pri_bytes = dated.and_then(|d| d.pri_bytes);
             s.total_bytes = dated.and_then(|d| d.total_bytes);
+            s.unreadable_indices = dated.map_or(0, |d| d.unreadable_indices);
         }
     }
     for (name, s) in day.sources.iter_mut() {
@@ -943,15 +1006,14 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
         let t = aggs.get(format!("f_{key}")).cloned().unwrap_or(Value::Null);
         let m = aggs.get(format!("m_{key}")).cloned().unwrap_or(Value::Null);
         let top: Vec<TopValue> = t.get("buckets").and_then(Value::as_array).into_iter().flatten()
-            .filter_map(|b| Some(TopValue {
-                value: bucket_key(b)?,
-                docs: b.get("doc_count").and_then(Value::as_u64).unwrap_or(0),
-                event_bytes: sum_of(b, "ev", ev_on),
-                sub_bytes: sum_of(b, "sub", sub_on),
-            }))
+            .filter_map(|b| {
+                let docs = b.get("doc_count").and_then(Value::as_u64).unwrap_or(0);
+                Some(TopValue { value: bucket_key(b)?, docs, event_bytes: sum_of(b, "ev", ev_on, docs), sub_bytes: sum_of(b, "sub", sub_on, docs) })
+            })
             .collect();
-        let missing_ev = sum_of(&m, "ev", ev_on);
-        let missing_sub = sum_of(&m, "sub", sub_on);
+        let missing_docs = m.get("doc_count").and_then(Value::as_u64).unwrap_or(0);
+        let missing_ev = sum_of(&m, "ev", ev_on, missing_docs);
+        let missing_sub = sum_of(&m, "sub", sub_on, missing_docs);
         // "All others" is what the day measured less the top values and the missing ones.
         let rest = |total: Option<u64>, missing: Option<u64>, each: fn(&TopValue) -> Option<u64>| {
             let total = total?;
@@ -962,11 +1024,12 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
             field: Some(field),
             error: None,
             other_docs: t.get("sum_other_doc_count").and_then(Value::as_u64).unwrap_or(0),
-            missing_docs: m.get("doc_count").and_then(Value::as_u64).unwrap_or(0),
+            missing_docs,
             other_event_bytes: rest(day.event_bytes, missing_ev, |v| v.event_bytes),
             missing_event_bytes: missing_ev,
             other_sub_bytes: rest(day.sub_bytes, missing_sub, |v| v.sub_bytes),
             missing_sub_bytes: missing_sub,
+            error_bound: t.get("doc_count_error_upper_bound").and_then(Value::as_u64),
             top,
         });
     }
@@ -975,8 +1038,11 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
     // one that could not count the time-split part.
     let partial = partial_answer(res).or_else(|| group.split_missing.as_ref()
         .map(|why| format!("the indices split by time were not counted: {why}; asked again on the next run")));
-    day.is_final = partial.is_none() && parse_day(&day.day).is_some_and(|d| is_closed(d, today));
-    day.error = partial;
+    day.closed_indices = group.indices.saturating_sub(group.open);
+    let closed = (day.closed_indices > 0).then(|| closed_note(day.closed_indices, group.indices));
+    day.is_final = partial.is_none() && closed.is_none() && parse_day(&day.day).is_some_and(|d| is_closed(d, today));
+    day.error = partial.clone().or(closed);
+    partial
 }
 
 #[cfg(test)]
@@ -1031,7 +1097,92 @@ mod tests {
         assert_eq!(g.sources["win-dc"].pri_bytes, Some(500));
         assert!(l.time_split.is_empty(), "the legacy format splits nothing by time");
         let closed = &l.days[&d("2026-10-21")];
-        assert_eq!((closed.indices, closed.open, closed.pri_bytes), (1, 0, 0));
+        assert_eq!((closed.indices, closed.open, closed.unreadable, closed.pri_bytes), (1, 0, 1, 0), "no size is unreadable, not 0 bytes");
+        let mut days = BTreeMap::new();
+        apply_totals(&mut days, "2026-10", &l, &Split::None, 1);
+        let x = &days["2026-10-21"];
+        assert_eq!((x.sizes(), x.unreadable_indices, x.sources["linux"].sizes()), ((None, None), 1, (None, None)), "a closed index has no size: not measured, never 0");
+    }
+
+    /// One of a day's two indices closed, or red: no bare sum of the other, and never final.
+    #[test]
+    fn a_day_with_a_closed_index_has_no_size_and_is_not_final_until_it_is_opened() {
+        let cat = |status: &str, size: Value| json!([
+            { "index": "logstash-linux-2026.10.20", "status": "open", "pri.store.size": "1000", "store.size": "2000" },
+            { "index": "logstash-win-2026.10.20", "status": status, "pri.store.size": size, "store.size": size }]);
+        let l = read_cat(&cat("close", Value::Null), &legacy());
+        let mut days = BTreeMap::new();
+        apply_totals(&mut days, "2026-10", &l, &Split::None, 1);
+        let day = days.get_mut("2026-10-20").unwrap();
+        assert_eq!((day.indices, day.pri_bytes, day.sizes()), (2, Some(1000), (None, None)), "the open index's size is kept, not shown as the day's");
+        let g = &l.days[&d("2026-10-20")];
+        assert!(needs_search(day, Some(g), false));
+        let whole = json!({ "_shards": { "failed": 0 }, "hits": { "total": { "value": 5 } }, "aggregations": {} });
+        let late = super::super::schedule::final_from(d("2026-10-20")) + 1;
+        assert_eq!(apply_search(day, &whole, &[], g, d("2026-10-29"), late), None, "no fault of the run");
+        assert!(!day.is_final, "half a day is not final");
+        assert_eq!((day.docs, day.closed_indices), (Some(5), 1));
+        assert!(day.error.as_deref().unwrap().starts_with("1 of its 2 indices closed"), "{:?}", day.error);
+        assert!(!needs_search(day, Some(g), false), "searched again when it is opened, not every run");
+        let open = read_cat(&cat("open", json!("500")), &legacy());
+        let g = &open.days[&d("2026-10-20")];
+        assert!(needs_search(day, Some(g), false));
+        apply_totals(&mut days, "2026-10", &open, &Split::None, late);
+        let day = days.get_mut("2026-10-20").unwrap();
+        apply_search(day, &whole, &[], g, d("2026-10-29"), late + 1);
+        assert!(day.is_final && day.error.is_none() && day.closed_indices == 0);
+        assert_eq!(day.sizes(), (Some(1500), Some(2500)));
+    }
+
+    /// A final day whose indices go one by one (or close) keeps what was measured while they
+    /// were all there, and says how many went.
+    #[test]
+    fn a_final_day_keeps_its_recorded_sizes_when_some_of_its_indices_are_deleted() {
+        let l = read_cat(&cat(), &legacy());
+        let mut days = BTreeMap::new();
+        apply_totals(&mut days, "2026-10", &l, &Split::None, 1);
+        let g = l.days[&d("2026-10-20")].clone();
+        let whole = json!({ "hits": { "total": { "value": 30 } }, "aggregations": {} });
+        apply_search(days.get_mut("2026-10-20").unwrap(), &whole, &[], &g, d("2026-10-29"), 5);
+        assert!(days["2026-10-20"].is_final);
+        let fewer = read_cat(&json!([
+            { "index": "logstash-linux-2026.10.20", "status": "open", "pri.store.size": "1000", "store.size": "2000" }]), &legacy());
+        assert!(apply_totals(&mut days, "2026-10", &fewer, &Split::None, 9));
+        let x = &days["2026-10-20"];
+        assert_eq!((x.indices, x.sizes(), x.sources.len(), x.gone_indices, x.docs), (2, (Some(1500), Some(3000)), 2, 1, Some(30)),
+                   "the recorded day, not what is left of it");
+        assert_eq!(x.totals_at, 1, "read when it was read");
+        // Closed instead of deleted: the same.
+        let shut = read_cat(&json!([
+            { "index": "logstash-linux-2026.10.20", "status": "open", "pri.store.size": "1000", "store.size": "2000" },
+            { "index": "logstash-win-dc-2026.10.20", "status": "close", "pri.store.size": null, "store.size": null }]), &legacy());
+        apply_totals(&mut days, "2026-10", &shut, &Split::None, 10);
+        assert_eq!((days["2026-10-20"].sizes(), days["2026-10-20"].gone_indices), ((Some(1500), Some(3000)), 1));
+        // All there again: read again.
+        apply_totals(&mut days, "2026-10", &l, &Split::None, 11);
+        assert_eq!((days["2026-10-20"].gone_indices, days["2026-10-20"].totals_at), (0, 11));
+    }
+
+    /// A sum over documents that all lack the field answers 0.0: not measured, not 0.
+    #[test]
+    fn a_sum_no_document_carries_is_not_measured_and_a_partial_one_counts_what_lacks_it() {
+        let mut rows = resolve_rows(&fc(), &VolumeSettings::default());
+        rows.iter_mut().find(|r| r.key == "eventSize").unwrap().resolved = Some("event_logsize".into());
+        let g = DayGroup { indices: 1, open: 1, index_source: [("i".to_string(), "linux".to_string())].into(), ..DayGroup::default() };
+        let mut day = Day { day: "2026-10-20".into(), live: true, ..Day::default() };
+        day.sources.insert("linux".into(), SourceTotals::default());
+        let res = |n: u64| json!({ "hits": { "total": { "value": 400 } }, "aggregations": {
+            "ev": { "value": if n == 0 { 0.0 } else { 900.0 } }, "ev_n": { "value": n }, "sub": { "value": 0.0 }, "sub_n": { "value": 0 },
+            "by_index": { "buckets": [{ "key": "i", "doc_count": 400, "ev": { "value": 0.0 }, "ev_n": { "value": 0 } }] },
+            "f_tag": { "doc_count_error_upper_bound": 7, "sum_other_doc_count": 0, "buckets": [{ "key": "fw", "doc_count": 400, "ev": { "value": 0.0 }, "ev_n": { "value": 0 } }] },
+            "m_tag": { "doc_count": 0, "ev": { "value": 0.0 }, "ev_n": { "value": 0 } } } });
+        apply_search(&mut day, &res(0), &rows, &g, d("2026-10-29"), 5);
+        assert_eq!((day.docs, day.event_bytes, day.event_missing_docs, day.sub_bytes), (Some(400), None, Some(400), None));
+        assert_eq!(day.sources["linux"].event_bytes, None);
+        let tag = &day.fields["tag"];
+        assert_eq!((tag.top[0].event_bytes, tag.missing_event_bytes, tag.error_bound), (None, Some(0), Some(7)), "no missing document: 0 is true there");
+        apply_search(&mut day, &res(150), &rows, &g, d("2026-10-29"), 6);
+        assert_eq!((day.event_bytes, day.event_missing_docs), (Some(900), Some(250)), "the sum stands, and 250 documents are not in it");
     }
 
     #[test]
@@ -1101,8 +1252,9 @@ mod tests {
         assert!(a.get("ev").is_none(), "eventSize did not resolve: no ev agg anywhere");
         assert_eq!(a["sub"], json!({ "sum": { "field": "sub_size" } }));
         assert_eq!(a["by_index"]["terms"], json!({ "field": "_index", "size": 1000 }));
-        assert_eq!(a["by_index"]["aggs"], json!({ "sub": { "sum": { "field": "sub_size" } } }));
-        assert_eq!(a["f_tag"]["terms"], json!({ "field": "tag1", "size": 25 }));
+        assert_eq!(a["sub_n"], json!({ "value_count": { "field": "sub_size" } }), "how many documents the sum is over");
+        assert_eq!(a["by_index"]["aggs"], json!({ "sub": { "sum": { "field": "sub_size" } }, "sub_n": { "value_count": { "field": "sub_size" } } }));
+        assert_eq!(a["f_tag"]["terms"], json!({ "field": "tag1", "size": 25, "shard_size": 500 }));
         assert_eq!(a["m_tag"]["missing"], json!({ "field": "tag1" }));
         assert_eq!(a["f_forwarder"]["terms"]["field"], "fwdtag.keyword");
         assert!(a.get("f_sourceHost").is_none() && a.get("m_sourceHost").is_none());

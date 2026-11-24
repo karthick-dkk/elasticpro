@@ -280,6 +280,7 @@ impl Core {
         let mut t = (*st.read_tracker(cluster)).clone();
         let complete = read.complete && !read.is_partial();
         let before = t.last_run_ms;
+        t.interval_ms = Some((self.logdelay_every_hours() as i64) * 3_600_000);
         let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete, zone);
         if read.is_partial() {
             // One device, or the late devices, measured again is not the cluster's run: "in the
@@ -287,6 +288,7 @@ impl Core {
             t.last_run_ms = before.or(Some(run_ms));
         } else {
             t.last_read = Some(read);
+            t.last_failed = None;
         }
         st.write_tracker(cluster, &t)?;
         let day = time::local_date(run_ms);
@@ -310,6 +312,20 @@ impl Core {
         Ok((applied, daily))
     }
 
+    /// A run that read nothing of the cluster: kept, so that what was measured before it is not
+    /// shown as now (`Tracker::not_measured`). Only for a cluster measured before.
+    pub(crate) fn logdelay_failed(&self, cluster: &str, at: i64, error: &str) {
+        let Some(st) = self.logdelay_store() else { return };
+        let mut t = (*st.read_tracker(cluster)).clone();
+        if t.last_run_ms.is_none() {
+            return;
+        }
+        t.last_failed = Some(state::FailedRun { at, error: error.chars().take(300).collect() });
+        if let Err(e) = st.write_tracker(cluster, &t) {
+            tracing::warn!(cluster = %cluster, error = %e, "log delay: the failed run could not be kept");
+        }
+    }
+
     /// The bulk of one run's documents for a destination under `prefix`, in requests of at
     /// most `BULK_DOCS` documents each: 25 000 devices are five requests of a few MB, not one
     /// of tens.
@@ -318,7 +334,7 @@ impl Core {
         let mut items: Vec<(String, String, Value)> = applied.rows.iter()
             .map(|r| (docs::measurement_index(prefix, y, m), docs::measurement_id(cluster, &r.device, &bucket), docs::measurement_doc(cluster, r, &bucket, run_ms)))
             .collect();
-        for e in applied.opened.iter().chain(applied.continued.iter()).chain(applied.solved.iter()) {
+        for e in applied.opened.iter().chain(applied.continued.iter()).chain(applied.solved.iter()).chain(applied.ended.iter()) {
             let (ey, _, _) = crate::delay_sink::month_and_hour_bucket(e.started_ms);
             items.push((docs::episodes_index(prefix, ey), docs::episode_id(cluster, e), docs::episode_doc(cluster, e, run_ms)));
         }
