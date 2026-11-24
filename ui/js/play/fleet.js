@@ -90,7 +90,10 @@ export function tileDelayMinutes(ctx, c) {
   return sum && typeof sum.median === 'number' ? sum.median : null;
 }
 
-function tile(ctx, c) {
+/** What the tile's delay is: the median, not the worst device. Short on the two smallest tiles, where the long word would be cut. */
+export const delayWord = (dens) => (dens === 's' || dens === 'xs' ? ' med. delay' : ' median delay');
+
+function tile(ctx, c, dens) {
   const s = ctx.st.get(c.id);
   const d = ctx.data(c.id) || {};
   const nodes = ctx.nodes(c.id);
@@ -109,7 +112,7 @@ function tile(ctx, c) {
     h('div.pl-tfig',
       h('span', h('b', present === null || present === undefined ? '–' : String(present)), expected ? `/${expected}` : '', ' nodes'),
       h('span', s.fullest ? h('b', `${Math.round(s.fullest.pct)} %`) : unknown('–'), ' disk'),
-      h('span', delayMin !== null ? h(`b.${delayTone}`, minutes(delayMin)) : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : ''), ' delay'),
+      h('span', delayMin !== null ? h(`b.${delayTone}`, minutes(delayMin)) : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : ''), delayMin !== null ? delayWord(dens) : ' delay'),
       h('span', h(`b${toneOfCounts(a) ? `.${toneOfCounts(a)}` : ''}`, String(a.total)), ' alerts')),
     h('div.pl-tdev', { title: `Devices by delay: under ${ctx.watch.delayYellowFromMin} min, ${ctx.watch.delayYellowFromMin}–${ctx.watch.delayRedAboveMin} min, over ${ctx.watch.delayRedAboveMin} min` },
       sum ? [h('span.pl-dev.green', String(sum.by.OK || 0)), h('span.pl-dev.yellow', String(sum.by.DELAYED || 0)), h('span.pl-dev.red', String(sum.by.CRITICAL || 0))]
@@ -181,8 +184,9 @@ export const orderTitle = (order) => readFleetOrder(order).map((k) => FLEET_KEYS
 
 export function render(ctx) {
   const list = orderFleet(ctx, ctx.clusters, ctx.display && ctx.display.fleetOrder);
-  const tiles = list.map((c) => tile(ctx, c));
-  const grid = h(`div.pl-tiles.${density(list.length)}`, tiles);
+  const dens = density(list.length);
+  const tiles = list.map((c) => tile(ctx, c, dens));
+  const grid = h(`div.pl-tiles.${dens}`, tiles);
   ctx.afterMount(() => fitRows(grid, tiles, (n) => h('div.pl-tile.pl-more', `+${n} more`)));
   return h('div.pl-slide.pl-fleet', strip(ctx), grid);
 }

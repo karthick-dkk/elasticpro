@@ -82,3 +82,8 @@ test('the log delay key sorts by the figure the tile prints, not the worst devic
   for (const c of clusters) assert.equal(F.fleetFigure(ctx, c, 'logDelay'), printed(c));
   assert.equal(F.tileDelayMinutes({ delay: new Map() }, { id: 'x' }), null);
 });
+
+test('the tile says its delay is the median, on the smallest tiles too', () => {
+  for (const d of ['xl', 'l', 'm']) assert.equal(F.delayWord(d), ' median delay');
+  for (const d of ['s', 'xs']) assert.equal(F.delayWord(d), ' med. delay');
+});

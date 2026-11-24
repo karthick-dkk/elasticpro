@@ -267,7 +267,7 @@ late; none when none is) — about 54–58, from about 95.
   | Key | Figure (one definition, reused) |
   |---|---|
   | `critical` | The status rank of `play/status.js` (health, node left, critical and other open alerts, disk past high watermark) |
-  | `logDelay` | The delay shown on the tile (the median of the cluster's measured devices): `tileDelayMinutes`, called by the tile and the sort |
+  | `logDelay` | The delay shown on the tile, "2 min median delay" (the median of the cluster's measured devices, not its worst; "med. delay" on the two smallest tiles): `tileDelayMinutes`, called by the tile and the sort |
   | `volume` | Volume used yesterday: the Volume slide's "Yesterday" for the cluster |
   | `disk` | The fullest disk %: `status.fullest`, the tile's disk figure |
   | `alerts` | The open alert count on the tile |
