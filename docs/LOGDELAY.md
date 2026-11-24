@@ -35,6 +35,7 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 | `other_tz` | the raw gap sits at a real UTC offset other than the cluster's, two runs in a row ("Time zones" below) | other time zone — not late, counted apart |
 | `silent` | seen recently, no document for `silentAfterHours` (2) | silent — never on time, never 0 min |
 | `unmeasured` | arrival or event time unreadable | can't measure — never 0 min |
+| `part_delay` | some of its measured log types late, some on time ("Log types" below) | part delayed — neither late nor on time, its own count |
 
 * `m` is the **corrected** delay: the raw gap (arrival − event) with the cluster's log time zone
   taken out ("Time zones" below). Without a zone the raw gap is the delay, as before 0.3.62.
@@ -65,7 +66,7 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
   (30 minutes at least) for the next run to be read and written (`state::stale_after_ms`, the one rule): `lastMeasuredMs`, `measuredUntilMs`, `stale: true`, and the state text is "late when
   last measured 10:05, not measured since", never "still late". A period that ends without being
   solved says why (`ended`, `endedWhy`): the device was forgotten (it lasted to its last measurement,
-  0.3.89), or its time zone changed.
+  0.3.89), its time zone changed, or only some of its log types are late from then on (0.3.90).
 * **Resolution per cluster** (`logdelay::levels_for`): `logdelay.json` `clusters.<id>.levels`
   → the clusters file's `delayThresholds` on that cluster (`delayMinutes` → `delayFrom`,
   `criticalMinutes` → `criticalOver`; today's override, kept) → `logdelay.json` `levels` →
@@ -76,6 +77,57 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
   (`resolved[].levels`) and classify with the table above. `STATUS` names map: OK→`no_delay`
   (+`little`), DELAYED→`delay`, CRITICAL→`critical`, CLOCK_AHEAD→`clock_ahead`,
   NO_DATA→`silent`, ERROR→`unmeasured`.
+
+## Log types (0.3.90; `levels.rs` `State::of_types`, `state.rs` `take_types`)
+
+A device's logs are measured per **log type**: the value of `log_type` (`levels::LOG_TYPE_FIELD`,
+the same on every cluster; no setting). Only the mapping decides `log_type` or `log_type.keyword`.
+
+* **The field.** One `_field_caps` per cluster and run, over the indices with documents in the
+  window. Not in the mapping → off for that cluster: `logTypeField: null`, `logTypeWhy: "log_type is
+  not in the mapping"`, and everything is as before 0.3.90. Not answered → as the last run that was
+  (`"mapping not read"` when none was). Documents without the field are the type `(no log type)`
+  (`noType: true`); a real value of that text is another type, quoted in lists of names.
+* **A series is a device and a log type**: its own newest document, zone, level, delay periods, points
+  and last measurement, by the same code as the device's (`DeviceState::take_reading`) and the
+  cluster's levels. A log type measured for the first time is in its device's zone, where known.
+* **The device's state**, from its log types read in the run (two or more, one measured at least):
+  every measured one late → late, at the worst one's level; some late → `part_delay` ("part delayed —
+  1 of 3 log types late: threat"); none → on time, or `other_tz` when all of them are. With one log
+  type, with none measured, or with the field off, its newest document decides, as before.
+* **Its figures** (delay, raw gap, event time) are its worst late log type's (`delayLogType`); with none
+  late, its newest document's. A part delayed device's minutes are therefore one log type's.
+* **No document in the window** → that log type is `silent`, "no logs since 12:40": never on time,
+  never a reason to call the device silent, and it solves nothing. Counted as not late.
+* **More than 20 log types in a device's window** (`types_truncated`): those not read are left as they
+  were and said (`types.truncated`). An index that maps the field otherwise counts here too. After
+  150 000 log types of a cluster a run reads the rest of its devices without them (`TYPES_PER_RUN`).
+  **Not read is not on time**: such a device keeps its state, periods, points and log types, all
+  `stale` as of their own last measurement, and `stateText` ends "log types not read in this run (N
+  devices over the limit)"; nothing is solved, opened or forgotten. One never read by log types has its
+  newest document's state, and says the same. `typesUnread` counts them (totals, per cluster; on a device
+  the cluster's count, else `null`). The next run begins where the limit was reached and turns at the
+  last name (`collect::Walk`), so no device is always past it.
+* **A run over part of the cluster** (one device, the late ones) replaces nothing the cluster's run said
+  of its coverage (`Tracker::run_read`): last run, how it was read, `logTypesNotKept`.
+* **A name over 256 bytes** is its first 200, "…" and 8 hex of its sha256 (`measure::type_name`): never
+  another one's, never `(no log type)`.
+* **Periods.** A device's own period is open only while the whole device is late; when it becomes part
+  delayed the period ends, unsolved ("only some of its log types are late"). Every series has periods
+  of its own. Time part delayed is `partLateMs`, never in `lateMs`. A device's periods from before it
+  was read by log types carry `beforeLogTypes: true`.
+* **Counts.** `partDelayed` is in neither `late` nor `noDelay`; `noDelay` + part delayed + late + other
+  zone = devices, and their percentages 100. `logTypes {total, late, above}` counts series (`null`: not
+  read by log types — not 0); no logs and can't measure are not late.
+* **Kept.** A series' points 8 days in the tracker (`TYPE_RECENT_MS`; a device's 31 days), older ones
+  from the day files for the one device asked for; its ended periods 31 days, at most 100 000 a
+  cluster (`seriesPeriodsFromMs`: what started up to then is not all kept). A log type not seen for 7 days is
+  dropped, its open period ended. At most 40 log types a device and 100 000 a cluster are kept:
+  one beyond counts in its device's state, has no history, and is said (`types.truncated`,
+  `logTypesNotKept`). Memory and disk: `tests/logdelay_scale.rs`.
+* **Not changed by it.** The zone detection, *vs yesterday*, `newlyLate`/`solved` and the history's
+  `started`/`solved` are the devices'. State and day files from before load. **Back to 0.3.89**: a
+  tracker that holds a `part_delay` is not read by an older core (it starts the cluster's memory anew).
 
 ## Time zones (`logdelay/tz.rs`; applied in `state.rs` `Tracker::apply_run`)
 
@@ -210,7 +262,9 @@ named in the card's head, so the difference seen is the delay.
   (`event_created`, `ingested_time`, `event.created` by default); extras default
   `tag1, fwd_tag, parser_tag, Zone` (≤ 12 names).
 * **Pages, nothing cut** (`measure::page_body`, `collect.rs`): per cluster, a composite
-  aggregation on the device field, read `after_key` by `after_key`, at most 1000 devices a page
+  aggregation on the device field, read `after_key` by `after_key`, at most 1000 devices a page —
+  500 with log types, whose newest documents are in the same search (`types`: 20 a device, and
+  `no_type`): 21 buckets a device, 10 500 a page, no second search —
   (halved, down to 100, when a page's answer is over `memory::report_page_bytes`, or when it is
   over the response cap — `response_too_large` is asked again smaller, not a failure). Each
   bucket's `top_hits 1` (newest by arrival) brings the arrival, **every** event-time candidate
@@ -306,7 +360,7 @@ The page's *Fetch now*: the scheduled measurement, now, by the same code and que
   hand; the automatic run reads every device of every cluster every 2 hours). Missing, empty or
   more than one: `bad_request` with the reason in plain words; an unknown id `not_found`.
 * `devices: "late"` (the default) re-measures only that cluster's devices whose stored state at
-  the run's start is **late** — `delay` (30–60) or `critical` (above 60), by the cluster's own
+  the run's start is **late** — `delay` (30–60), `critical` (above 60) or `part_delay`, by the cluster's own
   levels (the one definition, "Levels") on the time-zone-corrected delay; never a figure of its
   own — in one `terms` filter on the device field (above `LATE_FILTER_MAX` = 10 000
   late devices the whole cluster is read instead, and the note says so). None late at the start:
@@ -342,9 +396,9 @@ The page's *Fetch now*: the scheduled measurement, now, by the same code and que
 ```text
 <data>/logdelay.json                          settings
 <data>/logdelay/clusters.json                 directory name → cluster id (a directory name is a file-safe rendering of the id)
-<data>/logdelay/<cluster>/tracker.json        per-device state, open period, open silence, 31 days of points as [t, m, s]; solved periods and silences (90 days)
+<data>/logdelay/<cluster>/tracker.json        per-device state, open period, open silence, 31 days of points as [t, m, s]; solved periods and silences (90 days); per log type 8 days of points as one text (`<ms since the last> : <minutes><state letter>`), its periods 31 days
 <data>/logdelay/<cluster>/daily.json          day → totals (90 days)
-<data>/logdelay/<cluster>/m/YYYY-MM-DD.ndjson one measurement document per device per run (90 days)
+<data>/logdelay/<cluster>/m/YYYY-MM-DD.ndjson one measurement document per device per run (90 days), its log types in it
 <data>/logdelay/findings.json                 the fixes as last matched (last 7 days)
 ```
 
@@ -359,16 +413,23 @@ in memory, replaced when the run writes it; the pages never re-read the file. Da
 
 | record | index | `_id` | fields |
 |---|---|---|---|
-| `measurement` | `<prefix>-YYYY.MM` (as before) | `cluster\|device\|hour` — a rerun in the hour overwrites | `@timestamp` (hour bucket), `measured_at`, `cluster`, `device`, `docs`, `arrival_time`, `event_time`, `event_field`, `delay_minutes` (null = can't measure), `state`, `extras.{…}` |
-| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `ended` / `ended_why` (ended unsolved), `last_measured`, `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras` |
+| `measurement` | `<prefix>-YYYY.MM` (as before) | `cluster\|device\|hour` — a rerun in the hour overwrites | `@timestamp` (hour bucket), `measured_at`, `cluster`, `device`, `docs`, `arrival_time`, `event_time`, `event_field`, `delay_minutes` (null = can't measure), `state`, `extras.{…}`; 0.3.90: `log_type` (the one its figures are of; null = its newest document's), `late_types[]`, `types[]` `{log_type, no_type?, state, delay_minutes, raw_gap_minutes, docs}` (null = not read by log types), `types_truncated` |
+| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `ended` / `ended_why` (ended unsolved), `last_measured`, `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras`; a log type's: `log_type` / `no_type`, `_id` `cluster\|t\|<sha256 of [device, kind, type, started]>` |
 | `daily` | `<prefix>-daily-YYYY` | `cluster\|day` — every run rewrites today; the first run of a new day rewrites yesterday complete | `@timestamp` (day), `day`, `cluster`, `clusterName`, `devices`, `measured`, `onTime`, `little`, `delayed`, `critical`, `clockAhead`, `silent`, `unmeasured`, `noDelay`, `lateBeforeSilent`, `startedCount`, `solvedCount`, `lateHours`, `medianMinutes`, `p95Minutes`, `complete`, `writtenAt` |
 
+* An `_id` over Elasticsearch's 512 bytes (a long device name) is `cluster\|d\|<sha256>` for a period,
+  `cluster\|m\|<sha256>` for a measurement; every other one is as it always was.
+* A document Elasticsearch rejects does not stop the others: the run says how many were and why the
+  first was, and its part is partial. A request it refuses stops the cluster's write.
 * Store template `<history prefix>-delay-template` on `<history prefix>-delay-*`, priority 210
   (above the general 200), mappings only, extras as keywords by dynamic template; created
   `create=true`, verified once per process (`history_ensure_template_for("logdelay")`).
 * **Retention on Elasticsearch is not built**: the templates hold mappings only (no ILM —
   `guard.rs` refuses settings), as for every history index; the store owner's ILM applies.
   The Storage board's 13 months / 3 years are documented targets for that policy.
+* A template made by an older ElasticPro is not replaced (`create=true`): `log_type`, `late_types`,
+  `types`, `partDelayed` and `logTypes` are then in the documents and not searchable until the store's
+  owner updates the template. `dynamic: false`, so nothing else changes.
 * `HISTORY_QUERY stream:delay` returns measurements only (`must_not record: period|daily`).
 * Mirror only: the pages never read Elasticsearch for this report.
 
@@ -392,6 +453,7 @@ Deterministic rules over the stored periods of a range (default last 7 days) and
 | `device_time_zone` | devices in `other_tz` now, one finding per offset (*Device clock / parser*): the gap sits at a real offset other than the cluster's two runs running; fix names the parser's `date { timezone => "…" }` with an example zone ("Time zones") |
 | `cluster` | the setting is `detect`, over half the measured devices sit at one non-UTC offset (*Cluster*): under the majority, "only x % of its devices agree on one offset … so no correction is applied — check the devices' clocks and the parser's date filter; the zone is taken from the majority once 60 % agree" (devices named); once detected, "nothing to set" (0.3.62: the page offers no chooser; the config's `logTimeZone` stays an admin override) |
 | `elasticsearch` | ≥ `max(5, 20 % of devices)` late in the same `everyHours` window(s), spanning ≥ 2 `fwd_tag`s (or no `fwd_tag` at all — then named as missing); evidence: devices, windows, days, forwarders, `writeRejected`, `nodesOverWatermark`, snapshots overlapping the windows (named in the fix) |
+| `log_type` | devices part delayed now, one finding per late log type (*Log type path*): only that type is late, so look at its own forwarder input and parser, not the device or the network; steady at a time-zone offset → its parser's date filter |
 | `forwarder` | late devices share one `fwd_tag` (else `Zone` when no `fwd_tag` exists): ≥ 2 late, ≥ half of that tag's devices, other tags ≤ 20 % late |
 | `parser` | same by `parser_tag`, and the late devices span ≥ 2 forwarders |
 | `device_clock` | ≥ 80 % of a device's late measurements (after the cluster's zone is taken out) within 3 min of a real UTC offset (60, 120, 330, 345 …), or clock-ahead readings |
@@ -400,8 +462,8 @@ Deterministic rules over the stored periods of a range (default last 7 days) and
 
 Each finding: `{cluster, step, stepLabel, devices[], group: [field, value] | null, why, fix,
 evidence{…numbers}, missing[]}`. Group findings claim their devices in the order above (a device
-with a time-zone finding is claimed first); the per-device view (`fixes::per_device`) is each
-device's first group. No model, no guess. `LOGDELAY_FIXES` `rules` lists eight rows.
+with a time-zone or log type finding is claimed first); the per-device view (`fixes::per_device`) is each
+device's first group. No model, no guess. `LOGDELAY_FIXES` `rules` lists nine rows.
 
 **On every board (0.3.62, `mod.rs` `attach_fixes`)**: `LOGDELAY_SUMMARY` and `LOGDELAY_CLUSTER`
 carry the kept findings (`findings.json`, the last 7 days as the last run matched them; matched
@@ -461,6 +523,14 @@ count (no clock ahead). `byCluster[]`: `noDelay`, `onTime`, `cantMeasure`, `cloc
 clock ahead. `windows[]` do not carry a reading past the stale rule. `DeviceRow`: `ownZone`,
 `lastEndedWhy`, `lastMeasuredMs`, `measuredUntilMs`, `stale`, `eventField`, `docsCounted` over
 `docsCountedHours` — `docsPerDay` is `null` under 24 h of windows (no extrapolation).
+
+Added in 0.3.90 ("Log types"; an older core sends none of it). `totals`, `byCluster[]`, `days[]`:
+`partDelayed`, `pctPartDelayed`, `logTypes {total, late, above} | null`. `byCluster[]` and the cluster
+answer: `logTypeField`, `logTypeWhy`, `logTypesNotKept`; `byCluster[].worst.logType`. `windows[]`:
+`partDelayed`, `partAt`. `byLogType[] {logType, noType, devices, late, above, silent, worstMinutes | null}`,
+worst first (at most 500), in the summary and the cluster answer. `DeviceRow`: `stateText`, `types
+{total, measured, late, lateNames[], truncated} | null` (`null`: the field is off, or never read by log
+types), `partLateMs`, `delayLogType`.
 
 Board figures (0.3.62): the five tiles = `totals` (`onTime` = below the delay line, `delay`,
 `critical`, `otherTz`, `silent` with `unmeasured` named under it); *Devices behind* = `days[]`
@@ -540,10 +610,17 @@ lasted until `ended`. `olderMeasurements` appears only when
 the range reaches past the tracker's 31 days (read from the day files, ≤ 20 000).
 `not_found` when the device is not in the tracker (forgotten after 7 days unseen).
 
+Added in 0.3.90: `types`, `partLateMs`, `delayLogType`, `logTypeField`, `logTypeWhy`, `typesSinceMs`,
+`periods[].beforeLogTypes`, and `series[]`, worst first: `{logType, noType, state, stateText, delayMinutes,
+rawGap, eventField, lastArrival, lastEvent, docs, episodes[] (as periods[]), points[] (as points[]), lateMs,
+lastMeasuredMs, stale}`; none → `seriesWhy` ("before log types were measured", or `logTypeWhy`). Points older
+than `typeDays` (8) come from the day files, the newest days first up to 1 GB of them: `seriesFromMs` says
+from when, when that was not all; `seriesPeriodsFromMs` the same for periods cut by number. A log type
+dropped since (a week without a log) is listed where the range still has points or periods of it.
+
 ### `LOGDELAY_SEARCH {name?, field?, value?, clusterIds?, from?, to?, max?}`
 
-`name` = device name contains (case-insensitive); `field` + `value` = `device`/`src_*` (the
-device name) or an extra column, `value` with `*`/`?` wildcards, whole value, case-insensitive;
+`name` = device name contains (case-insensitive); `field` + `value` = `device`/`src_*` (the device name), `log_type` (any of its log types) or an extra column, `value` with `*`/`?` wildcards, whole value, case-insensitive;
 both apply when both given. `{ ok, matches, truncated, clusters[], devices[DeviceRow], from, to }`.
 
 ### `LOGDELAY_FIXES {clusterIds?, from?, to?}` (default last 7 days) — Fix board
@@ -566,7 +643,7 @@ rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
                   "logTimeZone": "detect|UTC|Asia/Kolkata", "timeZone": { "…": "Time zones" } } ],
   "timeZones": { "toleranceMinutes": 3.0, "majorityPercent": 60, "steadyRuns": 3, "server": "Asia/Kolkata" },
   "schedule": { "enabled": true, "everyHours": 2, "destination": "builtin|history|cluster", "clusters": [], "maxDevices": 20000, "state": {…}, "blocked": null },
-  "builtinStore": { "keepDays": 90, "bytes": 123456, "recentDays": 31, "dir": "logdelay",
+  "builtinStore": { "keepDays": 90, "bytes": 123456, "recentDays": 31, "typeDays": 8, "dir": "logdelay",
                     "sizes": { "bytes": 123456, "trackersBytes": 0, "dailyBytes": 0, "dayFilesBytes": 0, "dayFiles": 0, "clusters": 0 } },
   "extrasDefault": [..], "uiCopy": "…" }
 ```
@@ -599,14 +676,22 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
 * **Attachments**: `elasticpro-log-delay-<from>_<to>.xlsx` (`elasticpro-log-delay-<YYYY-MM-DDTHH00>.xlsx`
   for an hour) — sheets *Summary* (with a *Zone · tag1* table: devices, late now, above 60 min,
   silent per pair, the most late first; "—" where the logs do not say), *Devices* (chosen
-  columns, group column first when not cluster, + Step/Likely why/Fix), *Every N hours*, *Day by
-  day*, *Top delayed*, *Fixes* — and `…-devices.csv` (the Devices sheet).
+  columns, group column first when not cluster, + Step/Likely why/Fix, and 0.3.90 Log types / Delay is of
+  log type / Time part delayed, in the CSV at the end), *Every N hours*, *Day by
+  day*, *Log types* (0.3.90, where a cluster is read by them: one row per delay period of a log type in
+  the range — cluster, device, log type, state, delay now, started → solved, lasted, worst; a report of
+  all devices also lists the log types without one; at most 200 000 rows, said when cut), *Top
+  delayed*, *Fixes* — and `…-devices.csv` (the Devices sheet).
 * **Zone and tag1 everywhere**: the Devices sheet and the CSV always carry `Zone` and `tag1`
   (added after the cluster when the chosen columns leave them out); *Top delayed* has both
   columns; *Fixes* names the zones and tag1s of each finding's devices; the mail's *Top delayed*
   has both and its Summary a *By zone and tag1* table (12 pairs, the rest named as in the
   attachment). *Every N hours* and *Day by day* are counts per time window over all devices
   (no device rows): they are not split by zone.
+* **Part delayed** (0.3.90) has its own figure beside Late in the Summary, the mail's tile and tables,
+  *Every N hours* and *Day by day*, and is in the device list of a "delayed" report; *Top delayed* lists
+  fully late devices alone. A cluster not read by log types is named with the reason in *About*; its
+  cells say "not read", never 0.
 * **No measurement in the period** (an hour between two-hourly runs, a range before the first
   run): the mail and the text say so at the top; the figures shown are the devices' states now.
   **PDF: not built** — there is no PDF writer in the tree; `pdf: true` round-trips and the
@@ -618,7 +703,7 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   (top 3 that are not "unknown"), *Open the full report* when `UI_PUBLIC_URL` is set in
   config.txt (`<url>/#/reports/log-delay`, which opens the Log Delay page since 0.3.60). Tables and inline styles only. A state has one
   colour everywhere (`report::state_colour`, owner 2026-11-24): critical light red, delayed light
-  yellow, on time light green, another time zone violet, silent and can't measure grey — with dark
+  yellow, on time light green, part delayed white with a yellow edge, another time zone violet, silent and can't measure grey — with dark
   ink and the word always written.
 * Period days are local days; `yesterday`/`last7`/`previousWeek`/`previousMonth`/`{from,to}`
   as every report, and **`lastHour`** (this kind only): the whole server-local hour before now.

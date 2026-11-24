@@ -12,6 +12,8 @@
 //!   a different fault with a different fix, tested before the "how big" questions;
 //! * other time zone: not a level of the delay at all — a device whose gap sits, steadily, at
 //!   a real UTC offset other than its cluster's (`tz.rs`; decided in `state.rs`). Not late.
+//! * part delayed: some of a device's log types are late, some are on time (`State::of_types`).
+//!   Not a late device, not an on-time one: its own count (0.3.90).
 //!
 //! There is no "little delay" band (the owner's rule, 0.3.62): the three configured levels are
 //! all anyone sees. `noDelayUnder` stays in the JSON for the settings file and the clients that
@@ -93,7 +95,17 @@ pub enum State {
     Silent,
     /// Its latest document has no readable event time or arrival. "Can't measure", not 0 min.
     Unmeasured,
+    /// Some of its log types are late and some are on time (0.3.90): neither late nor on time,
+    /// its own count (docs/LOGDELAY.md "Log types").
+    PartDelay,
 }
+
+/// The ECS field a device's logs say their type in: the same on every cluster, no setting. The
+/// mapping decides `log_type` or `log_type.keyword`.
+pub const LOG_TYPE_FIELD: &str = "log_type";
+/// How documents without that field are shown: a type of its own, never merged with a real value
+/// of the same text.
+pub const NO_LOG_TYPE: &str = "(no log type)";
 
 /// Before any measurement, a device is unmeasured — never on time by default.
 impl Default for State {
@@ -103,6 +115,47 @@ impl Default for State {
 }
 
 impl State {
+    pub const ALL: [State; 9] = [State::NoDelay, State::Little, State::Delay, State::Critical, State::ClockAhead, State::OtherTz, State::Silent, State::Unmeasured,
+                                 State::PartDelay];
+
+    /// Its place in `ALL`, as points are held; an unknown code is "can't measure", never on time.
+    pub(super) fn code(self) -> u8 {
+        self as u8
+    }
+    pub(super) fn of_code(c: u8) -> State {
+        State::ALL.get(c as usize).copied().unwrap_or(State::Unmeasured)
+    }
+    /// Its letter in a log type's points as written.
+    pub(super) fn letter(self) -> char {
+        b"nldcazsup"[self as usize] as char
+    }
+    pub(super) fn of_letter(c: char) -> Option<State> {
+        State::ALL.into_iter().find(|s| s.letter() == c)
+    }
+
+    /// A device's state from its log types read in one run — the one rule (docs/LOGDELAY.md "Log
+    /// types"). Every measured one late: late, at the worst one's level. Some late: part delayed.
+    /// None late: on time, or in another time zone when all of them are. `None` — the device's
+    /// newest document decides, as before 0.3.90 — with fewer than two read, or none measured.
+    pub fn of_types(read: &[State]) -> Option<State> {
+        if read.len() < 2 {
+            return None;
+        }
+        let measured: Vec<State> = read.iter().copied().filter(|s| s.measured() && !s.cant_measure()).collect();
+        let late: Vec<State> = measured.iter().copied().filter(|s| s.late()).collect();
+        if measured.is_empty() {
+            None
+        } else if late.len() == measured.len() {
+            Some(if late.contains(&State::Critical) { State::Critical } else { State::Delay })
+        } else if !late.is_empty() {
+            Some(State::PartDelay)
+        } else if measured.iter().all(|s| *s == State::OtherTz) {
+            Some(State::OtherTz)
+        } else {
+            Some(State::NoDelay)
+        }
+    }
+
     /// The level of a measured delay. `None` in, nothing out: unreadable is not a level.
     pub fn of(delay_minutes: Option<f64>, l: &Levels) -> Option<State> {
         let m = delay_minutes.filter(|m| m.is_finite())?;
@@ -157,6 +210,7 @@ impl State {
             State::OtherTz => "other_tz",
             State::Silent => "silent",
             State::Unmeasured => "unmeasured",
+            State::PartDelay => "part_delay",
         }
     }
 
@@ -171,6 +225,7 @@ impl State {
             State::OtherTz => "other time zone",
             State::Silent => "silent",
             State::Unmeasured => "can't measure",
+            State::PartDelay => "part delayed",
         }
     }
 }
@@ -209,7 +264,7 @@ mod tests {
 
     #[test]
     fn late_is_delay_or_critical_and_nothing_else() {
-        for s in [State::NoDelay, State::Little, State::ClockAhead, State::OtherTz, State::Silent, State::Unmeasured] {
+        for s in [State::NoDelay, State::Little, State::ClockAhead, State::OtherTz, State::Silent, State::Unmeasured, State::PartDelay] {
             assert!(!s.late(), "{s:?}");
         }
         assert!(State::Delay.late() && State::Critical.late());
@@ -222,6 +277,27 @@ mod tests {
         assert_eq!(serde_json::to_value(State::OtherTz).unwrap(), json!("other_tz"));
         assert_eq!(State::OtherTz.label(), "other time zone");
         assert_eq!(TZ_TOLERANCE_MINUTES, 3.0);
+    }
+
+    #[test]
+    fn a_device_is_late_only_when_every_measured_log_type_is() {
+        use State::*;
+        let of = |v: &[State]| State::of_types(v);
+        assert_eq!(of(&[Delay, Delay]), Some(Delay));
+        assert_eq!(of(&[Delay, Critical]), Some(Critical), "the worst one's level");
+        assert_eq!(of(&[Delay, NoDelay, NoDelay]), Some(PartDelay), "one of three late");
+        assert_eq!(of(&[Critical, OtherTz]), Some(PartDelay), "on time in another zone is not late");
+        assert_eq!(of(&[NoDelay, OtherTz]), Some(NoDelay));
+        assert_eq!(of(&[OtherTz, OtherTz]), Some(OtherTz));
+        // What could not be measured is neither late nor on time: the measured ones decide.
+        assert_eq!(of(&[Critical, Unmeasured]), Some(Critical));
+        assert_eq!(of(&[NoDelay, ClockAhead, Silent]), Some(NoDelay));
+        assert_eq!(of(&[Unmeasured, ClockAhead]), None, "nothing measured: the newest document, as before");
+        assert_eq!((of(&[]), of(&[Delay])), (None, None), "one log type: as before");
+        // Part delayed is never on time, late, silent, or in No delay.
+        assert!(!PartDelay.on_time() && !PartDelay.late() && !PartDelay.no_delay() && !PartDelay.cant_measure() && PartDelay.measured());
+        assert_eq!(serde_json::to_value(PartDelay).unwrap(), json!("part_delay"));
+        assert_eq!((PartDelay.as_str(), PartDelay.label()), ("part_delay", "part delayed"));
     }
 
     #[test]

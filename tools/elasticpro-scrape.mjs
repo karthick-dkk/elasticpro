@@ -223,14 +223,18 @@ for (const c of activeClusters()) {
   const last = delaySummaryFor(c.id);
   if (!data.reachable || (last && started - last.at < delayEveryMs)) continue;
   try {
-    const pre = await preflight(client(c.id), c);
+    // By log type too (docs/LOGDELAY.md "Log types"): a cluster without the field sends those keys
+    // not at all — unknown, not 0.
+    const pre = await preflight(client(c.id), c, { logType: true });
     if (!pre.ok || pre.unknown) continue;
     if (!levelsAsked) { levelsAsked = true; await loadLevels(); }
     const r = await measureDelay(client(c.id), c, pre, 24);
     const sum = summarise(r.records);
     // Only what the alert reads is kept; the device list stays in the app.
     setDelaySummary(c.id, { devices: sum.devices, by: sum.by, median: sum.median,
-      worst: sum.worst && { device: sum.worst.device, delayMinutes: sum.worst.delayMinutes } }, started);
+      worst: sum.worst && { device: sum.worst.device, delayMinutes: sum.worst.delayMinutes },
+      // Part delayed devices are `by.PART_DELAY`: not in the late counts, not on time.
+      logTypes: sum.logTypes ?? null, partLate: sum.partLate ?? null, worstLogType: sum.worstLogType ?? null }, started);
     measuredNow.add(c.id);
   } catch (e) { problems.push(`${c.name}: log delay not measured — ${e.message || e}`); }
 }

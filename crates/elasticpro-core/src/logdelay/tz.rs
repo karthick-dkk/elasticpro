@@ -568,7 +568,7 @@ mod tests {
         assert!(v["windowNote"].is_null());
         // What the note says, shown: a log that arrived a minute before the run, stored at +05:30,
         // is past the end of the window the run asks for.
-        let fields = crate::logdelay::measure::Fields { pattern: "p".into(), device: "d".into(), arrival: "@timestamp".into(), event_time: vec![], extras: vec![] };
+        let fields = crate::logdelay::measure::Fields { pattern: "p".into(), device: "d".into(), arrival: "@timestamp".into(), event_time: vec![], extras: vec![], log_type: None };
         let q = crate::logdelay::measure::page_body(&fields, NOV - 7_200_000, NOV, 10, None, &crate::logdelay::measure::DeviceFilter::All);
         let end = q.pointer("/query/bool/filter/0/range/@timestamp/lte").and_then(serde_json::Value::as_i64).unwrap();
         assert!(NOV - 60_000 + 330 * 60_000 > end);

@@ -22,7 +22,7 @@
 //! worker, and a copy refreshed only by its own process's writes goes stale in the other.
 
 use super::state::{Daily, Tracker, KEEP_MS};
-use crate::volume::store::write_atomic;
+use crate::volume::store::{write_atomic, write_atomic_with};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
@@ -129,12 +129,18 @@ impl Store {
     }
 
     pub fn write_tracker(&self, cluster: &str, t: &Tracker) -> Result<(), String> {
+        self.put_tracker(cluster, t.clone())
+    }
+
+    /// The tracker, taken: written as it is serialised (a 25 000-device one is hundreds of MB of
+    /// text, never held) and kept as the parsed copy.
+    pub fn put_tracker(&self, cluster: &str, t: Tracker) -> Result<(), String> {
         let dir = self.cluster_dir(cluster);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("tracker.json");
-        write_atomic(&path, &serde_json::to_vec(t).map_err(|e| e.to_string())?)?;
+        write_atomic_with(&path, |f| serde_json::to_writer(f, &t).map_err(|e| e.to_string()))?;
         let at = stamp(&path);
-        cache().lock().insert(path, (at, Arc::new(t.clone())));
+        cache().lock().insert(path, (at, Arc::new(t)));
         let mut index = self.index();
         if index.get(&Self::dir_name(cluster)).map(String::as_str) != Some(cluster) {
             index.insert(Self::dir_name(cluster), cluster.to_string());
@@ -159,56 +165,95 @@ impl Store {
     }
 
     /// Append one run's measurement lines to the day's file.
-    pub fn append_measurements(&self, cluster: &str, day: &str, lines: &[Value]) -> Result<(), String> {
-        if lines.is_empty() {
+    pub fn append_measurements(&self, cluster: &str, day: &str, lines: impl Iterator<Item = Value>) -> Result<(), String> {
+        use std::io::Write as _;
+        let mut lines = lines.peekable();
+        if lines.peek().is_none() {
             return Ok(());
         }
         let dir = self.cluster_dir(cluster).join("m");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let mut body = String::new();
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{day}.ndjson"))).map_err(|e| e.to_string())?;
+        let mut f = std::io::BufWriter::with_capacity(1 << 18, f);
         for l in lines {
-            body.push_str(&l.to_string());
-            body.push('\n');
+            writeln!(f, "{l}").map_err(|e| e.to_string())?;
         }
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{day}.ndjson"))).map_err(|e| e.to_string())?;
-        f.write_all(body.as_bytes()).map_err(|e| e.to_string())
+        f.flush().map_err(|e| e.to_string())
     }
 
     /// The measurement lines of one device between two days inclusive (`YYYY-MM-DD`), oldest
     /// first. Reads only the day files in range; `None` for a device filter reads every line.
     pub fn read_measurements(&self, cluster: &str, device: Option<&str>, from_day: &str, to_day: &str, max: usize) -> (Vec<Value>, bool) {
-        let dir = self.cluster_dir(cluster).join("m");
-        let mut days: Vec<String> = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".ndjson")).map(String::from))
-                .filter(|d| d.as_str() >= from_day && d.as_str() <= to_day).collect(),
-            Err(_) => return (vec![], false),
-        };
-        days.sort();
-        let needle = device.map(|d| format!("\"device\":{}", serde_json::to_string(d).unwrap_or_default()));
         let mut out = vec![];
-        let mut truncated = false;
-        'days: for d in days {
-            let Ok(text) = std::fs::read_to_string(dir.join(format!("{d}.ndjson"))) else { continue };
-            for line in text.lines() {
-                if let Some(n) = &needle {
-                    if !line.contains(n.as_str()) {
-                        continue;
-                    }
-                }
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    if device.is_some_and(|dv| v.get("device").and_then(Value::as_str) != Some(dv)) {
-                        continue;
-                    }
-                    if out.len() >= max {
-                        truncated = true;
-                        break 'days;
-                    }
-                    out.push(v);
-                }
+        for d in self.measured_days(cluster, from_day, to_day) {
+            if !self.read_day(cluster, device, &d, max, &mut out) {
+                return (out, true);
             }
         }
-        (out, truncated)
+        (out, false)
+    }
+
+    /// The same for one device, the newest days first until `max_bytes` of day files were read: the
+    /// lines oldest first, and the oldest day read when that was not all of them.
+    pub fn read_newest(&self, cluster: &str, device: &str, from_day: &str, to_day: &str, max_bytes: u64) -> (Vec<Value>, Option<String>) {
+        let mut days: Vec<Vec<Value>> = vec![];
+        let (mut bytes, mut oldest) = (0u64, None);
+        let mut cut = None;
+        for d in self.measured_days(cluster, from_day, to_day).into_iter().rev() {
+            bytes += std::fs::metadata(self.day_file(cluster, &d)).map(|m| m.len()).unwrap_or(0);
+            if bytes > max_bytes {
+                cut = oldest.or(Some(to_day.to_string()));
+                break;
+            }
+            let mut lines = vec![];
+            self.read_day(cluster, Some(device), &d, usize::MAX, &mut lines);
+            days.push(lines);
+            oldest = Some(d);
+        }
+        (days.into_iter().rev().flatten().collect(), cut)
+    }
+
+    fn day_file(&self, cluster: &str, day: &str) -> PathBuf {
+        self.cluster_dir(cluster).join("m").join(format!("{day}.ndjson"))
+    }
+
+    fn measured_days(&self, cluster: &str, from_day: &str, to_day: &str) -> Vec<String> {
+        let mut days: Vec<String> = match std::fs::read_dir(self.cluster_dir(cluster).join("m")) {
+            Ok(rd) => rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".ndjson")).map(String::from))
+                .filter(|d| d.as_str() >= from_day && d.as_str() <= to_day).collect(),
+            Err(_) => vec![],
+        };
+        days.sort();
+        days
+    }
+
+    /// One day file's lines, read a line at a time (a large cluster's is hundreds of MB). `false`
+    /// once `max` lines are held and there is another.
+    fn read_day(&self, cluster: &str, device: Option<&str>, day: &str, max: usize, out: &mut Vec<Value>) -> bool {
+        use std::io::BufRead as _;
+        let Ok(f) = std::fs::File::open(self.day_file(cluster, day)) else { return true };
+        let needle = device.map(|d| format!("\"device\":{}", serde_json::to_string(d).unwrap_or_default()));
+        let mut r = std::io::BufReader::with_capacity(1 << 18, f);
+        let mut line = vec![];
+        loop {
+            line.clear();
+            match r.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => return true,
+                Ok(_) => {}
+            }
+            let Ok(line) = std::str::from_utf8(&line) else { continue };
+            if needle.as_ref().is_some_and(|n| !line.contains(n.as_str())) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            if device.is_some_and(|dv| v.get("device").and_then(Value::as_str) != Some(dv)) {
+                continue;
+            }
+            if out.len() >= max {
+                return false;
+            }
+            out.push(v);
+        }
     }
 
     /// Delete day files older than the retention, every cluster. Returns how many went.
@@ -275,8 +320,8 @@ pub fn oldest_kept_day(now_ms: i64) -> String {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
-    let text = std::fs::read_to_string(p).ok()?;
-    serde_json::from_str(&text).ok()
+    // Read as it is parsed: the text of a large tracker is not held beside it.
+    serde_json::from_reader(std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(p).ok()?)).ok()
 }
 
 #[cfg(test)]
@@ -296,9 +341,9 @@ mod tests {
         let dir = tmp("store");
         let s = Store::new(&dir);
         s.write_tracker("prod", &Tracker::default()).unwrap();
-        s.append_measurements("prod", "2026-11-04", &[json!({ "device": "fw-1", "delay_minutes": 41 }), json!({ "device": "fw-2", "delay_minutes": 1 })]).unwrap();
-        s.append_measurements("prod", "2026-11-05", &[json!({ "device": "fw-1", "delay_minutes": 5 })]).unwrap();
-        s.append_measurements("prod", "2020-01-01", &[json!({ "device": "fw-1", "delay_minutes": 5 })]).unwrap();
+        s.append_measurements("prod", "2026-11-04", [json!({ "device": "fw-1", "delay_minutes": 41 }), json!({ "device": "fw-2", "delay_minutes": 1 })].into_iter()).unwrap();
+        s.append_measurements("prod", "2026-11-05", [json!({ "device": "fw-1", "delay_minutes": 5 })].into_iter()).unwrap();
+        s.append_measurements("prod", "2020-01-01", [json!({ "device": "fw-1", "delay_minutes": 5 })].into_iter()).unwrap();
         let (rows, truncated) = s.read_measurements("prod", Some("fw-1"), "2026-11-01", "2026-11-30", 100);
         assert_eq!(rows.len(), 2);
         assert!(!truncated);
@@ -367,5 +412,22 @@ mod tests {
         assert_eq!(all.keys().cloned().collect::<Vec<_>>(), vec!["2026-11-06".to_string()]);
         assert_eq!(all["2026-11-06"].devices, 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_devices_lines_are_read_newest_first_up_to_a_size_and_it_is_said() {
+        let d = std::env::temp_dir().join(format!("elasticpro-ld-newest-{}", std::process::id()));
+        let s = Store::new(&d);
+        for day in ["2026-11-01", "2026-11-02", "2026-11-03"] {
+            s.append_measurements("prod", day, (0..2).flat_map(|k| ["fw-1", "fw-10"].map(|n| json!({ "device": n, "measured_at": k, "day": day })))).unwrap();
+        }
+        s.append_measurements("prod", "2026-11-04", std::iter::empty()).unwrap();
+        let (all, cut) = s.read_newest("prod", "fw-1", "2026-11-01", "2026-11-09", u64::MAX);
+        assert_eq!((all.len(), cut, all[0]["day"].clone(), all[5]["day"].clone()), (6, None, json!("2026-11-01"), json!("2026-11-03")), "oldest first, that device alone");
+        let one = std::fs::metadata(s.day_file("prod", "2026-11-01")).unwrap().len();
+        let (some, cut) = s.read_newest("prod", "fw-1", "2026-11-01", "2026-11-09", one * 2 + 1);
+        assert_eq!((some.len(), cut.as_deref()), (4, Some("2026-11-02")), "not from the 1st: said");
+        assert_eq!(s.read_newest("prod", "fw-1", "2026-11-01", "2026-11-09", 1), (vec![], Some("2026-11-09".into())));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
