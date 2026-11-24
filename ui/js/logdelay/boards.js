@@ -53,6 +53,7 @@ import {
   lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, gridHue, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER, noDeviceTotal, noDeviceLine, partOf, partText, partLateText,
+  typesUnreadLine,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank, withTypes } from './rows.js';
 import { LOG_TYPE_FIELD, hasTypes, saysTypes, seriesLate, typeLabel, typesHeadline } from '../core/log-types.js';
@@ -419,9 +420,17 @@ function readNotes(items) {
  */
 function noDeviceNote(byCluster, where = '') {
   const sum = noDeviceTotal(byCluster);
-  if (!sum) return null;
-  return h('div.muted.ld-note#ld-nodevice-note', { title: 'Documents in the last run’s window whose device field is empty: they are in no bucket, so no device’s delay or count includes them. Check the parser’s device field.' },
+  const unread = typesUnreadNote(byCluster);
+  if (!sum) return unread;
+  const note = h('div.muted.ld-note#ld-nodevice-note', { title: 'Documents in the last run’s window whose device field is empty: they are in no bucket, so no device’s delay or count includes them. Check the parser’s device field.' },
     `${noDeviceLine(sum)}.${where ? ` ${where}` : ''}`);
+  return unread ? h('div', note, unread) : note;
+}
+
+/** The devices whose log types the last run did not come to: said wherever their counts are shown. */
+function typesUnreadNote(items) {
+  const line = typesUnreadLine(items);
+  return line ? h('div.ld-note.ld-types-unread', line) : null;
 }
 
 /** One cluster's three counts, one line, with what each means. */
@@ -892,7 +901,7 @@ function clusterView(id) {
     : null));
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
   const countsNote = never ? null : B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
-    h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
+    h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`), typesUnreadNote([t])));
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
   const winNote = B.get('cl:window', `${rid}|${S.pk}|${JSON.stringify(S.rng)}`, () => windowNote(res.lastRunAt, res.now));
   const charts = never ? null : B.get('cl:charts', `${rid}|${S.pk}|${S.tz}`, () => chartPanels(res, S.period, b, id));

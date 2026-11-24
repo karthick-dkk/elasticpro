@@ -706,6 +706,11 @@ export function noDeviceTotal(items) {
   }
   return n ? { docs, clusters: n } : null;
 }
+/** Devices whose log types the last runs did not come to (a cluster over its limit), in words; '' for none. `items`: `byCluster` rows or a cluster answer's totals. */
+export function typesUnreadLine(items) {
+  const n = (items || []).reduce((a, x) => a + (x && finite(x.typesUnread) && x.typesUnread > 0 ? x.typesUnread : 0), 0);
+  return n ? `${countText(n)} device${n === 1 ? ' is' : 's are'} counted as when ${n === 1 ? 'its' : 'their'} log types were last read: the last run did not come to ${n === 1 ? 'its' : 'their'} log types (over the limit of one run).` : '';
+}
 /** That sum in one line: "12,404 documents in 9 clusters have no device name …"; one cluster needs no "in 1 cluster". */
 export function noDeviceLine(sum) {
   if (!sum) return '';

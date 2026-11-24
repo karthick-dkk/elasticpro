@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.90
+
+- **Log delay per log type.** Each device's log types (`log_type`, the same field on every cluster; no setting) are measured on their own in the same query as the device: own delay, level, delay periods. A device with only some log types late is **part delayed**, not delayed: its own count and percentage beside No delay, 30–60, above 60 and other time zone (they add up to 100). A device is delayed only when every log type measured in the run is late. A cluster without `log_type` in its mapping works as before and says so.
+  - *Device page*: one line per log type in the graph (worst six, the rest to choose), every type's delay in the tooltip, and a table of the device's log types (now, delay, event time, arrived, logs, delays, time late, last delay started → solved). The headline says it: "1 of 3 log types late: threat". Delays from before the upgrade are labelled "before log types were measured".
+  - *Lists, cluster page, Summary, Dashboard, Live*: state "part delayed", column LOG TYPES, filter chip, search by log type, the card *By log type*, the tile PART DELAYED.
+  - *Files and mail*: a Log types sheet, part delayed in totals and day by day, a `log_type` column. *Alerts*: part delayed is a warning. *Zabbix*: new items `elasticpro.delay[part_delayed]`, `[log_types_late]`, `[worst_log_type]`; `late`, `delayed` and `critical` now count fully late devices only. Import the regenerated log delay template.
+  - Limits, always said where they apply: 20 log types read per device, 150,000 per cluster and run (a device past it keeps its last read state, marked, and the next run starts there); a type name over 256 bytes is cut and marked. Points per log type are kept 8 days in memory, the rest in the day files.
+- **Going back to 0.3.89**: it cannot read a log delay record that holds a part delayed device. Keep the backup `deploy.sh --upgrade` makes.
+- **Alerts: log delay from the scheduled measurement.** The alert existed only in a browser that had opened *Live* or Play; the page and its CSV could say nothing while devices were late. It now comes from the server's last run too ("as of last run 21:50"); the newer of the two counts.
+- **Reports › Monthly and Breakdown: finished days only.** The Monthly table, its CSV and the current month's breakdown still counted today's part of a day, against Overview, Daily and the files. One rule now; the current month is not offered for a breakdown on the 1st.
+- **A size in GB is never 0 when there is one.** The Storage plan, Every parameter, Client plan, Overview and Measure size files rounded to 0.1 or 0.01 GB: 13.4 MB a day read 0. Below 1 GB they now carry three significant digits.
+- **Play** says "median delay" on a cluster's tile; **Clusters › Overview** says what ILM counted ("0 of 9 open log indices managed"); a snapshot alert's time names its zone.
+- The history store takes documents with names longer than Elasticsearch's 512-byte id, and one rejected document no longer stops the others.
+
 ## 0.3.89
 
 Every page and file was compared with raw Elasticsearch, because they are given to auditors. What was not known, not read, partial or not current now says so, on screen and in every file. Rule: the true figure; else "not measured" or "not read" with the reason; a partial figure says "N of M"; an old one says when it was read.

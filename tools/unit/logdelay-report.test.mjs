@@ -557,3 +557,10 @@ test('event time: the fields the devices\' times really came from', () => {
   assert.equal(R.eventFieldsText([{}], ['ingested_time', 'event_created']), 'the first of ingested_time, event_created a device’s log has');
   assert.equal(R.eventFieldsText([], []), 'field not known');
 });
+
+test('devices whose log types were not read in the last run are said, summed over the clusters', () => {
+  assert.equal(R.typesUnreadLine([{ typesUnread: 0 }, {}, { typesUnread: null }]), '');
+  assert.equal(R.typesUnreadLine(undefined), '');
+  assert.match(R.typesUnreadLine([{ typesUnread: 1 }]), /^1 device is counted as when its log types were last read/);
+  assert.match(R.typesUnreadLine([{ typesUnread: 3 }, { typesUnread: 4 }]), /^7 devices are counted as when their log types were last read/);
+});
