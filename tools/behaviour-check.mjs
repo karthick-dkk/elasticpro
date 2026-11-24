@@ -8872,7 +8872,10 @@ await settleFor(300);
   const drawn = () => view().querySelectorAll('#ld-graph .ld-type-line').length;
   try {
     ldKnobs.logTypes = true;
+    S.state.selected = 'all';   // the boards of every cluster, whatever a block before this one chose
+    await go('overview');   // leaving drops what the page was told before
     await go('log-delay');
+    location.hash = '#/log-delay';
     // The Part delayed tile: its own count beside the delayed devices, pressed to list them.
     const tile = await waitFor(() => view().querySelector('.ld-kpi[data-kpi="part"]'), 'log types: no Part delayed tile');
     const t = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, fx).totals;
