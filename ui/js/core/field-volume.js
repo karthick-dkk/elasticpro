@@ -55,7 +55,9 @@ function bytesByDay(clusterId) {
   const out = new Map();
   for (const r of state.indices.get(clusterId) || []) {
     if (!r.day) continue;
-    out.set(r.day, (out.get(r.day) || 0) + (r.size || 0));
+    // An index without a size (closed, red) makes the day's size unknown, not smaller.
+    const cur = out.has(r.day) ? out.get(r.day) : 0;
+    out.set(r.day, cur === null || typeof r.size !== 'number' ? null : cur + r.size);
   }
   return out;
 }
@@ -103,7 +105,7 @@ export async function fetchFieldVolume(cluster, { field, days = 14, topN = 12 } 
         day,
         docs: b.doc_count,
         // Estimate only — see the note at the top of this file.
-        bytes: Math.round((sizeByDay.get(day) || 0) * share),
+        bytes: typeof sizeByDay.get(day) === 'number' ? Math.round(sizeByDay.get(day) * share) : null,
       };
     });
     return { term: String(t.key), docs: t.doc_count, series, ...spike(series, today) };

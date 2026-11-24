@@ -85,7 +85,7 @@ test('indices unhealthy first (red, yellow, green, unknown), then by size, then 
   assert.deepEqual(O.unhealthyFirst(IDX).map((r) => r.index), ['r', 'y-small', 'g-big', 'g-small', 'unknown']);
   assert.deepEqual(O.unhealthyFirst(null), []);
   assert.deepEqual(O.indexHealthCounts(IDX), { red: 1, yellow: 1, green: 2, total: 5 });
-  assert.deepEqual(O.indexTotals(IDX), { docs: 17, size: 1160 });
+  assert.deepEqual(O.indexTotals(IDX), { docs: 17, size: 1160, note: '1 red index counted in part' });
   assert.deepEqual(IDX.map(O.indexShards), [2, 2, 3, null, 6], 'primaries × (1 + replicas); no primary count is null');
 });
 

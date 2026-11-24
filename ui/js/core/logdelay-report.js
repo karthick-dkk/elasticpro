@@ -20,6 +20,7 @@
  */
 
 import { bridge } from './transport.js';
+import { pct } from '../lib/fmt.js';
 import { STATE_LABEL, isLate, levelState } from './delay-levels.js';
 import { parseHash } from '../reports/route.js';
 import { zonedParts } from './log-range.js';
@@ -419,7 +420,7 @@ export function docsText(n) {
   return String(Math.round(n));
 }
 
-export const pctText = (p, digits = 1) => (finite(p) ? `${p.toFixed(digits)} %` : '—');
+export const pctText = (p, digits = 1) => (finite(p) ? pct(p, digits, ' ') : '—');
 export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
 
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */

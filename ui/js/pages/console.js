@@ -584,6 +584,8 @@ async function run() {
     stopRunning();
     const b = $('#c-run'); if (b) b.disabled = false;
   }
+  // Whose answer this is stays with it: shown only while that cluster is the one on screen.
+  res = { ...res, fromCluster: c.id };
   tabRes.set(sentFrom, res);
   if (tabs.active !== sentFrom) {
     // Switched tabs while it ran: the answer waits in its own tab.
@@ -596,7 +598,7 @@ async function run() {
   const entry = {
     id: `${started}-${Math.random().toString(36).slice(2, 8)}`,
     ts: started, cluster: c.name, clusterId: c.id,
-    method: ui.method, path: ui.path, body: ui.body,
+    method: sent.method, path: sent.path, body: sent.body,
     status: res.status || 0, ok: !!res.ok, tookMs: res.tookMs || 0, fav: 0,
   };
   // Show the response first. Saving it to the history is bookkeeping, and it used to be
@@ -780,7 +782,7 @@ function statusLine() {
       h('span.spin', { 'aria-hidden': 'true' }),
       h('span.muted#c-status-elapsed', { style: { fontSize: '11.5px', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }, elapsedText()));
   }
-  const r = ui.res;
+  const r = shownRes();
   const { label, tone } = responseStatus(r);
   return h('span#c-status', { role: 'status', 'aria-live': 'polite', style: { display: 'inline-flex', gap: '8px', alignItems: 'center' },
     title: r ? null : 'Nothing run yet in this tab' },
@@ -804,13 +806,18 @@ function stopRunning() {
   inFlight.timer = null; inFlight.tab = null;
 }
 
+/** The active tab's response, only when it came from the cluster on screen (null otherwise). */
+export function responseFor(res, clusterId) { return res && (res.fromCluster === undefined || res.fromCluster === clusterId) ? res : null; }
+const shownRes = () => responseFor(ui.res, (cluster() || {}).id);
+
 function responseCard() {
-  const r = ui.res;
+  const r = shownRes();
   const head = (sub, actions) => h('header', h('h2', 'Results'), sub || null,
     actions ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }, ...actions) : null);
   if (!r) {
-    return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minHeight: 0 } }, head(h('span.sub', 'nothing run yet')),
-      h('div.body', { style: { flex: '1', minHeight: '0', overflow: 'auto' } }, empty('Run a request — the response appears here, next to the query.')));
+    return h('section.card', { style: { flex: '1', display: 'flex', flexDirection: 'column', minHeight: 0 } }, head(h('span.sub', ui.res ? 'not from this cluster' : 'nothing run yet')),
+      h('div.body', { style: { flex: '1', minHeight: '0', overflow: 'auto' } }, empty(ui.res ? 'This tab\u2019s last response came from another cluster, so it is not shown here. Run the request again.'
+        : 'Run a request — the response appears here, next to the query.')));
   }
   const bodyText = r.json !== null && r.json !== undefined ? JSON.stringify(r.json, null, 2) : (r.text || '');
 

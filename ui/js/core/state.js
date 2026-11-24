@@ -3,7 +3,7 @@
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
-import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
+import { bytes as bytesish, ago, dur, dtz } from '../lib/fmt.js';
 import { diskLevel, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
 import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
@@ -946,6 +946,8 @@ export function effectiveIndexRe(reSrc) {
   return reSrc;
 }
 
+const catNum = (v) => { const n = v === null || v === undefined || v === '' ? NaN : Number(v); return isFinite(n) ? n : null; };
+
 let cachedRe = { src: null, re: null };
 export function parseIndexName(name, reSrc, row = {}) {
   if (cachedRe.src !== reSrc) {
@@ -962,10 +964,12 @@ export function parseIndexName(name, reSrc, row = {}) {
     day: g.date ? g.date.replace(/[.\-]/g, '-') : null,
     health: row.health, status: row.status,
     pri: Number(row.pri) || 0, rep: Number(row.rep) || 0,
-    docs: Number(row['docs.count']) || 0,
-    deleted: Number(row['docs.deleted']) || 0,
-    size: Number(row['store.size']) || 0,
-    priSize: Number(row['pri.store.size']) || 0,
+    // Null when Elasticsearch did not report it (a closed index, a red one): never 0
+    // (core/index-figures.js sums them and says what is not counted).
+    docs: catNum(row['docs.count']),
+    deleted: catNum(row['docs.deleted']),
+    size: catNum(row['store.size']),
+    priSize: catNum(row['pri.store.size']),
     created: Number(row['creation.date']) || 0,
     uuid: row.uuid,
   };
@@ -2151,25 +2155,24 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
         : `${c.name}: disk capacity FELL to ${bytesish(to)}`,
       detail: grew
         ? `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(to - from)} added ${ago(d.capacity.changedAt)}. `
-          + 'Expected if you just extended the storage; worth confirming nobody else did it.'
+          + 'The total disk the nodes report; why it changed is not measured.'
         : `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(from - to)} gone ${ago(d.capacity.changedAt)}. `
-          + 'A data path is missing or a mount was lost. The node count is unchanged, so this is not a node leaving.',
+          + 'The node count is unchanged. This is the total disk the nodes report; why it changed is not measured.',
     });
   }
 
-  // Disk Elasticsearch holds that no index accounts for.
+  // Shard data the nodes report that the index list does not hold. The gap is measured; its cause is not.
   {
     const acct = diskAccounting(d, state.indices.get(c.id));
     if (acct.material) {
       const dang = danglingFor(c.id);
       const named = dang && dang.indices && dang.indices.length
         ? ` ${dang.indices.length} dangling index(es): ${dang.indices.slice(0, 3).map((x) => x.index_name).join(', ')}.`
-        : dang && !dang.failed ? ' No dangling indices, so it is orphaned shard data rather than a lost index.'
-               : ' Open Nodes & shards to check for dangling indices.';
+        : '';
       add({ key: `${c.id}:disk-unaccounted`, level: 'warning', cluster: c,
-        title: `${c.name}: ${bytesish(acct.gap)} of disk is not accounted for by any index`,
-        detail: `Elasticsearch holds ${bytesish(acct.held)} on its data path but the index list `
-              + `totals ${bytesish(acct.accounted)}.${named}` });
+        title: `${c.name}: ${bytesish(acct.gap)} of shard data is not in the index list`,
+        detail: `Nodes report ${bytesish(acct.held)} of shard data; the index list (hidden indices not listed, closed indices without a size) `
+              + `totals ${bytesish(acct.accounted)}. This does not measure dangling or orphaned data.${named}` });
     }
   }
 
@@ -2196,7 +2199,7 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
     // High: one failed run is a backup to retry today; the repository rule says when backups are broken.
     if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'high', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
     const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
-    if (!exempt && ls && now - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
+    if (!exempt && ls && now - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${snapDay(ls.time)}` });
   });
 }
 
@@ -2411,14 +2414,12 @@ export const MASTER_ALERT_HOURS = 24;
 export const CAPACITY_ALERT_HOURS = 48;
 
 /**
- * Disk that Elasticsearch holds but no open or closed index accounts for.
+ * Shard data the nodes report that the index list does not hold.
  *
- * `_cat/allocation` reports what the data path occupies; `_cat/indices` reports what the
- * indices in the cluster state occupy. They should agree closely. When allocation is
- * materially larger, the difference is data on disk that the cluster state does not
- * account for — a dangling index left by a removed node, or shard directories orphaned by
- * a failed relocation. That is disk nobody is going to reclaim by deleting an index,
- * because there is no index to delete.
+ * `_cat/allocation` reports what the shards on each node occupy (`disk.indices`); `_cat/indices`
+ * reports the listed indices' sizes. The list leaves out hidden indices and gives closed ones no
+ * size, so a gap is a difference between two readings — it does not measure dangling or orphaned
+ * data, and the alert does not say so.
  *
  * Reported as unknown rather than zero when either figure is missing: a missing index
  * list would otherwise make the whole of allocation look unaccounted for.
@@ -2446,7 +2447,8 @@ export function danglingFor(clusterId) { return dangling.get(clusterId) || null;
 export const SNAPSHOT_WINDOW = 5;
 
 const SNAP_BAD = new Set(['FAILED', 'PARTIAL']);
-const snapDay = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice(0, 16) : 'unknown');
+/** A snapshot's time in an alert's text: the browser's zone, as every other time on the page, and named. */
+const snapDay = (ms) => (ms ? dtz(ms) : 'unknown');
 
 /**
  * What the last five snapshots in one repository say about it.
@@ -2509,12 +2511,13 @@ function snapshotAlertsFor(c, repo, all, now = Date.now()) {
   }
 
   if (!isNew) {
+    const bad = recent.filter((x) => SNAP_BAD.has(String(x.status || '').toUpperCase())).length;
     return [{
       key: `${key}:stale`, level: 'warning', cluster: c, repo: repo.name, snapshot,
       title: `${c.name}/${repo.name}: newest snapshot is not recent`,
-      detail: `${latest.id} succeeded at ${snapDay(latest.start)}, which is older than the `
-            + `${state.defaults.snapshotStaleHours}h this cluster allows. The last `
-            + `${recent.length} runs all succeeded, so the schedule stopped rather than broke.`,
+      detail: `${latest.id} (${snapshot.status || 'state not reported'}) started ${snapDay(latest.start)}, which is older than the `
+            + `${state.defaults.snapshotStaleHours}h this cluster allows. `
+            + `${bad ? `${bad} of` : 'None of'} the last ${recent.length} run${recent.length === 1 ? '' : 's'} failed or came back partial.`,
     }];
   }
   return [];

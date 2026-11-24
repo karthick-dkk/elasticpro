@@ -34,6 +34,7 @@ import { unreachableReason } from '../core/alert-groups.js';
 import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf, NOT_KNOWN } from '../core/lifecycle-errors.js';
 import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
+import { sumKnown } from '../core/index-figures.js';
 import { repoOverview, spanTitle } from '../core/snapshot-evidence.js';
 import { repoListing, cutText, spanText, reposRead, noRepository } from '../core/snapshot-restorable.js';
 // Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
@@ -140,8 +141,8 @@ function clusterSize(r) {
   if (d.disk && d.disk.indicesBytes) return d.disk.indicesBytes;
   // Before allocation data arrives, fall back to the index list if that page has run.
   const idx = state.indices.get(r.c.id);
-  if (idx && idx.length) return idx.reduce((s, x) => s + (x.size || 0), 0);
-  return -1;
+  const s = idx && idx.length ? sumKnown(idx, 'size').sum : null;
+  return s === null ? -1 : s;
 }
 
 // The search, sort and health filter live behind the 🔍 beside the title; `search` is whether
@@ -750,12 +751,14 @@ const CSV = {
  */
 export function csvTable(rows, cols) {
   const headers = [], getters = [];
-  for (const col of cols) {
+  // A cluster that is not answering has no figures now: blank, as on screen, and its state said.
+  const withState = cols.some((c) => c.id === 'health') ? cols : [...cols, { id: 'health', name: 'State' }];
+  for (const col of rows.some(isDown) ? withState : cols) {
     for (const [suffix, get] of CSV[col.id] || []) {
       const base = suffix ? `${col.name} (${suffix})` : col.name;
       let name = base;
       for (let n = 2; headers.includes(name); n++) name = `${base} ${n}`;
-      headers.push(name); getters.push(get);
+      headers.push(name); getters.push((r) => (isDown(r) && !DOWN_KEEPS.has(col.id) ? '' : get(r)));
     }
   }
   return { headers, data: rows.map((r) => Object.fromEntries(headers.map((k, i) => [k, getters[i](r)]))) };

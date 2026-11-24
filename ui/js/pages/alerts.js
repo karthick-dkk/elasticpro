@@ -1019,6 +1019,8 @@ function exportAlerts(merged) {
       items: m.items.map((i) => (i.value ? `${i.label} ${i.value}` : i.label)).join(' | '),
       detail: m.detail || '',
       since: new Date(m.since).toISOString(),
+      // yes: the time it was first seen here; it may have started earlier.
+      since_is_first_seen: m.approxSince ? 'yes' : 'no',
       repository: m.snapshot ? m.snapshot.repo : '',
       snapshot: m.snapshot ? m.snapshot.id : '',
       snapshot_date: m.snapshot ? new Date(m.snapshot.at).toISOString() : '',

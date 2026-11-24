@@ -19,6 +19,7 @@ import { isDataNode, slmCard, ilmCard } from './cluster-boxes.js';
 import { staleIndices } from './nodes-shards.js';
 import { byLevel, worstOf } from './alert-levels.js';
 import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js';
+import { sumKnown, notCounted } from './index-figures.js';
 import { clusterKind } from './cluster-kind.js';
 import { durationMs } from './snapshot-list.js';
 import { bands, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
@@ -157,11 +158,13 @@ export function indexHealthCounts(rows) {
   return out;
 }
 
-/** Documents and store size over the indices: { docs, size }. */
+/**
+ * Documents and store size over the listed indices: { docs, size, note }. `note` is what the two
+ * figures do not hold (closed and red indices report none, hidden ones are not listed).
+ */
 export function indexTotals(rows) {
-  let docs = 0, size = 0;
-  for (const r of Array.isArray(rows) ? rows : []) { docs += r.docs || 0; size += r.size || 0; }
-  return { docs, size };
+  const docs = sumKnown(rows, 'docs'), size = sumKnown(rows, 'size');
+  return { docs: docs.sum, size: size.sum, note: notCounted(docs.missing >= size.missing ? docs : size) };
 }
 
 /** An index's shard count: primaries × (1 + replicas); null when the row has no primary count. */

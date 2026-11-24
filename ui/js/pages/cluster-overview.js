@@ -26,9 +26,9 @@
 
 import { h, mount } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
-import { bytes, compact, num, dur, dt, ago } from '../lib/fmt.js';
+import { bytes, compact, num, pct, dur, dt, ago } from '../lib/fmt.js';
 import { ringGauge, STATUS } from '../lib/charts.js';
-import { state, clusters, client, healthState, openAlertsNow, askForPage, fetchIndices, fetchedAt, refreshAll, bus } from '../core/state.js';
+import { state, clusters, client, healthState, openAlertsNow, askForPage, fetchIndices, fetchedAt, datasetFreshness, refreshAll, bus } from '../core/state.js';
 import { clusterKind } from '../core/cluster-kind.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
@@ -40,6 +40,7 @@ import { nodeRates, recordReading } from '../core/node-rates.js';
 import { ldSummary, periodQuery, whenText, countText, LD_COLOURS } from '../core/logdelay-report.js';
 import { empty, usageBar } from './common.js';
 import { usageLevel } from '../core/nodes-shards.js';
+import { figureWhy, HIDDEN_NOTE } from '../core/index-figures.js';
 import {
   OVERVIEW, LIST, overviewClusterOf, overviewHash, listHash, highestNode, heapFigures,
   busiestFirst, nodeCounts, shardFigures, placedText, unhealthyFirst, indexHealthCounts, indexTotals,
@@ -96,7 +97,7 @@ export function onLeave() {
 /**
  * The owner (2026-11-14): "Create Refresh button and show refresh interval: 10 s, 30 s, 1 m, 5 m".
  * At the right of the tab row: ↻ Refresh (now), "every <select>" — remembered per browser — and
- * "refreshed N s ago", whose text ticks once a second (the text node alone is touched). The timer
+ * "figures read N s ago" (when the node figures on screen were read, not when a refresh was tried), whose text ticks once a second (the text node alone is touched). The timer
  * runs only while this board is on screen and the tab is visible; a tick that finds a refresh
  * still in flight is skipped. It refreshes THIS cluster: the poller's figures through the app's
  * own path (refreshAll for the chosen cluster — what the top bar's Refresh does for the selection)
@@ -115,7 +116,6 @@ function setEvery(v) {
   try { localStorage.setItem(REFRESH_KEY, String(v)); } catch (_) { /* kept for this visit */ }
   schedule();
 }
-let refreshedAt = 0;
 let refreshing = false;
 let tickTimer = null;
 let ageTimer = null;
@@ -138,17 +138,28 @@ async function refreshNow() {
   try { await Promise.allSettled([refreshAll({ force: true, selected: true }), readOwn(c)]); }
   finally {
     refreshing = false;
-    refreshedAt = Date.now();
     paintAge();
     if (host && host.isConnected) draw();
   }
 }
-/** "refreshed N s ago": the button's title, ticking (the owner: the icon and the interval alone are shown). */
+/**
+ * How old the cluster's figures are: "figures read N s ago", the time of the answer itself — a
+ * refresh that failed leaves the old time standing. The button's title, ticking (the owner: the
+ * icon and the interval alone are shown).
+ */
+export function figuresAgeText(at, down, now = Date.now()) {
+  if (!at) return down ? 'not answering · figures never read' : 'figures not read yet';
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  const age = s < 5 ? 'just now' : s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : ago(at);
+  return `${down ? 'not answering now · ' : ''}figures read ${age}`;
+}
+/** When this cluster's health was last read (it is the figure every refresh asks for first). */
+const figuresAt = (c) => (c ? datasetFreshness(c.id, 'health').ts || 0 : 0);
+const isDown = (c) => !!c && healthState(state.data.get(c.id)) === 'unreachable';
 function ageText() {
   if (refreshing) return 'refreshing…';
-  if (!refreshedAt) return 'not refreshed yet';
-  const s = Math.round((Date.now() - refreshedAt) / 1000);
-  return `refreshed ${s < 5 ? 'just now' : s < 90 ? `${s} s ago` : `${Math.round(s / 60)} min ago`}`;
+  const c = pick();
+  return figuresAgeText(figuresAt(c), isDown(c));
 }
 function paintAge() {
   const el = host && host.querySelector('#ov-refresh');
@@ -197,16 +208,15 @@ const tasksRead = new Map();
 function stopPoll() {
   if (tickTimer) clearTimeout(tickTimer);
   if (ageTimer) clearInterval(ageTimer);
-  tickTimer = null; ageTimer = null; polled = null; refreshedAt = 0; refreshing = false;
+  tickTimer = null; ageTimer = null; polled = null; refreshing = false;
 }
 /** Arriving, or the chooser moved: the first own reading at once, then the interval. */
 function pollFor(c) {
   if (polled === c.id) return;
   polled = c.id;
   if (!everyRead) { everyRead = true; every = readEvery(); }
-  refreshedAt = 0;
   if (!ageTimer) ageTimer = setInterval(() => { if (host && host.isConnected) paintAge(); else stopPoll(); }, 1000);
-  readOwn(c).then(() => { if (host && host.isConnected && polled === c.id) { if (!refreshedAt) refreshedAt = Date.now(); paintAge(); draw(); } });
+  readOwn(c).then(() => { if (host && host.isConnected && polled === c.id) { paintAge(); draw(); } });
   schedule();
 }
 /** The task rows the Search card reads: the Tasks panel's when it has them, else this page's own reading. */
@@ -252,7 +262,7 @@ function draw() {
   const c = pick();
   P.begin();
   try {
-      // The tab row and, at its right, Refresh · every · refreshed N s ago — one bar, kept for the visit.
+      // The tab row and, at its right, Refresh · every (the age of the figures in its title) — one bar, kept for the visit.
     const tabs = P.get('bar', OVERVIEW, () => h('div.ov-bar', clustersTabs(OVERVIEW), refreshControl()));
     if (!c) { mount(host, tabs, P.get('none', '', () => empty(clusters().length ? 'Pick a cluster in the top bar' : 'No clusters configured'))); return; }
     syncAddress(c);
@@ -271,7 +281,7 @@ function draw() {
     const snapSig = Object.entries(d.snapshots || {}).map(([k, v]) => `${k}:${(v || []).length}:${v && v[0] ? v[0].id : ''}`).join(',');
     mount(host, tabs, h('div.ov-board',
       h('div.ov-row.ov-top',
-        P.get('head', `${rev}|${objId(sh)}|${objId(c)}|${healthState(d)}|${alerts.count}|${alerts.worst}|${alerts.titles.join('|')}`, () => headerCard(c, d, sh, alerts)),
+        P.get('head', `${rev}|${isDown(c) ? Math.floor(Date.now() / 60000) : ''}|${objId(sh)}|${objId(c)}|${healthState(d)}|${alerts.count}|${alerts.worst}|${alerts.titles.join('|')}`, () => headerCard(c, d, sh, alerts)),
         P.get('nodes', `${rev}|${objId(d.nodes)}`, () => nodesCard(d)),
         P.get('indices', `${rev}|${objId(idx)}`, () => indicesCard(idx))),
       h('div.ov-row.ov-gauges',
@@ -280,9 +290,9 @@ function draw() {
         P.get('g-heap', `${rev}|${objId(d.nodes)}`, () => heapGauge(d)),
         P.get('g-shards', `${rev}|${objId(d.health)}`, () => shardsGauge(d))),
       h('div.ov-row.ov-rates',
-        P.get('r-search', `${rateSig(rates, 'searchPerSec', 'sinceMs')}|${tasks.source}|${objId(tasks.rows)}|${c.id}`, () => searchCard(c, rates, tasks)),
+        P.get('r-search', `${rateSig(rates, 'searchPerSec', 'sinceMs', 'why')}|${tasks.source}|${objId(tasks.rows)}|${c.id}`, () => searchCard(c, rates, tasks)),
         P.get('r-devices', `${objId(ldRead.get(c.id))}|${c.id}|${Math.floor(Date.now() / 60000)}`, () => devicesCard(c, ldRead.get(c.id) || null)),
-        P.get('r-pressure', rateSig(rates, 'searchLatencyMs', 'rejected', 'breakerTrips'), () => pressureCard(rates))),
+        P.get('r-pressure', rateSig(rates, 'searchLatencyMs', 'rejected', 'breakerTrips', 'searchQueue', 'writeQueue', 'why'), () => pressureCard(rates))),
       h('div.ov-row.ov-lifecycle',
         P.get('slm', `${rev}|${objId(d.slm)}|${objId(d.slmStatus)}|${snapSig}|${objId(c)}|${objId(state.defaults)}`, () => slmCardEl(c, d)),
         P.get('ilm', `${rev}|${objId(c)}|${objId(idx)}|${objId(state.defaults)}|${Math.floor(Date.now() / 3600000)}`, () => ilmCardEl(c, d, idx))),
@@ -345,7 +355,9 @@ function headerCard(c, d, sh, alerts) {
       h('span.ov-uuid.mono', { title: 'cluster uuid' }, uuid || '–')),
     h('div.ov-head-side',
       h('div.ov-head-pills', alertsBadge(c, alerts), h(`span.pill.${HEALTH_PILL[st]}.ov-health`, { title: why || null }, h('i.dot'), HEALTH_WORD[st])),
-      h('span.ov-placed.muted', placedText(shardFigures(d.health)) || (st === 'loading' ? 'health not read yet' : why || ''), un ? [h('br'), un] : null)));
+      h('span.ov-placed.muted', placedText(shardFigures(d.health)) || (st === 'loading' ? 'health not read yet' : why || ''), un ? [h('br'), un] : null,
+        // Everything on the board is the last answer, not the cluster now: it says so, with its age.
+        st === 'unreachable' ? [h('br'), h('b.ov-old', figuresAgeText(figuresAt(c), true))] : null)));
 }
 
 function nodesCard(d) {
@@ -360,10 +372,12 @@ function nodesCard(d) {
 function indicesCard(idx) {
   const t = indexTotals(idx), hc = indexHealthCounts(idx);
   const unhealthy = idx ? [hc.red ? `${hc.red} red` : null, hc.yellow ? `${hc.yellow} yellow` : null].filter(Boolean).join(' · ') : '';
-  return h('section.card.ov-card.ov-fact', { dataset: { card: 'indices' } },
+  return h('section.card.ov-card.ov-fact', { dataset: { card: 'indices' },
+      title: idx ? `From the index list: ${[HIDDEN_NOTE, t.note].filter(Boolean).join('; ')}. The size on the Clusters list is every shard the nodes hold, hidden indices included.` : null },
     h('b.ov-fact-t', '≡ ', idx ? `${num(idx.length)} ${idx.length === 1 ? 'index' : 'indices'}` : 'Indices'),
-    idx ? h('span', `${compact(t.docs)} documents`) : h('span.muted', 'index list not read yet'),
-    idx ? h('span', `${bytes(t.size)} on disk`) : null,
+    idx ? h('span', t.docs === null ? 'documents not reported' : `${compact(t.docs)} documents`) : h('span.muted', 'index list not read yet'),
+    idx ? h('span', t.size === null ? 'size not reported' : `${bytes(t.size)} on disk`) : null,
+    idx ? h('span.muted.ov-fact-s', [t.note ? t.note.replace(/ \(.*?\)/, '') : '', 'hidden (.) not counted'].filter(Boolean).join(' · ')) : null,
     idx ? h('span.muted.ov-fact-s', unhealthy || (idx.length ? 'all green' : 'none')) : null);
 }
 
@@ -387,7 +401,7 @@ function gaugeCard(id, title, best, caption, ring) {
 
 const pctRing = (value, kind, label) => ringGauge(
   value === null ? [] : [{ value, color: LEVEL_COLOUR[usageLevel(value, kind)] || LEVEL_COLOUR.ok, label }],
-  { total: 100, size: 82, stroke: 10, centre: value === null ? '–' : `${Math.round(value)}%`, label: value === null ? `${label}: not known` : `${label} ${Math.round(value)} percent` });
+  { total: 100, size: 82, stroke: 10, centre: pct(value, 0), label: value === null ? `${label}: not known` : `${label} ${pct(value, 0)}` });
 
 function cpuGauge(d) {
   const best = highestNode(d.nodes, 'cpu');
@@ -415,8 +429,8 @@ function shardsGauge(d) {
     { value: f.assigned, color: 'var(--chart-info)', label: 'assigned' },
     { value: f.moving, color: 'var(--chart-good)', label: 'moving' },
     { value: f.unassigned, color: STATUS.critical, label: 'unassigned' },
-  ] : [], { total: f ? f.total : 0, size: 82, stroke: 10, centre: f && f.pct !== null ? `${Math.round(f.pct)}%` : '–',
-    label: f && f.pct !== null ? `${Math.round(f.pct)} percent of shards assigned` : 'shards: not known' });
+  ] : [], { total: f ? f.total : 0, size: 82, stroke: 10, centre: f ? pct(f.pct, 0) : '–',
+    label: f && f.pct !== null ? `${pct(f.pct, 0)} of shards assigned` : 'shards: not known' });
   const dot = (colour, n, what) => h('span', { title: `${n} ${what}` }, h('i.ov-dot', { style: { background: colour } }), ` ${n}`);
   return h('section.card.ov-card.ov-gauge', { dataset: { card: 'shards' } },
     h('div.ov-gauge-text',
@@ -465,7 +479,7 @@ function longRunning(c, tasks) {
 
 function searchCard(c, r, tasks) {
   const lr = longRunning(c, tasks);
-  if (!r.measured) return rateCard('search', 'Search', '–', 'req/s', MEASURING, lr);
+  if (!r.measured) return rateCard('search', 'Search', '–', 'req/s', r.why ? `not measured: ${r.why}` : MEASURING, lr);
   return rateCard('search', 'Search', rateText(r.searchPerSec), 'req/s', `average between the last two polls${sinceText(r)}`, lr);
 }
 /**
@@ -496,7 +510,7 @@ function devicesCard(c, res) {
     h('span.muted.ov-fact-s', { title: d.message || null }, d.state === 'off' ? d.message : `last measured ${whenText(d.lastRunAt)} · next ${whenText(d.nextDueAt)}`));
 }
 function pressureCard(r) {
-  if (!r.measured) return rateCard('pressure', 'Latency and pressure', '–', 'per search', MEASURING);
+  if (!r.measured) return rateCard('pressure', 'Latency and pressure', '–', 'per search', r.why ? `not measured: ${r.why}` : MEASURING);
   const ms = r.searchLatencyMs === null || r.searchLatencyMs === undefined ? '–' : `${Math.round(r.searchLatencyMs)} ms`;
   const n = (v) => (v === null || v === undefined ? '–' : num(v));
   return rateCard('pressure', 'Latency and pressure', ms, 'per search', `${n(r.rejected)} rejected, ${n(r.breakerTrips)} breaker trips${r.writeQueue ? ` · write queue ${num(r.writeQueue)}` : ''}`);
@@ -600,18 +614,19 @@ function indicesPanel(c, idx) {
     : !rows.length ? empty('No indices')
     : h('table.tbl.ov-tbl',
       h('thead', h('tr', h('th', 'Index'), h('th', 'Health'), h('th.num', 'Docs'), h('th.num', 'Size'), h('th.num', 'Shards'))),
-      h('tbody', ...rows.slice(0, INDEX_ROWS).map((r) => P.get(`idx:${r.index}`, `${r.health}|${r.docs}|${r.size}|${r.pri}|${r.rep}`, () => indexRow(r))),
+      h('tbody', ...rows.slice(0, INDEX_ROWS).map((r) => P.get(`idx:${r.index}`, `${r.health}|${r.status}|${r.docs}|${r.size}|${r.pri}|${r.rep}`, () => indexRow(r))),
         rows.length > INDEX_ROWS ? h('tr.ov-more', h('td', { colspan: 5 }, h('span.muted', `…and ${num(rows.length - INDEX_ROWS)} more — All indices lists them`))) : null))));
   fillPanel(shell, `Indices (${idx ? num(idx.length) : '–'})`, 'Unhealthy first (red, then yellow), then by size', table);
   return shell;
 }
+const figureCell = (r, v, fmt) => (v === null || v === undefined ? h('span.muted', { title: figureWhy(r) }, 'not reported') : fmt(v));
 function indexRow(r) {
   const hk = String(r.health || '').toLowerCase();
   const sh = indexShards(r);
   return h('tr', { dataset: { index: r.index } },
     h('td.mono.ov-idx-name', { title: r.index }, r.index),
     h('td', h(`span.q.${HEALTH_CLASS[hk] || 'ok'}`, hk ? hk[0].toUpperCase() + hk.slice(1) : h('span.muted', 'unknown'))),
-    h('td.num', compact(r.docs)),
-    h('td.num', bytes(r.size)),
+    h('td.num', figureCell(r, r.docs, compact)),
+    h('td.num', figureCell(r, r.size, bytes)),
     h('td.num', sh === null ? h('span.muted', '–') : num(sh)));
 }

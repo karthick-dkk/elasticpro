@@ -116,10 +116,13 @@ export function dailyVolume(indices, cluster = {}) {
   const byDay = new Map();
   for (const r of indices || []) {
     if (!r.day || r.day >= t) continue;             // skip undated and today's partial index
-    byDay.set(r.day, (byDay.get(r.day) || 0) + (r.size || 0));
+    const v = byDay.get(r.day) || { bytes: 0, missing: 0 };
+    // A closed or red index reports no size: not counted, and said in the basis.
+    if (typeof r.size === 'number') v.bytes += r.size; else v.missing++;
+    byDay.set(r.day, v);
   }
   const days = [...byDay.entries()]
-    .map(([day, bytes]) => ({ day, bytes }))
+    .map(([day, v]) => ({ day, ...v }))
     .sort((a, b) => (a.day < b.day ? 1 : -1));      // newest first
 
   const mean = (xs) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
@@ -128,6 +131,8 @@ export function dailyVolume(indices, cluster = {}) {
   const window7 = days.slice(0, cfg.windowDays);
   // Within that window, the heaviest days are what the cluster must cope with.
   const top3 = [...window7].sort((a, b) => b.bytes - a.bytes).slice(0, cfg.topDays);
+
+  const unsized = window7.reduce((n, d) => n + d.missing, 0);
 
   const perDay = mean(top3.map((d) => d.bytes));
   const avg7 = mean(window7.map((d) => d.bytes));   // kept for context, not for sizing
@@ -146,7 +151,8 @@ export function dailyVolume(indices, cluster = {}) {
     basis: !days.length
       ? 'no dated indices'
       : `mean of the ${top3.length} heaviest of the last ${window7.length} day${window7.length === 1 ? '' : 's'}` +
-        (top3.length ? ` (${top3.map((d) => d.day).join(', ')})` : ''),
+        (top3.length ? ` (${top3.map((d) => d.day).join(', ')})` : '')
+        + (unsized ? `; ${plural(unsized, 'index', 'indices')} of those days without a size not counted` : ''),
   };
 }
 

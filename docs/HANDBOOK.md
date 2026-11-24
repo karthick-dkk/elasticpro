@@ -69,7 +69,7 @@ cluster's name, type and tags, version, URL and uuid with — in the corner — 
 Indices cards; four gauges (CPU, Disk, JVM heap, Shards), each naming the node that is highest;
 Search (with the searches running over a minute, from the task list) and Latency-and-pressure
 rates from two readings of `_nodes/stats` (`core/node-rates.js` — "measuring · next poll" until two
-exist), and between them Devices & log delay — the devices in the cluster's last scheduled run and
+exist, *not measured* with the reason when they cannot be compared), and between them Devices & log delay — the devices in the cluster's last scheduled run and
 how many are late by the configured levels, from the Log Delay Dashboard's own summary; SLM and ILM, one status line each, from what the Clusters page's
 expanded row holds; and the Nodes (busiest first, with IP) and Indices (unhealthy first, then by
 size) tables, which scroll inside themselves so the page never does at 1280×720 and above. At the
@@ -490,7 +490,7 @@ counts, filters or colours by level reads it there:
 |---|---|---|
 | **Critical** | red | cluster not answering; health red; disk over the critical threshold / a node past its high watermark (and the flood-stage balance row); disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
 | **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`) |
-| **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, disk not accounted for, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
+| **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, shard data not in the index list, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
 
 Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
 High; `heap` is new, High. An automation rule can be set to raise at any of the three. The
@@ -737,6 +737,46 @@ the save that produced the version when recorded, else when it was set aside. `c
 by hand or by an older core. `CONFIG_RESTORE {id}` is unchanged: it hands the text back, and
 loading it saves through `CONFIG_WRITE`, so a restore is recorded like any save (the summary
 is then the diff against what it replaced).
+
+## Evidence — what a figure may claim
+
+Pages and files are handed to auditors. A figure is true, or it says it is not known and why, or it
+says how much of it was read ("N of M") on screen and in the file, or it says when it was read.
+
+**Snapshots** (`core/snapshot-restorable.js`, the one definition). `restorableIndices(snapshot)`:
+SUCCESS → all its indices; PARTIAL → those without a failure when the failures were read, else not
+known; IN_PROGRESS, FAILED, INCOMPATIBLE → none. The Data span, a row's *Data inside covers*, the
+evidence rows, availability, the newest index day backed up (Clusters, Volume sheet, plan feed), the
+verify before a delete and *free live indices* all use it. A span with days missing says so
+("15 → 22 Nov · 4 of 8 days"). Snapshot CSV: `data_days` is the number of index days that can be
+restored, `data_missing_days` the days inside the span that cannot, `data_note` why (in progress,
+"partial: N of M indices", failed, not known). A repository that could not be read, or not yet, is
+*not known* with the reason, never "0" or "no snapshots"; "no repository" is said only when the list
+was read and is empty. Only the newest 500 snapshots are listed: the page says "newest 500 of N", and
+availability days before the oldest listed are *not read*. Days are the server's days; today is *so
+far*, not missing. "In no snapshot" is said only when every listing was read whole.
+
+**SLM** (`core/lifecycle-errors.js`): green only when every policy that takes log indices succeeded
+at its last run; otherwise "1 of 2 failed · name". "takes logstash-*" only when the policy's pattern
+contains the whole log pattern; else "takes part of". The Clusters CSV's *covers log indices* is
+yes / no / part / empty (unknown).
+
+**Index figures** (`core/index-figures.js`): a closed or red index reports no documents or size — the
+cell says so, the CSV is empty, `figures` says why; a sum says how many indices it does not count.
+Hidden (.) indices are not in the index list and the totals say so. A cluster whose index list was
+not read shows *not read* and the reason, and exports nothing. A search's answer and a REST response
+belong to the cluster they were asked of and are dropped on another.
+
+**Percentages** (`lib/fmt.js` `pct`, `sharePct`): 100 % and 0 % only when exactly so; otherwise one
+decimal, then ">99.9 %" and "<0.1 %".
+
+**Query pressure** (`core/node-rates.js`): a counter that reset, a section not reported, a reading
+over six minutes old or two readings from different nodes is *not measured*, never "No pressure".
+
+**A cluster that is not answering**: the Clusters CSV leaves its figures blank and states why; the
+cluster's Overview says when the figures on it were read. **Alerts**: times in a text carry their
+zone; `since_is_first_seen` in the CSV is yes when the start is only when it was first seen here; the
+disk gap and a capacity change name no cause.
 
 ## Snapshot running — the message contract
 

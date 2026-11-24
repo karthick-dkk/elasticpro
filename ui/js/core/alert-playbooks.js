@@ -109,14 +109,15 @@ export const PLAYBOOKS = {
   }),
 
   'disk-unaccounted': () => ({
-    cause: 'Elasticsearch holds more on disk than the index list accounts for: a dangling index, orphaned shard directories, or files that are not Elasticsearch\'s at all.',
+    cause: 'The nodes report more shard data than the index list totals. The list leaves out hidden indices and gives closed ones no size, so start there; the figure does not measure dangling or orphaned data.',
     steps: [
+      { text: 'List every index, hidden and closed ones included, with its size.',
+        request: read('/_cat/indices?v&expand_wildcards=all&h=index,status,store.size&s=store.size:desc', 'Prepare the full index list in the REST console') },
       { text: 'List dangling indices: indices found on a node\'s disk that the cluster state does not know about.',
         request: read('/_dangling?pretty', 'Prepare the dangling list in the REST console') },
       { text: 'See whether there are dangling indices, and how much of the disk in use is not index data.', links: [{ label: 'Disk & dangling indices', page: 'shards', focus: { section: 'dangling' } }] },
       { text: 'Import or delete a dangling index by its UUID, after checking it is not wanted. The request is prepared with a placeholder you must replace.',
         request: write('DELETE', '/_dangling/INDEX-UUID?accept_data_loss=true', '', 'Prepare the delete in the REST console') },
-      { text: 'If there are none, look at the data path on the node for files that are not Elasticsearch\'s (old logs, a copied snapshot).' },
     ],
   }),
 

@@ -60,11 +60,11 @@ zabbix_export:
             - tag: component
               value: elasticpro-alert
         - uuid: a087e9f6fa3b4f3d9ac0d86e0b51036f
-          name: 'Alert: Disk not accounted for by any index'
+          name: 'Alert: Shard data not in the index list'
           type: TRAP
           key: 'elasticpro.alert[disk-unaccounted]'
           value_type: UNSIGNED
-          description: 'Data the cluster state does not know about — a dangling index or orphaned shard directories. 0 clear, 1 warning, 2 critical.'
+          description: 'The nodes report more shard data than the index list totals. Hidden indices are not listed and closed ones have no size; it does not measure dangling or orphaned data. 0 clear, 1 warning, 2 critical.'
           valuemap:
             name: 'ElasticPro alert level'
           tags:
@@ -73,7 +73,7 @@ zabbix_export:
             - tag: rule
               value: 'disk-unaccounted'
         - uuid: bca558418cc848d6a105aad1a47be300
-          name: 'Alert detail: Disk not accounted for by any index'
+          name: 'Alert detail: Shard data not in the index list'
           type: TRAP
           key: 'elasticpro.alert.detail[disk-unaccounted]'
           value_type: TEXT
@@ -86,7 +86,7 @@ zabbix_export:
           type: TRAP
           key: 'elasticpro.alert[capacity]'
           value_type: UNSIGNED
-          description: 'The size of the storage itself moved. Growing is worth knowing; shrinking is a lost data path. 0 clear, 1 warning, 2 critical.'
+          description: 'The total disk the nodes report changed while the node count stayed the same. 0 clear, 1 warning, 2 critical.'
           valuemap:
             name: 'ElasticPro alert level'
           tags:
@@ -318,11 +318,11 @@ zabbix_export:
           value: 'disk-balance'
     - uuid: 75e54fb1d9b24484b452688226ab38d7
       expression: 'find(/ElasticPro alerts/elasticpro.alert.detail[disk-unaccounted],,"regexp","^critical: ")=1'
-      name: 'Disk not accounted for by any index — {ITEM.LASTVALUE1}'
-      event_name: 'Disk not accounted for by any index — {ITEM.LASTVALUE1}'
+      name: 'Shard data not in the index list — {ITEM.LASTVALUE1}'
+      event_name: 'Shard data not in the index list — {ITEM.LASTVALUE1}'
       priority: HIGH
       manual_close: YES
-      description: 'Data the cluster state does not know about — a dangling index or orphaned shard directories. Raised by ElasticPro (critical).'
+      description: 'The nodes report more shard data than the index list totals. Hidden indices are not listed and closed ones have no size; it does not measure dangling or orphaned data. Raised by ElasticPro (critical).'
       tags:
         - tag: source
           value: elasticpro
@@ -330,11 +330,11 @@ zabbix_export:
           value: 'disk-unaccounted'
     - uuid: 4a102ec3707d49a89116b65db77764b2
       expression: 'find(/ElasticPro alerts/elasticpro.alert.detail[disk-unaccounted],,"regexp","^warning: ")=1'
-      name: 'Disk not accounted for by any index — {ITEM.LASTVALUE1}'
-      event_name: 'Disk not accounted for by any index — {ITEM.LASTVALUE1}'
+      name: 'Shard data not in the index list — {ITEM.LASTVALUE1}'
+      event_name: 'Shard data not in the index list — {ITEM.LASTVALUE1}'
       priority: WARNING
       manual_close: YES
-      description: 'Data the cluster state does not know about — a dangling index or orphaned shard directories. Raised by ElasticPro (warning).'
+      description: 'The nodes report more shard data than the index list totals. Hidden indices are not listed and closed ones have no size; it does not measure dangling or orphaned data. Raised by ElasticPro (warning).'
       tags:
         - tag: source
           value: elasticpro
@@ -346,7 +346,7 @@ zabbix_export:
       event_name: 'Disk capacity changed — {ITEM.LASTVALUE1}'
       priority: HIGH
       manual_close: YES
-      description: 'The size of the storage itself moved. Growing is worth knowing; shrinking is a lost data path. Raised by ElasticPro (critical).'
+      description: 'The total disk the nodes report changed while the node count stayed the same. Raised by ElasticPro (critical).'
       tags:
         - tag: source
           value: elasticpro
@@ -358,7 +358,7 @@ zabbix_export:
       event_name: 'Disk capacity changed — {ITEM.LASTVALUE1}'
       priority: WARNING
       manual_close: YES
-      description: 'The size of the storage itself moved. Growing is worth knowing; shrinking is a lost data path. Raised by ElasticPro (warning).'
+      description: 'The total disk the nodes report changed while the node count stayed the same. Raised by ElasticPro (warning).'
       tags:
         - tag: source
           value: elasticpro

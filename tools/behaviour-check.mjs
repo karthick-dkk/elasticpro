@@ -3471,7 +3471,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   al = snapAlerts();
   ok(al.length === 1 && al[0].level === 'warning', 'a stale-but-successful repository is a warning');
   ok(al[0] && al[0].snapshot.isNew === false, 'a four-day-old snapshot is not new');
-  ok(al[0] && /succeeded at 20/.test(al[0].detail), `the stale detail should date the run: ${al[0] && al[0].detail}`);
+  ok(al[0] && /started .*20\d\d/.test(al[0].detail), `the stale detail should date the run: ${al[0] && al[0].detail}`);
 
   setup([{ name: 'daily', error: null }], { daily: [snap('good', 'SUCCESS', 0.1)] });
   ok(snapAlerts().length === 0, 'a healthy recent repository should raise nothing');
@@ -4204,9 +4204,9 @@ if (config.clusters.length >= 2 && viaFleet) {
   cap([{ name: 'n1', master: '*' }],
     { total: 50 * GB, nodeCount: 1, changedFrom: 100 * GB, changedAt: Date.now() - 60000 });
   const fell = st.alerts().find((a) => a.key.startsWith('c1:capacity'));
-  ok(fell && fell.level === 'critical', 'a disk shrinking is critical — a path went away');
+  ok(fell && fell.level === 'critical', 'a disk shrinking is critical — the reported total went down');
   ok(fell && /FELL/.test(fell.title), `fell title: ${fell && fell.title}`);
-  ok(fell && /not a node leaving/.test(fell.detail), 'the detail should rule out the innocent explanation');
+  ok(fell && /node count is unchanged/.test(fell.detail) && !/mount|data path/.test(fell.detail), 'the detail says what was measured and claims no cause');
 
   // Unchanged capacity says nothing, and an ancient change has aged out.
   cap([{ name: 'n1', master: '*' }], { total: 100 * GB, nodeCount: 1, changedFrom: null, changedAt: null });
@@ -4220,7 +4220,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   st.state.indices.set('c1', [{ index: 'a', size: 30 * 1024 ** 3 }]);
   const gap = st.alerts().find((a) => a.key === 'c1:disk-unaccounted');
   ok(!!gap, `a 70 GB gap should be reported: ${keys().join(', ')}`);
-  ok(gap && /not accounted for/.test(gap.title), `gap title: ${gap && gap.title}`);
+  ok(gap && /of shard data is not in the index list/.test(gap.title) && /does not measure dangling/.test(gap.detail), `gap title: ${gap && gap.title}`);
 
   // Agreeing closely is the normal case and says nothing.
   st.state.indices.set('c1', [{ index: 'a', size: 99 * 1024 ** 3 }]);

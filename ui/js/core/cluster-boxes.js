@@ -15,6 +15,7 @@
  */
 
 import { offText } from './collection.js';
+import { pct } from '../lib/fmt.js';
 import { shardAllocation, nodeTier, TIERS } from './cluster-detail.js';
 import { ilmPolicyState, ilmErrorsOf, slmCoverage, slmLastRun, slmTakesText, logsOf, NOT_KNOWN } from './lifecycle-errors.js';
 
@@ -206,7 +207,7 @@ export function shardCard(health) {
   const parts = [{ key: 'active', label: 'Active', n: a.active }, { key: 'init', label: 'Initializing', n: a.initializing }];
   if (a.relocating > 0) parts.splice(1, 0, { key: 'reloc', label: 'Relocating', n: a.relocating });
   parts.push({ key: 'unas', label: 'Unassigned', n: a.unassigned });
-  return { pill, figure: a.pct === null ? null : `${a.pct.toFixed(1)}%`, parts, total: a.total };
+  return { pill, figure: a.pct === null ? null : pct(a.pct), parts, total: a.total };
 }
 
 /**

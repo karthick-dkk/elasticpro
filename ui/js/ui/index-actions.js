@@ -14,6 +14,7 @@ import { toast } from './menu.js';
 import { ensureWrites } from '../core/writes.js';
 import { client, state } from '../core/state.js';
 import { verifyIndicesInSnapshots, coverageLabel } from '../core/snapshot-verify.js';
+import { sumKnown } from '../core/index-figures.js';
 import { pill } from '../pages/common.js';
 
 /** Run one action per index, collecting failures rather than stopping at the first. */
@@ -79,10 +80,8 @@ export async function closeIndices(cluster, names, { onChanged } = {}) {
 export async function deleteIndices(cluster, names, { onChanged } = {}) {
   if (!names.length || !(await ensureWrites())) return false;
 
-  const total = names.reduce((s, n) => {
-    const row = (state.indices.get(cluster.id) || []).find((r) => r.index === n);
-    return s + ((row && row.size) || 0);
-  }, 0);
+  const byName = new Map((state.indices.get(cluster.id) || []).map((r) => [r.index, r]));
+  const total = sumKnown(names.map((n) => byName.get(n) || {}), 'size');
 
   // Verify first. This is one listing per repository, so it is quick even for many indices.
   let coverage = null, verifyError = null;
@@ -120,7 +119,7 @@ export async function deleteIndices(cluster, names, { onChanged } = {}) {
             h('div', 'An index may be held there without this check seeing it. Treat "NOT in any snapshot" as "unknown" for those.')))
       : null,
     h('div', { style: { display: 'flex', gap: '10px', fontSize: '12.5px', alignItems: 'baseline', flexWrap: 'wrap' } },
-      h('b', `${num(names.length)} index/indices`), total ? h('span.muted', `${bytes(total)} on disk`) : null,
+      h('b', `${num(names.length)} index/indices`), total.counted ? h('span.muted', `${bytes(total.sum)} on disk${total.missing ? ` · ${total.missing} without a size` : ''}`) : null,
       h('span', { style: { color: 'var(--good-ink)' } }, `${covered.length} in a snapshot`),
       uncovered.length ? h('span', { style: { color: 'var(--critical-ink)', fontWeight: 640 } }, `${uncovered.length} ${unverified.length ? 'not confirmed in a snapshot' : 'with no snapshot'}`) : null),
     h('div.tbl-wrap', { style: { maxHeight: 'min(60vh, 520px)', overflow: 'auto' } },

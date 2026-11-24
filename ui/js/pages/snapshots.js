@@ -227,7 +227,7 @@ function clusterSection(c) {
 /** Why this cluster's repositories cannot be read right now, or '' when they can. */
 function unreadableReason(c) {
   const cl = client(c.id);
-  if (!cl || !cl.state || cl.state === 'ok' || cl.state === 'unknown') return '';
+  if (!cl || !cl.state || ['ok', 'online', 'connecting', 'unknown'].includes(cl.state)) return '';
   const le = cl.lastError || {};
   return hideAddress(le.message, c) || le.kind || cl.state;
 }
