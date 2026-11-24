@@ -241,9 +241,8 @@ async function loadAllocation(c, force = false) {
 
 /**
  * The dangling indices (`GET /_dangling`), per cluster: read when the page opens on one or two
- * clusters, kept ten minutes, and on the card's refresh. Not read with All clusters (a call per
- * cluster); the card's refresh reads the one it is pressed on. A read that failed is "not known"
- * with its reason.
+ * clusters, kept ten minutes, and on that cluster's Refresh. Not read with All clusters by itself (a
+ * call per cluster). A read that failed is "not known" with its reason.
  */
 const DISK_INFO_MAX_AGE_MS = 10 * 60 * 1000;
 const diskInfo = new Map();   // cluster id → { at, inflight, problem }
@@ -764,7 +763,7 @@ function diskCard(c, d) {
         h('i', { style: { background: p.color } }), h('span', p.label),
         h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', pct(p.value))))),
       h('div.ns-disk-dangling', danglingBody(c, io))),
-    [diskHelp(c), refreshButton(() => loadDiskInfo(c, true), { title: `ask ${c.name} for its dangling indices`, busy: !!(io && io.inflight) })])), 'dangling');
+    [diskHelp(c)])), 'dangling');
 }
 
 /** The dangling line: none, the list, or why it is not known. */
@@ -933,7 +932,7 @@ function shardsCard(c, d, all, raw) {
         title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.',
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
-      refreshButton(() => load(c), { busy: loading.has(c.id), title: 'read the shards again' }))]);
+      refreshButton(() => { load(c); loadDiskInfo(c, true); }, { busy: loading.has(c.id), title: 'read the shards and the dangling indices again' }))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length
