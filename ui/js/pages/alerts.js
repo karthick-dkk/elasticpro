@@ -1025,7 +1025,7 @@ export function alertsCsv(merged) {
       since_is_first_seen: m.approxSince ? 'yes' : 'no',
       repository: m.snapshot ? m.snapshot.repo : '',
       snapshot: m.snapshot ? m.snapshot.id : '',
-      snapshot_date: m.snapshot && m.snapshot.at ? dtz(m.snapshot.at) : '',
+      snapshot_date: m.snapshot && m.snapshot.at ? new Date(m.snapshot.at).toISOString() : '',
       snapshot_status: m.snapshot ? m.snapshot.status : '',
       snapshot_is_new: m.snapshot ? (m.snapshot.isNew ? 'yes' : 'no') : '',
       // Held: raised on a cluster that cannot be reached now. Listed here, never as current.

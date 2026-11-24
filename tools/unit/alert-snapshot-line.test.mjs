@@ -1,6 +1,6 @@
 /**
  * A snapshot alert's two lines say the snapshot's start with the same zone (0.3.90): the detail was
- * labelled, the line under it and the CSV's column were not (or in another zone).
+ * labelled, the line under it was not. The CSV's column stays ISO UTC, as the file's other times.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,8 +27,9 @@ test('the second line is written by the labelled formatter of the first', () => 
   assert.equal(snapshotLine({ at: null, repo: 'daily' }), '– · daily', 'no start is not a date');
 });
 
-test('the CSV column says the same', () => {
+test('the CSV column is the same moment, ISO UTC', () => {
   const row = { level: 'warning', cluster: { name: 'c', url: 'u' }, title: 't', detail: `snap-1 started ${dtz(at)}`, items: [], since: at, snapshot, state: 'open', notes: [], key: 'k', keys: ['k'] };
   const csv = alertsCsv([row, { ...row, snapshot: { ...snapshot, at: null } }]);
-  assert.equal(csv.split(dtz(at)).length - 1, 3, 'the detail of both rows and the first row\'s snapshot date');
+  assert.equal(csv.split('2026-11-21T03:41:47.000Z').length - 1, 1, 'the first row\'s snapshot date');
+  assert.equal(csv.split(dtz(at)).length - 1, 2, 'the detail of both rows');
 });
