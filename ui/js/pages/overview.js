@@ -269,6 +269,7 @@ export function onLeave() {
   listLeave();
 }
 function listLeave() {
+  wantedRow = null;
   if (ageTimer) { clearInterval(ageTimer); ageTimer = null; }
   for (const L of live.values()) if (L.timer) { clearTimeout(L.timer); L.timer = null; }
 }

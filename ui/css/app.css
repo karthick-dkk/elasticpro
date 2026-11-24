@@ -723,7 +723,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 .cl-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Never squeezed below its own length by the other columns (a wide table scrolls instead);
    only a name longer than this is cut, and the tooltip has it whole. */
-.cl-name-t { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.cl-name-t { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 215px; } /* name, caret and type badge within .cl-name-td's 300 px */
 .cl-caret { font-size: 10px; color: var(--text-muted); flex: none; }
 /* CI / DI / On-Prem beside the name (core/cluster-kind.js). A label, not a state: neutral. */
 .cl-type { display: inline-block; margin-left: 4px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -1702,7 +1702,6 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-detail .tbl th.num, .cl-detail .tbl td.num { text-align: right; }
 .cl-detail .cl-two { justify-items: start; }
 .cl-detail .tbl th, .cl-detail .tbl td { padding: 4px 8px; }
-.cl-pols { display: grid; gap: 4px; }
 .cl-acts { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .cl-acts .btn { text-decoration: none; }
 .cl-mini { position: relative; width: 80px; max-width: 100%; height: 5px; border-radius: 3px; background: var(--surface-3); margin: 2px auto 0; }

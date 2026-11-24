@@ -9537,6 +9537,8 @@ async function backToList() {
   ok(list().length > 1, 'clusters: the fixture should have more than one row');
   // A click on a plain cell opens the row; a second closes it.
   const up = () => doc.querySelector('#view table.cl-tbl > tbody > tr.cl-row');
+  // Rows a link opened earlier (Alerts' cluster names) are closed first.
+  for (let i = 0, b; i < 9 && (b = doc.querySelector('#view tr.cl-row.open button.cl-chev')); i++) { b.click(); await settleFor(150); }
   up().querySelector('td:nth-child(4)').click(); await settleFor(250);
   ok(doc.querySelectorAll('#view tr.cl-detail-row').length === 1 && up().classList.contains('open'), 'clusters: a click on a row does not open it');
   up().querySelector('td:nth-child(4)').click(); await settleFor(250);
