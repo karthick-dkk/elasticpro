@@ -100,6 +100,7 @@ async fn cluster_with(listing: Listing, with_event: bool, split: Vec<(String, St
             let docs: u64 = mine.iter().map(|(_, p)| *p).sum();
             let buckets: Vec<Value> = mine.iter().map(|(n, p)| json!({
                 "key": n, "doc_count": p, "sub": { "value": (*p / 10) as f64 }, "ev": { "value": (*p * 3) as f64 },
+                "ev_n": { "value": p }, "sub_n": { "value": p },
             })).collect();
             return (200, json!({ "hits": { "total": { "value": docs, "relation": "eq" } }, "aggregations": {
                 "sub": { "value": (docs / 10) as f64 }, "ev": { "value": (docs * 3) as f64 },
@@ -199,7 +200,8 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     assert_eq!(c.volume_tick_at(local(t, "06:00")).await, vec!["prod".to_string()]);
     let daily = settle(&c, "prod").await;
     assert_eq!(searches_for(&srv, t), 2, "today is searched every run");
-    for d in [d1, d2, d3] {
+    assert_eq!(searches_for(&srv, d1), 2, "yesterday is not final until 24 h after it ended: read again");
+    for d in [d2, d3] {
         assert_eq!(searches_for(&srv, d), 1, "{d} was final: not searched again");
     }
     assert!(c.volume_tick_at(local(t, "09:00")).await.is_empty(), "no repeat the same local day");
@@ -208,7 +210,9 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     let gone = row(&daily, d3);
     assert_eq!(gone["live"], false, "{gone}");
     assert_eq!((gone["priBytes"].as_u64(), gone["docs"].as_u64()), (Some(100), Some(100)), "kept as measured");
-    assert_eq!(row(&daily, d1)["final"], true);
+    assert_eq!(row(&daily, d2)["final"], true);
+    assert_eq!(row(&daily, d1)["final"], false, "read less than 24 h after it ended");
+    assert!(row(&daily, d1)["readAt"].is_i64() && row(&daily, d1)["notes"].to_string().contains("not final"), "{}", row(&daily, d1));
     assert_eq!(row(&daily, t)["final"], false);
     assert_eq!(row(&daily, d1)["indices"], 2);
     // Not measured is null, never 0.
@@ -345,7 +349,7 @@ async fn a_day_search_that_may_pass_is_tried_again_in_the_run() {
     }
     assert_eq!(daily["status"]["running"], json!(false), "the run did not finish: {daily}");
     assert_eq!(searches_for(&srv, good), 2, "turned away once, asked again in the same run");
-    assert_eq!(row(&daily, good)["final"], json!(true), "{daily}");
+    assert_eq!(row(&daily, good)["final"], json!(false), "yesterday, read less than 24 h after it ended: {daily}");
     assert_eq!(row(&daily, good)["eventBytes"], json!(30));
     assert_eq!(searches_for(&srv, bad), 1, "a 400 will not pass: not asked again");
     let e = row(&daily, bad)["error"].as_str().unwrap_or_default().to_string();
@@ -411,7 +415,7 @@ async fn an_index_without_a_date_is_split_by_its_time_field() {
     let r1 = row(&daily, d1);
     assert_eq!((r1["docs"].as_u64(), r1["eventBytes"].as_u64()), (Some(500), Some(1500)), "{r1}");
     assert_eq!((r1["priBytes"].clone(), r1["unmeasuredSizeIndices"].as_u64(), r1["indices"].as_u64()), (Value::Null, Some(1), Some(2)));
-    assert_eq!(r1["final"], true);
+    assert_eq!(r1["final"], false, "yesterday: not final yet");
     // d2: only time-split documents.
     let r2 = row(&daily, d2);
     assert_eq!((r2["docs"].as_u64(), r2["priBytes"].clone(), r2["totalBytes"].clone()), (Some(50), Value::Null, Value::Null), "{r2}");
@@ -735,10 +739,10 @@ async fn last_daily_run(c: &Arc<Core>) -> Value {
     panic!("the daily job's run did not end");
 }
 
-/// Backfill (docs/VOLUME.md "Backfill"): days before yesterday that the record does not hold
-/// as final and measured, while the cluster still has their indices, are filled a few a run,
-/// oldest first, and only while the cluster is not under query pressure. Today and yesterday
-/// are the run's own and are collected whatever the pressure; a day whose indices went is not
+/// Backfill (docs/VOLUME.md "Backfill"): days before the run's own three that the record does not
+/// hold as final and measured, while the cluster still has their indices, are filled a few a run,
+/// oldest first, and only while the cluster is not under query pressure. Today, yesterday and the
+/// day before (read once more to be final) are the run's own and are collected whatever the pressure; a day whose indices went is not
 /// asked again and is counted, never shown as 0; a day with no index anywhere is counted apart.
 #[tokio::test]
 async fn missing_days_are_backfilled_a_few_a_run_oldest_first_while_the_cluster_is_calm() {
@@ -751,30 +755,30 @@ async fn missing_days_are_backfilled_a_few_a_run_oldest_first_while_the_cluster_
     let dir = TempDir::new("volume-backfill");
     let c = portable(&dir, &srv.url()).await;
 
-    // Run 1, Collect now, three a run (the desktop message's settings): today and yesterday,
-    // then d11, d10, d9 — the oldest three of the ten missing.
+    // Run 1, Collect now, three a run (the desktop message's settings): today, yesterday and the
+    // day before, then d11, d10, d9 — the oldest three of the nine missing.
     let volume = json!({ "defaults": { "backfillPerRun": 3 } });
     let r = c.handle(json!({ "type": "VOLUME_RUN", "volume": volume })).await;
     assert_eq!(r["started"], json!(["prod"]), "{r}");
     let daily = settle(&c, "prod").await;
-    for n in [0, 1, 9, 10, 11] {
+    for n in [0, 1, 2, 9, 10, 11] {
         assert_eq!(searches_for(&srv, day(n)), 1, "d{n} searched on the first run");
     }
-    for n in 2..=8 {
+    for n in 3..=8 {
         assert_eq!(searches_for(&srv, day(n)), 0, "d{n} waits for a later run");
     }
     let pool = srv.hits().iter().filter(|h| h.path.starts_with("/_cat/thread_pool/search")).count();
     assert_eq!(pool, 3, "one thread-pool reading before each backfill day");
     let bf = &daily["status"]["backfill"];
-    assert_eq!((bf["from"].as_str(), bf["to"].as_str()), (Some(dash(day(30)).as_str()), Some(dash(day(2)).as_str())), "{bf}");
+    assert_eq!((bf["from"].as_str(), bf["to"].as_str()), (Some(dash(day(30)).as_str()), Some(dash(day(3)).as_str())), "{bf}");
     assert_eq!((bf["fillable"].as_u64(), bf["searched"].as_u64(), bf["filled"].as_u64(), bf["queued"].as_u64()),
-               (Some(10), Some(3), Some(3), Some(7)), "{bf}");
+               (Some(9), Some(3), Some(3), Some(6)), "{bf}");
     assert_eq!((bf["noIndex"].as_u64(), bf["gone"].as_u64(), bf["missing"].as_u64(), bf["paused"].clone()),
-               (Some(19), Some(0), Some(29), Value::Null), "{bf}");
+               (Some(19), Some(0), Some(28), Value::Null), "{bf}");
     assert_eq!(daily["status"]["lastError"], Value::Null, "{daily}");
     let run = last_daily_run(&c).await;
     assert_eq!(run["status"], json!("completed"), "{run}");
-    assert_eq!(run["note"], json!("backfilled 3 of 10 missing days"), "the run log says it: {run}");
+    assert_eq!(run["note"], json!("backfilled 3 of 9 missing days"), "the run log says it: {run}");
     // The days not yet backfilled have a record (sizes from _cat) but no figures: not 0.
     assert_eq!((row(&daily, day(5))["final"].clone(), row(&daily, day(5))["docs"].clone()), (json!(false), Value::Null));
 
@@ -784,36 +788,36 @@ async fn missing_days_are_backfilled_a_few_a_run_oldest_first_while_the_cluster_
     assert_eq!(c.volume_tick_at(local(t, "06:00")).await, vec!["prod".to_string()]);
     let daily = settle(&c, "prod").await;
     assert_eq!(searches_for(&srv, t), 2, "today, whatever the pressure");
-    for n in 2..=8 {
+    for n in 3..=8 {
         assert_eq!(searches_for(&srv, day(n)), 0, "d{n}: not under pressure");
     }
     let bf = &daily["status"]["backfill"];
     let paused = bf["paused"].as_str().unwrap_or_else(|| panic!("{bf}"));
     assert!(paused.contains("query pressure") && paused.contains("search queue is 900 of 1000"), "{paused}");
-    assert_eq!((bf["searched"].as_u64(), bf["queued"].as_u64()), (Some(0), Some(7)), "{bf}");
+    assert_eq!((bf["searched"].as_u64(), bf["queued"].as_u64()), (Some(0), Some(6)), "{bf}");
     assert_eq!(daily["status"]["lastError"], Value::Null, "pressure is not an error: {daily}");
     let run = last_daily_run(&c).await;
     assert_eq!(run["status"], json!("completed"), "{run}");
     assert!(run["note"].as_str().unwrap_or("").contains("backfill paused: cluster under query pressure"), "{run}");
 
-    // Run 3, calm again, the built-in seven a run: d2's index went meanwhile (retention), so
-    // it is not asked and is counted as gone; d3..d8 are filled.
+    // Run 3, calm again, the built-in seven a run: d3's index went meanwhile (retention), so
+    // it is not asked and is counted as gone; d4..d8 are filled.
     pressed.store(false, Ordering::SeqCst);
     c.load_clear_for_tests("prod");
-    listing.lock().unwrap().retain(|(n, _)| !n.ends_with(&dot(day(2))));
+    listing.lock().unwrap().retain(|(n, _)| !n.ends_with(&dot(day(3))));
     assert_eq!(c.volume_tick_at(local(t + Duration::days(1), "06:00")).await, vec!["prod".to_string()]);
     let daily = settle(&c, "prod").await;
-    for n in 3..=8 {
+    for n in 4..=8 {
         assert_eq!(searches_for(&srv, day(n)), 1, "d{n} filled on the third run");
     }
     for n in [9, 10, 11] {
         assert_eq!(searches_for(&srv, day(n)), 1, "d{n} was final: never asked again");
     }
-    assert_eq!(searches_for(&srv, day(2)), 0, "d2's indices are gone: not asked");
+    assert_eq!(searches_for(&srv, day(3)), 0, "d3's indices are gone: not asked");
     let bf = &daily["status"]["backfill"];
     assert_eq!((bf["fillable"].as_u64(), bf["searched"].as_u64(), bf["filled"].as_u64(), bf["queued"].as_u64(), bf["gone"].as_u64()),
-               (Some(6), Some(6), Some(6), Some(0), Some(1)), "{bf}");
-    let gone = row(&daily, day(2));
+               (Some(5), Some(5), Some(5), Some(0), Some(1)), "{bf}");
+    let gone = row(&daily, day(3));
     assert_eq!((gone["live"].clone(), gone["docs"].clone()), (json!(false), Value::Null), "kept, never 0: {gone}");
     assert_eq!(row(&daily, day(5))["final"], json!(true));
     assert_eq!(row(&daily, day(5))["eventBytes"], json!(300));

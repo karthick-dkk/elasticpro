@@ -87,6 +87,23 @@ pub fn utc_day(now_ms: i64) -> NaiveDate {
     chrono::DateTime::from_timestamp_millis(now_ms).map(|d| d.date_naive()).unwrap_or_default()
 }
 
+/// How long after a day ended (UTC midnight) it must have been read for its figures to be final.
+/// Documents keep arriving after midnight — late shippers, devices behind a queue — and a day
+/// read minutes after it ended would be frozen short. The one number: the daily record, the
+/// hosts day files and the files' "not final" notes all read it.
+pub const FINAL_AFTER_MS: i64 = 24 * 3_600_000;
+
+/// The first instant a read of day `d` is final.
+pub fn final_from(d: NaiveDate) -> i64 {
+    (d + Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX - FINAL_AFTER_MS) + FINAL_AFTER_MS
+}
+
+/// Days before this date are final when read at `now_ms`. `margin_ms` is a run's own margin
+/// (`Shift`), with `FINAL_AFTER_MS` its floor.
+pub fn final_today(now_ms: i64, margin_ms: u64) -> NaiveDate {
+    utc_day(now_ms - (margin_ms as i64).max(FINAL_AFTER_MS))
+}
+
 /// `YYYY-MM-DD`.
 pub fn day_key(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
