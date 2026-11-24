@@ -9803,7 +9803,7 @@ async function backToList() {
       ok(!/Older|Newer/.test(view().querySelector('.isum-toolbar').textContent), 'summary: the toolbar pages Older / Newer');
 
       // The tiles: Yesterday with indices and docs, three averages per day, today as of HH:MM.
-      ok(/^Yesterday/.test(tileText('yesterday')) && /\d+ indices · [\d,]+ docs/.test(tileText('yesterday')), `summary: the Yesterday tile reads "${tileText('yesterday')}"`);
+      ok(/^Yesterday/.test(tileText('yesterday')) && /\d{4}-\d\d-\d\d \(UTC day\) · \d+ indices · [\d,]+ docs/.test(tileText('yesterday')), `summary: the Yesterday tile reads "${tileText('yesterday')}"`);
       ok(/per day$/.test(tileText('avg7')) && /per day$/.test(tileText('avg30')), `summary: Avg 7 / 30 do not read "per day": "${tileText('avg7')}" "${tileText('avg30')}"`);
       ok(/per day · 59 of 60 days recorded/.test(tileText('avg60')), `summary: the 60-day tile does not count the missing day: "${tileText('avg60')}"`);
       ok(/as of \d\d:\d\d · not final/.test(tileText('today')), `summary: the Today tile reads "${tileText('today')}"`);
@@ -9889,7 +9889,8 @@ async function backToList() {
       ok(/share of the day's documents/.test(tipText()), 'summary: pressing the "i" shows nothing');
       const titles = [...view().querySelectorAll('[title]')].map((e) => e.getAttribute('title')).join(' ');
       ok(!/\best\.|\(est\)/i.test(view().textContent) && !/\best\./i.test(titles), 'summary: "est." is on the page');
-      ok(!/estimate/i.test(view().textContent), 'summary: a visible line explains the estimate (the owner chose the "i" only)');
+      // The size per tag1 value is worked out, not read: the heading says so (evidence accuracy, 2026-11-24).
+      ok([...view().querySelectorAll('.isum-tags h2')].some((e) => /^Per day by tag1 · estimated by document share$/.test(e.textContent)), 'summary: the size per tag1 is not called estimated');
 
       // Export CSV: a row per day shown, the size and its 7-day average, the tag1 values.
       const before = files.length;
@@ -9897,7 +9898,7 @@ async function backToList() {
       await settleFor(100);
       const f = files.length > before ? files.at(-1) : null;
       const lines = f ? f.text.split('\n') : [];
-      ok(lines[0] && lines[0].startsWith('cluster,day,status,indices,docs,size_basis,size_bytes,avg_7d_bytes,tag1=') && lines[0].endsWith(',tag1=other_bytes'), `summary: the CSV header is "${lines[0]}"`);
+      ok(lines[0] && lines[0].startsWith('cluster,day,status,indices,docs,size_basis,size_bytes,avg_7d_bytes,avg_7d_days_recorded,tag1=') && lines[0].endsWith(',tag1=other_bytes_estimated'), `summary: the CSV header is "${lines[0]}"`);
       ok(lines.length === 16, `summary: the CSV has ${lines.length - 1} rows for 15 days`);
 
       // A cluster with no tag1 field says so and names the setting; no chips.

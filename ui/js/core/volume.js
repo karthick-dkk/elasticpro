@@ -1,6 +1,6 @@
 import { plural } from '../lib/fmt.js';
 import { nodeRoles } from './cluster-detail.js';
-import { restorableIndices, spanText } from './snapshot-restorable.js';
+import { restorableIndices, spanText, repoListing, reposRead } from './snapshot-restorable.js';
 /**
  * Capacity arithmetic: how much a cluster ingests per day, and what that means for the
  * disk it has and the retention it promises.
@@ -363,7 +363,10 @@ export function dataNodeDisk(data) {
   return { measured: true, total, used, avail, percent: (used / total) * 100, nodes: count, reason: null };
 }
 
-/** How many days the data-node disk's free space lasts at `perDayBytes`. null when either is unknown. */
+/** What "Disk lasts" is worked out from; said wherever the figure is shown. */
+export const DISK_LASTS_BASIS = 'free data-node disk ÷ event_logsize per day (7-day average), replicas not counted';
+
+/** How many days the data-node disk's free space lasts at `perDayBytes` (DISK_LASTS_BASIS). null when either is unknown. */
 export function diskLastsDays(disk, perDayBytes) {
   if (!disk || !disk.measured || !(perDayBytes > 0)) return null;
   return Math.max(0, disk.avail) / perDayBytes;
@@ -544,12 +547,14 @@ export const SHEET_COLUMNS = [
   { group: 'Cluster', label: 'Tags', kind: 'text', get: (r) => (r.cluster.tags || []).join(', '),
     help: 'Labels from the config file, for grouping and filtering. Nothing is calculated from them.' },
 
-  { group: 'How much comes in', label: 'Indices size per day', unit: 'GB', kind: 'num',
+  { group: 'How much comes in', label: 'Log volume per day', unit: 'GB', kind: 'num',
     get: (r) => round1(r.perDayGB), note: (r) => r.vol.basis,
-    help: 'How much the indices grow in a day: the average of the heaviest days in the window, both set in the '
-        + 'config (volumeTopDays of volumeWindowDays, 3 of 7 by default). Heaviest-few rather than a plain average '
-        + 'so a quiet weekend does not make the estimate too small. Today is left out because it is still being '
-        + 'written to.' },
+    help: 'How much comes in a day; what it was measured on is said beside it. On Reports: event_logsize, the mean of '
+        + 'the last 7 finished days of the daily record. Sent to Zabbix: index sizes, the average of the heaviest days in '
+        + 'the window, both set in the config (volumeTopDays of volumeWindowDays, 3 of 7 by default). Today is left out '
+        + 'because it is still being written to.' },
+  { group: 'How much comes in', label: 'Log volume measured as', kind: 'text', get: (r) => r.vol.basis || null,
+    help: 'What the daily figure is: event_logsize of the daily record, or index sizes.' },
   { group: 'How much comes in', label: 'Per day + buffer', unit: 'GB', kind: 'num',
     get: (r) => round1(r.bufferedGB),
     note: (r) => `the daily figure plus ${headroomPct(r)}% headroom — what sizing is done against`,
@@ -564,9 +569,10 @@ export const SHEET_COLUMNS = [
     help: 'Disk not yet used. Not all of it is usable: Elasticsearch stops allocating shards at the high '
         + 'watermark, 90% full by default, so the cluster is in trouble before this reaches zero.' },
   { group: 'Disk on the cluster', label: 'Current live storage store upto', unit: 'days', kind: 'num',
-    get: (r) => floorOrNull(r.liveSufficientDays), note: () => 'at the current daily rate',
-    help: 'Disk free ÷ indices size per day. How long until the cluster fills at today\'s rate, assuming nothing is deleted. '
-        + 'Uses the unbuffered daily figure, because it is a projection of what is happening rather than a plan.' },
+    get: (r) => floorOrNull(r.liveSufficientDays), note: (r) => `disk free ÷ log volume per day (${r.vol.basis || 'basis not known'}); replicas not counted`,
+    help: 'Disk free ÷ log volume per day. How long until the cluster fills at that rate, assuming nothing is deleted. '
+        + 'Uses the unbuffered daily figure, because it is a projection of what is happening rather than a plan. '
+        + 'Replicas are not added: an index with one replica takes twice its size.' },
 
   { group: 'Indices kept on the cluster', label: 'Retention policy', kind: 'text',
     get: (r) => (r.liveRetention ? r.liveRetention.label : 'not set'),
@@ -583,14 +589,14 @@ export const SHEET_COLUMNS = [
         + 'cluster is doing whatever ILM says.' },
   { group: 'Indices kept on the cluster', label: 'Disk needed for the policy', unit: 'GB', kind: 'num', get: (r) => round1(r.requiredLiveGB),
     note: (r) => (r.liveRetention ? `(per day + ${headroomPct(r)}%) × ${r.liveRetention.days} days` : 'no retention policy set'),
-    help: 'Indices size per day, plus the configured headroom, × the retention policy in days.' },
+    help: 'Log volume per day, plus the configured headroom, × the retention policy in days.' },
   { group: 'Indices kept on the cluster', label: 'Enough disk for the policy?', kind: 'bool', get: (r) => r.liveRetentionMet,
     note: (r) => (r.requiredLiveGB ? `needs ${gb(r.requiredLiveGB)}` : 'set liveRetention on the cluster'),
     help: 'Whether disk total covers what the retention policy needs. NO means the policy cannot be kept without more disk.' },
   { group: 'Indices kept on the cluster', label: 'Disk needed for 30 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required30GB),
-    note: (r) => `(per day + ${headroomPct(r)}%) × 30 days`, help: 'Indices size per day, plus the configured headroom, × 30.' },
+    note: (r) => `(per day + ${headroomPct(r)}%) × 30 days`, help: 'Log volume per day, plus the configured headroom, × 30.' },
   { group: 'Indices kept on the cluster', label: 'Disk needed for 90 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required90GB),
-    note: (r) => `(per day + ${headroomPct(r)}%) × 90 days`, help: 'Indices size per day, plus the configured headroom, × 90.' },
+    note: (r) => `(per day + ${headroomPct(r)}%) × 90 days`, help: 'Log volume per day, plus the configured headroom, × 90.' },
   { group: 'Indices kept on the cluster', label: 'Days of indices held now', unit: 'days', kind: 'num',
     get: (r) => r.vol.daysCovered || null,
     note: (r) => (r.liveLogsFrom ? `${r.liveLogsFrom} → ${r.liveLogsTo}` : 'no dated indices'),
@@ -620,11 +626,11 @@ export const SHEET_COLUMNS = [
   { group: 'Backups (snapshots)', label: 'Backup space required for the policy', unit: 'GB', kind: 'num',
     get: (r) => round1(r.requiredSnapshotGB),
     note: (r) => (r.snapshotRetention ? `(per day + ${headroomPct(r)}%) × ${r.snapshotRetention.days} days` : 'no backup retention policy set'),
-    help: 'Indices size per day, plus the configured headroom, × the backup retention policy in days. An upper bound: snapshots are '
+    help: 'Log volume per day, plus the configured headroom, × the backup retention policy in days. An upper bound: snapshots are '
         + 'incremental, so the repository normally needs less.' },
   { group: 'Backups (snapshots)', label: 'Backup space required for 365 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required365GB),
     note: (r) => `(per day + ${headroomPct(r)}%) × 365 days`,
-    help: 'Indices size per day, plus the configured headroom, × 365 — a year of backups. An upper bound, for the same reason.' },
+    help: 'Log volume per day, plus the configured headroom, × 365 — a year of backups. An upper bound, for the same reason.' },
   { group: 'Backups (snapshots)', label: 'Enough backup space?', kind: 'bool', get: (r) => r.backupSpaceMet,
     note: (r) => (r.backupCapacityGB === null ? 'set backupCapacity on the cluster'
                                               : `needs ${gb(r.backupNeedGB)} of ${gb(r.backupCapacityGB)}`),
@@ -647,7 +653,7 @@ export const SHEET_COLUMNS = [
     get: (r) => floorOrNull(r.backupSufficientDays),
     note: (r) => (r.repoGB === null ? 'measure the repository first'
                                     : 'repository size ÷ daily volume — an estimate, not a reading'),
-    help: 'Backup space used ÷ indices size per day. A rough sense of how much data the repository holds. It is '
+    help: 'Backup space used ÷ log volume per day. A rough sense of how much data the repository holds. It is '
         + 'an estimate from sizes; the two columns that follow are read from the actual dates.' },
 
   // What is actually inside the snapshots, which is the question "how far back can I
@@ -708,7 +714,7 @@ const CLIENT_VIEW = [
   // label freely, never the key.
   { from: 'Cluster name',                       group: 'Client',         label: 'ClientName',                             key: 'name' },
   { from: 'Elasticsearch URL',                  group: 'Client',         label: 'ES Host',                                key: 'es.host' },
-  { from: 'Indices size per day',               group: 'Volume',         label: 'Current Per Day Volume',                 key: 'volume.day' },
+  { from: 'Log volume per day',                 group: 'Volume',         label: 'Current Per Day Volume',                 key: 'volume.day' },
   { from: 'Per day + buffer',                   group: 'Volume',         label: 'Daily Volume + buffer',                  key: 'volume.day.buffered' },
   { from: 'Disk total',                         group: 'Live storage',   label: 'Current Live Storage',                   key: 'live.total' },
   { from: 'Disk used',                          group: 'Live storage',   label: 'Live Used',                              key: 'live.used.pct' },
@@ -752,35 +758,59 @@ export function clientPlanValues(r) {
  * What the snapshot repositories of one cluster hold, in bytes.
  *
  * Elasticsearch does not report a repository's size. The closest honest answer is the sum
- * of each snapshot's INCREMENTAL bytes — one _status call per snapshot, capped per
- * repository. `failed` says how many could not be read, so a short total is never passed
- * off as a complete one; when every read failed the total is null, not zero.
+ * of each snapshot's INCREMENTAL bytes — one _status call per snapshot, at most `cap` calls
+ * per repository a run (a snapshot already in the cache costs none, so the next run goes on
+ * where this one stopped).
  *
- * `cache`, when given, is a Map of `repo/snapshot` → bytes. A snapshot never changes size
- * once taken, so a caller that runs often need only ask about the new ones.
+ * `{total, atLeast, counted, failed, of, more, unlisted}`: `total` only when every snapshot of
+ * every repository was counted, else null — `atLeast` is then what was counted (null when
+ * nothing was). `of` is how many snapshots the listings name, `more` that a listing was cut
+ * (there are snapshots not listed), `unlisted` the repositories with no listing. A short sum is
+ * never passed off as a complete one (repoMeasureText).
+ *
+ * `cache`, when given, is a Map of `repo/snapshot` → bytes. A finished snapshot never changes
+ * size, so a caller that runs often need only ask about the new ones.
  */
 export async function measureRepoBytes(cl, data, { cap = 60, cache = null } = {}) {
-  let total = 0, failed = 0, counted = 0;
+  let sum = 0, failed = 0, counted = 0, of = 0, more = false;
+  const unlisted = [];
   for (const repo of (data && data.repos) || []) {
-    const snaps = (((data.snapshots || {})[repo.name]) || []).slice(0, cap);
-    for (const s of snaps) {
+    const listing = repoListing(data, repo);
+    if (!listing.rows) { unlisted.push(repo.name); continue; }
+    if (listing.cut) more = true;
+    of += listing.rows.length;
+    let calls = 0;
+    for (const s of listing.rows) {
       const id = `${repo.name}/${s.id}`;
-      if (cache && cache.has(id)) { total += cache.get(id); counted++; continue; }
+      if (cache && cache.has(id)) { sum += cache.get(id); counted++; continue; }
+      if (calls >= cap) continue;
+      calls++;
       try {
         const st = await cl.snapshotStatus(repo.name, s.id);
         const one = (st.snapshots || [])[0];
-        const bytes = (one && one.stats && one.stats.incremental && one.stats.incremental.size_in_bytes) || 0;
+        const bytes = one && one.stats && one.stats.incremental ? one.stats.incremental.size_in_bytes : null;
+        // No size in the answer is not a size of 0.
+        if (typeof bytes !== 'number' || !isFinite(bytes)) { failed++; continue; }
         if (cache) cache.set(id, bytes);
-        total += bytes;
+        sum += bytes;
         counted++;
       } catch (_) { failed++; }
     }
   }
-  // Nothing readable is unknown. No snapshots at all is a repository holding nothing.
-  return { total: counted || !failed ? total : null, counted, failed };
+  // Repositories read and holding no snapshot: 0, measured. A list nobody read: not known.
+  const whole = reposRead(data) && counted === of && !more && !unlisted.length;
+  return { total: whole ? sum : null, atLeast: counted ? sum : null, counted, failed, of, more, unlisted };
 }
 
-
+/** "measured 60 of 212 snapshots: at least 4.1 TB", for a measurement that is not whole; '' when it is. */
+export function repoMeasureText(m, fmt) {
+  if (!m || m.total !== null) return '';
+  if (!m.of && !m.more && !m.unlisted.length) return 'not measured: the repositories have not been read';
+  const parts = [m.atLeast === null ? `measured 0 of ${m.of}${m.more ? '+' : ''} snapshots` : `measured ${m.counted} of ${m.of}${m.more ? '+' : ''} snapshots: at least ${fmt(m.atLeast)}`];
+  if (m.failed) parts.push(`${m.failed} could not be read`);
+  if (m.unlisted && m.unlisted.length) parts.push(`${plural(m.unlisted.length, 'repository', 'repositories')} not listed`);
+  return parts.join(' · ');
+}
 function round1(v) { return v === null || v === undefined || !isFinite(v) ? null : Math.round(v * 10) / 10; }
 function floorOrNull(v) { return v === null || v === undefined || !isFinite(v) ? null : Math.floor(v); }
 

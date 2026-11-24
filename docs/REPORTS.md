@@ -41,12 +41,19 @@ disagree, this file wins and the difference is a bug in one of them: fix it.
 
 ### Overview (board 1)
 
-- Five tiles: *Ingested yesterday* (event_logsize, all clusters, with ▲/▼ % against the 7-day
-  average), *7-day daily average*, *Month so far* (days counted), *Disk runs out within 6
-  weeks* (clusters, "data-node disk · N within 2 weeks"), *Backups that do not fit* (with
-  "N not measured · set backupCapacity").
+- Five tiles: *Ingested yesterday* (event_logsize, with ▲/▼ % against the 7 days before it),
+  *7-day daily average*, *Month so far* (days counted), *Disk runs out within 6 weeks*
+  (clusters, N within 2 weeks), *Backups that do not fit*. **What a figure covers** (0.3.89,
+  `fleetTiles` / `tileTexts`): every tile says "N of M clusters"; a tile no cluster could be
+  measured for reads *not measured* (backups then name what is missing: backupCapacity,
+  snapshotRetention, a repository, event_logsize), never 0, and a month that is not measured
+  has no day count; a month short of days says "46 of 115 cluster-days measured"; a day that is
+  not final is counted beside the figure. A row's 7-day average and month over fewer days say
+  "3/7 d". The CSV and xlsx end with *Yesterday final*, *7-day avg days measured*, *Month days
+  measured* and *Not measured because*. A bar of Daily volume says how many clusters it covers.
 - Two cards: *Daily volume* (stacked bars, 30 days, top 5 clusters + the rest) and *How long
-  the free disk lasts* (data nodes only, at each cluster's 7-day rate; red < 2 weeks, amber < 6
+  the free disk lasts* (`DISK_LASTS_BASIS`: free data-node disk ÷ event_logsize per day, 7-day
+  average, replicas not counted; red < 2 weeks, amber < 6
   weeks, green, grey = not measured).
 - *By cluster* table: Cluster, Type (CI/DI/On-Prem), Yesterday, 7-day avg, vs avg, Month so
   far, Data-node disk used, Disk lasts, Live retention (fits / short by / not set), Backups,
@@ -84,9 +91,11 @@ disagree, this file wins and the difference is a bug in one of them: fix it.
   of in these days is not kept as a filter that empties the page: Daily shows all sources and
   says "Source X has no index on <cluster> in these days: showing all sources".
 - Daily: four tiles (Yesterday, 7-day average, Peak day, Month so far — all event_logsize,
-  docs in the detail line), *Log size per day* line chart with 7-day average, *Day by day*
-  table: Day, Indices, Documents, event_logsize, vs 7-day avg, Status (final / today so far /
-  "N of M shards failed · asked again" / not measured).
+  docs in the detail line; the average says its dates and how many of its days were measured or
+  are not final, and what yesterday is compared with: "+7.1 % yesterday against the 7 days before
+  it (16–22 Nov: 14 GB)" — the day is never in its own average), *Log size per day* line chart with 7-day average, *Day by day*
+  table: Day, Indices, Documents, event_logsize, vs 7-day avg, Status (final / "today so far, as of HH:MM" in
+  the server's zone / "N of M shards failed · asked again" / not measured).
 - Monthly: *Month by month* (Month, Days, Documents, event_logsize with a mini bar, Peak day,
   vs previous) beside *Breakdown* (By field, Period, Top N, Export CSV; horizontal bars with
   share %, "N other hosts", "no <field>"). No explanatory note under the breakdown.
@@ -107,7 +116,7 @@ snapshot / backup**) over the headers, hidden when a reorder mixes the two group
 | Required live disk | per day × policy days × buffer; *needs a policy* when no policy |
 | Live disk shortfall | required − total; amount in red, *none* in green |
 | Backup policy | `snapshotRetention` (and ULM bucket for CI/DI: "ULM · S3 · 90 days"), as typed |
-| Backup disk (repository) | bar: repository size against `backupCapacity`; ULM → *in S3*; no capacity → *not measured · set backupCapacity* |
+| Backup disk (repository) | bar: repository size against `backupCapacity`, only when every snapshot was measured (a run asks at most 60 snapshots of a repository; the rest on the next press): until then "measured 60 of 212 snapshots: at least 4.1 TB"; ULM → *in S3*; no capacity → *not measured · set backupCapacity* |
 | Required backup disk | per day × backup days × buffer |
 | Backup disk shortfall | required − total; *none* / amount / *ULM · S3* / *not set* |
 
@@ -137,7 +146,9 @@ Planning sizes a new or existing cluster from a **plan template**. Templates are
 server-side settings (admins edit, everyone plans).
 
 - Inputs: Template, Based on (a new cluster | an existing cluster, which fills daily volume
-  from its 7-day event_logsize and the policy from its settings), Daily volume (GB), Live
+  from its 7-day event_logsize and the policy from its settings), Daily volume (GB = 1024³ bytes,
+  as every size on Reports; a volume under 1 GB stays what it is; a TB of disk is 1000 GB, as
+  bought), Live
   retention policy **hot days + warm days**, Backups go to (**/backup disk | S3 | ULM → S3**),
   Backup retention (days), Buffer (%), Replicas.
 - Output: tiles (Servers, CPU, RAM, /live disk, backup) and a bill of materials: Role, Sizing

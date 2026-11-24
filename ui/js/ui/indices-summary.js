@@ -28,7 +28,7 @@ import {
   basisOf, dayBasis, BASIS_LABEL, NEEDS_VERSION, backfillLine,
 } from '../core/volume-daily.js';
 import {
-  DAY_CHOICES, DEFAULT_DAYS, AVG_TILES, LINE_AVG_DAYS, TOP_VALUES, RECORD_DAYS, SUMMARY_CSV,
+  DAY_CHOICES, DEFAULT_DAYS, AVG_TILES, LINE_AVG_DAYS, TOP_VALUES, RECORD_DAYS, SUMMARY_CSV, TAG_ESTIMATE, tagColumnName,
   dayWindow, avgPerDay, basisPoints, tagShareBytes, valueDocsOn, restDocsOn, rankedValues,
   sizeDayStatus, dayMonth, monthSpans, labelStep, labelledBars, niceScale,
 } from '../core/indices-summary.js';
@@ -292,7 +292,7 @@ function tiles(reply, points, basis, today) {
   const out = [];
   out.push(tile('Yesterday',
     y && y.value !== null ? bytes(y.value) : notRecorded(y ? 'Index size is not measured for this day.' : `The record has no figure for ${yday}.`),
-    y ? `${num(y.row.indices)} indices · ${typeof y.row.docs === 'number' ? `${num(y.row.docs)} docs` : 'docs not counted yet'}` : yday, 'yesterday'));
+    `${yday} (UTC day)${y ? ` · ${num(y.row.indices)} indices · ${typeof y.row.docs === 'number' ? `${num(y.row.docs)} docs` : 'docs not counted yet'}${y.row.final === false ? ' · not final' : ''}` : ''}`, 'yesterday'));
   for (const n of AVG_TILES) {
     const a = avgPerDay(points, n, { today });
     out.push(tile(`Avg ${n} days`, a.value === null ? notRecorded(`No day of the last ${n} is in the record.`) : bytes(a.value),
@@ -341,7 +341,7 @@ function chips(ranked, rk, field) {
 
 function chartCard(c, reply, days, series, basis, ranked, rk, today) {
   const field = tagField(reply, rk);
-  const title = basis === 'eventSize' ? 'Event bytes per day' : 'Index size per day';
+  const title = `${basis === 'eventSize' ? 'Event bytes per day' : 'Index size per day'}${S.chosen.length ? ` · ${field} ${TAG_ESTIMATE}` : ''}`;
   const byDay = new Map(series.map((p) => [p.day, p]));
   const shown = days.map((d) => byDay.get(d) || { day: d, value: null, row: null, pending: false });
   const avgOf = (d) => avgPerDay(series, LINE_AVG_DAYS, { today, before: d }).value;
@@ -364,9 +364,10 @@ function dayTip(p, today, avgOf) {
   const r = (k, v) => h('div.r', h('span', k), h('b', { style: { display: 'inline', margin: 0 } }, v));
   const st = p.day === today ? 'today so far' : p.row && p.row.final === false ? 'not final' : p.row ? 'final' : 'not recorded';
   const avg = avgOf(p.day);
+  const est = p.value !== null && S.chosen.length ? ' (estimated)' : '';
   return h('div',
     h('b', `${dayMonth(p.day)} ${p.day.slice(0, 4)} · ${st}`),
-    r('Size', p.value !== null ? bytes(p.value) : p.pending ? 'Loading…' : 'not recorded'),
+    r('Size', p.value !== null ? `${bytes(p.value)}${est}` : p.pending ? 'Loading…' : 'not recorded'),
     p.row ? r('Indices', num(p.row.indices)) : null,
     r(`${LINE_AVG_DAYS}-day avg`, avg !== null ? bytes(avg) : 'no earlier day'));
 }
@@ -472,7 +473,7 @@ function tagCell(c, row, basis, d, value, named) {
 
 function tagCard(c, reply, days, rowOf, basis, ranked, rk, today) {
   const field = tagField(reply, rk);
-  const head = h('header', h('h2', `Per day by ${field}`), infoButton(field));
+  const head = h('header', h('h2', `Per day by ${field} · ${TAG_ESTIMATE}`), infoButton(field));
   let body;
   if (!rk || rk.loading) body = h('div.tbl-empty', `Reading the ${field} values…`);
   else if (rk.error) body = unreadable(`The ${field} values`, rk.error);
@@ -523,15 +524,17 @@ export function summaryCsv(c, today = utcDay()) {
   const ranked = rankedValues(rk && rk.reply);
   const field = tagField(reply, rk);
   const cols = tagColumns(ranked);
-  const tagHeads = [...cols.values.map((v) => `${field}=${v}_bytes`), ...(cols.other ? [`${field}=other_bytes`] : [])];
+  const tagHeads = [...cols.values.map((v) => tagColumnName(field, v)), ...(cols.other ? [tagColumnName(field, 'other')] : [])];
   const rows = [...days].reverse().map((d) => {
     const row = rowOf.get(d) || null;
+    const avg = avgPerDay(points, LINE_AVG_DAYS, { today, before: d });
     const o = {
       cluster: c.name, day: d, status: sizeDayStatus(row && { ...row, day: d }, basis, { today }).text,
       indices: row && typeof row.indices === 'number' ? row.indices : null,
       docs: row && typeof row.docs === 'number' ? row.docs : null,
       size_basis: basis, size_bytes: row ? dayBasis(row, basis) : null,
-      avg_7d_bytes: (() => { const a = avgPerDay(points, LINE_AVG_DAYS, { today, before: d }).value; return a === null ? null : Math.round(a); })(),
+      avg_7d_bytes: avg.value === null ? null : Math.round(avg.value),
+      avg_7d_days_recorded: `${avg.measured} of ${avg.of}`,
     };
     cols.values.forEach((v, i) => { const x = tagCell(c, row, basis, d, v, null); o[tagHeads[i]] = x.v === null ? null : Math.round(x.v); });
     if (cols.other) { const x = tagCell(c, row, basis, d, null, cols.values); o[tagHeads[tagHeads.length - 1]] = x.v === null ? null : Math.round(x.v); }

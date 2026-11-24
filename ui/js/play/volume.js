@@ -6,7 +6,7 @@
  *
  * Two figures exist only here, because no other page shows the fleet as one: the sums of
  * the per-cluster cards (yesterday, average per day, month so far) over the clusters that
- * have a record, and the change of the first against the second. Both are said with how
+ * have a record, and yesterday's change against the 7 days before it. Both are said with how
  * many clusters they cover. Total events (spotlight) is Σ docs of the record's live days,
  * as docs/PLAY.md defines it.
  */
@@ -60,18 +60,21 @@ export function cardsOf(reply) {
   };
 }
 
+/** What yesterday's change is against: the mean of the days before yesterday (the average card counts yesterday). */
+const baseOf = (x) => (x && x.yesterday !== null && typeof x.change === 'number' && x.change > -100 ? x.yesterday / (1 + x.change / 100) : null);
+
 /**
  * The fleet's sums over the clusters whose record has the figure: `{value, of}` each, value
- * null when none has it — and the fleet's yesterday against its average, only over clusters
- * that have both (so a cluster missing one does not tilt the change).
+ * null when none has it — and the fleet's yesterday against the 7 days before it (the row rule,
+ * docs/VOLUME.md), only over clusters that have both (so a cluster missing one does not tilt it).
  */
 export function fleetVolume(cardList) {
   const sum = (k) => {
     const have = cardList.filter((x) => x && x[k] !== null && x[k] !== undefined);
     return { value: have.length ? have.reduce((s, x) => s + x[k], 0) : null, of: have.length };
   };
-  const both = cardList.filter((x) => x && x.yesterday !== null && x.average !== null && x.average > 0);
-  const ySum = both.reduce((s, x) => s + x.yesterday, 0), aSum = both.reduce((s, x) => s + x.average, 0);
+  const both = cardList.filter((x) => baseOf(x) > 0);
+  const ySum = both.reduce((s, x) => s + x.yesterday, 0), aSum = both.reduce((s, x) => s + baseOf(x), 0);
   return {
     yesterday: sum('yesterday'), average: sum('average'), month: sum('month'),
     change: aSum > 0 ? ((ySum - aSum) / aSum) * 100 : null,
@@ -111,7 +114,7 @@ export function render(ctx) {
   return h('div.pl-slide.pl-volume',
     h('div.pl-kpis',
       kpi('Yesterday · all clusters', fleet.yesterday.value === null ? unknown(noRec) : bytes(fleet.yesterday.value),
-        fleet.change === null ? cover(fleet.yesterday) : `${signedPct(fleet.change)} vs 7-day avg · ${cover(fleet.yesterday)}`,
+        fleet.change === null ? cover(fleet.yesterday) : `${signedPct(fleet.change)} vs the 7 days before it · ${cover(fleet.yesterday)}`,
         fleet.change !== null && fleet.change > 25 ? 'yellow' : ''),
       kpi('Average per day', fleet.average.value === null ? unknown(noRec) : bytes(fleet.average.value), cover(fleet.average) ? `7 days · ${cover(fleet.average)}` : null),
       kpi('Month so far', fleet.month.value === null ? unknown(noRec) : bytes(fleet.month.value), cover(fleet.month)),

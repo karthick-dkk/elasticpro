@@ -414,7 +414,9 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   the record is read from `derive::cards_from(today, N)` (the earliest of the N days before
   yesterday, the first of the month, 30 days back) whatever `days` is; rows, totals and
   `sources` stay limited to the window.
-- **Yesterday card change**: yesterday against the N days before it (the row rule).
+- **Yesterday card change**: yesterday against the N days before it (the row rule). Play's fleet
+  change is the same rule over the clusters that have it: each cluster's base is what its own
+  change is against, never the average card, which counts yesterday.
 - **Totals row** (Daily table): Σ over the days shown; a figure no shown day measured stays
   `null`.
 - **Average per month** (Monthly graph's dashed line): mean of the month rows' basis over
@@ -481,6 +483,12 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
   never the basis figures (`avgPerDay`, `peakDay`), whatever `sizeBasis` is. In the .xlsx
   Monthly sheet the Average per day / Peak day columns follow the basis, as on the page, and
   their headers name it when it is not primary size ("Average per day · event bytes").
+- Reports › Exports daily: a cluster with no day in the record has one row, its status saying why;
+  monthly by cluster: the clusters chosen, a column per month and `days_note` ("2026-10: 12 of 31
+  days", or that the server has no monthly record for it)
+- Indices › Summary: `cluster, day, status, indices, docs, size_basis, size_bytes, avg_7d_bytes,
+  avg_7d_days_recorded, <tag>=<value>_bytes_estimated…`; a value's size is always headed
+  "estimated by document share" on the page
 - breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen`
 
 ## Reports and mail

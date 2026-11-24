@@ -31,7 +31,8 @@
  */
 
 import { bridge } from './transport.js';
-import { workerStatus } from './es.js';
+import { workerStatus, serverZoneName } from './es.js';
+import { zonedText } from './log-range.js';
 import { state } from './state.js';
 import { slug } from './config.js';
 import { desktopVolume } from './volume-config.js';
@@ -134,12 +135,11 @@ export function toMs(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-/** "14:02", local time, for "as of". */
-export function hhmm(v) {
+/** "14:02" for "as of", in the server's zone (this browser's until the server has said it). */
+export function hhmm(v, zone = serverZoneName()) {
   const ms = toMs(v);
   if (ms === null) return '';
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return zonedText(ms, zone || Intl.DateTimeFormat().resolvedOptions().timeZone, { seconds: false }).slice(11);
 }
 
 /** Today's date as the core counts days: UTC, `YYYY-MM-DD`. */
@@ -438,19 +438,25 @@ export function backfillLine(status) {
   return { text: `Backfill${span}: ${parts.join(' · ')}`, title: b.paused ? String(b.paused) : 'Missing days are filled a few a run, oldest first, while the cluster is not under query pressure.' };
 }
 
+/** A finished day whose figure may still move: shards failed, or its parts are not final (docs/VOLUME.md "final"). */
+export const notFinalDay = (d) => !!d && d.final === false && eventBytesOf(d) !== null;
+/** "2 days not final", or ''. One wording for every tile and file. */
+export const notFinalText = (n) => (n > 0 ? `${n} ${n === 1 ? 'day' : 'days'} not final` : '');
+
 /**
  * The `days` calendar days before `before` (default: today, UTC), and the mean event_logsize
- * of those that measured it. `{value|null, measured, of, from, to}`: `measured` of `of` days
- * carried a figure. Today is never counted (it is still filling up).
+ * of those that measured it. `{value|null, measured, notFinal, of, from, to}`: `measured` of `of`
+ * days carried a figure, `notFinal` of those may still move. Today is never counted (it is still
+ * filling up).
  */
 export function eventWindow(record, days = 7, { today = utcDay(), before = null } = {}) {
   const n = Math.max(1, Math.floor(Number(days) || 7));
   const to = addDays(before || today, -1);
   const from = addDays(to, -(n - 1));
-  const vals = rowsOf(record)
-    .filter((d) => d.day >= from && d.day <= to && d.day < today)
-    .map(eventBytesOf).filter((v) => v !== null);
-  return { value: vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null, measured: vals.length, of: n, from, to };
+  const rows = rowsOf(record).filter((d) => d.day >= from && d.day <= to && d.day < today);
+  const vals = rows.map(eventBytesOf).filter((v) => v !== null);
+  return { value: vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null, measured: vals.length,
+    notFinal: rows.filter(notFinalDay).length, of: n, from, to };
 }
 
 /**
@@ -475,6 +481,15 @@ export function eventVsAvgPct(record, day, days = 7, { today = utcDay() } = {}) 
   return avg ? ((v - avg) / avg) * 100 : null;
 }
 
+/**
+ * What eventVsAvgPct compares with, in words: "the 7 days before it", or "6 of the 7 days before it"
+ * when not all of them were measured. The day itself is never in its own average.
+ */
+export function vsAvgWords(record, day, days = 7, { today = utcDay() } = {}) {
+  const w = eventWindow(record, days, { today, before: day });
+  return w.measured < w.of ? `${w.measured} of the ${w.of} days before it` : `the ${w.of} days before it`;
+}
+
 /** Yesterday's row: `{day, value|null, docs|null, row|null}`. */
 export function eventYesterday(record, { today = utcDay() } = {}) {
   const day = addDays(today, -1);
@@ -493,9 +508,10 @@ export function eventMonthSoFar(record, { today = utcDay() } = {}) {
   const days = Number(today.slice(8, 10)) - 1;
   const rows = days ? rowsOf(record).filter((d) => d.day >= from && d.day <= to) : [];
   const vals = rows.map(eventBytesOf).filter((v) => v !== null);
+  const notFinal = rows.filter(notFinalDay).length;
   const docs = rows.map((d) => (typeof d.docs === 'number' ? d.docs : null)).filter((v) => v !== null);
   return { value: vals.length ? vals.reduce((a, v) => a + v, 0) : null, docs: docs.length ? docs.reduce((a, v) => a + v, 0) : null,
-    from, to, days, measured: vals.length };
+    from, to, days, measured: vals.length, notFinal };
 }
 
 /** "23 of 30 days": how many days a total covers, against the days it could have. One wording for the card and the table. */
@@ -515,12 +531,13 @@ export function eventPeak(record, { today = utcDay(), from = null, to = null } =
 /**
  * The fleet's totals for the Overview tiles, from one record per cluster: Σ of each figure
  * above over the clusters that measured it, and how many did not. `vsAvgPct` is yesterday
- * against the 7 days before it, over the clusters that have both (the row rule).
+ * against the 7 days before it, over the `vsN` clusters that have both (the row rule).
+ * `monthMeasured` is the days measured this month, summed over the clusters.
  */
 export function fleetEventTotals(records, { today = utcDay(), days = 7 } = {}) {
   const out = { yesterday: null, yesterdayN: 0, vsAvgPct: null, avg: null, avgN: 0,
     month: null, monthN: 0, monthFrom: `${today.slice(0, 7)}-01`, monthTo: addDays(today, -1),
-    monthDays: Number(today.slice(8, 10)) - 1, notMeasured: 0, of: 0 };
+    monthDays: Number(today.slice(8, 10)) - 1, monthMeasured: 0, vsN: 0, notFinal: 0, yesterdayNotFinal: 0, notMeasured: 0, of: 0 };
   let y = 0, yBoth = 0, base = 0, a = 0, m = 0;
   for (const r of records || []) {
     out.of++;
@@ -530,9 +547,10 @@ export function fleetEventTotals(records, { today = utcDay(), days = 7 } = {}) {
     const ms = eventMonthSoFar(r, { today });
     if (yy.value === null && av === null) out.notMeasured++;
     if (yy.value !== null) { y += yy.value; out.yesterdayN++; }
-    if (yy.value !== null && before) { yBoth += yy.value; base += before; }
+    if (yy.value !== null && before) { yBoth += yy.value; base += before; out.vsN++; }
+    if (notFinalDay(yy.row)) out.yesterdayNotFinal++;
     if (av !== null) { a += av; out.avgN++; }
-    if (ms.value !== null) { m += ms.value; out.monthN++; }
+    if (ms.value !== null) { m += ms.value; out.monthN++; out.monthMeasured += ms.measured; out.notFinal += ms.notFinal; }
   }
   if (out.yesterdayN) out.yesterday = y;
   if (base) out.vsAvgPct = ((yBoth - base) / base) * 100;
@@ -578,13 +596,16 @@ export function measureSize(record, days = 7, { today = utcDay() } = {}) {
     eventField: rows.some((r) => r.event !== null), rows };
 }
 
+/** "today so far, as of 14:02": when today's totals were read, when the record says it. */
+export const todayText = (d) => { const at = hhmm(d && (d.totalsAt ?? d.aggregatedAt)); return `today so far${at ? `, as of ${at}` : ''}`; };
+
 /**
  * A day row's status, as the Day by day table says it: final / today so far / "N of M shards
  * failed · asked again" / not aggregated / not measured. `kind`: ok | today | warn | na.
  */
 export function dayStatus(d, { today = utcDay() } = {}) {
   if (!d) return { text: 'not measured', kind: 'na' };
-  if (d.day === today) return { text: 'today so far', kind: 'today' };
+  if (d.day === today) return { text: todayText(d), kind: 'today' };
   const err = d.error ? String(d.error) : '';
   if (d.final === false) {
     const m = /(\d+) of (\d+) shards failed/.exec(err);
@@ -604,11 +625,13 @@ export function monthEventPeak(record, ym, { today = utcDay() } = {}) {
 
 /**
  * Each breakdown row's event_logsize as a share of the sum over every row the core listed
- * (named values, "all others" and "not set"). Shares are null when nothing was measured.
+ * (named values, "all others" and "not set"). Shares are null when a row was not measured (the sum is not known).
  */
 export function breakdownEventShares(reply) {
   const rows = (reply && reply.rows) || [];
-  const total = rows.reduce((a, r) => a + (eventBytesOf(r) || 0), 0);
+  // A row with documents and no event size: the whole is not known, so no share of it is.
+  const whole = rows.every((r) => eventBytesOf(r) !== null || r.docs === 0);
+  const total = whole ? rows.reduce((a, r) => a + (eventBytesOf(r) || 0), 0) : 0;
   return rows.map((r) => {
     const v = eventBytesOf(r);
     return { row: r, value: v, share: total > 0 && v !== null ? (v / total) * 100 : null };
@@ -643,6 +666,9 @@ export const REPORT_MONTHLY_CSV = ['cluster', 'month', 'days_with_data', 'days_i
 
 const round1 = (x) => (typeof x === 'number' && Number.isFinite(x) ? Math.round(x * 10) / 10 : null);
 
+/** The one row a cluster without days has in the daily file: no figure, and why (never left out of the file). */
+export const reportDailyMissingRow = (clusterName, why) => ({ ...Object.fromEntries(REPORT_DAILY_CSV.map((k) => [k, null])), cluster: clusterName, status: why });
+
 /** One row per day of the record, newest first, as the Day by day table shows it. */
 export function reportDailyCsvRows(clusterName, record, avgDays = 7, { today = utcDay() } = {}) {
   return rowsOf(record).slice().sort((a, b) => (a.day < b.day ? 1 : -1)).map((d) => ({
@@ -671,12 +697,24 @@ export function reportMonthlyCsvRows(clusterName, months, peaks = null, { today 
   }).reverse();
 }
 
-/** The all-cluster monthly CSV on event_logsize: one row per cluster, a column per month. */
-export function monthlyAllEventCsvRows(reply) {
-  const clusters = (reply && reply.clusters) || [];
+/**
+ * The all-cluster monthly CSV on event_logsize: one row per cluster, a column per month, and which of
+ * its months are not whole ("2026-10: 12 of 31 days"; the current month is always so). `chosen`
+ * (`[{id, name}]`): only these clusters, one the server gave no months for named with why.
+ */
+export function monthlyAllEventCsvRows(reply, chosen = null) {
+  const answered = (reply && reply.clusters) || [];
+  const by = new Map(answered.map((c) => [c.clusterId, c]));
+  const clusters = chosen ? chosen.map((c) => by.get(c.id) || { clusterId: c.id, name: c.name, months: [], none: true }) : answered;
   const months = monthsAcross(clusters);
+  const note = (c) => {
+    if (c.none) return 'no monthly record on the server';
+    if (c.error) return String(c.error);
+    return (c.months || []).filter((m) => m.daysWithData > 0 && (m.partial || m.daysWithData < daysInMonth(m.month)))
+      .sort((a, b) => (a.month < b.month ? -1 : 1)).map((m) => `${m.month}: ${daysCoverText(m.daysWithData, daysInMonth(m.month))}`).join('; ') || null;
+  };
   return {
-    headers: ['cluster', ...months],
+    headers: ['cluster', ...months, 'days_note'],
     rows: clusters.map((c) => {
       const o = { cluster: c.name || c.clusterId };
       const by = new Map((c.months || []).map((m) => [m.month, m]));
@@ -684,6 +722,7 @@ export function monthlyAllEventCsvRows(reply) {
         const m = by.get(ym);
         o[ym] = m && m.daysWithData > 0 && typeof m.eventBytes === 'number' ? m.eventBytes : null;
       }
+      o.days_note = note(c);
       return o;
     }),
   };

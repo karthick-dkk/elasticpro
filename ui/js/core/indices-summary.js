@@ -10,7 +10,7 @@
  * anything again; a day the record does not have is unknown, never a 0.
  */
 
-import { dayBasis, basisOf, addDays, utcDay, dayStatus } from './volume-daily.js';
+import { dayBasis, basisOf, addDays, utcDay, dayStatus, todayText } from './volume-daily.js';
 
 /** The day buttons, each a window that always ends today. */
 export const DAY_CHOICES = [15, 30, 60, 90];
@@ -128,7 +128,7 @@ export function rankedValues(reply) {
  */
 export function sizeDayStatus(row, basis, { today = utcDay() } = {}) {
   if (!row) return { text: 'not measured', kind: 'na', title: 'The record has no figure for this day.' };
-  if (row.day === today) return { text: 'today so far', kind: 'today' };
+  if (row.day === today) return { text: todayText(row), kind: 'today' };
   if (row.final === false) {
     const s = dayStatus(row, { today });
     if (s.kind === 'warn') return s;
@@ -196,5 +196,10 @@ export function niceScale(top) {
   return { max: step * 4, step };
 }
 
+/** What a tag1 value's size is, on the screen: it is worked out, never read (tagShareBytes). */
+export const TAG_ESTIMATE = 'estimated by document share';
+/** A tag1 value's CSV column: the header says it is an estimate. */
+export const tagColumnName = (field, value) => `${field}=${value}_bytes_estimated`;
+
 /** The CSV's columns before the tag1 ones. */
-export const SUMMARY_CSV = ['cluster', 'day', 'status', 'indices', 'docs', 'size_basis', 'size_bytes', 'avg_7d_bytes'];
+export const SUMMARY_CSV = ['cluster', 'day', 'status', 'indices', 'docs', 'size_basis', 'size_bytes', 'avg_7d_bytes', 'avg_7d_days_recorded'];

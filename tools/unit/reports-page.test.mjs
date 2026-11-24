@@ -186,7 +186,7 @@ test('volumeReport on the Reports figures: the event rate and the data-node disk
   assert.equal(r.liveRetentionMet, true);
   const unknown = VOL.volumeReport(c, data, [], null, { perDayBytes: null, disk: { measured: false } });
   assert.equal(unknown.liveRetentionMet, null, 'no rate: unknown, not NO');
-  assert.equal(VOL.sheetCell(VOL.SHEET_COLUMNS.find((x) => x.label === 'Indices size per day'), unknown), '–');
+  assert.equal(VOL.sheetCell(VOL.SHEET_COLUMNS.find((x) => x.label === 'Log volume per day'), unknown), '–');
   assert.equal(VOL.sheetCell(VOL.SHEET_COLUMNS.find((x) => x.label === 'Disk total'), unknown), '–');
   // Without opts: the index-list figure the Zabbix feed, Play and the alert rules keep.
   assert.equal(VOL.volumeReport(c, data, [], null).liveTotalGB, 999);
@@ -242,7 +242,7 @@ test('the Reports CSVs carry event_logsize and leave unmeasured cells empty', ()
   assert.deepEqual(Object.keys(mrows[0]), V.REPORT_MONTHLY_CSV);
   assert.deepEqual([mrows[0].month, mrows[0].vs_previous_pct, mrows[0].peak_event_bytes], ['2026-10', 20, null]);
   const all = V.monthlyAllEventCsvRows({ clusters: [{ name: 'a', months: [{ month: '2026-10', daysWithData: 3, eventBytes: 7, priBytes: 99 }] }] });
-  assert.deepEqual(all.rows, [{ cluster: 'a', '2026-10': 7 }], 'event_logsize, not primary size');
+  assert.deepEqual(all.rows, [{ cluster: 'a', '2026-10': 7, days_note: '2026-10: 3 of 31 days' }], 'event_logsize, not primary size; a month that is not whole says so');
 });
 
 /* ------------------------------------ route, band ------------------------------------ */
