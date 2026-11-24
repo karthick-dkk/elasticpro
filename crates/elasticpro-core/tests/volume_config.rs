@@ -130,6 +130,6 @@ async fn an_unreadable_config_file_stops_collection_until_it_is_fixed() {
     assert!(d["status"]["lastRunAt"].is_i64());
     let search = srv.hits().into_iter().find(|h| h.path.contains("/_search")).expect("a search");
     let body: Value = serde_json::from_str(&search.body).unwrap();
-    assert_eq!(body["aggs"]["f_forwarder"]["terms"], json!({ "field": "fwdtag", "size": 40 }), "{body}");
+    assert_eq!(body["aggs"]["f_forwarder"]["terms"], json!({ "field": "fwdtag", "size": 40, "shard_size": 500 }), "{body}");
     assert!(c.volume_tick_at(local("23:59")).await.is_empty(), "once a day");
 }
