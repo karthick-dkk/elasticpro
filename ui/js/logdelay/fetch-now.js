@@ -53,6 +53,9 @@ export function fetchNowLeave() {
   if (F.phase === 'starting' || F.phase === 'following') { F.phase = 'idle'; F.message = ''; }
 }
 
+/** The schedule's interval in hours (the window a run reads), null while unknown. */
+export const fetchNowEvery = () => (Number.isFinite(INFO.everyHours) ? INFO.everyHours : null);
+
 /** Whether a Fetch Now is being followed (the page's loading line). */
 export const fetchNowBusy = () => F.phase === 'starting' || F.phase === 'following';
 

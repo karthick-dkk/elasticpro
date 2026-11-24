@@ -498,6 +498,9 @@ export function eventMonthSoFar(record, { today = utcDay() } = {}) {
     from, to, days, measured: vals.length };
 }
 
+/** "23 of 30 days": how many days a total covers, against the days it could have. One wording for the card and the table. */
+export const daysCoverText = (have, all) => `${have} of ${all} ${all === 1 ? 'day' : 'days'}`;
+
 /** The heaviest finished day in the record (or in `[from, to]`): `{day, value}` or null. */
 export function eventPeak(record, { today = utcDay(), from = null, to = null } = {}) {
   let best = null;
