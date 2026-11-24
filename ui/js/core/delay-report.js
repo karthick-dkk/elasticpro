@@ -36,13 +36,13 @@ export const DEVICE_COLUMNS = [
 ];
 
 /** Added after Status where log types were measured: how many, how many late, which. Blank: not measured, never 0. */
-export const TYPE_COLUMNS = Object.freeze(['Log types', 'Log types measured', 'Log types late', 'Late log types']);
+export const TYPE_COLUMNS = Object.freeze(['Log types', 'Log types measured', 'Log types late', 'Late log types', 'Delay is of log type']);
 const hasTypes = (records) => (records || []).some((r) => Array.isArray(r.types));
 const typeCells = (r) => {
-  if (!Array.isArray(r.types)) return [null, null, null, null];
+  if (!Array.isArray(r.types)) return [null, null, null, null, null];
   const late = r.types.filter((t) => isLate(t.state));
   const measured = r.types.filter((t) => t.delayMinutes !== null).length;
-  return [r.typesTruncated ? `${r.types.length}+` : r.types.length, measured, measured ? late.length : null, late.map((t) => t.label).join('; ') || null];
+  return [r.typesTruncated ? `${r.types.length}+` : r.types.length, measured, measured ? late.length : null, late.map((t) => t.label).join('; ') || null, r.delayLogType || null];
 };
 const AFTER = DEVICE_COLUMNS.findIndex((c) => c.key === 'status') + 1;
 const deviceHead = (records) => { const l = DEVICE_COLUMNS.map((c) => c.label); if (hasTypes(records)) l.splice(AFTER, 0, ...TYPE_COLUMNS); return l; };

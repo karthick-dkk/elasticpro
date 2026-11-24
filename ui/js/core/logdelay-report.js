@@ -21,7 +21,7 @@
 
 import { bridge } from './transport.js';
 import { pct } from '../lib/fmt.js';
-import { STATE_LABEL, isLate, isPart, levelState, stateFromTypes } from './delay-levels.js';
+import { STATE_LABEL, isLate, isPart, levelState, deviceReading } from './delay-levels.js';
 import { parseHash } from '../reports/route.js';
 import { zonedParts } from './log-range.js';
 
@@ -295,23 +295,22 @@ export function extraOf(row, name) {
  * before it, time spent late, logs a day — is null: drawn as unknown, not 0.
  */
 export function liveDeviceRow(rec, cluster, levels) {
-  const own = levelState(rec ? rec.delayMinutes : null, levels);
-  const st = rec && Array.isArray(rec.types) ? stateFromTypes(rec.types.map((t) => levelState(t.delayMinutes, levels)), own) : own;
+  const { state: st, figures: f, delayLogType } = deviceReading(rec, levels);
   const types = rec && Array.isArray(rec.types) ? typesSummary(rec, levels) : null;
   return {
     device: rec.device, cluster: cluster.id, clusterName: cluster.name,
-    state: st || 'unknown', nowMinutes: finite(rec.delayMinutes) ? rec.delayMinutes : null,
+    state: st || 'unknown', nowMinutes: finite(f.delayMinutes) ? f.delayMinutes : null,
     // The zone step as the browser applied it (core/log-tz.js): the gap as measured, what was
     // taken out (the cluster's offset; null = no zone), the offset the gap itself sits at.
-    rawGapMinutes: finite(rec.rawGapMinutes) ? rec.rawGapMinutes : null,
-    tzOffsetMinutes: finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null,
+    rawGapMinutes: finite(f.rawGapMinutes) ? f.rawGapMinutes : null,
+    tzOffsetMinutes: finite(f.tzOffsetMinutes) ? f.tzOffsetMinutes : null,
     clusterTzOffset: finite(rec.clusterTzOffset) ? rec.clusterTzOffset : (finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null),
     deviceTzOffset: finite(rec.deviceTzOffset) ? rec.deviceTzOffset : null,
     // Its log types, when this measurement read them (typesSummary); left out when it did not.
-    ...(types ? { types } : {}),
+    ...(types ? { types, delayLogType } : {}),
     medianMinutes: null, maxMinutes: null, episodes: null, lateMs: null, lastStarted: null, lastSolved: null, lateSince: null,
     docsPerDay: null, docs: finite(rec.docs) ? rec.docs : null,
-    lastArrival: rec.arrival ?? null, lastEvent: rec.event ?? null, silentSince: null,
+    lastArrival: rec.arrival ?? null, lastEvent: f.event ?? null, silentSince: null,
     pattern: rec.pattern && rec.pattern !== '-' ? rec.pattern : null, patternNote: rec.patternNote || '',
     extras: rec.meta || {}, live: true,
   };
@@ -516,7 +515,8 @@ export function partOf(t, clusters = []) {
   const off = list.filter((c) => c.logTypeField === null);
   const whys = [...new Set(off.map((c) => c.logTypeWhy || 'log_type is not in the mapping'))];
   const all = list.length > 0 && off.length === list.length;
-  const ok = !all && finite(t.partDelayed);
+  // logTypes null (0.3.90): no cluster read by log types — not 0.
+  const ok = !all && finite(t.partDelayed) && t.logTypes !== null;
   const lt = t.logTypes || {};
   return { count: ok ? t.partDelayed : null, pct: ok && finite(t.pctPartDelayed) ? t.pctPartDelayed : null, late: ok && finite(lt.late) ? lt.late : null,
     above: ok && finite(lt.above) ? lt.above : null, off: off.length, of: list.length, why: ok ? '' : all ? whys.join(' · ') : 'not measured with log types yet' };
@@ -592,7 +592,7 @@ export const partLateText = (row) => (row && finite(row.partLateMs) && row.partL
 /** A browser measurement's log types as a device row's `types`: `{total, measured, late, lateNames, truncated}`. */
 function typesSummary(rec, levels) {
   const late = rec.types.filter((t) => isLate(levelState(t.delayMinutes, levels)));
-  return { total: rec.types.length, measured: rec.types.filter((t) => finite(t.delayMinutes)).length, late: late.length, lateNames: late.map((t) => t.label), truncated: !!rec.typesTruncated };
+  return { total: rec.types.length, measured: rec.types.filter((t) => finite(t.delayMinutes) && levelState(t.delayMinutes, levels) !== 'clock_ahead').length, late: late.length, lateNames: late.map((t) => t.label), truncated: !!rec.typesTruncated };
 }
 
 /* ------------------------------ tables: order, filter ------------------------------ */

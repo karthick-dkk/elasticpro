@@ -167,6 +167,8 @@ export function deviceZoneText(row) {
  */
 export function delaySumText(row, fmt) {
   if (!row || !finite(row.nowMinutes)) return '';
+  // Its figures are one log type's, whose arrival is not the device's newest: the sum would not add up.
+  if (row.delayLogType) return `log type ${row.delayLogType}: ${Math.round(row.nowMinutes * 10) / 10} min${finite(row.rawGapMinutes) ? ` (raw gap ${Math.round(row.rawGapMinutes * 10) / 10} min)` : ''}`;
   const t = (ms) => (finite(ms) && fmt ? fmt(ms) : '?');
   const m = (v) => `${Math.round(v * 10) / 10} min`;
   const off = finite(row.tzOffsetMinutes) ? row.tzOffsetMinutes : null;

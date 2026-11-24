@@ -81,19 +81,57 @@ export const isPart = (state) => state === 'part_delay';
 /** On time in totals = no_delay, little. Silent, unmeasured and clock ahead are neither (they are in No delay, logdelay-report.js noDelayOf). */
 export const isOnTime = (state) => state === 'no_delay' || state === 'little';
 
+/** A log type whose delay was measured: not silent, not can't measure (a clock ahead is that too). */
+const typeMeasured = (s) => s !== 'silent' && s !== 'unmeasured' && s !== 'clock_ahead' && s !== 'unknown';
+
 /**
- * A device's state from its log types' states (0.3.90; the core's rule, logdelay/levels.rs): fewer
- * than two, or none late → `own`, the device's own state as before; some late and some on time →
- * `part_delay`; every one measured late → the worst of them. A silent or can't-measure log type
- * is neither late nor on time. A state not known (null: levels unknown) keeps `own`.
+ * A device's state from its log types' states (0.3.90; the core's rule, logdelay/levels.rs
+ * `State::of_types`): fewer than two, or none measured → `own`, its newest document's, as before;
+ * every measured one late → the worst of them; some late → `part_delay`; none late → on time (in
+ * another time zone when all of them are). A state not known (null: levels unknown) keeps `own`.
  */
 export function stateFromTypes(states, own) {
   const list = states || [];
   if (list.length < 2 || list.some((s) => !s)) return own;
-  const late = list.filter(isLate);
-  if (!late.length) return own;
-  if (list.some(isOnTime)) return 'part_delay';
-  return late.includes('critical') ? 'critical' : 'delay';
+  const measured = list.filter(typeMeasured);
+  const late = measured.filter(isLate);
+  if (!measured.length) return own;
+  if (late.length === measured.length) return late.includes('critical') ? 'critical' : 'delay';
+  if (late.length) return 'part_delay';
+  return measured.every((s) => s === 'other_tz') ? 'other_tz' : 'no_delay';
+}
+
+/**
+ * Which of a device's log types its figures are of (the core's `device_by_types`): an index into
+ * `types` ([{state, delayMinutes}]), or -1: its newest document's. Late or part delayed → the worst
+ * late one; none late → the newest document's when that is in the same state, else the worst in it.
+ */
+export function figuresOfType(types, state, own) {
+  const list = types || [];
+  if (list.length < 2 || !list.some((t) => typeMeasured(t.state || 'unknown'))) return -1;
+  const late = isLate(state) || isPart(state);
+  if (!late && own === state) return -1;
+  let best = -1;
+  list.forEach((t, i) => {
+    if (!(late ? isLate(t.state) : t.state === state) || t.delayMinutes === null || t.delayMinutes === undefined) return;
+    if (best < 0 || t.delayMinutes > list[best].delayMinutes) best = i;
+  });
+  return best;
+}
+
+/**
+ * A measured device on `levels`: its state, its status, and the figures it is shown with — from its
+ * log types when two or more were read (stateFromTypes, figuresOfType), else its
+ * newest document's, as always without log types. `delayLogType`: the log type they are of, or null.
+ */
+export function deviceReading(r, levels) {
+  const newest = (r && r.newest) || r || {};
+  const list = r && Array.isArray(r.types) ? r.types : [];
+  const own = levelState(newest.delayMinutes ?? null, levels);
+  const typed = list.map((t) => ({ state: levelState(t.delayMinutes, levels), delayMinutes: t.delayMinutes }));
+  const state = stateFromTypes(typed.map((t) => t.state), own);
+  const i = state ? figuresOfType(typed, state, own) : -1;
+  return { state, status: state ? STATUS_OF_STATE[state] : 'UNKNOWN', figures: i < 0 ? newest : list[i], delayLogType: i < 0 ? null : list[i].label };
 }
 
 /* ------------------------------- what the core said ------------------------------- */

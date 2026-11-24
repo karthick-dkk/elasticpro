@@ -33,7 +33,7 @@
  * Checking the base name instead of this one is the mistake that makes a preflight pass
  * and the query that follows return nothing.
  */
-import { statusFor, levelState, levelsOf, zoneOf, stateFromTypes, STATUS_OF_STATE } from './delay-levels.js';
+import { statusFor, levelState, levelsOf, zoneOf, deviceReading } from './delay-levels.js';
 import { LOG_TYPE_FIELD, NO_LOG_TYPE, typeLabel } from './log-types.js';
 import { correct as correctByZone, matchOffset as matchOffsetFor, offsetLabel as offsetLabelOf } from './log-tz.js';
 
@@ -313,9 +313,11 @@ function offsetWords(minutes) {
 export function recordFrom(bucket, resolved, levels = null, tz = null) {
   const hit = ((((bucket || {}).latest || {}).hits || {}).hits || [])[0];
   const src = (hit && hit._source) || {};
-  const { arrival, event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = docDelay(src, resolved.arrival, eventSource(resolved), tz);
+  const newest = docDelay(src, resolved.arrival, eventSource(resolved), tz);
+  const { arrival } = newest;
   const types = typesFrom(bucket, resolved, levels, tz);
-  const status = deviceStatus({ delayMinutes, types }, levels);
+  const { status, figures, delayLogType } = deviceReading({ newest, types }, levels);
+  const { event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = figures;
   const { pattern, note } = analysePattern(rawGapMinutes, PATTERN, deviceTzOffset);
 
   return {
@@ -331,6 +333,8 @@ export function recordFrom(bucket, resolved, levels = null, tz = null) {
     status,
     // Its log types (worst first), or null: the field is not mapped or was not asked for.
     types,
+    // With log types: the newest document's figures, and the log type the delay above is of (null: the newest document's).
+    ...(types ? { newest, delayLogType } : {}),
     typesTruncated: !!(types && bucket.types && bucket.types.sum_other_doc_count > 0),
     pattern,
     patternNote: note,
@@ -356,24 +360,13 @@ function typesFrom(bucket, resolved, levels, tz) {
     const d = docDelay((hit && hit._source) || {}, resolved.arrival, eventSource(resolved), tz);
     const state = levelState(d.delayMinutes, levels);
     return { logType, noType, label: typeLabel({ logType, noType }), docs: b.doc_count || 0, arrival: d.arrival, event: d.event, delayMinutes: d.delayMinutes,
-      rawGapMinutes: d.rawGapMinutes, tzOffsetMinutes: d.tzOffsetMinutes, state, status: statusFor(d.delayMinutes, levels) };
+      rawGapMinutes: d.rawGapMinutes, tzOffsetMinutes: d.tzOffsetMinutes, deviceTzOffset: d.deviceTzOffset, state, status: statusFor(d.delayMinutes, levels) };
   };
   const out = bucket.types.buckets.map((b) => one(b, String(b.key_as_string ?? b.key), false));
   if (bucket.no_type && bucket.no_type.doc_count > 0) out.push(one(bucket.no_type, NO_LOG_TYPE, true));
   const rank = { critical: 0, delay: 1 };
   return out.sort((a, b) => (rank[a.state] ?? 2) - (rank[b.state] ?? 2) || (b.delayMinutes ?? -Infinity) - (a.delayMinutes ?? -Infinity)
     || String(a.logType).localeCompare(String(b.logType)));
-}
-
-/**
- * A measured device's status on `levels`: from its log types when two or more were measured
- * (delay-levels.js stateFromTypes), else from its newest document — as always without log types.
- */
-export function deviceStatus(r, levels) {
-  const own = levelState(r ? r.delayMinutes : null, levels);
-  const list = r && Array.isArray(r.types) ? r.types : [];
-  const s = stateFromTypes(list.map((t) => levelState(t.delayMinutes, levels)), own);
-  return s ? STATUS_OF_STATE[s] : 'UNKNOWN';
 }
 
 /** Whether a record's log type is late now (delayed or critical). */

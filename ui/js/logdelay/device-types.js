@@ -24,6 +24,8 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const GRAPH_H = 220;
 /** The rows of "By log type" before Show all. */
 const BY_TYPE_TOP = 10;
+/** The most log types an answer carries (the core's MAX_LOG_TYPES). */
+const BY_TYPE_MAX = 500;
 
 /** An element in part delayed's fill: the yellow let through, with a yellow outline. */
 export const partFill = (tag) => h(`${tag}.ld-part-fill`, { style: { background: C.part } });
@@ -138,7 +140,8 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
       h('div.ld-marks', { 'aria-label': 'Delay starts and solves per log type' }, ...marks),
       h('div.ld-ticks.ld-indent', ...axisTicks(g.lo, g.hi).map((t) => h('span', t))),
       h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement, in the log type’s colour${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
-      h('div.muted.ld-tiny.ld-whole-note', 'Of the whole device (its newest log, whichever log type):'),
+      finite(res.seriesFromMs) ? h('div.muted.ld-tiny.ld-indent#ld-series-from', `The log types’ measurements before ${whenText(res.seriesFromMs, res.now)} were not read: not all of the period is drawn.`) : null,
+      h('div.muted.ld-tiny.ld-whole-note', 'Peak: the worst log type’s then. Longest delay and Late most often: the whole device’s (every log type late).'),
       insights(res, age, openText)],
     [h('span.ld-legend', before.length ? key(C.silent, 'whole device, before the first measurement with log types') : null, key(C.delayLine, `${lv.delayFrom ?? '?'} min`, true), key(C.critLine, `${lv.criticalOver ?? '?'} min`, true))]);
 }
@@ -186,11 +189,14 @@ export function typesTableCard(res, { clusterId, device, sort }) {
  * type's own. A device of one log type has the same delays twice: listed once.
  */
 export function typeDelays(res, age) {
-  const whole = (res.periods || []).map((p) => ({ ...p, whole: true, age, typeLabel: p.beforeTypes === true ? 'whole device, before log types were measured' : 'whole device' }));
+  const whole = (res.periods || []).map((p) => ({ ...p, whole: true, age, typeLabel: p.beforeLogTypes === true ? 'whole device, before log types were measured' : 'whole device' }));
   const only = (res.series || []).length === 1 ? new Set(whole.map((p) => p.started)) : null;
   return [...whole, ...(res.series || []).flatMap((s) => (s.episodes || []).filter((p) => p && !(only && only.has(p.started)))
     .map((p) => ({ ...p, typeLabel: typeLabel(s), age: { at: finite(s.lastMeasuredMs) ? s.lastMeasuredMs : null, stale: !!s.stale } })))];
 }
+
+/** The log types the core had no room to keep, in words; null when it kept them all. */
+const notKept = (res) => (finite(res.logTypesNotKept) && res.logTypesNotKept > 0 ? h('div.ld-foot.muted#ld-types-not-kept', `${countText(res.logTypesNotKept)} more log types were read and not kept: they count in their devices’ states and have no history here.`) : null);
 
 /** A cluster's log types, worst first: devices, late, above the critical line, with no logs, the worst delay. */
 export function byLogTypeCard(res, { b, sort, all, onAll }) {
@@ -209,8 +215,10 @@ export function byLogTypeCard(res, { b, sort, all, onAll }) {
         h('td.num', countText(x.devices)), h(`td.num${x.late ? '.ld-delay' : ''}`, { title: 'devices this log type is late on' }, countText(x.late)),
         h(`td.num${x.above ? '.ld-crit' : ''}`, countText(x.above)), h('td.num', { title: 'devices with no documents of this log type now' }, countText(x.silent)),
         h('td.num', minutesText(x.worstMinutes))))))),
-    list.length > BY_TYPE_TOP ? h('div.ld-foot', `Showing ${countText(shown.length)} of ${countText(list.length)} · `, h('button.linkish#ld-by-type-all', { type: 'button', onclick: onAll }, all ? `Show the top ${BY_TYPE_TOP} only` : 'Show all')) : null]
-      : empty('No log type read yet.'));
+    list.length > BY_TYPE_TOP ? h('div.ld-foot', `Showing ${countText(shown.length)} of ${countText(list.length)} · `, h('button.linkish#ld-by-type-all', { type: 'button', onclick: onAll }, all ? `Show the top ${BY_TYPE_TOP} only` : 'Show all')) : null,
+    list.length >= BY_TYPE_MAX ? h('div.ld-foot.muted', `The worst ${countText(BY_TYPE_MAX)} log types: the cluster may have more.`) : null,
+    notKept(res)]
+      : [empty('No log type read yet.'), notKept(res)]);
   el.id = 'ld-by-type-card';
   return el;
 }

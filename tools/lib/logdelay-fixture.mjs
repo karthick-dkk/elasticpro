@@ -67,7 +67,10 @@ function withTypesOf(row, ci, i) {
   const late = fresh.filter(([, s]) => s === 'delay' || s === 'critical');
   const label = ([n, , , o]) => (n === NO_TYPE && !(o && o.noType) ? `“${n}”` : n);
   const part = late.length > 0 && late.length < fresh.length;
-  return { ...row, types: { total: list.length, measured: fresh.length, late: late.length, lateNames: late.map(label), truncated: list.length >= 20 }, partLateMs: part ? 130 * 60000 : 0,
+  // The delay shown is the worst late log type's (the core's delayLogType); none late: the newest document's.
+  const w = list.length > 1 && late.length ? late.reduce((a, b) => (b[2] > a[2] ? b : a)) : null;
+  const figures = { delayLogType: w ? label(w) : null, ...(w ? { nowMinutes: w[2], rawGapMinutes: w[2] + (row.tzOffsetMinutes || 0) } : {}) };
+  return { ...row, ...figures, types: { total: list.length, measured: fresh.length, late: late.length, lateNames: late.map(label), truncated: list.length >= 20 }, partLateMs: part ? 130 * 60000 : 0,
     ...(part ? { state: 'part_delay', stateText: `${late.length} of ${list.length} log types late: ${late.map(label).join(', ')}`, lateMs: 0 } : {}) };
 }
 const isLateState = (s) => s === 'delay' || s === 'critical';

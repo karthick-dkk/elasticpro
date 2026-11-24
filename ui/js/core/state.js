@@ -2046,7 +2046,7 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   if (ds && now - ds.at < DELAY_ALERT_HOURS * 3600 * 1000) {
     const by = ds.summary.by || {};
     const w = ds.summary.worst;
-    const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${w.delayLogType ? `log type ${w.delayLogType}, ` : ''}${Math.round(w.delayMinutes)} min behind.` : '';
     // Part delayed (0.3.90): only some of a device's log types late. Said beside the delayed ones, which
     // alone decide the level; on its own it is a warning. Nothing where log types were not measured.
     const partN = by.PART_DELAY || 0;

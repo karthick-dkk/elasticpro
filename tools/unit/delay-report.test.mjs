@@ -134,13 +134,13 @@ test('the cut line counts documents, as Elasticsearch does, and is labelled so; 
 
 test('log types (0.3.90): a sheet, columns and a status row only where they were measured', () => {
   const t = (label, status, state, delayMinutes) => ({ logType: label, label, status, state, delayMinutes, docs: 4, arrival: Date.UTC(2026, 8, 20, 15), event: null });
-  const part = rec({ device: 'fw', status: 'PART_DELAY', types: [t('threat', 'DELAYED', 'delay', 46), t('system', 'ERROR', 'unmeasured', null), t('traffic', 'OK', 'no_delay', 2)] });
+  const part = rec({ device: 'fw', status: 'PART_DELAY', delayLogType: 'threat', types: [t('threat', 'DELAYED', 'delay', 46), t('system', 'ERROR', 'unmeasured', null), t('traffic', 'OK', 'no_delay', 2)] });
   const sheets = reportSheets([rec({ device: 'off', types: null }), part], { by: { OK: 1, PART_DELAY: 1 }, devices: 2, logTypes: { total: 3, late: 1, above: 0 } }, { noLogTypes: ['vm-2: log_type is not in the mapping'] });
   assert.deepEqual(sheets.map((x) => x.name), ['Devices', 'Log types', 'Summary', 'Not measured']);
   const dev = sheet(sheets, 'Devices').rows;
   const at = dev[0].indexOf('Log types');
-  assert.deepEqual(dev[1].slice(at - 1, at + 4), ['part delayed', 3, 2, 1, 'threat'], 'part delayed before on time');
-  assert.deepEqual(dev[2].slice(at, at + 4), [null, null, null, null], 'not measured is blank, not 0');
+  assert.deepEqual(dev[1].slice(at - 1, at + 5), ['part delayed', 3, 2, 1, 'threat', 'threat'], 'part delayed before on time');
+  assert.deepEqual(dev[2].slice(at, at + 5), [null, null, null, null, null], 'not measured is blank, not 0');
   const types = sheet(sheets, 'Log types').rows;
   assert.deepEqual(types[2], ['vm-1', 'fw', 'system', 'unmeasured', null, 4, '2026-09-20T15:00:00Z', null].map((v, i) => (i === 3 ? types[2][3] : v)));
   assert.match(types[4][0], /vm-2: log_type is not in the mapping/);

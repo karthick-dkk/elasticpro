@@ -711,7 +711,7 @@ function exportDelayCsv() {
   // The rows on screen (the fetch's scope and the time-zone filter), the silent ones too.
   const live = liveRows();
   const withT = live.some(saysTypes);
-  const typeCols = (x) => (withT ? { log_types: hasTypes(x) ? `${x.types.total}${x.types.truncated ? '+' : ''}` : '', log_types_measured: hasTypes(x) ? x.types.measured : '', log_types_late: hasTypes(x) && x.types.measured !== 0 ? x.types.late : '', late_log_types: hasTypes(x) ? x.types.lateNames.join('; ') : '' } : {});
+  const typeCols = (x) => (withT ? { log_types: hasTypes(x) ? `${x.types.total}${x.types.truncated ? '+' : ''}` : '', log_types_measured: hasTypes(x) ? x.types.measured : '', log_types_late: hasTypes(x) && x.types.measured !== 0 ? x.types.late : '', late_log_types: hasTypes(x) ? x.types.lateNames.join('; ') : '', delay_log_type: x.delayLogType || '' } : {});
   const rows = live.map((x) => ({
     cluster: x.clusterName, device: x.device, zone: extraOf(x, 'zone') ?? '', tag1: extraOf(x, 'tag1') ?? '',
     state: x.state === 'unknown' ? 'levels unknown' : stateText(x.state), ...typeCols(x),

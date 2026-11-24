@@ -796,7 +796,7 @@ function fleetView() {
             h('td.num', countText(c.devices)),
             h('td.num', { title: COUNT_HINT }, countText(c.counts && c.counts.inLastRun)),
             h('td.mono.ld-worst', c.worst && c.worst.device
-              ? [link(ldHash('device', c.id, c.worst.device), c.worst.device, { title: `${c.worst.device} · delay details` }), h('span.muted', ` ${minutesText(c.worst.minutes)}`)]
+              ? [link(ldHash('device', c.id, c.worst.device), c.worst.device, { title: `${c.worst.device} · delay details` }), h('span.muted', { title: c.worst.logType ? `log type ${c.worst.logType}` : null }, ` ${minutesText(c.worst.minutes)}`)]
               : h('span.muted', '—')),
             h('td.ld-acts', fixButton({ kind: 'cluster', id: c.name || c.id, items: () => clusterFixItems(c) }))]);
     });
@@ -964,7 +964,7 @@ function exportDevicesCsv(rows, res) {
   const out = rows.map((r) => ({
     device: r.device, cluster: r.clusterName || r.cluster, zone: extraOf(r, 'zone') ?? '', tag1: extraOf(r, 'tag1') ?? '',
     state: stateText(r.state),
-    ...(withT ? { log_types: t(r) ? `${t(r).total}${t(r).truncated ? '+' : ''}` : '', log_types_measured: t(r) && finite(t(r).measured) ? t(r).measured : '', log_types_late: t(r) && t(r).measured !== 0 ? t(r).late : '', late_log_types: t(r) ? (t(r).lateNames || []).join('; ') : '', part_late_ms: finite(r.partLateMs) ? r.partLateMs : '' } : {}),
+    ...(withT ? { log_types: t(r) ? `${t(r).total}${t(r).truncated ? '+' : ''}` : '', log_types_measured: t(r) && finite(t(r).measured) ? t(r).measured : '', log_types_late: t(r) && t(r).measured !== 0 ? t(r).late : '', late_log_types: t(r) ? (t(r).lateNames || []).join('; ') : '', delay_log_type: r.delayLogType || '', part_late_ms: finite(r.partLateMs) ? r.partLateMs : '' } : {}),
     delay_minutes: finite(r.nowMinutes) ? r.nowMinutes.toFixed(2) : '',
     raw_gap_minutes: finite(r.rawGapMinutes) ? r.rawGapMinutes.toFixed(2) : '', time_zone_offset: finite(r.tzOffsetMinutes) ? offsetLabel(r.tzOffsetMinutes) : '',
     max_minutes: finite(r.maxMinutes) ? r.maxMinutes.toFixed(2) : '', delays: finite(r.episodes) ? r.episodes : '', late_ms: finite(r.lateMs) ? r.lateMs : '',
@@ -1097,7 +1097,7 @@ function deviceView(clusterId, device) {
         res && extraOf(res, 'tag1') !== null ? `tag1 ${extraOf(res, 'tag1')}` : 'tag1 not known',
         res && res.timeZone ? `cluster time zone ${timeZoneShort(res.timeZone)}` : null,
         res && res.state === 'other_tz' ? `this device ${offsetLabel(res.tzOffsetMinutes)} (other time zone)` : null,
-        res && finite(res.rawGapMinutes) && finite(res.tzOffsetMinutes) ? `raw gap ${minutesText(res.rawGapMinutes)} − ${offsetLabel(res.tzOffsetMinutes)}` : null,
+        res && finite(res.rawGapMinutes) && finite(res.tzOffsetMinutes) ? `raw gap${res.delayLogType ? ` of ${res.delayLogType}` : ''} ${minutesText(res.rawGapMinutes)} − ${offsetLabel(res.tzOffsetMinutes)}` : null,
         every ? `measured every ${every} hour${every === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))),
     h('div.ld-actions', S.range ? h('span.muted.ld-range', `${S.range.from} → ${S.range.to}`) : null,
       // The same run as Fetch now, narrowed to this device (docs/LOGDELAY.md "Fetch now" `device`).
@@ -1123,7 +1123,7 @@ function deviceView(clusterId, device) {
     worstType ? h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${seriesLate(worstType) ? (worstType.state === 'critical' ? '.ld-crit' : '.ld-delay') : ''}`, minutesText(worstType.delayMinutes)),
       h('span', 'worst log type now: ', h('b', typeLabel(worstType)), finite(worstType.lastMeasuredMs) ? ` · measured ${whenText(worstType.lastMeasuredMs, res.now).replace(/^today /, '')}` : ''))
       : h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${late ? (res.state === 'critical' ? '.ld-crit' : '.ld-delay') : ''}`, res.state === 'unmeasured' ? 'can’t measure' : res.state === 'silent' ? 'silent' : minutesText(res.nowMinutes)), h('span', age.at === null ? 'delay now' : age.stale ? `last measured ${whenText(age.at, res.now).replace(/^today /, '')}` : `delay now · measured ${whenText(age.at, res.now).replace(/^today /, '')}`)),
-    h('div.ld-kpi', { dataset: { kpi: 'worst' } }, h('b', minutesText(res.worst && res.worst.minutes)), h('span', `worst${series && series.length > 1 ? ', whole device' : ''} · ${res.worst && finite(res.worst.at) ? whenText(res.worst.at, res.now) : 'not known'}`)),
+    h('div.ld-kpi', { dataset: { kpi: 'worst' } }, h('b', minutesText(res.worst && res.worst.minutes)), h('span', `worst · ${res.worst && finite(res.worst.at) ? whenText(res.worst.at, res.now) : 'not known'}`)),
     h('div.ld-kpi', { dataset: { kpi: 'episodes' } }, h('b', countText(res.episodes)), h('span', `${series && series.length > 1 ? 'delays of the whole device' : 'delays'} · ${countText(res.solved)} solved`)),
     h('div.ld-kpi', { dataset: { kpi: 'lateMs' } }, h('b', durationText(lt.ms)), h('span', `time late · ${finite(lt.pct) ? `${pctText(lt.pct)} ` : ''}${lt.of}${partLateText(res) ? ` · ${partLateText(res)}` : ''}`)),
     h('div.ld-kpi', { dataset: { kpi: 'docs' } }, h('b', perDay.text), h('span', `${perDay.label} · ${finite(res.lastSilence) ? `${whenText(res.lastSilence, res.now)} last silence` : 'no silence'}`))));
@@ -1317,6 +1317,7 @@ function periodsCard(res, every, age) {
           ['zone', 'zone'], ['tag1', 'tag1'], ['measurements', 'Measurements', 1]]),
         h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: cols }, empty('No delay in this period.')))])))),
       footer(`A start or solve time is accurate to the ${every ? `${every}-hour ` : ''}measurement. `,
+        typed && finite(res.seriesPeriodsFromMs) ? `Delays of single log types that started up to ${whenText(res.seriesPeriodsFromMs, res.now)} are not all kept. ` : '',
         sil.length ? `Silences (no logs at all) are listed separately: ${sil.join('; ')}.` : 'No silence in this period.',
         Array.isArray(res.olderMeasurements) && res.olderMeasurements.length ? ` ${countText(res.olderMeasurements.length)} older measurements read from the day files${res.olderTruncated ? ' (the first 20,000)' : ''}.` : '')]);
   });

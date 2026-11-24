@@ -21,7 +21,7 @@ const ser = (logType, state, delayMinutes, more = {}) => ({ logType, noType: fal
 
 /* ------------------------------------ the rule ------------------------------------ */
 
-test('stateFromTypes: some late and some on time is part delayed, all late is the worst, none late is the device’s own', () => {
+test('stateFromTypes is the core’s rule: some late is part delayed, all late is the worst, none late is on time', () => {
   const f = lv.stateFromTypes;
   assert.equal(f(['critical', 'no_delay', 'no_delay'], 'critical'), 'part_delay', '1 of 3 late');
   assert.equal(f(['delay', 'critical', 'no_delay'], 'no_delay'), 'part_delay', '2 of 3 late, whichever logged last');
@@ -33,7 +33,32 @@ test('stateFromTypes: some late and some on time is part delayed, all late is th
   assert.equal(f(['delay', 'unmeasured'], 'unmeasured'), 'delay', 'a type that cannot be measured is not on time: every measured one is late');
   assert.equal(f(['no_delay', 'unmeasured'], 'no_delay'), 'no_delay');
   assert.equal(f(['delay', 'silent'], 'delay'), 'delay', 'a silent type is neither');
+  // The core's own cases (logdelay/levels.rs State::of_types).
+  assert.equal(f(['critical', 'other_tz'], 'critical'), 'part_delay', 'on time in another zone is not late');
+  assert.equal(f(['no_delay', 'other_tz'], 'other_tz'), 'no_delay');
+  assert.equal(f(['other_tz', 'other_tz'], 'no_delay'), 'other_tz');
+  assert.equal(f(['critical', 'unmeasured'], 'no_delay'), 'critical');
+  assert.equal(f(['no_delay', 'clock_ahead', 'silent'], 'clock_ahead'), 'no_delay', 'the newest document does not decide');
+  assert.equal(f(['unmeasured', 'clock_ahead'], 'clock_ahead'), 'clock_ahead', 'nothing measured: the newest document, as before');
   assert.equal(f(['delay', null], null), null, 'levels unknown: unknown, never part delayed');
+});
+
+test('a device’s figures are its worst late log type’s; with none late its newest document’s (the core’s delayLogType)', () => {
+  const L = { delayFrom: 30, criticalOver: 60 };
+  const t = (label, m) => ({ label, delayMinutes: m, rawGapMinutes: m, event: 1 });
+  const newest = { delayMinutes: 2, rawGapMinutes: 2, event: 9 };
+  const part = lv.deviceReading({ newest, types: [t('threat', 46), t('audit', 35), t('traffic', 2)] }, L);
+  assert.deepEqual([part.state, part.status, part.figures.delayMinutes, part.delayLogType], ['part_delay', 'PART_DELAY', 46, 'threat']);
+  const all = lv.deviceReading({ newest: { delayMinutes: 41 }, types: [t('a', 41), t('b', 95)] }, L);
+  assert.deepEqual([all.state, all.figures.delayMinutes, all.delayLogType], ['critical', 95, 'b']);
+  const none = lv.deviceReading({ newest, types: [t('a', 2), t('b', 5)] }, L);
+  assert.deepEqual([none.state, none.figures.delayMinutes, none.delayLogType], ['no_delay', 2, null]);
+  const ahead = lv.deviceReading({ newest: { delayMinutes: -90 }, types: [t('a', 2), t('b', -90)] }, L);
+  assert.deepEqual([ahead.state, ahead.figures.delayMinutes, ahead.delayLogType], ['no_delay', 2, 'a'], 'the newest is in another state: the worst in this one');
+  const off = lv.deviceReading({ delayMinutes: 46 }, L);
+  assert.deepEqual([off.state, off.figures.delayMinutes, off.delayLogType], ['delay', 46, null], 'no log types: the newest document, as before');
+  const unknown = lv.deviceReading({ newest, types: [t('a', 46), t('b', 2)] }, null);
+  assert.deepEqual([unknown.status, unknown.figures.delayMinutes, unknown.delayLogType], ['UNKNOWN', 2, null], 'levels unknown: nothing claimed');
 });
 
 test('part delayed is neither late nor on time, and has its own label and status', () => {
@@ -223,6 +248,7 @@ test('partOf: null for an older core; off on every cluster is no count and why; 
   const t = { partDelayed: 4, pctPartDelayed: 2.5, logTypes: { total: 30, late: 7, above: 2 } };
   assert.equal(R.partText(R.partOf(t, [on])), '7 log types late');
   assert.equal(R.partText(R.partOf(t, [on, off])), '7 log types late · not on 1 of 2 clusters: no log_type');
+  assert.deepEqual([R.partOf({ partDelayed: 0, logTypes: null }, [on]).count, R.partOf({ partDelayed: 0, logTypes: null }, [on]).why], [null, 'not measured with log types yet'], 'not read by log types: not 0');
   const p = R.partOf({ partDelayed: 0, logTypes: { total: 0, late: 0, above: 0 } }, [off]);
   assert.equal(p.count, null); assert.equal(R.partText(p), 'log_type is not in the mapping');
 });
