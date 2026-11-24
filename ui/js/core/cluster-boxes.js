@@ -1,12 +1,13 @@
 /**
- * Figures the Clusters › Overview cards and the Nodes & shards page read, as plain data — pure,
- * so the pages and tools/unit/cluster-boxes.test.mjs read ONE definition of each figure:
+ * What the expanded Clusters row (overview.js `detail`) is drawn from, as plain data — pure,
+ * so the page and tools/unit/cluster-boxes.test.mjs read ONE definition of each figure:
  *
  * - (disk levels are NOT defined here: the Size cell, the Disk usage cell and the nodes table all
  *   ask core/disk-balance.js diskAgainstWatermarks, the cluster's own watermarks);
- * - whether a node is a data node;
- * - the unassigned shards of each index and the reason ElasticPro can honestly give for each;
- * - the ILM card's pill and its figures;
+ * - a node's free size and whether it is a data node;
+ * - which indices the Cluster health button lists (red cluster: red ones; yellow: yellow),
+ *   their unassigned shards and the reason ElasticPro can honestly give for each;
+ * - the donut segments of the Shard allocation and ILM cards and their pills;
  * - the Backups (SLM) card: which policy, its last run, or why there is nothing to show.
  *
  * Unknown is not zero: every function answers null / `known: false` when the cluster did not
@@ -14,14 +15,88 @@
  */
 
 import { offText } from './collection.js';
+import { shardAllocation, nodeTier, TIERS } from './cluster-detail.js';
 import { ilmPolicyState, ilmErrorsOf, slmCoverage, logsOf, NOT_KNOWN } from './lifecycle-errors.js';
 
-/* ----------------------------------- nodes ----------------------------------- */
+/* ----------------------------------- disks ----------------------------------- */
+
+const fin = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+
+/**
+ * What is left on a node's disk, in bytes: `disk.total − disk.used` from `_cat/nodes`, else
+ * its `disk.avail`; null when the node reported neither (unknown, not 0 B).
+ */
+export function nodeFreeBytes(n) {
+  const total = fin(n && n['disk.total']), used = fin(n && n['disk.used']);
+  if (isFinite(total) && isFinite(used) && total > 0) return Math.max(0, total - used);
+  const avail = fin(n && n['disk.avail']);
+  return isFinite(avail) ? Math.max(0, avail) : null;
+}
 
 /** A node that holds shards: the plain `data` role or any `data_*` tier / content role. */
 export const isDataNode = (roles) => (roles || []).some((r) => r === 'data' || String(r).startsWith('data_'));
 
+/**
+ * The Nodes header's summary line from each node's role list: "6 · 3 master-eligible · 3 data
+ * (2 hot, 1 warm) · ★ elected master". The tier breakdown is left out when no data node has a
+ * tier role; the star clause only when a master was elected.
+ */
+export function nodesSummary(roleLists, hasElected) {
+  const n = roleLists.length;
+  const data = roleLists.filter(isDataNode);
+  const tiers = TIERS.map((t) => [t, data.filter((r) => nodeTier(r) === t).length]).filter(([, k]) => k > 0);
+  return [String(n), `${roleLists.filter((r) => r.includes('master')).length} master-eligible`,
+    `${data.length} data${tiers.length ? ` (${tiers.map(([t, k]) => `${k} ${t}`).join(', ')})` : ''}`,
+    hasElected ? '★ elected master' : null].filter(Boolean).join(' · ');
+}
+
+/* ---------------------------------- role chips ---------------------------------- */
+
+/**
+ * The chips a node's roles take in one table line. Every data role (`data`, `data_hot`,
+ * `data_content`, …) is ONE plain `data` chip — no tier chip, no "data: hot·warm·…" label
+ * (owner, 2026-11-07); which tiers it holds is in that chip's `title`. At most `max` chips are
+ * drawn and the rest are counted ("+3"), their names in `more`. Coordinating-only (no roles)
+ * is its own chip.
+ * → { chips: [{ label, kind, roles, title }], more: [role names] }
+ */
+export function roleChips(roles, max = 3) {
+  const list = roles || [];
+  if (!list.length) return { chips: [{ label: 'coordinating', kind: 'other', roles: [], title: null }], more: [] };
+  const dataRoles = list.filter((r) => r === 'data' || String(r).startsWith('data_'));
+  const tiers = dataRoles.filter((r) => r !== 'data').map((r) => r.slice(5));
+  const chips = [];
+  let placed = false;
+  for (const r of list) {
+    if (dataRoles.includes(r)) {
+      if (placed) continue;
+      placed = true;
+      chips.push({ label: 'data', kind: 'other', roles: dataRoles,
+        title: tiers.length ? `Data tiers: ${tiers.join(', ')}${dataRoles.includes('data') ? ' (and the generic data role)' : ''}` : 'data (every tier)' });
+    } else chips.push({ label: r, kind: null, roles: [r], title: null });
+  }
+  const shown = chips.slice(0, max), rest = chips.slice(max);
+  return { chips: shown, more: rest.flatMap((c) => c.roles) };
+}
+
 /* ------------------------------- cluster health -------------------------------- */
+
+/**
+ * The indices the Cluster health button lists: the red ones when the cluster is red, the
+ * yellow ones when yellow; null when green (or unknown) — there is nothing to open then.
+ * `rows` is a `_cat/indices` answer ({ index, health, pri, rep }). → { health, rows } | null
+ */
+export function problemIndices(status, rows) {
+  const s = String(status || '').toLowerCase();
+  if (s !== 'red' && s !== 'yellow') return null;
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => String(r.health || '').toLowerCase() === s)
+    .map((r) => ({ index: r.index, health: s, pri: fin(r.pri), rep: fin(r.rep) }))
+    .sort((a, b) => (a.index < b.index ? -1 : a.index > b.index ? 1 : 0));
+  return { health: s, rows: list };
+}
+
+/** "2 yellow indices", "1 red index". */
+export const problemButtonText = (health, n) => `${n} ${health} ${n === 1 ? 'index' : 'indices'}`;
 
 /**
  * Unassigned shards per index from a `_cat/shards` answer
@@ -43,6 +118,13 @@ export function unassignedByIndex(shards, only) {
   return out;
 }
 
+/** "1 replica", "2 replicas", "1 primary, 1 replica"; null when none are unassigned. */
+export function unassignedText(u) {
+  if (!u) return null;
+  const part = (n, one, many) => (n ? `${n} ${n === 1 ? one : many}` : null);
+  return [part(u.primaries, 'primary', 'primaries'), part(u.replicas, 'replica', 'replicas')].filter(Boolean).join(', ') || null;
+}
+
 /** Elasticsearch's `unassigned.reason` codes in words. */
 const REASON_WORDS = {
   INDEX_CREATED: 'index just created', CLUSTER_RECOVERED: 'cluster recovered', INDEX_REOPENED: 'index reopened',
@@ -53,9 +135,79 @@ const REASON_WORDS = {
 };
 export const reasonWords = (code) => REASON_WORDS[String(code || '').toUpperCase()] || String(code || '').toLowerCase().replace(/_/g, ' ');
 
+/**
+ * One line from an allocation-explain answer: the first node that said NO and the decider's own
+ * sentence, else the answer's overall explanation. → { index, text } | null (nothing to say).
+ * `GET _cluster/allocation/explain` with no body explains ONE unassigned shard (the first the
+ * cluster finds); the core refuses the POST that would pick the shard (guard.rs is_read), so
+ * a per-index explanation is not available to a read-only session.
+ */
+export function explainLine(res) {
+  if (!res || typeof res !== 'object' || !res.index) return null;
+  let text = '';
+  for (const nd of res.node_allocation_decisions || []) {
+    const no = (nd.deciders || []).find((x) => String(x.decision).toUpperCase() === 'NO');
+    if (no && no.explanation) { text = `${nd.node_name ? `${nd.node_name}: ` : ''}${no.explanation}`; break; }
+  }
+  if (!text) text = String(res.allocate_explanation || res.can_allocate || (res.unassigned_info && res.unassigned_info.details) || '');
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return { index: res.index, text: text.length > 160 ? `${text.slice(0, 157)}…` : text };
+}
+
+/**
+ * The Reason cell of one listed index: the allocation-explain sentence when that explained
+ * this index, else the `unassigned.reason` code in words, else null (unknown: the page says so).
+ * → { text, source: 'allocation explain' | 'unassigned.reason' } | null
+ */
+export function reasonFor(index, unassigned, explained) {
+  if (explained && explained.index === index) return { text: explained.text, source: 'allocation explain' };
+  const u = unassigned && unassigned.get && unassigned.get(index);
+  if (u && u.codes.length) return { text: u.codes.map(reasonWords).join(', '), source: 'unassigned.reason' };
+  return null;
+}
+
 /* ---------------------------------- the donuts ---------------------------------- */
 
+/**
+ * Stroke segments for a donut drawn as circles of circumference 100 (r = 15.915):
+ * [{ key, len, dash: 'len rest', offset }]. Zero parts are skipped; an empty total gives none
+ * (the ring is drawn empty, not full).
+ */
+export function donutSegments(parts) {
+  const total = (parts || []).reduce((s, p) => s + Math.max(0, p.n), 0);
+  if (!total) return [];
+  let cum = 0;
+  const out = [];
+  for (const p of parts) {
+    if (!(p.n > 0)) continue;
+    const len = (p.n / total) * 100;
+    out.push({ key: p.key, len, dash: `${len.toFixed(2)} ${(100 - len).toFixed(2)}`, offset: -cum });
+    cum += len;
+  }
+  return out;
+}
+
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The Shard allocation card from `_cluster/health`. → null when health was not read;
+ * else { pill: { tone, text }, figure: '99.6%' | null, parts: [{ key, label, n }], total }.
+ * Relocating is its own part, listed only when some shard is moving.
+ */
+export function shardCard(health) {
+  const a = shardAllocation(health);
+  if (!a) return null;
+  let pill;
+  if (a.unassigned > 0) pill = { tone: String(health.status) === 'red' ? 'red' : 'yellow', text: `${a.unassigned} unassigned` };
+  else if (a.initializing > 0) pill = { tone: 'yellow', text: `${a.initializing} initializing` };
+  else if (a.relocating > 0) pill = { tone: 'yellow', text: `${a.relocating} relocating` };
+  else pill = { tone: 'green', text: 'Healthy' };
+  const parts = [{ key: 'active', label: 'Active', n: a.active }, { key: 'init', label: 'Initializing', n: a.initializing }];
+  if (a.relocating > 0) parts.splice(1, 0, { key: 'reloc', label: 'Relocating', n: a.relocating });
+  parts.push({ key: 'unas', label: 'Unassigned', n: a.unassigned });
+  return { pill, figure: a.pct === null ? null : `${a.pct.toFixed(1)}%`, parts, total: a.total };
+}
 
 /**
  * The ILM card for the cluster's log indices (`pattern`). "Not known" and "No policy" come from

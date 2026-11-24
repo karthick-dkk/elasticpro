@@ -853,6 +853,7 @@ function renderTopbar() {
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
     // for; picking one cluster withdraws it.
     fleetChosen = e.target.value === 'all';
+    setAside = null;
     // A page whose address names the cluster (Clusters › Overview: #/clusters/overview/<id>) moves
     // its address first: drawn again under the old one, the page read the old cluster out of it
     // and put the chooser straight back.
@@ -1031,8 +1032,25 @@ function evidenceChooser() {
 let fleetChosen = false;
 let borrowed = null;
 
+/**
+ * The Clusters List shows every cluster when it is opened (the owner, 2026-11-24). The cluster
+ * chosen for the other pages is put aside meanwhile and comes back with the next page; a cluster
+ * picked on the List narrows it and is the choice from then on.
+ */
+let onFleetList = false;
+let setAside = null;
+
 /** The cluster last chosen in this browser (idb 'lastCluster'), kept here so a page can use it synchronously. */
 let lastCluster = '';
+
+/** A link that names a cluster: it is the choice; on the Clusters List, its row among the others, opened. */
+function arriveAt(pageId, id) {
+  state.selected = id;
+  const p = PAGES.find((x) => x.id === pageId);
+  if (!p || !p.mod.opensOnAll || !p.mod.opensOnAll()) return;
+  p.mod.reveal(id);
+  onFleetList = false;
+}
 
 function resolveSelection(page) {
   // A chosen cluster that is no longer in the config (reloaded, removed, hidden) is no choice at all.
@@ -1040,6 +1058,17 @@ function resolveSelection(page) {
   // Somebody moved the selection since a page borrowed a cluster: that is the choice now.
   if (borrowed && state.selected !== borrowed) borrowed = null;
   const borrow = (id) => { if (id && state.selected === 'all') { state.selected = id; borrowed = id; } };
+  const fleetList = !!(page.mod.opensOnAll && page.mod.opensOnAll());
+  if (fleetList && !onFleetList) {
+    if (state.selected !== 'all' && state.selected !== borrowed) setAside = state.selected;
+    borrowed = null;
+    state.selected = 'all';
+  } else if (fleetList && state.selected !== 'all') setAside = null;
+  else if (!fleetList && onFleetList) {
+    if (state.selected === 'all' && clusters().some((c) => c.id === setAside)) state.selected = setAside;
+    setAside = null;
+  }
+  onFleetList = fleetList;
   // An evidence page shows one cluster: the one it was left on, else the one last chosen,
   // else the first. So does a page section that shows one cluster (Clusters › Overview, `singleCluster`).
   if (EVIDENCE_PAGES.has(page.id) || (page.mod.singleCluster && page.mod.singleCluster())) {
@@ -1175,6 +1204,7 @@ async function start(config, handle) {
   // Open on the cluster last chosen in this browser (or the first), not on "All clusters":
   // the fleet view is the dearest one there is, and the one a person who looks after a
   // single cluster never asked for. defaults.defaultScope: 'all' restores the old start.
+  // (The Clusters List shows every cluster all the same: resolveSelection, opensOnAll.)
   if (!isSnapshotMode()) {
     const last = await idb.getKV('lastCluster');
     if (typeof last === 'string') lastCluster = last;
@@ -1187,7 +1217,7 @@ async function start(config, handle) {
   // answers it, and then forget the request so a later start does not repeat it.
   const target = troubleshootTarget(readLaunch(location).trouble, clusters(), pageForProblem);
   if (target) {
-    if (target.cluster) state.selected = target.cluster;
+    if (target.cluster) arriveAt(pageAlias(target.page), target.cluster);
     try { history.replaceState(null, '', withoutTrouble(location.href)); } catch (_) { /* sandboxed frame */ }
   }
   // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
@@ -1595,7 +1625,7 @@ window.addEventListener('ep:navigate', (e) => {
   if (!id || !PAGES.some((p) => p.id === id)) return;
   // Arriving with a cluster named means arriving AT that cluster.
   const wanted = e.detail && e.detail.cluster;
-  if (wanted && clusters().some((c) => c.id === wanted)) state.selected = wanted;
+  if (wanted && clusters().some((c) => c.id === wanted)) arriveAt(id, wanted);
   go(id);
 });
 

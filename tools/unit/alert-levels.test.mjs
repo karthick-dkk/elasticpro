@@ -289,6 +289,7 @@ test('heap colour: a cell over the High line is orange, the alert\'s colour, and
   assert.equal(O.heapLevel(50), 'ok');
   assert.match(O.HEAP_TITLE, /over 85 %/);
   const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  assert.match(css, /\.cl-mini i\.over \{ background: var\(--high\); \}/);
   assert.match(css, /\.pl-bar i\.orange \{ background: var\(--tv-orange\); \}/);
 });
 
