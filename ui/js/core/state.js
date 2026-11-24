@@ -2566,7 +2566,7 @@ export function worstHealth() {
 function updateBadge() {
   const { total, critical: crit, high, warning: warn } = openAlertCounts();
   const w = worstHealth();
-  const color = crit ? '#d03b3b' : high ? '#ff8c42' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
+  const color = crit ? '#d03b3b' : high ? '#ff8c42' : warn ? '#f2c01e' : w === 'green' ? '#0ca30c' : '#64748b';
   setBadge(total ? String(total) : '', color,
     total ? `ElasticPro — ${crit} critical, ${high} high, ${warn} warning` : 'ElasticPro — all clusters healthy');
 }

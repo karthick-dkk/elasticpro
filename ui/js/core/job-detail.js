@@ -59,16 +59,16 @@ export function resultOf(run) {
   if (run.status === 'running' || run.status === 'queued' || run.status === 'pending') return { text: 'Running', tone: 'blue', warn: false };
   if (!n) {
     const word = { completed: 'Succeeded', failed: 'Failed', deferred: 'Deferred', skipped: 'Skipped', cancelled: 'Cancelled' }[run.status] || String(run.status || '—');
-    const tone = { completed: 'green', failed: 'red', deferred: 'orange', skipped: 'grey', cancelled: 'grey' }[run.status] || 'grey';
+    const tone = { completed: 'green', failed: 'red', deferred: 'yellow', skipped: 'grey', cancelled: 'grey' }[run.status] || 'grey';
     return { text: word, tone, warn: run.status === 'deferred' };
   }
   const bad = (num(p.failed) || 0), part = (num(p.partial) || 0), def = (num(p.deferred) || 0), skip = (num(p.skipped) || 0);
   const ex = bad + part + def + skip;
   if (!ex) return { text: `Succeeded · ${plural(n)}`, tone: 'green', warn: false };
   if (bad === n) return { text: `Failed · ${plural(n)}`, tone: 'red', warn: false };
-  if (def === ex && !bad && !part) return { text: `Deferred · ${plural(def)}`, tone: 'orange', warn: true };
+  if (def === ex && !bad && !part) return { text: `Deferred · ${plural(def)}`, tone: 'yellow', warn: true };
   if (ex === n && !bad && !part) return { text: `Skipped · ${plural(n)}`, tone: 'grey', warn: false };
-  return { text: `Partial · ${ex} of ${plural(n)}`, tone: 'orange', warn: true };
+  return { text: `Partial · ${ex} of ${plural(n)}`, tone: 'yellow', warn: true };
 }
 
 /**
@@ -171,7 +171,7 @@ export const exceptionsOf = (detail) => ((detail && detail.parts) || []).filter(
 
 /** A part's result as a pill: Failed red, Partial and Deferred amber, Skipped grey, Succeeded green. */
 export function partTone(status) {
-  return { succeeded: 'green', failed: 'red', partial: 'orange', deferred: 'orange', skipped: 'grey' }[status] || 'grey';
+  return { succeeded: 'green', failed: 'red', partial: 'yellow', deferred: 'yellow', skipped: 'grey' }[status] || 'grey';
 }
 export const partWord = (status) => ({ succeeded: 'Succeeded', failed: 'Failed', partial: 'Partial', deferred: 'Deferred', skipped: 'Skipped' }[status] || String(status || '—'));
 

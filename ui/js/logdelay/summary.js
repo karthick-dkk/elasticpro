@@ -21,12 +21,7 @@ import { card, empty } from '../pages/common.js';
 import {
   LD_COLOURS as C, LD_NEVER_MEASURED, noDelayOf, noDelaySplit, noDelayOfText, shareText, ldHash, bands, sharedLevels, countText,
   lateSplitText, reducedBars, ringsOrder, ringArcs, dayBars, dayTitle, dayTicks, dayChartWords,
-  LD_RING_RED_PCT, ringAlert,
 } from '../core/logdelay-report.js';
-
-/** A ring above LD_RING_RED_PCT: the theme's critical red, the delay band a lighter mix of it. */
-const RED = 'var(--level-crit)';
-const RED_SOFT = 'color-mix(in srgb, var(--level-crit) 55%, var(--surface-1))';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const never = (c) => !c || c.lastRunAt === null || c.lastRunAt === undefined;
@@ -48,7 +43,7 @@ function tiles(res, b, lv) {
   const pc = nd.pct || {};
   return h('div.ld-kpis.ld-6#ld-sum-tiles',
     kpi('devices', n(t.devices), none ? 'never measured' : 'total devices'),
-    kpi('late', n(late), none ? 'never measured' : `devices with delay at the last run · ${lateSplitText(t, b)}`, late && !none ? 'ld-crit' : null),
+    kpi('late', n(late), none ? 'never measured' : `devices with delay at the last run · ${lateSplitText(t, b)}`, none || !late ? null : t.critical ? 'ld-crit' : 'ld-delay'),
     kpi('onTime', n(nd.count), none ? 'never measured' : [h('span', 'No delay'), h('span.ld-small', noDelaySplit(nd, { counts: true }))], none ? null : 'ld-ok'),
     kpi('pct', shareText(pc.noDelay), [h('span', 'No delay'),
       h('span.ld-small', nd.pct ? `${noDelaySplit(nd)} · ${shareText(pc.late)} delayed` : `no percentage: ${nd.why}`,
@@ -92,22 +87,20 @@ function dayCard(daysRes, win, b, pending) {
 }
 
 /**
- * One ring: the late share as two arcs (above the critical line, then the delay band); unknown is
- * an empty ring with "—". Above LD_RING_RED_PCT delayed both arcs are red (`data-alert`), the
- * delay band a lighter red: the ring has no other warm colour, so never red with yellow.
+ * One ring: red above the critical line, yellow the delay band, green No delay (what is left is another
+ * time zone); the late share is its figure. Unknown is an empty ring with "—".
  */
 function ring(o) {
-  const arcs = o.never ? null : ringArcs(o.delay, o.critical, o.devices);
+  const arcs = o.never ? null : o.why ? null : ringArcs(o.delay, o.critical, o.devices, o.nd && o.nd.count);
   const known = arcs !== null && finite(o.pct);
-  const alert = known && ringAlert(o.pct);
-  const arcColour = (kind) => (alert ? (kind === 'critical' ? RED : RED_SOFT) : kind === 'critical' ? C.crit : C.delay);
+  const arcColour = (kind) => ({ critical: C.crit, delay: C.delay, ok: C.ok }[kind]);
   const nd = o.nd;
   const title = o.never ? `${o.name}: ${LD_NEVER_MEASURED}`
     : o.why ? `${o.name}: no percentage — ${o.why}`
     : known ? `${o.name}: ${countText(o.late)} of ${countText(o.devices)} devices delayed (${shareText(o.pct)})${nd && nd.pct ? ` · No delay ${shareText(nd.pct.noDelay)} (${noDelaySplit(nd)})` : ''} · opens ${o.all ? 'Dashboard' : 'the cluster'}`
       : `${o.name}: no device measured`;
   const circle = (stroke, extra = {}) => svg('circle', { cx: 21, cy: 21, r: 15.915, fill: 'none', stroke, 'stroke-width': 5, ...extra });
-  return h(`a.ld-ring${o.all ? '.ld-all' : ''}`, { href: o.href, title: alert ? `${title} · above ${LD_RING_RED_PCT} % delayed` : title, dataset: { ring: o.all ? 'all' : o.id, known: String(known), alert: String(alert) } },
+  return h(`a.ld-ring${o.all ? '.ld-all' : ''}`, { href: o.href, title, dataset: { ring: o.all ? 'all' : o.id, known: String(known) } },
     h('span.ld-ring-pic',
       svg('svg', { width: 84, height: 84, viewBox: '0 0 42 42', role: 'img', 'aria-label': title },
         circle('var(--surface-3)'),
@@ -132,7 +125,7 @@ function ringsCard(res, b, clusterId, nameOf) {
   }
   return card('Delayed devices by cluster', `share of each cluster’s devices at ${b.late} at its last run · worst first · a ring opens the cluster`,
     rings.length ? h('div.ld-rings#ld-rings', ...rings) : empty('No cluster you can see is measured.'),
-    [legend(key(C.crit, b.high), key(C.delay, b.mid), key('var(--surface-3)', 'no delay, or another time zone'), key(RED, `Above ${LD_RING_RED_PCT} % delayed`))]);
+    [legend(key(C.crit, b.high), key(C.delay, b.mid), key(C.ok, 'No delay'))]);
 }
 
 /**

@@ -383,7 +383,7 @@ function indicesCard(idx) {
 
 /* ------------------------------------ row 2: gauges ------------------------------------ */
 
-const LEVEL_COLOUR = { ok: 'var(--chart-info)', warn: STATUS.warning, crit: STATUS.critical };
+const LEVEL_COLOUR = { ok: STATUS.good, warn: STATUS.warning, crit: STATUS.critical };
 
 /**
  * One gauge card: the title, "Highest on <node>", a caption, and the ring (lib/charts.js
@@ -426,8 +426,8 @@ function heapGauge(d) {
 function shardsGauge(d) {
   const f = shardFigures(d.health);
   const ring = ringGauge(f ? [
-    { value: f.assigned, color: 'var(--chart-info)', label: 'assigned' },
-    { value: f.moving, color: 'var(--chart-good)', label: 'moving' },
+    { value: f.assigned, color: STATUS.good, label: 'assigned' },
+    { value: f.moving, color: 'var(--chart-info)', label: 'moving' },
     { value: f.unassigned, color: STATUS.critical, label: 'unassigned' },
   ] : [], { total: f ? f.total : 0, size: 82, stroke: 10, centre: f ? pct(f.pct, 0) : '–',
     label: f && f.pct !== null ? `${pct(f.pct, 0)} of shards assigned` : 'shards: not known' });
@@ -437,7 +437,7 @@ function shardsGauge(d) {
       h('b.ov-fact-t', 'Shards'),
       f ? h('span.ov-gauge-node', f.primary === null ? 'primaries not known' : `${num(f.primary)} primary`) : h('span.muted', 'health not read yet'),
       f ? h('span.ov-gauge-node', `${num(f.total)} total`) : null,
-      f ? h('span.muted.ov-gauge-c.ov-split', dot('var(--chart-info)', f.assigned, 'assigned'), ' · ', dot('var(--chart-good)', f.moving, 'moving'), ' · ', dot(STATUS.critical, f.unassigned, 'unassigned')) : null),
+      f ? h('span.muted.ov-gauge-c.ov-split', dot(STATUS.good, f.assigned, 'assigned'), ' · ', dot('var(--chart-info)', f.moving, 'moving'), ' · ', dot(STATUS.critical, f.unassigned, 'unassigned')) : null),
     ring);
 }
 

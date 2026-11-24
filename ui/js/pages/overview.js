@@ -1376,7 +1376,7 @@ function bucketBox(c) {
 
 /* -- the four cards -- */
 
-// Chart colours (owner rule: never red with yellow): light green, orange, pink, blue.
+// The states' colours (app.css --state-*); moving is information, blue.
 const SEG_COLOR = { active: 'var(--chart-good)', init: 'var(--chart-warn)', unas: 'var(--chart-bad)', reloc: 'var(--chart-info)', ok: 'var(--chart-good)', err: 'var(--chart-bad)', none: 'var(--surface-3)' };
 
 /** A 64 px donut: the share of each part, an empty ring when there is nothing to share. */

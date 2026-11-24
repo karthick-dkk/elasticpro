@@ -165,7 +165,7 @@ export const STATUS = {
   OK: { label: 'ok', cls: 'green' },
   DELAYED: { label: 'delayed', cls: 'yellow' },
   CRITICAL: { label: 'critical', cls: 'red' },
-  CLOCK_AHEAD: { label: 'clock ahead', cls: 'orange' },
+  CLOCK_AHEAD: { label: 'clock ahead', cls: 'grey' },
   OTHER_TZ: { label: 'other time zone', cls: 'blue' },
   ERROR: { label: 'error', cls: 'grey' },
   NO_DATA: { label: 'no data', cls: 'grey' },

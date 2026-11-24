@@ -45,7 +45,7 @@ import {
   minutesText, durationText, whenText, pctText, countText,
   stateText, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
-  lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, vsText, GRID_WORST, dayText,
+  lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, gridHue, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
   LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER, noDeviceTotal, noDeviceLine,
 } from '../core/logdelay-report.js';
@@ -519,8 +519,8 @@ function chartPanels(res, period, b, scopeId) {
  * measurement is hatched "not measured", never an earlier reading carried forward; the window in
  * progress with no reading yet is "pending" (light dots, when the next run is due); one not
  * begun yet is blank. Before today's first run, Late now is yesterday's last measurement, labelled.
- * Each row is shaded on its own scale (its worst window darkest), one hue. A cell opens the
- * cluster at that window.
+ * A cell is green at 0, yellow when devices were late, red when one of them was above the critical
+ * line (gridHue), stronger on its own row's scale. A cell opens the cluster at that window.
  */
 function lateGrid(res, b) {
   const every = finite(res.everyHours) ? res.everyHours : null;
@@ -551,10 +551,11 @@ function lateGrid(res, b) {
       if (c.state === 'pending') { kids.push(h('td.ld-gc.ld-g-pend', { title: `${r.name} · ${label} · pending — this window has not ended and has no reading yet${finite(r.nextAt) && r.nextAt > Date.now() ? `; next measurement about ${hm(r.nextAt)}` : ''}` })); continue; }
       if (c.state === 'missing') { kids.push(h('td.ld-gc.ld-g-na', { title: `${r.name} · ${label} · not measured — no run in this window (never a copy of an earlier one)` }, '·')); continue; }
       const shade = gridShade(c.v, r.worst);
+      const hue = gridHue(c.w, c.v);
       const open = () => openAtWindow(r.id, c.w);
-      kids.push(h(`td.ld-gc.ld-gs-${shade}`, {
+      kids.push(h(`td.ld-gc.ld-gs-${shade}${hue ? `.ld-gs-${hue}` : ''}`, {
         role: 'button', tabindex: 0, dataset: { win: String(c.i) },
-        title: `${r.name} · ${label} · ${countText(c.v)} device${c.v === 1 ? '' : 's'} ${what} at that window’s measurement · opens the cluster`,
+        title: `${r.name} · ${label} · ${countText(c.v)} device${c.v === 1 ? '' : 's'} ${what} at that window’s measurement${hue === 'crit' && S.gridMode !== 'critical' ? `, ${countText(c.w.criticalAt)} ${b.high.toLowerCase()}` : ''} · opens the cluster`,
         onclick: open, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } },
       }, countText(c.v)));
     }
@@ -567,8 +568,8 @@ function lateGrid(res, b) {
       h('thead', h('tr', h('th.ld-g-nm', 'Cluster'), h('th.num', 'Late now'), h('th.num', 'vs yesterday'), ...heads.map((x) => h('th', x)), h('th.num', 'Measured'))),
       h('tbody', ...rows.map(tr)))),
     h('div.ld-foot.ld-g-legend',
-      h('span', 'Shade = this cluster’s own scale (its worst window is darkest), so a quiet cluster’s rise still shows'),
-      h('span.ld-key', h('i.ld-g-key.ld-gs-0'), '0'), h('span.ld-key', h('i.ld-g-key.ld-gs-2'), 'some'), h('span.ld-key', h('i.ld-g-key.ld-gs-4'), 'its worst'),
+      h('span', 'Strength = this cluster’s own scale (its worst window is strongest), so a quiet cluster’s rise still shows'),
+      h('span.ld-key', h('i.ld-g-key.ld-gs-0'), '0'), h('span.ld-key', h('i.ld-g-key.ld-gs-3.ld-gs-late'), b.late), h('span.ld-key', h('i.ld-g-key.ld-gs-3.ld-gs-crit'), `some ${b.high.toLowerCase()}`),
       h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run in that window'),
       h('span.ld-key', h('i.ld-g-key.ld-g-pend'), 'pending — the window in progress, no reading yet')),
   ];
@@ -1206,7 +1207,7 @@ function graphCard(res, lv, every, age) {
   return card('Delay over time', `each point is one ${every ? `${every}-hour ` : ''}measurement · shaded bands are delays, from start to solve`,
     [h('div.ld-graph',
       h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))),
-      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, tail, line(lv.criticalOver, C.crit), line(lv.delayFrom, C.delay), pic)),
+      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, tail, line(lv.criticalOver, C.critLine), line(lv.delayFrom, C.delayLine), pic)),
     h('div.ld-marks', { 'aria-label': 'Delay starts and solves' }, ...marks),
     h('div.ld-ticks.ld-indent', ...ticks.map((t) => h('span', t))),
     h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
@@ -1215,7 +1216,7 @@ function graphCard(res, lv, every, age) {
       cell('Peak', minutesText(ins.peak && ins.peak.minutes, 'not known'), ins.peak && finite(ins.peak.at) ? whenText(ins.peak.at, res.now) : null),
       cell('Longest delay', longestMs === null ? 'not known' : longestMs === 0 ? 'one measurement' : durationText(longestMs), ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : openText}` : null),
       cell('Late most often', ins.lateMostOften ? ins.lateMostOften.label : 'not known', ins.lateMostOften ? `${ins.lateMostOften.count} of ${ins.lateMostOften.of} delays began then` : null))],
-    [legend(key(C.line, 'Delay', { line: true }), key(C.delay, `${lv.delayFrom ?? '?'} min`, { dash: true }), key(C.crit, `${lv.criticalOver ?? '?'} min`, { dash: true }))]);
+    [legend(key(C.line, 'Delay', { line: true }), key(C.delayLine, `${lv.delayFrom ?? '?'} min`, { dash: true }), key(C.critLine, `${lv.criticalOver ?? '?'} min`, { dash: true }))]);
 }
 
 function periodsCard(res, every, age) {

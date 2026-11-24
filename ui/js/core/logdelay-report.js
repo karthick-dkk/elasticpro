@@ -30,11 +30,15 @@ export const LD_PAGE = 'log-delay';
 export const LD_SECTION = 'log-delay';
 
 /**
- * Chart colours (owner's rule, 0.3.62, "cool blue"): green below the delay line, light blue for
- * the delay band, blue above the critical line, violet for another time zone, grey for silent —
- * never red with yellow. Theme tokens (ui/css/app.css), so each theme mixes its own inks.
+ * The colours of the levels (the owner, 2026-11-24): No delay green, the delay band yellow, above the
+ * critical line red — the states' tokens every page uses (ui/css/app.css --state-*) — violet for
+ * another time zone, grey for silent and can't measure. `delayLine` / `critLine`: a level's line, the
+ * same hue a step stronger, so a thin line shows on a light page.
  */
-export const LD_COLOURS = Object.freeze({ ok: 'var(--ld-ok)', delay: 'var(--ld-delay)', crit: 'var(--ld-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)' });
+export const LD_COLOURS = Object.freeze({
+  ok: 'var(--state-ok)', delay: 'var(--state-late)', crit: 'var(--state-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)',
+  delayLine: 'color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink))', critLine: 'color-mix(in srgb, var(--state-crit) 72%, var(--state-crit-ink))',
+});
 
 /**
  * What the boards and the Clusters › Overview card say about the scheduled measurement — one
@@ -610,25 +614,22 @@ export function ringsOrder(byCluster) {
 }
 
 /**
- * A ring's two arcs on a circumference of 100 — above the critical line first, then the delay band
- * after it: `[{kind, dash, offset}]`, a sliver at least for a count above 0. Null when the share is
- * not known (no device, a figure missing): drawn as an empty ring with "—", never 0 %.
+ * A ring's arcs on a circumference of 100 — above the critical line first, then the delay band, then
+ * No delay (`noDelay`, when known): `[{kind, dash, offset}]`, a sliver at least for a count above 0.
+ * What is left is another time zone. Null when the share is not known (no device, a figure missing):
+ * drawn as an empty ring with "—", never 0 %.
  */
-export function ringArcs(delay, critical, devices) {
+export function ringArcs(delay, critical, devices, noDelay = null) {
   if (!finite(devices) || devices <= 0 || !finite(delay) || !finite(critical)) return null;
   const len = (n) => (n > 0 ? Math.max((n / devices) * 100, 1.5) : 0);
   const c = Math.min(100, len(critical)); const d = Math.min(100 - c, len(delay));
+  const o = finite(noDelay) ? Math.min(100 - c - d, len(noDelay)) : 0;
   const arc = (kind, l, at) => ({ kind, dash: `${l.toFixed(2)} ${(100 - l).toFixed(2)}`, offset: (-at).toFixed(2) });
-  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null].filter(Boolean);
+  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null, o ? arc('ok', o, c + d) : null].filter(Boolean);
 }
 
-/**
- * A Summary ring turns red above this share of its devices delayed (percent; the owner, 0.3.77):
- * at or below it the ring keeps the level colours. One figure for every ring, All clusters too.
- */
-export const LD_RING_RED_PCT = 2;
-/** Whether a ring's delayed share (`latePct`, `pctLate`, percent) is above LD_RING_RED_PCT; unknown is not red. */
-export const ringAlert = (pct) => finite(pct) && pct > LD_RING_RED_PCT;
+/** A grid cell's hue: red when a device was above the critical line at that measurement, yellow when one was late, '' for none. */
+export const gridHue = (w, v) => (!(v > 0) ? '' : finite(w && w.criticalAt) && w.criticalAt > 0 ? 'crit' : 'late');
 
 /**
  * The documents the last runs read with no device name, summed over the clusters that said a
@@ -1067,8 +1068,8 @@ export function periodBand(p, lo, hi, until = Date.now()) {
 /** Is this row late now (for colouring)? */
 export const rowLate = (r) => !!r && isLate(r.state);
 
-/** The finding step's pill tone: a time-zone step violet, a fix on the path the delay band's blue, unknown grey. */
-export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-delay', forwarder: 'ld-delay', parser: 'ld-delay', device_clock: 'ld-delay', device_time_zone: 'ld-tz', device_link: 'ld-delay', cluster: 'ld-tz', unknown: 'grey' });
+/** The finding step's pill tone: a time-zone step violet, a fix on the path blue (where to look, not a level), unknown grey. */
+export const STEP_TONE = Object.freeze({ elasticsearch: 'blue', forwarder: 'blue', parser: 'blue', device_clock: 'blue', device_time_zone: 'ld-tz', device_link: 'blue', cluster: 'ld-tz', unknown: 'grey' });
 export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_time_zone: 'Device clock / parser', device_link: 'Device', cluster: 'Cluster', unknown: 'Not enough evidence' });
 export const stepLabel = (f) => (f && (f.stepLabel || STEP_LABEL[f.step])) || 'Not known yet';
 

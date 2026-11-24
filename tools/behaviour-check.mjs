@@ -8578,16 +8578,13 @@ await settleFor(300);
       const shares = rings().slice(1).map(share);
       ok(shares.every((v, i) => i === 0 || v <= shares[i - 1]), `log delay: the rings are not worst first (${shares.join(', ')})`);
       {
-        // 0.3.77: a ring above LD_RING_RED_PCT (2 %) delayed draws its arcs in the critical red; at or below, the level colours. All clusters too.
-        const fxR = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, list);
-        const pctOf = (a) => (a.dataset.ring === 'all' ? fxR.totals.pctLate : (fxR.byCluster.find((c) => c.id === a.dataset.ring) || {}).latePct);
-        const bad = rings().filter((a) => a.dataset.known === 'true').filter((a) => {
-          const red = pctOf(a) > 2;
-          const arcs = [...a.querySelectorAll('.ld-arc')];
-          return a.dataset.alert !== String(red) || arcs.some((c) => /level-crit/.test(c.getAttribute('stroke') || '') !== red);
-        });
-        ok(rings().some((a) => a.dataset.known === 'true') && bad.length === 0, `log delay: rings red the wrong way: ${bad.map((a) => `${a.dataset.ring} ${pctOf(a)} % alert=${a.dataset.alert}`).join(', ')}`);
-        ok(/Above 2 % delayed/.test(g('ld-rings').closest('section').textContent), 'log delay: the rings legend does not name the red line');
+        // The states' colours (owner, 2026-11-24; was: above 2 % every arc red): critical red, the delay band yellow, No delay green.
+        const want = { critical: '--state-crit', delay: '--state-late', ok: '--state-ok' };
+        const arcs = rings().flatMap((a) => [...a.querySelectorAll('.ld-arc')]);
+        const kindOf = (c) => ((c.getAttribute('class') || '').match(/ld-arc-(\w+)/) || [])[1];
+        ok(arcs.length && ['critical', 'ok'].every((k) => arcs.some((c) => kindOf(c) === k)) && arcs.every((c) => (c.getAttribute('stroke') || '').includes(want[kindOf(c)])),
+          `log delay: the rings' arcs are ${[...new Set(arcs.map((c) => `${kindOf(c)} ${c.getAttribute('stroke')}`))].join(', ')}`);
+        ok([...g('ld-rings').closest('section').querySelectorAll('.ld-key')].map((k) => k.textContent).join('|') === 'Above 60 min|30–60 min|No delay', 'log delay: the rings legend does not name the three states');
         // The summed no-device line, under the cards, once; no per-cluster note above them.
         ok([...view().querySelectorAll('.banner')].every((b) => !/no device name/.test(b.textContent)) && [...view().querySelectorAll('.ld-note')].filter((x) => /no device name/.test(x.textContent)).length <= 1,
           'log delay: Summary still writes a note per cluster for documents without a device name');
@@ -9109,7 +9106,7 @@ await settleFor(300);
     ok(/^\d+(\.\d+)? ?(ms|s)$|^\d+m \d{2}s$/.test(cell(backup, 5)), `jobs: Duration reads "${cell(backup, 5)}"`);
     ok(/^\d{2} [A-Z][a-z]{2,3} \d{2}:\d{2}$/.test(cell(backup, 6)), `jobs: Next run reads "${cell(backup, 6)}", not an exact time`);
     const ldRow = panel('All jobs').querySelector('tbody tr[data-job="logdelay.measure"]');
-    ok(/Partial · 4 of 71 clusters/.test(cell(ldRow, 7)) && ldRow.querySelector('td:nth-child(7) .pill.orange'), `jobs: the log delay result reads "${cell(ldRow, 7)}"`);
+    ok(/Partial · 4 of 71 clusters/.test(cell(ldRow, 7)) && ldRow.querySelector('td:nth-child(7) .pill.yellow'), `jobs: the log delay result reads "${cell(ldRow, 7)}"`);
     ok(cell(ldRow, 5) === '1m 31s', `jobs: the log delay duration reads "${cell(ldRow, 5)}"`);
     // Deferred, cluster busy: amber, a warning — never a red "Error:".
     const defSub = panel('All jobs').querySelector('tbody tr[data-sub="hosts.collect"]');
@@ -9148,7 +9145,7 @@ await settleFor(300);
       ok(demo && /INDEX_NOT_FOUND/.test(demo.textContent) && /None — config issue/.test(demo.textContent) && /0\.4 s/.test(demo.textContent)
         && [...demo.querySelectorAll('a, span')].some((a) => a.textContent === 'Set log index'), `jobs: the demo exception reads "${demo && demo.textContent}"`);
       const aib = ex.querySelector('tr[data-part="aib"]');
-      ok(aib && aib.querySelector('.pill.orange') && /212/.test(aib.textContent), 'jobs: a partial cluster is not amber with its records');
+      ok(aib && aib.querySelector('.pill.yellow') && /212/.test(aib.textContent), 'jobs: a partial cluster is not amber with its records');
       ok(/67 clusters succeeded/.test(ex.textContent) && /View all 71/.test(ex.textContent), 'jobs: the exceptions do not say how many succeeded');
       ex.querySelector('.jb-dtabs button[data-dtab="log"]').click(); await settleFor(100);
       const lg = panel('All jobs').querySelector('tr[data-detail="logdelay.measure"]');

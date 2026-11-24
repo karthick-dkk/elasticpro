@@ -5,6 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -71,6 +72,8 @@ test('summary: the late split, Delay reduced, the rings worst first and their ar
   assert.deepEqual(arcs.map((x) => x.kind), ['critical', 'delay']);
   assert.equal(arcs[0].dash, '10.00 90.00'); assert.equal(arcs[1].dash, '20.00 80.00'); assert.equal(arcs[1].offset, '-10.00', 'the delay band starts where the critical arc ends');
   assert.equal(R.ringArcs(0, 1, 100000)[0].dash, '1.50 98.50', 'one late device still shows');
+  const three = R.ringArcs(2, 1, 10, 6);
+  assert.deepEqual(three.map((x) => [x.kind, x.dash, x.offset]), [['critical', '10.00 90.00', '0.00'], ['delay', '20.00 80.00', '-10.00'], ['ok', '60.00 40.00', '-30.00']], 'No delay after the late arcs; the rest is another time zone');
   assert.deepEqual(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 30, criticalOver: 60 } }]), { delayFrom: 30, criticalOver: 60 });
   assert.equal(R.sharedLevels([{ levels: { delayFrom: 30, criticalOver: 60 } }, { levels: { delayFrom: 20, criticalOver: 60 } }]), null);
   assert.equal(R.sharedLevels([]), null);
@@ -348,8 +351,7 @@ test('periods: today, last N days, this month, last month', () => {
 });
 
 test('chart colours: the theme tokens for the three levels, another time zone and silent — never a hex of its own', () => {
-  const fills = Object.entries(R.LD_COLOURS).filter(([k]) => k !== 'line').map(([, v]) => v);
-  assert.deepEqual(fills, ['var(--ld-ok)', 'var(--ld-delay)', 'var(--ld-crit)', 'var(--ld-tz)', 'var(--ld-silent)']);
+  const fills = Object.values(R.LD_COLOURS);
   assert.ok(fills.every((v) => !/#/.test(v)), 'a theme draws its own tones');
 });
 
@@ -409,13 +411,31 @@ test('Live: a device silent in the range is a silent row, its last arrival kept;
   assert.deepEqual(R.scheduleOf(null), { supported: null, enabled: null, everyHours: null, lastRunAt: null, nextDueAt: null }, 'no answer: nothing known');
 });
 
-test('summary rings: red above LD_RING_RED_PCT delayed, one figure for every ring (0.3.77)', () => {
-  assert.equal(R.LD_RING_RED_PCT, 2, 'the owner’s line: 2 %');
-  assert.equal(R.ringAlert(2.0), false, '2.0 % is at the line: not red');
-  assert.equal(R.ringAlert(2.1), true, '2.1 % is above it: red');
-  assert.equal(R.ringAlert(0), false);
-  assert.equal(R.ringAlert(null), false, 'unknown is not red (nor 0)');
-  assert.equal(R.ringAlert(undefined), false);
+test('states have one colour everywhere: critical red, delayed yellow, No delay green (owner, 2026-11-24)', () => {
+  const C = R.LD_COLOURS;
+  assert.deepEqual([C.ok, C.delay, C.crit, C.tz, C.silent], ['var(--state-ok)', 'var(--state-late)', 'var(--state-crit)', 'var(--ld-tz)', 'var(--ld-silent)']);
+  assert.match(C.delayLine, /--state-late\b/); assert.match(C.critLine, /--state-crit\b/);
+  // A grid cell: red when a device was above the critical line then, yellow late, none at 0; unknown split is not red.
+  assert.deepEqual([R.gridHue({ criticalAt: 1 }, 3), R.gridHue({ criticalAt: 0 }, 3), R.gridHue({ criticalAt: null }, 3), R.gridHue({ criticalAt: 0 }, 0)], ['crit', 'late', 'late', '']);
+  // A fix on the path is not a level.
+  assert.ok(!Object.values(R.STEP_TONE).some((t) => /ld-(ok|delay|crit)/.test(t)));
+});
+
+test('the state tokens: set in every theme, one set (good/warning/critical and the chart fills are these), none of the old ones left', () => {
+  const css = fs.readFileSync(new URL('../../ui/css/app.css', import.meta.url), 'utf8');
+  for (const s of ['crit', 'late', 'ok']) {
+    for (const k of ['', '-ink', '-bg']) assert.equal((css.match(new RegExp(`--state-${s}${k}: #`, 'g')) || []).length, 5, `--state-${s}${k}: light, dark by system, dark, dark-blue, warm`);
+  }
+  for (const [a, b] of [['good-ink', 'ok-ink'], ['warning-ink', 'late-ink'], ['critical-ink', 'crit-ink'], ['good-bg', 'ok-bg'], ['warning-bg', 'late-bg'], ['critical-bg', 'crit-bg'], ['chart-good', 'ok'], ['chart-warn', 'late'], ['chart-bad', 'crit']]) {
+    assert.equal((css.match(new RegExp(`--${a}:`, 'g')) || []).length, 1, `--${a} is set once`);
+    assert.ok(css.includes(`--${a}: var(--state-${b});`), `--${a} is the state's`);
+  }
+  assert.ok(!/--ld-(pink|blue|green|orange|ok|delay|crit|hx|heat)|--level-crit/.test(css));
+  // A yellow pill is dark ink on yellow in every theme: 4.5:1 and more.
+  const lum = (hex) => { const v = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
+  const pills = [...css.matchAll(/--state-late-pill: (#\w{6}); --state-late-on: (#\w{6});/g)];
+  assert.equal(pills.length, 5);
+  for (const [, bg, on] of pills) assert.ok((lum(bg) + 0.05) / (lum(on) + 0.05) >= 4.5, `${on} on ${bg}`);
 });
 
 test('documents without a device name: one summed line, never a note per cluster (0.3.77)', () => {

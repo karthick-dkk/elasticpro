@@ -166,7 +166,6 @@ function noVolume(rows) {
 function runway(rows) {
   const sorted = [...rows].sort((a, b) => (a.lasts === null) - (b.lasts === null) || (a.lasts ?? 0) - (b.lasts ?? 0));
   const shown = sorted.slice(0, 12);
-  // Chart colours (owner rule: never red with yellow): pink, orange, light green.
   const color = { red: 'var(--chart-bad)', yellow: 'var(--chart-warn)', green: 'var(--chart-good)', na: 'var(--border-strong)' };
   const items = shown.map((r) => {
     const lvl = runwayLevel(r.lasts);

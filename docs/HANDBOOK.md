@@ -785,6 +785,13 @@ cluster's Overview says when the figures on it were read. **Alerts**: times in a
 zone; `since_is_first_seen` in the CSV is yes when the start is only when it was first seen here; the
 disk gap and a capacity change name no cause.
 
+**State colours**: critical (above 60 min, the critical level) red, delayed / warning yellow, on time /
+ok green, everywhere — one token set per theme, `--state-crit / -late / -ok` (`ui/css/app.css`; the
+`--good`/`--warning`/`--critical` inks and the `--chart-*` fills are these). High stays orange,
+information blue, another time zone violet, silent or not measured grey; series of a chart that are
+not states are never red, yellow or green. Red and yellow may stand in one chart (until 0.3.88 they
+could not).
+
 ## Snapshot running — the message contract
 
 The fleet cache has a tenth dataset, `snapshot_status`: `/_snapshot/_status` with no

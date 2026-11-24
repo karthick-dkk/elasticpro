@@ -6,7 +6,7 @@ import { bytes, num, pct } from './fmt.js';
 
 export const SERIES = ['var(--series-1)','var(--series-2)','var(--series-3)','var(--series-4)',
                        'var(--series-5)','var(--series-6)','var(--series-7)','var(--series-8)'];
-/** Status in a chart: the owner's chart colours (light green, orange, pink), never red with yellow. */
+/** Status in a chart: the states' colours (app.css --state-*): green, yellow, red. */
 export const STATUS = { good: 'var(--chart-good)', warning: 'var(--chart-warn)', serious: 'var(--chart-warn)', critical: 'var(--chart-bad)' };
 
 /** Stable color for an entity name: colour follows the entity, never its rank. */

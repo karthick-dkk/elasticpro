@@ -30,6 +30,12 @@ const UNTHEMED = ['--radius', '--radius-sm', '--mono', '--sans',
                   '--good', '--warning', '--serious', '--high', '--critical'];
 
 const root = tokensIn(':root {');
+/** Declared once as another token (`--good: var(--state-ok)`): it takes the theme's value of that token. */
+const ALIASES = (() => {
+  const i = css.indexOf(':root {');
+  const body = css.slice(i, css.indexOf('}', i));
+  return [...body.matchAll(/(--[a-z0-9-]+)\s*:\s*var\((--[a-z0-9-]+)\)\s*;/g)].filter((m) => root.has(m[2])).map((m) => m[1]);
+})();
 const DARK_THEMES = [':root[data-theme="dark"] {', ':root[data-theme="dark-blue"] {',
                      ':root[data-theme="warm"] {'];
 
@@ -40,7 +46,7 @@ test('the light palette defines the untheme-able tokens too', () => {
 for (const sel of DARK_THEMES) {
   test(`${sel.trim()} themes every token that needs theming`, () => {
     const theme = tokensIn(sel);
-    const needed = [...root].filter((t) => !UNTHEMED.includes(t));
+    const needed = [...root].filter((t) => !UNTHEMED.includes(t) && !ALIASES.includes(t));
     const missing = needed.filter((t) => !theme.has(t));
     assert.deepEqual(missing, [],
       `${sel} falls back to the light value for: ${missing.join(', ')}`);
