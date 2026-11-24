@@ -37,7 +37,7 @@ import { unassignedByIndex, reasonWords } from '../core/cluster-boxes.js';
 import { unreachableReason } from '../core/alert-groups.js';
 import { LEVEL_TONE } from '../core/alert-levels.js';
 import { nodeRates, recordReading } from '../core/node-rates.js';
-import { ldSummary, periodQuery, whenText, countText, LD_COLOURS, noDelaySplit, shareText } from '../core/logdelay-report.js';
+import { ldSummary, periodQuery, whenText, countText, LD_COLOURS, noDelaySplit, shareText, partText } from '../core/logdelay-report.js';
 import { empty, usageBar } from './common.js';
 import { usageLevel } from '../core/nodes-shards.js';
 import { figureWhy, HIDDEN_NOTE } from '../core/index-figures.js';
@@ -506,7 +506,8 @@ function devicesCard(c, res) {
   return h('section.card.ov-card.ov-rate', { dataset: { card: 'devices', state: d.state } }, head,
     h('span.ov-rate-v', h('b', n(d.inLastRun)), ' ', h('span.muted', 'devices in the last run')),
     h('span.ov-fact-s.ov-ld-line', h('b', n(d.late)), ` delayed ${d.bands.lateShort === 'late' ? '' : `over ${d.bands.lateShort.replace('+ min', ' min')} `}· `,
-      dot(LD_COLOURS.delay), ` ${n(d.delay)} ${d.bands.mid.toLowerCase()} · `, dot(LD_COLOURS.crit), ` ${n(d.critical)} ${d.bands.high.toLowerCase()}`),
+      dot(LD_COLOURS.delay), ` ${n(d.delay)} ${d.bands.mid.toLowerCase()} · `, dot(LD_COLOURS.crit), ` ${n(d.critical)} ${d.bands.high.toLowerCase()}`,
+      d.part && d.part.count !== null ? [' · ', h('i.ov-dot.ld-part-fill', { style: { background: LD_COLOURS.part } }), h('span', { dataset: { part: '' }, title: partText(d.part) }, ` ${n(d.part.count)} part delayed`)] : null),
     d.noDelay && d.noDelay.count !== null ? h('span.ov-fact-s.ov-ld-line', { dataset: { nodelay: '' }, title: d.noDelay.why ? `no percentage: ${d.noDelay.why}` : noDelaySplit(d.noDelay) },
       dot(LD_COLOURS.ok), ` No delay `, h('b', d.noDelay.pct ? shareText(d.noDelay.pct.noDelay) : n(d.noDelay.count)), h('span.muted', ` (${noDelaySplit(d.noDelay)})`)) : null,
     h('span.muted.ov-fact-s', { title: d.message || null }, d.state === 'off' ? d.message : `last measured ${whenText(d.lastRunAt)} · next ${whenText(d.nextDueAt)}`));

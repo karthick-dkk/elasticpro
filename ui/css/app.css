@@ -1987,7 +1987,6 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-pill { display: inline-block; font-size: .8em; padding: .05em .55em; border-radius: 1em; border: 1px solid currentColor; white-space: nowrap; }
 .pl-pill.green { color: var(--tv-green); }
 .pl-pill.yellow, .pl-pill.orange { color: var(--tv-yellow); }
-.pl-pill.part { color: var(--tv-yellow); border-style: dashed; }
 .pl-pill.red { color: var(--tv-red); }
 .pl-pill.grey { color: var(--tv-muted); }
 .pl-pill.blue { color: var(--tv-blue); }

@@ -64,3 +64,22 @@ test('it reaches Zabbix as the log-delay rule', () => {
   assert.equal(v['log-delay'].level, 2);
   assert.match(v['log-delay'].detail, /^critical: \[High\] vm-1: 1 device/);
 });
+
+const typed = (device, status, delayMinutes, types) => ({ ...rec(device, status, delayMinutes), types: types.map(([label, st, m]) => ({ logType: label, label, noType: false, status: st, delayMinutes: m })) });
+
+test('part delayed (0.3.90) is said beside the delayed devices, which alone decide the level', () => {
+  s.setDelaySummary('c1', summarise([typed('a', 'CRITICAL', 95, [['x', 'CRITICAL', 95], ['y', 'CRITICAL', 70]]), typed('b', 'PART_DELAY', 2, [['threat', 'DELAYED', 46], ['traffic', 'OK', 2]])]));
+  const [a] = delayAlerts();
+  assert.equal(a.level, 'high');
+  assert.match(a.detail, /1 over 60 min, 0 30–60 min late, of 2 · 1 part delayed \(log types: threat\)\./);
+});
+
+test('only part delayed is a warning naming the log types; log types all on time raise nothing', () => {
+  s.setDelaySummary('c1', summarise([typed('b', 'PART_DELAY', 2, [['threat', 'CRITICAL', 96], ['traffic', 'OK', 2]]), typed('d', 'PART_DELAY', 1, [['audit', 'DELAYED', 40], ['threat', 'DELAYED', 35], ['sys', 'OK', 1]])]));
+  const [a] = delayAlerts();
+  assert.equal(a.level, 'warning');
+  assert.match(a.title, /2 device\(s\) part delayed/);
+  assert.match(a.detail, /0 delayed of 2 · 2 part delayed \(log types: threat, audit\)\. Worst log type: threat on b, 96 min behind\./);
+  s.setDelaySummary('c1', summarise([typed('b', 'OK', 2, [['threat', 'OK', 3], ['traffic', 'OK', 2]])]));
+  assert.deepEqual(delayAlerts(), []);
+});

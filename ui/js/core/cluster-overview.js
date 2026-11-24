@@ -22,7 +22,7 @@ import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js'
 import { sumKnown, notCounted } from './index-figures.js';
 import { clusterKind } from './cluster-kind.js';
 import { durationMs } from './snapshot-list.js';
-import { bands, noDelayOf, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
+import { bands, noDelayOf, partOf, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
 
 /* ------------------------------------ the route ------------------------------------ */
 
@@ -230,6 +230,9 @@ export function devicesDelay(res, clusterId) {
   out.critical = n(t.critical);
   // The Log Delay page's No delay (one definition), and why there is no percentage.
   out.noDelay = noDelayOf(t, { why: (mine && mine.notMeasured) || '' });
+  // Part delayed (0.3.90): only where the core measures log types.
+  const part = partOf(t, mine ? [mine] : []);
+  if (part) out.part = part;
   out.late = out.delay === null && out.critical === null ? null : (out.delay || 0) + (out.critical || 0);
   out.state = sch.enabled === false ? 'off' : 'ok';
   out.message = sch.enabled === false ? LD_SCHEDULE_OFF : null;

@@ -177,6 +177,12 @@ test('the Devices & log delay card: the last run’s devices, the late counts by
   assert.equal(O.devicesDelay(null, 'c1').state, 'none');
   const noTotals = O.devicesDelay({ ...res, totals: {} }, 'c1');
   assert.deepEqual([noTotals.delay, noTotals.critical, noTotals.late], [null, null, null], 'a count the core did not give is not 0');
+  // Part delayed (0.3.90): said only where the core measures log types, beside the delayed devices and never in them.
+  assert.equal(d.part, undefined, 'a core without log types');
+  const typed = O.devicesDelay({ ...res, totals: { ...res.totals, partDelayed: 5, pctPartDelayed: 4.2, logTypes: { total: 300, late: 9, above: 3 } }, byCluster: [{ ...res.byCluster[0], logTypeField: 'log_type' }] }, 'c1');
+  assert.deepEqual([typed.part.count, typed.part.late, typed.late], [5, 9, 21]);
+  const off0 = O.devicesDelay({ ...res, totals: { ...res.totals, partDelayed: 0 }, byCluster: [{ ...res.byCluster[0], logTypeField: null, logTypeWhy: 'log_type is not in the mapping' }] }, 'c1');
+  assert.deepEqual([off0.part.count, off0.part.why], [null, 'log_type is not in the mapping'], 'no field: not 0 part delayed');
 });
 
 test('rate text: null is a dash, small rates keep a decimal, large ones are whole', () => {

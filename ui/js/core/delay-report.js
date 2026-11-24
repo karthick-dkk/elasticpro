@@ -5,9 +5,10 @@
  * rows to whatever runs unattended, so the report cannot come out differently depending
  * on which of them asked for it — the failure this codebase has had three times.
  *
- * Three sheets, because a report that flattens them answers only one question:
+ * Three sheets (four with log types), because a report that flattens them answers only one question:
  *
  *   * **Devices** — every measurement, the thing that gets sorted and filtered.
+ *   * **Log types** — one row per device and log type, where log types were measured (0.3.90).
  *   * **Summary** — the counts by status and the median, so a reader who wants the
  *     shape does not have to build a pivot table to get it.
  *   * **Not measured** — the clusters that did not answer, by name. A report of six
@@ -16,6 +17,7 @@
  */
 
 import { STATUS } from './log-delay.js';
+import { isLate } from './delay-levels.js';
 import { noDelayOfStatuses, noDelaySplit, shareText } from './logdelay-report.js';
 
 /** The column order, in one place, so the header and the rows cannot drift apart. */
@@ -33,6 +35,18 @@ export const DEVICE_COLUMNS = [
   { key: 'detail', label: 'What it means' },
 ];
 
+/** Added after Status where log types were measured: how many, how many late, which. Blank: not measured, never 0. */
+export const TYPE_COLUMNS = Object.freeze(['Log types', 'Log types measured', 'Log types late', 'Late log types']);
+const hasTypes = (records) => (records || []).some((r) => Array.isArray(r.types));
+const typeCells = (r) => {
+  if (!Array.isArray(r.types)) return [null, null, null, null];
+  const late = r.types.filter((t) => isLate(t.state));
+  const measured = r.types.filter((t) => t.delayMinutes !== null).length;
+  return [r.typesTruncated ? `${r.types.length}+` : r.types.length, measured, measured ? late.length : null, late.map((t) => t.label).join('; ') || null];
+};
+const AFTER = DEVICE_COLUMNS.findIndex((c) => c.key === 'status') + 1;
+const deviceHead = (records) => { const l = DEVICE_COLUMNS.map((c) => c.label); if (hasTypes(records)) l.splice(AFTER, 0, ...TYPE_COLUMNS); return l; };
+
 const iso = (ms) => (ms ? new Date(ms).toISOString().replace('.000Z', 'Z') : null);
 
 /** Two decimals, or null. A delay that could not be measured is never a zero. */
@@ -49,7 +63,8 @@ function contextOf(r, name) {
 }
 
 function deviceRows(records) {
-  const rank = { CRITICAL: 0, DELAYED: 1, CLOCK_AHEAD: 2, ERROR: 3, NO_DATA: 4, OK: 5 };
+  const rank = { CRITICAL: 0, DELAYED: 1, PART_DELAY: 1.5, CLOCK_AHEAD: 2, ERROR: 3, NO_DATA: 4, OK: 5 };
+  const typed = hasTypes(records);
   const sorted = [...(records || [])].sort((a, b) =>
     (rank[a.status] - rank[b.status]) || ((b.delayMinutes ?? -1e9) - (a.delayMinutes ?? -1e9)));
   return sorted.map((r) => [
@@ -58,6 +73,7 @@ function deviceRows(records) {
     contextOf(r, 'zone'),
     contextOf(r, 'tag1'),
     (STATUS[r.status] || {}).label || r.status || '',
+    ...(typed ? typeCells(r) : []),
     delayCell(r.delayMinutes),
     Number(r.docs) || 0,
     r.pattern && r.pattern !== '-' ? r.pattern : null,
@@ -65,6 +81,19 @@ function deviceRows(records) {
     iso(r.event),
     r.patternNote || r.reason || '',
   ]);
+}
+
+/** One row per device and log type measured; a cluster without log_type is named under them. */
+function typeRows(records, noLogTypes) {
+  const rows = [['Cluster', 'Device', 'Log type', 'Status', 'Delay (minutes)', 'Documents', 'Last seen (UTC)', 'Event time (UTC)']];
+  for (const r of records || []) {
+    for (const t of Array.isArray(r.types) ? r.types : []) {
+      rows.push([r.cluster || '', r.device || '', t.label, (STATUS[t.status] || {}).label || t.status || '', delayCell(t.delayMinutes), Number(t.docs) || 0, iso(t.arrival), iso(t.event)]);
+    }
+    if (r.typesTruncated) rows.push([r.cluster || '', r.device || '', `the ${r.types.length} log types read; the device has more, not read`]);
+  }
+  for (const x of noLogTypes || []) rows.push([`Not measured per log type: ${x}`]);
+  return rows;
 }
 
 function summaryRows(records, summary, meta) {
@@ -81,9 +110,12 @@ function summaryRows(records, summary, meta) {
     ['Status', 'Devices'],
   ];
   for (const [key, label] of Object.entries(STATUS).map(([k, v]) => [k, v.label])) {
+    // Part delayed is counted only where log types were measured: no row is not "0".
+    if (key === 'PART_DELAY' && by[key] === undefined) continue;
     rows.push([label, Number(by[key]) || 0]);
   }
   const nd = noDelayOfStatuses(s);
+  if (s.logTypes) rows.push(['Log types late (counted per device)', Number(s.logTypes.late) || 0, `of ${Number(s.logTypes.total) || 0} log types`]);
   rows.push([], ['No delay (on time, silent and can\'t measure)', nd.count, nd.pct ? shareText(nd.pct.noDelay) : `no percentage: ${nd.why}`, noDelaySplit(nd, { counts: true })]);
   // Elasticsearch counts the documents of the devices it left out, not the devices.
   if (s.truncated) rows.push([], ['Documents of devices beyond the per-cluster limit (how many devices is not known)', Number(s.truncated) || 0]);
@@ -108,12 +140,13 @@ function missingRows(missing) {
 /**
  * @param records  merged device records, each carrying `cluster`
  * @param summary  the output of summarise()
- * @param meta     { generatedAt, windowHours, measured, notMeasured, missing: [{cluster, reason}] }
+ * @param meta     { generatedAt, windowHours, measured, notMeasured, missing: [{cluster, reason}], noLogTypes: ['cluster: why'] }
  * @returns [{ name, rows }] ready for the workbook writer
  */
 export function reportSheets(records, summary, meta = {}) {
   return [
-    { name: 'Devices', rows: [DEVICE_COLUMNS.map((c) => c.label), ...deviceRows(records)] },
+    { name: 'Devices', rows: [deviceHead(records), ...deviceRows(records)] },
+    ...(hasTypes(records) ? [{ name: 'Log types', rows: typeRows(records, meta.noLogTypes) }] : []),
     { name: 'Summary', rows: summaryRows(records, summary, meta) },
     { name: 'Not measured', rows: missingRows(meta.missing) },
   ];

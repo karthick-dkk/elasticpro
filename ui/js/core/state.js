@@ -1,5 +1,6 @@
 /** Application state, refresh loop and auto-reconnect. */
 
+import { namesText } from './log-types.js';
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
@@ -2046,16 +2047,25 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
     const by = ds.summary.by || {};
     const w = ds.summary.worst;
     const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    // Part delayed (0.3.90): only some of a device's log types late. Said beside the delayed ones, which
+    // alone decide the level; on its own it is a warning. Nothing where log types were not measured.
+    const partN = by.PART_DELAY || 0;
+    const part = partN ? ` · ${partN} part delayed (log types: ${namesText((ds.summary.partLate || []).map((x) => x.logType), 5)})` : '';
     // Past the red line (classify's CRITICAL, over 60 min) is High, not critical: logs late
     // are searches seeing the past, not data lost (the owner's rule, 2026-11-01).
     if (by.CRITICAL) {
       add({ key: `${c.id}:log-delay`, level: 'high', cluster: c,
         title: `${c.name}: ${by.CRITICAL} device(s) shipping logs over 60 min late`,
-        detail: `${by.CRITICAL} over 60 min, ${by.DELAYED || 0} 30–60 min late, of ${ds.summary.devices}.${worst}` });
+        detail: `${by.CRITICAL} over 60 min, ${by.DELAYED || 0} 30–60 min late, of ${ds.summary.devices}${part}.${worst}` });
     } else if (by.DELAYED) {
       add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
         title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
-        detail: `${by.DELAYED} delayed of ${ds.summary.devices}.${worst}` });
+        detail: `${by.DELAYED} delayed of ${ds.summary.devices}${part}.${worst}` });
+    } else if (partN) {
+      const wt = ds.summary.worstLogType;
+      add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
+        title: `${c.name}: ${partN} device(s) part delayed, the other log types on time`,
+        detail: `0 delayed of ${ds.summary.devices}${part}.${wt ? ` Worst log type: ${wt.logType} on ${wt.device}, ${Math.round(wt.delayMinutes)} min behind.` : ''}` });
     }
   }
   if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
