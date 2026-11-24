@@ -1116,7 +1116,8 @@ await go('reports');
     const tiles = doc.querySelector('.vs-cards').textContent;
     for (const k of [`Yesterday · `, '7-day average', 'Peak day in period', 'Month so far']) ok(tiles.includes(k), `daily (stubbed): no "${k}" tile`);
     ok(/event_logsize/.test(tiles) && /4\.47 GB/.test(tiles), `daily (stubbed): the Yesterday tile is not yesterday's event_logsize: ${tiles}`);
-    ok(/yesterday against the 7 days before it/.test(tiles), 'daily (stubbed): the 7-day average tile does not compare yesterday with it');
+    // One of the stub's seven days before yesterday has no event_logsize: the words say how many days were in the mean.
+    ok(/yesterday against (\d of )?the 7 days before it \(.*: [\d.]+ GB\)/.test(tiles), 'daily (stubbed): the 7-day average tile does not compare yesterday with it');
     ok(!!doc.querySelector('.vs .line-chart path.lc-avg'), 'daily (stubbed): no dashed average line');
     // Today is not plotted: 30 finished days, one point each.
     ok(doc.querySelectorAll('.vs .line-chart svg > rect').length === 30, `daily (stubbed): ${doc.querySelectorAll('.vs .line-chart svg > rect').length} points plotted, expected 30 finished days`);
@@ -1727,17 +1728,17 @@ await go('reports');
       ok(f && /^reports-storage-plan-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,Per day (GB),30% buffer (GB),Live retention (days)'),
         `reports capacity: the Storage plan CSV header is ${f && f.text.split('\n')[0]}`);
     }
-    // The switch: Every parameter (36) and Client plan (17), from the same report columns.
+    // The switch: Every parameter (38) and Client plan (17), from the same report columns.
     const seg = (re) => [...doc.querySelectorAll('.rp-bar .seg .btn')].find((b) => re.test(b.textContent));
-    ok(!!seg(/^Plan$/) && !!seg(/^Every parameter \(36\)$/) && !!seg(/^Client plan \(17\)$/), 'reports capacity: the Plan / Every parameter / Client plan switch is missing');
+    ok(!!seg(/^Plan$/) && !!seg(/^Every parameter \(38\)$/) && !!seg(/^Client plan \(17\)$/), 'reports capacity: the Plan / Every parameter / Client plan switch is missing');
     if (seg(/^Every parameter/)) {
       seg(/^Every parameter/).click();
       await settleFor(250);
       const h = sheetHeaders();
-      ok(h.length === 36 && h.some((x) => x.startsWith('Current live storage store upto')), `reports capacity: Every parameter has ${h.length} columns`);
+      ok(h.length === 38 && h.some((x) => x.startsWith('Current live storage store upto')), `reports capacity: Every parameter has ${h.length} columns`);
       btnIn(doc.getElementById('view'), 'Export CSV').click();
       const full = files.at(-1);
-      ok(full && /^reports-every-parameter-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name) && full.text.split('\n')[0].split(',').length === 37,
+      ok(full && /^reports-every-parameter-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name) && full.text.split('\n')[0].split(',').length === 39,
         `reports capacity: the full export is "${full && full.name}" with ${full && full.text.split('\n')[0].split(',').length} headers`);
       seg(/^Client plan/).click();
       await settleFor(250);
@@ -7594,7 +7595,7 @@ if (viaFleet) {
     const cl = doc.getElementById('pn-cl');
     cl.value = cl.options[1].value; fire(cl, 'change');
     await waitFor(() => (/Filled/.test(doc.getElementById('pn-based-hint')?.textContent || '') ? doc.body : null), 'planning: "Based on" a cluster filled nothing');
-    ok(doc.getElementById('pn-pd').value === '400', `planning: daily volume from the cluster reads ${doc.getElementById('pn-pd').value}, expected 400 (4e11 bytes a day)`);
+    ok(doc.getElementById('pn-pd').value === '372.5', `planning: daily volume from the cluster reads ${doc.getElementById('pn-pd').value}, expected 372.5 (4e11 bytes a day, GB = 1024³)`);
 
     // Export CSV: the bill of materials, [set] kept as [set].
     doc.getElementById('pn-csv').click();
@@ -8335,7 +8336,7 @@ await settleFor(300);
     // The owner's order: tiles, the state bar, the charts, By cluster, then Late devices over the day and the not-measured line.
     const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-late-grid, #ld-not-measured')].map((x) => x.id);
     ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-late-grid|ld-not-measured', `log delay: the Dashboard order is ${order.join(' › ')}`);
-    ok(g('ld-statebar') && g('ld-statebar').querySelectorAll('.ld-stack i').length >= 3 && /Silent \d/.test(g('ld-statebar').textContent), 'log delay: no state bar with a counted legend under the tiles');
+    ok(g('ld-statebar') && g('ld-statebar').querySelectorAll('.ld-stack i').length >= 3 && /No delay \d+ \(on time \d.*silent \d/.test(g('ld-statebar').textContent), 'log delay: no state bar with a counted legend under the tiles');
     ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Late devices over the day') && ![...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'),
       'log delay: the grid is not titled Late devices over the day');
     g('ld-tz-chip').click(); await settleFor(120);
@@ -8385,7 +8386,9 @@ await settleFor(300);
     g('ld-range-apply').click(); await settleFor(200);
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.from && m.from === m.to), 'log delay: a one-day custom range did not ask for its one day');
     await waitFor(() => g('ld-chart-critical') && g('ld-chart-critical').querySelectorAll('g.ld-bar').length >= 1 && g('ld-chart-critical').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
-    ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === 0, 'log delay: Today has no delay/critical split (the core sends one per window)');
+    // The fixture's window before the one in progress was not measured: a gap, never a carried or zero bar.
+    ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === (g('ld-chart-critical').querySelectorAll('g.ld-bar').length > 1 ? 1 : 0)
+      && g('ld-chart-critical').querySelector('g.ld-bar:not(.ld-bar-gap)'), 'log delay: Today has no delay/critical split (the core sends one per measured window), or the unmeasured window is not a gap');
     // A bar opens Devices on its level.
     press([...g('ld-chart-critical').querySelectorAll('g.ld-bar:not(.ld-bar-gap)')].at(-1));
     await waitFor(() => ldView() === 'devices' && view().querySelector('#ld-dev-chips [aria-pressed="true"]') && view().querySelector('#ld-dev-chips [aria-pressed="true"]').dataset.filter === 'critical', 'log delay: a bar of the Above-60 chart did not open Devices on critical');
@@ -8645,7 +8648,7 @@ await settleFor(300);
     await waitFor(() => ldView() === 'cluster' && g('ld-cluster-devices'), 'log delay: the cluster link did not open the cluster');
     ok(location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: the cluster address reads ${location.hash}`);
     const ch = [...g('ld-cluster-devices').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
-    for (const col of ['zone', 'tag1', 'fwd_tag', 'parser_tag', '@timestamp', 'event_created']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
+    for (const col of ['zone', 'tag1', 'fwd_tag', 'parser_tag', '@timestamp', 'Event time']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
     ok(doc.querySelector('.ld-tabs a[data-tab="fleet"]').getAttribute('aria-current') === 'page', 'log delay: the tabs do not mark Dashboard on the cluster page');
     ok(g('ld-tz-chip') && g('ld-tz-chip').textContent.replace(/\s*▾\s*$/, '').trim() === 'Time zone +05:30', `log delay: the cluster's time-zone chip reads "${g('ld-tz-chip') && g('ld-tz-chip').textContent}" (the zone alone)`);
     ok(!/Edit cluster/.test(view().textContent) && !/Edit cluster/.test(g('ld-tz-chip').title), 'log delay: the page offers a time-zone chooser');
@@ -9443,7 +9446,7 @@ for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
       const asked = sent.slice(before).filter((m) => (m.type === 'ES' && m.clusterId === st.state.selected) || m.type === 'REFRESH' || m.type === 'CLUSTER_DATASET');
       ok(asked.length > 0, `overview: Refresh now sent nothing for the cluster (${sent.slice(before).map((m) => m.type).join(',') || 'no messages'})`);
       ok(!sent.slice(before).some((m) => m.type === 'REFRESH' && Array.isArray(m.clusterIds) && m.clusterIds.length > 1), 'overview: Refresh now asked for more than this cluster');
-      ok(/refreshed (just now|\d+ s ago)/.test(refreshBtn.title), `overview: the button's title does not say when it refreshed (${refreshBtn.title})`);
+      ok(/figures read (just now|\d+ s ago)/.test(refreshBtn.title), `overview: the button's title does not say when its figures were read (${refreshBtn.title})`);
     }
     // SLM and ILM: a heading line with the operation pill and one status line each, from the fixture's policies.
     const slmTxt = (card('slm') || {}).textContent || '', ilmTxt = (card('ilm') || {}).textContent || '';
