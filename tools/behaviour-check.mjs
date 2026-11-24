@@ -8060,6 +8060,8 @@ await settleFor(300);
   // pages are answered from tools/lib/logdelay-fixture.mjs, shaped as docs/LOGDELAY.md says.
   const { logDelayAnswer, knobs: ldKnobs } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/logdelay-fixture.mjs')).href);
   const S = await load('core/state.js');
+  // A core before 0.3.90 sends no log types: this block is the page without them, as it was; the next block has them.
+  ldKnobs.logTypes = false;
   const list = S.clusters().map((c) => ({ id: c.id, name: c.name }));
   const realFetch = globalThis.fetch;
   const lsent = [];
@@ -8836,6 +8838,136 @@ await settleFor(300);
       ok(!g('ld-by-cluster') || /not detected · \d+ % agree/.test(g('ld-by-cluster').textContent), 'log delay: By cluster no longer says a cluster’s zone is not detected');
     } finally { ldKnobs.zonesUnknown = false; }
   } finally {
+    ldKnobs.logTypes = true;
+    globalThis.fetch = realFetch;
+  }
+  await go('overview');
+}
+
+/* ---------- Log Delay per log type (0.3.90): part delayed, the device's log types, and nothing of them where they are not measured ---------- */
+{
+  const { logDelayAnswer, knobs: ldKnobs } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/logdelay-fixture.mjs')).href);
+  const S = await load('core/state.js');
+  const list = S.clusters().map((c) => ({ id: c.id, name: c.name }));
+  const fx = [...list, { id: 'never-lab', name: 'never-lab' }];   // the fixture's last cluster is never measured: not one of ours
+  const realFetch = globalThis.fetch;
+  const lsent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const a = logDelayAnswer(body, fx);
+    if (a) { lsent.push(body); return stubReply(a); }
+    return realFetch(input, init);
+  };
+  const view = () => doc.getElementById('view');
+  const g = (id) => doc.getElementById(id);
+  const ldView = () => { const s = view().querySelector('.ld[data-ld]'); return s ? s.dataset.ld : ''; };
+  const typesOn = (dev) => `#/log-delay/device/${encodeURIComponent(list[0].id)}/${encodeURIComponent(dev)}`;
+  const openDevice = async (dev) => {
+    location.hash = typesOn(dev);
+    await waitFor(() => ldView() === 'device' && (view().querySelector('.ld-dev-h .mono') || {}).textContent === dev && g('ld-types-headline'), `log types: ${dev} did not open`);
+  };
+  const all = (logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, fx).devices || []).filter((d) => d.cluster === list[0].id);
+  const named = (i) => (all.find((d) => d.device.endsWith(`-${String(i + 1).padStart(2, '0')}`)) || {}).device;
+  const chips = () => [...view().querySelectorAll('#ld-type-chips .ld-type-chip:not(.ld-type-more)')];
+  const drawn = () => view().querySelectorAll('#ld-graph .ld-type-line').length;
+  try {
+    ldKnobs.logTypes = true;
+    await go('log-delay');
+    // The Part delayed tile: its own count beside the delayed devices, pressed to list them.
+    const tile = await waitFor(() => view().querySelector('.ld-kpi[data-kpi="part"]'), 'log types: no Part delayed tile');
+    const t = logDelayAnswer({ type: 'LOGDELAY_SUMMARY' }, fx).totals;
+    ok(view().querySelectorAll('.ld-kpi').length === 6 && tile.querySelector('b').textContent.includes(String(t.partDelayed)) && /log types late/.test(tile.textContent), `log types: the tile reads "${tile.textContent}" for ${t.partDelayed}`);
+    ok(view().querySelector('.ld-kpi[data-kpi="delay"] b').textContent.trim().startsWith(String(t.delay)), 'log types: part-delayed devices are in the delayed tile');
+    press(tile);
+    await waitFor(() => ldView() === 'devices' && g('ld-devices'), 'log types: the tile did not open Devices');
+    const names = [...g('ld-devices').querySelectorAll('tbody tr')].map((tr) => tr.textContent);
+    ok(names.length > 0 && names.every((x) => /part delayed/.test(x)) && names.some((x) => /1 of 3 late: threat/.test(x)), `log types: the part-delayed list reads ${names.slice(0, 2).join(' | ')}`);
+
+    // One log type late of three: part delayed, the late one named, a line per log type, a delay of its own.
+    await openDevice(named(6));
+    ok(/part delayed/.test(view().querySelector('.ld-dev-h').textContent) && !view().querySelector('.ld-dev-h .pill.ld-crit, .ld-dev-h .pill.ld-delay'), 'log types: a part-delayed device is drawn delayed');
+    ok(/threat/.test(g('ld-types-headline').textContent) && /1 of 3 log types late: threat — the other 2 are on time/.test(g('ld-types-headline').textContent), `log types: the headline reads "${g('ld-types-headline').textContent}"`);
+    ok(drawn() === 3 && chips().length === 3 && chips().every((c) => c.getAttribute('aria-pressed') === 'true') && !g('ld-type-more'), `log types: ${drawn()} lines, ${chips().length} chips`);
+    ok(![...view().querySelectorAll('#ld-graph .ld-type-line [stroke]')].some((x) => /state-red|state-yellow|--ld-crit|--ld-delay/.test(x.getAttribute('stroke'))), 'log types: a line is drawn in a state colour');
+    press(chips().find((c) => c.dataset.type.includes('traffic'))); await settleFor(120);
+    ok(drawn() === 2 && chips().find((c) => c.dataset.type.includes('traffic')).getAttribute('aria-pressed') === 'false', 'log types: a chip did not drop its line');
+    press(chips().find((c) => c.dataset.type.includes('traffic'))); await settleFor(120);
+    ok(drawn() === 3, 'log types: a chip did not draw its line again');
+    // The graph's value names the log types: by the arrow keys and under the pointer.
+    const plot = g('ld-graph');
+    plot.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    const last = plot.getAttribute('aria-valuetext');
+    ok(/threat 46 min/.test(last) && /traffic 2 min/.test(last) && /system 1 min/.test(last), `log types: the graph's value reads "${last}"`);
+    plot.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    ok(plot.getAttribute('aria-valuetext') !== last, 'log types: the arrow key did not move to the measurement before');
+    plot.dispatchEvent(new window.MouseEvent('mousemove', { bubbles: true, clientX: 10, clientY: 10 }));
+    ok([...doc.querySelectorAll('.ld-tip')].some((x) => /threat/.test(x.textContent) && /traffic/.test(x.textContent)), 'log types: the pointer reads out no log types');
+    plot.dispatchEvent(new window.MouseEvent('mouseleave', { bubbles: true }));
+    const trs = [...g('ld-log-types').querySelectorAll('tbody tr')];
+    ok(trs.length === 3 && /threat/.test(trs[0].textContent) && /46 min/.test(trs[0].textContent) && /still late/.test(trs[0].textContent) && /on time/.test(trs[1].textContent), `log types: the table reads ${trs.map((x) => x.textContent).join(' | ')}`);
+    ok([...g('ld-q-field').options].some((o) => o.value === 'log_type'), 'log types: Search by does not offer log_type');
+    g('ld-q-field').value = 'log_type'; g('ld-q-field').dispatchEvent(new window.Event('change', { bubbles: true }));
+    g('ld-q-value').value = 'threat'; g('ld-q-value').dispatchEvent(new window.Event('input', { bubbles: true }));
+    g('ld-q-show').click(); await settleFor(200);
+    const q = lsent.filter((m) => m.type === 'LOGDELAY_SEARCH').at(-1);
+    ok(q && q.field === 'log_type' && q.value === 'threat', `log types: Search by log_type sent ${JSON.stringify(q)}`);
+
+    // Every log type late: the device is delayed, as before. One log type only: the device is that log type.
+    await openDevice(named(0));
+    ok(view().querySelector('.ld-dev-h .pill.ld-crit') && /^All 2 log types late: threat, traffic$/.test(g('ld-types-headline').textContent), `log types: all late reads "${g('ld-types-headline').textContent}"`);
+    // Two of three, one of them the documents without log_type: their logs open on exactly that.
+    await openDevice(named(7));
+    const none = [...g('ld-log-types').querySelectorAll('tbody tr')].find((x) => /\(no log type\)/.test(x.textContent));
+    ok(none && /\/live\/.*\?no_log_type=1$/.test(none.querySelector('.ld-open-logs').dataset.href), `log types: the documents without log_type open ${none && none.querySelector('.ld-open-logs').dataset.href}`);
+    // More than six: the rest behind +N, six lines at most.
+    await openDevice(named(8));
+    ok(drawn() === 6 && /^\+2$/.test(g('ld-type-more').textContent), `log types: eight log types draw ${drawn()} lines and "${(g('ld-type-more') || {}).textContent}"`);
+    press(g('ld-type-more')); await settleFor(120);
+    ok(chips().length === 8 && g('ld-type-more').getAttribute('aria-expanded') === 'true', 'log types: +N did not show the rest');
+    press(chips().find((c) => c.getAttribute('aria-pressed') === 'false')); await settleFor(120);
+    ok(drawn() === 6, 'log types: a seventh line was drawn');
+    // A stale log type is not current, a silent one is not 0 min.
+    await openDevice(named(10));
+    const stale = [...g('ld-log-types').querySelectorAll('tbody tr')];
+    ok(stale.some((x) => /web/.test(x.textContent) && /not measured since/.test(x.textContent) && !x.querySelector('.pill.ld-delay')) && stale.some((x) => /audit/.test(x.textContent) && !/\b0 min/.test(x.textContent)), `log types: stale and silent read ${stale.map((x) => x.textContent).join(' | ')}`);
+    // Log types are the logs' own text: never markup, and a real "(no log type)" is not the missing one.
+    await openDevice(named(11));
+    ok(!view().querySelector('b evil, evil') && [...view().querySelectorAll('#ld-log-types td.ld-type-name')].some((x) => x.textContent === '<b>evil</b>' && !x.children.length), 'log types: a log type was drawn as markup');
+    const two = [...view().querySelectorAll('#ld-log-types td.ld-type-name')].map((x) => x.textContent).filter((x) => /no log type/.test(x));
+    ok(two.length === 2 && two[0] !== two[1], `log types: a log type called "(no log type)" reads like the missing one (${two.join(' · ')})`);
+
+    // The cluster's card, and a cluster whose mapping has no log_type: said, never 0.
+    location.hash = `#/log-delay/cluster/${encodeURIComponent(list[0].id)}`;
+    await waitFor(() => ldView() === 'cluster' && g('ld-by-type'), 'log types: no By log type card');
+    ok(g('ld-by-type').querySelectorAll('tbody tr').length === 10 && /Show all/.test(g('ld-by-type-card').textContent), 'log types: By log type is not its first ten');
+    press(g('ld-by-type-all')); await settleFor(120);
+    ok(g('ld-by-type').querySelectorAll('tbody tr').length > 10, 'log types: Show all did not list every log type');
+    if (list.length > 1) {
+      location.hash = `#/log-delay/cluster/${encodeURIComponent(list[1].id)}`;
+      await waitFor(() => ldView() === 'cluster' && g('ld-types-off'), 'log types: a cluster without log_type does not say so');
+      ok(/log_type is not in the mapping/.test(g('ld-types-off').textContent) && !g('ld-by-type'), `log types: the note reads "${g('ld-types-off').textContent}"`);
+      const off = view().querySelector('.ld-kpi[data-kpi="part"]');
+      ok(off && off.querySelector('b').textContent === '—', `log types: part delayed reads "${off && off.textContent}" where it is not measured`);
+    }
+    // A log type's logs: the filter asks for that exact value, or for the documents without it, and can be taken away.
+    location.hash = `${typesOn(named(6)).replace('/device/', '/live/')}?log_type=threat`;
+    await waitFor(() => ldView() === 'live' && g('ld-live-type') && g('ld-live-type').value === 'threat', 'log types: the address did not put log_type in the Logs filters');
+    location.hash = `${typesOn(named(6)).replace('/device/', '/live/')}?no_log_type=1`;
+    await waitFor(() => g('ld-live-notype'), 'log types: the address did not ask for the documents without log_type');
+    press(g('ld-live-notype')); await settleFor(120);
+    ok(!g('ld-live-notype'), 'log types: the filter was not taken away');
+
+    // Before log types were measured (an older core): no tile, no column, no card, the old graph.
+    ldKnobs.logTypes = false;
+    await go('overview'); await go('log-delay');
+    location.hash = '#/log-delay';
+    await waitFor(() => ldView() === 'fleet' && view().querySelectorAll('.ld-kpi').length === 5, 'log types: the boards did not draw without them');
+    location.hash = typesOn(named(6));
+    await waitFor(() => ldView() === 'device' && g('ld-graph'), 'log types: the device did not open without them');
+    await waitFor(() => !g('ld-types-headline'), 'log types: an older core still shows a headline');
+    ok(!g('ld-log-types') && !g('ld-type-chips') && !/part delayed/i.test(view().textContent), 'log types: an older core shows log types');
+  } finally {
+    ldKnobs.logTypes = true;
     globalThis.fetch = realFetch;
   }
   await go('overview');
