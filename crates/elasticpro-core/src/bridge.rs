@@ -6377,6 +6377,9 @@ impl Core {
                 failed_ids.push(id.clone());
                 retry.push(id.clone());
                 errors.push((place, SinkNote::read(id, got.error.clone().unwrap_or_default())));
+                if !filter.is_partial() {
+                    self.logdelay_failed(id, now, got.error.as_deref().unwrap_or(""));
+                }
                 ld_part(run, id, part_at, 0, Some((PartStatus::Failed, got.error.as_deref().unwrap_or(""))));
                 continue;
             }

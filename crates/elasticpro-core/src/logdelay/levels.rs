@@ -122,13 +122,27 @@ impl State {
         matches!(self, State::Delay | State::Critical)
     }
 
-    /// Counted as "on time" in the totals: measured and under the delay line. Silent,
-    /// unmeasured and other-time-zone are neither on time nor late.
+    /// "On time": measured and under the delay line. Silent, unmeasured, clock-ahead and
+    /// other-time-zone are neither on time nor late.
     pub fn on_time(self) -> bool {
-        matches!(self, State::NoDelay | State::Little | State::ClockAhead)
+        matches!(self, State::NoDelay | State::Little)
     }
 
-    /// A delay figure was taken (corrected or, for another zone, by the device's own offset).
+    /// No delay can be measured: no readable clock, or a clock ahead (how late its logs are
+    /// cannot be told from it).
+    pub fn cant_measure(self) -> bool {
+        matches!(self, State::Unmeasured | State::ClockAhead)
+    }
+
+    /// Without delay, as it is counted and reported (the owner's rule, 2026-11-24): on time,
+    /// silent or can't measure — every device not shown to be late. The device itself keeps its
+    /// own state; another time zone stays its own class.
+    pub fn no_delay(self) -> bool {
+        self.on_time() || self.cant_measure() || self == State::Silent
+    }
+
+    /// A figure was taken (corrected or, for another zone, by the device's own offset); a clock
+    /// ahead has one, which is no delay (`cant_measure`).
     pub fn measured(self) -> bool {
         !matches!(self, State::Silent | State::Unmeasured)
     }
@@ -199,7 +213,11 @@ mod tests {
             assert!(!s.late(), "{s:?}");
         }
         assert!(State::Delay.late() && State::Critical.late());
-        assert!(!State::Silent.on_time() && !State::Unmeasured.on_time(), "silent is never on time");
+        assert!(!State::Silent.on_time() && !State::Unmeasured.on_time() && !State::ClockAhead.on_time(), "silent and clock ahead are never on time");
+        for (s, no_delay) in [(State::NoDelay, true), (State::Silent, true), (State::Unmeasured, true), (State::ClockAhead, true),
+                              (State::OtherTz, false), (State::Delay, false), (State::Critical, false)] {
+            assert_eq!(s.no_delay(), no_delay, "{s:?}");
+        }
         assert!(!State::OtherTz.on_time() && State::OtherTz.measured(), "another zone is counted apart: measured, not on time, not late");
         assert_eq!(serde_json::to_value(State::OtherTz).unwrap(), json!("other_tz"));
         assert_eq!(State::OtherTz.label(), "other time zone");

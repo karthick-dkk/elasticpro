@@ -7,7 +7,7 @@
 
 use super::fixes::Finding;
 use super::levels::{Levels, State};
-use super::state::{percentile, Daily, Episode, Tracker};
+use super::state::{percentile, Daily, DeviceState, Episode, Tracker};
 use super::time;
 use super::tz::{self, LogTimeZone};
 use chrono::NaiveDate;
@@ -90,10 +90,15 @@ impl Range {
 }
 
 /// The counts of devices by state, now.
+///
+/// `noDelay` is the owner's figure (2026-11-24): every device not shown to be late — on time,
+/// silent, or can't measure (no readable clock, or a clock ahead) — always written with its split
+/// (`no_delay_text`). `onTime`, `silent`, `unmeasured` keep their strict meaning.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Totals {
     pub devices: u64,
+    /// A delay was measured: not silent, not can't measure.
     pub measured: u64,
     pub on_time: u64,
     pub no_delay: u64,
@@ -104,21 +109,44 @@ pub struct Totals {
     /// In another time zone than the cluster: measured, neither late nor on time.
     pub other_tz: u64,
     pub silent: u64,
+    /// Of the silent ones, how many were late when they went silent (not solved).
+    pub late_before_silent: u64,
     pub unmeasured: u64,
+    /// `unmeasured` and `clockAhead` together.
+    pub cant_measure: u64,
 }
 
 impl Totals {
     pub fn add(&mut self, s: State) {
         self.devices += 1;
+        self.no_delay += s.no_delay() as u64;
+        self.on_time += s.on_time() as u64;
+        self.cant_measure += s.cant_measure() as u64;
+        self.measured += (s.measured() && !s.cant_measure()) as u64;
         match s {
-            State::NoDelay => { self.no_delay += 1; self.on_time += 1; self.measured += 1 }
-            State::Little => { self.little += 1; self.on_time += 1; self.measured += 1 }
-            State::Delay => { self.delay += 1; self.measured += 1 }
-            State::Critical => { self.critical += 1; self.measured += 1 }
-            State::ClockAhead => { self.clock_ahead += 1; self.on_time += 1; self.measured += 1 }
-            State::OtherTz => { self.other_tz += 1; self.measured += 1 }
+            State::NoDelay => {}
+            State::Little => self.little += 1,
+            State::Delay => self.delay += 1,
+            State::Critical => self.critical += 1,
+            State::ClockAhead => self.clock_ahead += 1,
+            State::OtherTz => self.other_tz += 1,
             State::Silent => self.silent += 1,
             State::Unmeasured => self.unmeasured += 1,
+        }
+    }
+
+    /// A device as it is now.
+    pub fn add_device(&mut self, d: &DeviceState) {
+        self.add(d.state);
+        self.late_before_silent += (d.state == State::Silent && d.open.is_some()) as u64;
+    }
+
+    fn sum(&mut self, o: &Totals) {
+        for (a, b) in [(&mut self.devices, o.devices), (&mut self.measured, o.measured), (&mut self.on_time, o.on_time), (&mut self.no_delay, o.no_delay),
+                       (&mut self.little, o.little), (&mut self.delay, o.delay), (&mut self.critical, o.critical), (&mut self.clock_ahead, o.clock_ahead),
+                       (&mut self.other_tz, o.other_tz), (&mut self.silent, o.silent), (&mut self.late_before_silent, o.late_before_silent),
+                       (&mut self.unmeasured, o.unmeasured), (&mut self.cant_measure, o.cant_measure)] {
+            *a += b;
         }
     }
 
@@ -126,17 +154,70 @@ impl Totals {
         self.delay + self.critical
     }
 
-    /// Percentages of all devices, one decimal; `None` of none.
-    pub fn json(&self) -> Value {
-        let pct = |n: u64| (self.devices > 0).then(|| ((n as f64 / self.devices as f64) * 1000.0).round() / 10.0);
+    /// A day's counts, from the stored daily totals.
+    pub fn of_day(d: &Daily) -> Totals {
+        Totals {
+            devices: d.devices, measured: d.measured, on_time: d.on_time + d.little, no_delay: d.no_delay(), little: d.little, delay: d.delayed, critical: d.critical,
+            clock_ahead: d.clock_ahead, other_tz: d.other_tz, silent: d.silent, late_before_silent: d.late_before_silent, unmeasured: d.unmeasured,
+            cant_measure: d.unmeasured + d.clock_ahead,
+        }
+    }
+
+    /// The shares of all devices, as they go into an answer; `null` with no device.
+    pub fn shares(&self) -> Value {
+        // The seven classes a device can be in: they add up to the devices, and to 100.0 %.
+        let parts = [self.on_time, self.silent, self.unmeasured, self.clock_ahead, self.delay, self.critical, self.other_tz];
+        let Some(p) = tenths(&parts) else {
+            return json!({ "pctNoDelay": null, "pctOnTime": null, "pctSilent": null, "pctUnmeasured": null, "pctCantMeasure": null, "pctLate": null, "pctOtherTz": null,
+                           "noDelayText": null });
+        };
+        let pct = |n: u64| n as f64 / 10.0;
+        let (no_delay, cant) = (p[0] + p[1] + p[2] + p[3], p[2] + p[3]);
+        let was_late = match self.late_before_silent {
+            0 => String::new(),
+            1 => "; 1 of the silent was late before it went silent".into(),
+            n => format!("; {n} of the silent were late before they went silent"),
+        };
+        json!({ "pctNoDelay": pct(no_delay), "pctOnTime": pct(p[0]), "pctSilent": pct(p[1]), "pctUnmeasured": pct(p[2]), "pctCantMeasure": pct(cant),
+                "pctLate": pct(p[4] + p[5]), "pctOtherTz": pct(p[6]),
+                "noDelayText": format!("No delay {} (on time {} · silent {} · can't measure {}{was_late})", pct_text(no_delay), pct_text(p[0]), pct_text(p[1]), pct_text(cant)) })
+    }
+
+    /// The counts, and the shares of `over` (the devices of clusters that were measured).
+    pub fn json_over(&self, over: &Totals) -> Value {
         let mut v = serde_json::to_value(self).unwrap_or(Value::Null);
         v["late"] = json!(self.late());
-        v["pctOnTime"] = json!(pct(self.on_time));
-        v["pctLate"] = json!(pct(self.late()));
-        v["pctSilent"] = json!(pct(self.silent));
-        v["pctUnmeasured"] = json!(pct(self.unmeasured));
+        if let (Some(o), Some(s)) = (v.as_object_mut(), over.shares().as_object()) {
+            o.extend(s.clone());
+        }
         v
     }
+
+    /// The counts, and the shares of all devices, one decimal; `null` of none.
+    pub fn json(&self) -> Value {
+        self.json_over(self)
+    }
+}
+
+/// `95 %`, `94.7 %` from tenths.
+fn pct_text(tenths: u64) -> String {
+    if tenths.is_multiple_of(10) { format!("{} %", tenths / 10) } else { format!("{}.{} %", tenths / 10, tenths % 10) }
+}
+
+/// Shares in tenths of a percent that add up to exactly 1000 (largest remainder); `None` of none.
+pub fn tenths(parts: &[u64]) -> Option<Vec<u64>> {
+    let all: u64 = parts.iter().sum();
+    if all == 0 {
+        return None;
+    }
+    let mut out: Vec<u64> = parts.iter().map(|n| n * 1000 / all).collect();
+    let mut by_rest: Vec<usize> = (0..parts.len()).collect();
+    by_rest.sort_by_key(|i| std::cmp::Reverse(parts[*i] * 1000 % all));
+    let left = 1000 - out.iter().sum::<u64>() as usize;
+    for i in by_rest.into_iter().take(left) {
+        out[i] += 1;
+    }
+    Some(out)
 }
 
 /// One device's line in any table.
@@ -153,8 +234,11 @@ pub struct DeviceRow {
     /// device's own for one in another time zone. `None` = nothing taken out (no zone).
     pub raw_gap_minutes: Option<f64>,
     pub tz_offset_minutes: Option<i32>,
-    /// The device's own zone from its gap, if it sits at one (−330 on a UTC cluster: +05:30).
+    /// The device's zone (its known one, else the one its gap sits at: −330 on a UTC cluster is
+    /// +05:30).
     pub device_tz_offset: Option<i32>,
+    /// The zone its delay is measured in when that is known to be another than the cluster's.
+    pub own_zone: Option<i32>,
     /// The cluster's offset now (set or detected); `None` = the cluster has no zone.
     pub cluster_tz_offset: Option<i32>,
     pub median_minutes: Option<f64>,
@@ -166,11 +250,24 @@ pub struct DeviceRow {
     pub late_ms: i64,
     pub last_started: Option<i64>,
     pub last_solved: Option<i64>,
+    /// Why the last period ended when it was not solved.
+    pub last_ended_why: Option<String>,
     /// `None` while no period is open.
     pub late_since: Option<i64>,
+    /// When its delay was last measured, and whether that is too long ago to be "now"
+    /// (`Tracker::stale_after`): the figures beside it are as of then.
+    pub last_measured_ms: Option<i64>,
+    pub stale: bool,
+    /// Where its open period stops counting, when that is not now.
+    pub measured_until_ms: Option<i64>,
+    /// `None` when fewer than 24 hours of windows were counted: what was counted is below.
     pub docs_per_day: Option<u64>,
+    pub docs_counted: Option<u64>,
+    pub docs_counted_hours: Option<f64>,
     pub last_arrival: Option<i64>,
     pub last_event: Option<i64>,
+    /// The field the event time was read from in the device's logs (`None`: kept before 0.3.89).
+    pub event_field: Option<String>,
     pub silent_since: Option<i64>,
     /// `Zone` and `tag1` of the device (an extra column, read whatever its case): every row of
     /// every log delay table carries them; `None` = the device's logs do not say.
@@ -186,7 +283,7 @@ pub struct DeviceRow {
 /// included) inside it, or a delay period overlapping it. A device the tracker remembers only
 /// from before the range is not in it — the report for yesterday lists yesterday's devices.
 pub fn device_rows(c: &ClusterInput, r: &Range, now: i64) -> Vec<DeviceRow> {
-    let eps = c.tracker.all_episodes();
+    let eps = c.tracker.all_episodes(now);
     let by_device = episodes_by_device(&eps, r, now);
     let mut out = vec![];
     for (name, d) in &c.tracker.devices {
@@ -216,24 +313,32 @@ fn measured_in(d: &super::state::DeviceState, r: &Range) -> bool {
 
 /// One device's row over the range; `mine` are its periods overlapping the range.
 fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&Episode], r: &Range, now: i64) -> DeviceRow {
-    let mut in_range: Vec<f64> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m).collect();
+    let mut in_range: Vec<f64> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms && !p.s.cant_measure()).filter_map(|p| p.m).collect();
     let max = in_range.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
     let last = mine.last();
-    let docs: u64 = d.day_docs.iter().map(|(_, n)| n).sum();
+    let docs = c.tracker.docs_counted(d);
+    let last_measured = Tracker::last_measured(d);
+    let cluster_offset = c.cluster_offset(now);
     let measured = d.state.measured();
     DeviceRow {
         device: name.to_string(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
         now_minutes: if measured { d.last_minutes } else { None },
         raw_gap_minutes: if measured { d.last_raw_minutes } else { None },
         tz_offset_minutes: if measured { d.applied_offset } else { None },
-        device_tz_offset: d.tz_offset, cluster_tz_offset: c.cluster_offset(now),
+        device_tz_offset: d.zone_offset(cluster_offset), cluster_tz_offset: cluster_offset,
+        own_zone: d.home.filter(|h| !h.same_as_cluster()).map(|h| h.zone),
         median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
         episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
         late_ms: mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum(),
         last_started: last.map(|e| e.started_ms), last_solved: last.and_then(|e| e.solved_ms),
         late_since: d.open.as_ref().map(|e| e.started_ms),
-        docs_per_day: (!d.day_docs.is_empty()).then_some(docs),
-        last_arrival: d.last_arrival_ms, last_event: d.last_event_ms,
+        last_ended_why: last.and_then(|e| e.ended_why.clone()),
+        last_measured_ms: last_measured,
+        stale: d.state.measured() && now - d.last_run_ms > c.tracker.stale_after(),
+        measured_until_ms: mine.iter().find(|e| e.stale()).and_then(|e| e.measured_until_ms),
+        docs_per_day: docs.filter(|(_, h)| *h >= 24.0).map(|(n, h)| (n as f64 * 24.0 / h).round() as u64),
+        docs_counted: docs.map(|(n, _)| n), docs_counted_hours: docs.map(|(_, h)| h),
+        last_arrival: d.last_arrival_ms, last_event: d.last_event_ms, event_field: d.event_field.clone(),
         silent_since: d.silence.as_ref().map(|s| s.from_ms),
         zone: super::extra_ci(&d.extras, "Zone").cloned(), tag1: super::extra_ci(&d.extras, "tag1").cloned(),
         in_last_run: in_last_run(d, c.tracker.last_run_ms),
@@ -253,7 +358,7 @@ pub fn in_last_run(d: &super::state::DeviceState, last_run: Option<i64>) -> bool
 pub fn device_counts(c: &ClusterInput, r: &Range, now: i64) -> Value {
     let last = c.tracker.last_run_ms;
     let in_last = c.tracker.devices.values().filter(|d| in_last_run(d, last)).count();
-    let eps = c.tracker.all_episodes();
+    let eps = c.tracker.all_episodes(now);
     let by_device = episodes_by_device(&eps, r, now);
     let in_range = c.tracker.devices.iter().filter(|(n, d)| by_device.contains_key(n.as_str()) || measured_in(d, r)).count();
     json!({ "inLastRun": in_last, "now": c.tracker.devices.len(), "inRange": in_range,
@@ -264,7 +369,7 @@ pub fn device_counts(c: &ClusterInput, r: &Range, now: i64) -> Value {
 pub fn totals(c: &ClusterInput) -> Totals {
     let mut t = Totals::default();
     for d in c.tracker.devices.values() {
-        t.add(d.state);
+        t.add_device(d);
     }
     t
 }
@@ -274,7 +379,7 @@ pub fn totals(c: &ClusterInput) -> Totals {
 /// sat in the delay band (`delay`) and above the critical line (`critical`). The Dashboard's
 /// Today draws its three panels from these; `solved` is the devices that came back below the line.
 pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64) -> Vec<Value> {
-    let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes()).collect();
+    let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes(now)).collect();
     time::windows(day, every_hours).into_iter().filter(|(from, _)| *from <= now).map(|(from, to)| {
         let newly = eps.iter().filter(|e| e.started_ms >= from && e.started_ms < to).count();
         let solved = eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= from && s < to)).count();
@@ -284,7 +389,8 @@ pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64
         for t in trackers {
             for d in t.devices.values() {
                 // Points are chronological; today's windows sit at the tail, so the reverse scan is short.
-                match d.recent.iter().rev().find(|p| p.t <= end).map(|p| p.s) {
+                // One too old to speak for the window's end (nothing measured since) is not carried on.
+                match d.recent.iter().rev().find(|p| p.t <= end).filter(|p| p.t >= from || end - p.t <= t.stale_after()).map(|p| p.s) {
                     Some(State::Delay) => delay += 1,
                     Some(State::Critical) => critical += 1,
                     _ => {}
@@ -359,6 +465,7 @@ pub fn days(clusters: &[&ClusterInput], r: &Range) -> Vec<Value> {
             sum.clock_ahead += d.clock_ahead;
             sum.other_tz += d.other_tz;
             sum.silent += d.silent;
+            sum.late_before_silent += d.late_before_silent;
             sum.unmeasured += d.unmeasured;
             sum.started += d.started;
             sum.solved += d.solved;
@@ -376,18 +483,24 @@ pub fn days(clusters: &[&ClusterInput], r: &Range) -> Vec<Value> {
         sum.median_minutes = percentile(&mut medians, 0.5);
         sum.p95_minutes = None;
         let mut v = serde_json::to_value(&sum).unwrap_or(Value::Null);
-        v["onTimeAll"] = json!(sum.on_time + sum.little + sum.clock_ahead);
-        v["late"] = json!(sum.delayed + sum.critical);
+        let t = Totals::of_day(&sum);
+        v["onTimeAll"] = json!(t.on_time);
+        v["noDelay"] = json!(t.no_delay);
+        v["cantMeasure"] = json!(t.cant_measure);
+        v["late"] = json!(t.late());
+        if let (Some(o), Some(s)) = (v.as_object_mut(), t.shares().as_object()) {
+            o.extend(s.clone());
+        }
         out.push(v);
     }
     out
 }
 
-/// Share of devices under the delay line over the range's days, from the daily totals:
-/// the mean of each day's share. `None` with no day.
+/// Share of devices without delay (`Totals::no_delay`) over the range's days, from the daily
+/// totals: the mean of each day's share. `None` with no day.
 pub fn below_share(c: &ClusterInput, r: &Range) -> Option<f64> {
     let shares: Vec<f64> = r.day_keys().iter().filter_map(|k| c.daily.get(k)).filter(|d| d.devices > 0)
-        .map(|d| (d.on_time + d.little + d.clock_ahead) as f64 / d.devices as f64).collect();
+        .map(|d| d.no_delay() as f64 / d.devices as f64).collect();
     (!shares.is_empty()).then(|| ((shares.iter().sum::<f64>() / shares.len() as f64) * 1000.0).round() / 10.0)
 }
 
@@ -424,6 +537,8 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
     let refs: Vec<&ClusterInput> = clusters.iter().collect();
     let trackers: Vec<&Tracker> = clusters.iter().map(|c| c.tracker.as_ref()).collect();
     let mut all = Totals::default();
+    // The shares are of the clusters that were measured: one whose last run failed has none.
+    let (mut shown, mut shown_clusters) = (Totals::default(), 0u64);
     let mut per_cluster = vec![];
     let mut rows: Vec<DeviceRow> = vec![];
     let today = time::local_date(now);
@@ -431,26 +546,39 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
     let prev = r.previous();
     for c in clusters {
         let t = totals(c);
-        for d in c.tracker.devices.values() {
-            all.add(d.state);
+        let not_measured = c.tracker.not_measured(now);
+        all.sum(&t);
+        if not_measured.is_none() {
+            shown.sum(&t);
+            shown_clusters += 1;
         }
+        let shares = if not_measured.is_none() { t } else { Totals::default() }.shares();
         let crows = device_rows(c, r, now);
         let worst = crows.iter().filter(|x| x.now_minutes.is_some()).max_by(|a, b| a.now_minutes.partial_cmp(&b.now_minutes).unwrap_or(std::cmp::Ordering::Equal));
-        let new_today = c.tracker.all_episodes().iter().filter(|e| e.started_ms >= t0 && e.started_ms < t1).count();
-        per_cluster.push(json!({
+        let new_today = c.tracker.all_episodes(now).iter().filter(|e| e.started_ms >= t0 && e.started_ms < t1).count();
+        let mut entry = json!({
             "id": c.id, "name": c.name, "devices": t.devices, "measured": t.measured, "lateNow": t.late(), "delay": t.delay, "critical": t.critical,
             "silent": t.silent, "unmeasured": t.unmeasured, "otherTz": t.other_tz, "timeZone": c.time_zone(now),
-            "below": t.on_time, "belowPct": (t.devices > 0).then(|| ((t.on_time as f64 / t.devices as f64) * 1000.0).round() / 10.0),
-            "latePct": (t.devices > 0).then(|| ((t.late() as f64 / t.devices as f64) * 1000.0).round() / 10.0),
+            "below": t.no_delay, "belowPct": shares["pctNoDelay"], "latePct": shares["pctLate"],
             "belowPctPrevious": below_share(c, &prev), "newToday": new_today,
             "sparkline": sparkline(c, r), "sparklineDays": r.day_keys(),
-            "worst": worst.map(|w| json!({ "device": w.device, "minutes": w.now_minutes, "state": w.state })),
+            "worst": worst.map(|w| json!({ "device": w.device, "minutes": w.now_minutes, "state": w.state, "at": w.last_measured_ms, "stale": w.stale })),
             "levels": c.levels, "lastRunAt": c.tracker.last_run_ms,
             "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
             // Today's windows per cluster: the Dashboard's Late devices over the day.
             "windows": windows(&[c.tracker.as_ref()], today, every_hours, now),
             "yesterdayWindow": same_window_yesterday(&c.tracker, every_hours),
-        }));
+        });
+        entry["notMeasured"] = json!(not_measured);
+        // Its last run is longer ago than an interval (or the silence limit): its states are of then.
+        entry["stale"] = json!(c.tracker.last_run_ms.is_some_and(|t| now - t > c.tracker.stale_after()));
+        for (k, n) in [("noDelay", t.no_delay), ("onTime", t.on_time), ("cantMeasure", t.cant_measure), ("clockAhead", t.clock_ahead), ("lateBeforeSilent", t.late_before_silent)] {
+            entry[k] = json!(n);
+        }
+        if let (Some(o), Some(s)) = (entry.as_object_mut(), shares.as_object()) {
+            o.extend(s.clone());
+        }
+        per_cluster.push(entry);
         rows.extend(crows);
     }
     per_cluster.sort_by(|a, b| b["latePct"].as_f64().unwrap_or(0.0).partial_cmp(&a["latePct"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
@@ -458,7 +586,10 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
     let in_range = rows.len();
     let truncated = rows.len() > max_devices;
     rows.truncate(max_devices);
-    let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes()).collect();
+    let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes(now)).collect();
+    let mut totals = all.json_over(&shown);
+    // "N of M": how much of the fleet the shares speak for.
+    totals["pctOf"] = json!({ "clusters": shown_clusters, "ofClusters": clusters.len(), "devices": shown.devices, "ofDevices": all.devices });
     let yesterday = today.pred_opt().unwrap_or(today);
     let (y0, y1) = time::day_bounds(yesterday);
     let y_solved: Vec<&Episode> = eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= y0 && s < y1)).collect();
@@ -466,7 +597,7 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
     json!({
         "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(), "label": r.label(), "now": now,
         "everyHours": every_hours, "clusters": clusters.len(), "measuredClusters": clusters.iter().filter(|c| c.tracker.last_run_ms.is_some()).count(),
-        "totals": all.json(),
+        "totals": totals,
         "reduced": reduced(&trackers, now, &[2, 4, 6, 12, 24]),
         "newlyLateToday": eps.iter().filter(|e| e.started_ms >= t0 && e.started_ms < t1).count(),
         "solvedToday": eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= t0 && s < t1)).count(),
@@ -482,9 +613,11 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
 /// One cluster (Cluster board).
 pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: &Value) -> Value {
     let t = totals(c);
+    let not_measured = c.tracker.not_measured(now);
+    let totals = t.json_over(&if not_measured.is_none() { t } else { Totals::default() });
     let rows = device_rows(c, r, now);
-    let eps = c.tracker.all_episodes();
-    let mut nows: Vec<f64> = c.tracker.devices.values().filter_map(|d| d.last_minutes.filter(|_| d.state != State::Silent && d.state != State::Unmeasured)).collect();
+    let eps = c.tracker.all_episodes(now);
+    let mut nows: Vec<f64> = c.tracker.devices.values().filter_map(|d| d.last_minutes.filter(|_| d.state != State::Silent && !d.state.cant_measure())).collect();
     let prev = r.previous();
     let mut prev_medians: Vec<f64> = prev.day_keys().iter().filter_map(|k| c.daily.get(k).and_then(|d| d.median_minutes)).collect();
     let today = time::local_date(now);
@@ -493,7 +626,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
         "now": now, "everyHours": every_hours, "levels": c.levels, "fields": fields, "lastRunAt": c.tracker.last_run_ms,
         "timeZone": c.time_zone(now),
         "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
-        "totals": t.json(),
+        "totals": totals, "notMeasured": not_measured,
         "started": eps.iter().filter(|e| e.started_ms >= r.from_ms && e.started_ms < r.to_ms).count(),
         "solved": eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= r.from_ms && s < r.to_ms)).count(),
         "medianNow": percentile(&mut nows, 0.5), "medianPrevious": percentile(&mut prev_medians, 0.5),
@@ -506,10 +639,10 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
 /// One device (Device board), with its finding when there is one.
 pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u64, finding: Option<&Finding>) -> Option<Value> {
     let d = c.tracker.devices.get(name)?;
-    let eps: Vec<Episode> = c.tracker.all_episodes().into_iter().filter(|e| e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
+    let eps: Vec<Episode> = c.tracker.all_episodes(now).into_iter().filter(|e| e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
     let row = row_of(c, name, d, &eps.iter().collect::<Vec<_>>(), r, now);
     let points: Vec<Value> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect();
-    let measured: Vec<(i64, f64)> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m.map(|m| (p.t, m))).collect();
+    let measured: Vec<(i64, f64)> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter(|p| !p.s.cant_measure()).filter_map(|p| p.m.map(|m| (p.t, m))).collect();
     let peak = measured.iter().cloned().fold(None, |best: Option<(i64, f64)>, (t, m)| match best { Some((_, b)) if b >= m => best, _ => Some((t, m)) });
     let average = (!measured.is_empty()).then(|| ((measured.iter().map(|(_, m)| m).sum::<f64>() / measured.len() as f64) * 10.0).round() / 10.0);
     let longest = eps.iter().max_by_key(|e| e.lasted_ms(now));
@@ -527,21 +660,21 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
         "label": format!("{h:02}:00–{:02}:00", (h + step_h * 2).min(24)), "count": n, "of": eps.len() }));
     let silences: Vec<Value> = c.tracker.silences.iter().chain(c.tracker.open_silences()).filter(|s| s.device == name && s.from_ms < r.to_ms && s.to_ms.unwrap_or(now) >= r.from_ms)
         .map(|s| json!({ "from": s.from_ms, "to": s.to_ms, "burstDocs": s.burst_docs, "burstMinutes": s.burst_minutes })).collect();
-    let range_ms = (r.to_ms.min(now) - r.from_ms).max(1);
+    // The percentage is of the time it was measured, and of nothing else.
+    let spans = measured_spans(d, c.tracker.stale_after(), r, now);
+    let measured_ms: i64 = spans.iter().map(|(a, b)| b - a).sum();
+    let late_measured: i64 = eps.iter().map(|e| spans.iter().map(|(a, b)| e.overlap_ms(*a, *b, now)).sum::<i64>()).sum();
     let mut v = json!({
         "device": name, "cluster": c.id, "clusterName": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(),
         "label": r.label(), "now": now, "everyHours": every_hours, "levels": c.levels,
         "state": d.state, "nowMinutes": row.now_minutes, "lateSince": row.late_since, "silentSince": row.silent_since,
         "medianMinutes": row.median_minutes, "worst": peak.map(|(t, m)| json!({ "minutes": m, "at": t })),
         "episodes": eps.len(), "solved": solved.len(), "lateMs": row.late_ms,
-        "latePct": ((row.late_ms as f64 / range_ms as f64) * 1000.0).round() / 10.0,
+        "latePct": (measured_ms > 0).then(|| ((late_measured as f64 / measured_ms as f64) * 1000.0).round() / 10.0),
         "docsPerDay": row.docs_per_day, "lastSilence": silences.last().and_then(|s| s.get("from").cloned()),
         "extras": d.extras, "lastArrival": d.last_arrival_ms, "lastEvent": d.last_event_ms, "firstSeen": d.first_seen_ms,
         "points": points,
-        "periods": eps.iter().map(|e| json!({
-            "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "lastedMs": e.lasted_ms(now), "worstMinutes": e.worst_minutes, "worstState": e.worst_state,
-            "lastMinutes": e.last_minutes, "lastState": e.last_state, "measurements": e.measurements, "pattern": e.pattern(), "extras": e.extras,
-        })).collect::<Vec<_>>(),
+        "periods": eps.iter().map(|e| period_json(e, now)).collect::<Vec<_>>(),
         "silences": silences,
         "insights": {
             "peak": peak.map(|(t, m)| json!({ "minutes": m, "at": t })),
@@ -556,12 +689,56 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     v["zone"] = json!(row.zone);
     v["tag1"] = json!(row.tag1);
     v["inLastRun"] = json!(row.in_last_run);
+    v["lastMeasuredMs"] = json!(row.last_measured_ms);
+    v["measuredUntilMs"] = json!(row.measured_until_ms);
+    v["stale"] = json!(row.stale);
+    v["stateText"] = json!(state_text(&row, now));
+    v["measuredMs"] = json!(measured_ms);
+    v["lateMeasuredMs"] = json!(late_measured);
+    v["docsCounted"] = json!(row.docs_counted);
+    v["docsCountedHours"] = json!(row.docs_counted_hours);
+    v["eventField"] = json!(row.event_field);
+    v["ownZone"] = json!(row.own_zone);
+    v["notMeasured"] = json!(c.tracker.not_measured(now));
     v["timeZone"] = c.time_zone(now);
     v["rawGapMinutes"] = json!(row.raw_gap_minutes);
     v["tzOffsetMinutes"] = json!(row.tz_offset_minutes);
     v["deviceTzOffset"] = json!(row.device_tz_offset);
     v["clusterTzOffset"] = json!(row.cluster_tz_offset);
     Some(v)
+}
+
+/// One delay period, as the device's page lists it.
+fn period_json(e: &Episode, now: i64) -> Value {
+    json!({
+        "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "lastedMs": e.lasted_ms(now), "worstMinutes": e.worst_minutes, "worstState": e.worst_state,
+        "lastMinutes": e.last_minutes, "lastState": e.last_state, "measurements": e.measurements, "pattern": e.pattern(), "extras": e.extras,
+        "endedWhy": e.ended_why, "lastMeasuredMs": e.last_measured_ms, "measuredUntilMs": e.measured_until_ms, "stale": e.stale(),
+    })
+}
+
+/// A device's state in words, never "now" for one nobody has measured since.
+pub fn state_text(r: &DeviceRow, now: i64) -> String {
+    match r.last_measured_ms.filter(|_| r.stale || r.measured_until_ms.is_some()) {
+        Some(t) if r.state != State::Silent => format!("{} when last measured {}, not measured since", if r.state.late() { "late" } else { r.state.label() }, time::when(t, now)),
+        Some(t) if r.late_since.is_some() => format!("silent; late when last measured {}", time::when(t, now)),
+        _ => r.state.label().to_string(),
+    }
+}
+
+/// The stretches of the range a device was measured over: from one measurement to the next, at
+/// most `stale_after` of it, and from the last one to now while that still speaks for now.
+fn measured_spans(d: &DeviceState, stale_after: i64, r: &Range, now: i64) -> Vec<(i64, i64)> {
+    let at: Vec<i64> = d.recent.iter().filter(|p| p.m.is_some() && !p.s.cant_measure()).map(|p| p.t).collect();
+    let end = r.to_ms.min(now);
+    at.iter().enumerate().map(|(i, t)| {
+        let to = match at.get(i + 1) {
+            Some(next) => (*next).min(t + stale_after),
+            None if now - t <= stale_after => now,
+            None => *t,
+        };
+        ((*t).max(r.from_ms), to.min(end))
+    }).filter(|(a, b)| b > a).collect()
 }
 
 /// `*` and `?` wildcards, case-insensitive, whole value.
@@ -621,7 +798,7 @@ mod tests {
     fn reading(device: &str, m: Option<f64>, run: i64, zone: &str) -> Reading {
         let mut extras = BTreeMap::new();
         extras.insert("Zone".into(), zone.into());
-        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, extras }
+        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, event_field: None, extras }
     }
 
     fn cluster_input(now: i64) -> ClusterInput {
@@ -656,7 +833,7 @@ mod tests {
         assert!(ws.iter().all(|w| w["delay"].is_u64() && w["critical"].is_u64()), "{ws:?}");
         assert_eq!(ws.iter().filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["delay"].as_u64().unwrap() + w["critical"].as_u64().unwrap()).sum::<u64>(), 0);
         let d = crate::logdelay::state::daily(&c.tracker, "today", t0, t0 + 86_400_000, t0 + 20 * H);
-        assert_eq!(d.late_hours, 5.0, "it was late from midnight until it was forgotten at 05:00, not until now");
+        assert_eq!(d.late_hours, 0.0, "measured late once, a week ago: nothing was measured today (it used to count until it was forgotten)");
         assert_eq!(device_rows(&c, &Range::last_days(now, 30), now).iter().filter(|r| r.device == "gone").count(), 0);
     }
 
@@ -682,6 +859,83 @@ mod tests {
         assert_eq!(f["devices"][0]["tzOffsetMinutes"], Value::Null);
         assert!(!f["days"].as_array().unwrap().is_empty(), "{}", f["days"]);
         assert_eq!(f["windows"].as_array().unwrap().iter().map(|w| w["stillLate"].as_u64().unwrap()).max(), Some(1));
+    }
+
+    #[test]
+    fn no_delay_is_on_time_silent_and_cant_measure_and_the_shares_add_up() {
+        // 100 devices: 89 on time, 5 delayed, 6 silent.
+        let mut t = Totals::default();
+        (0..89).for_each(|_| t.add(State::NoDelay));
+        (0..3).for_each(|_| t.add(State::Delay));
+        (0..2).for_each(|_| t.add(State::Critical));
+        (0..6).for_each(|_| t.add(State::Silent));
+        let v = t.json();
+        assert_eq!((v["noDelay"].clone(), v["onTime"].clone(), v["silent"].clone(), v["late"].clone()), (json!(95), json!(89), json!(6), json!(5)));
+        assert_eq!((v["pctNoDelay"].clone(), v["pctLate"].clone()), (json!(95.0), json!(5.0)));
+        assert_eq!(v["noDelayText"], "No delay 95 % (on time 89 % · silent 6 % · can't measure 0 %)");
+        // A clock ahead can't be measured; a silent device that was late is said.
+        let mut u = Totals::default();
+        u.add(State::ClockAhead);
+        u.add(State::Unmeasured);
+        u.add(State::OtherTz);
+        let late = DeviceState { state: State::Silent, open: Some(Episode {
+            device: "d".into(), started_ms: 0, solved_ms: None, ended_ms: None, ended_why: None, last_measured_ms: None, measured_until_ms: None, worst_minutes: 45.0,
+            worst_state: State::Delay, last_minutes: 45.0, last_state: State::Delay, measurements: 1, whole_hour: 0, extras: BTreeMap::new() }), ..DeviceState::default() };
+        u.add_device(&late);
+        let v = u.json();
+        assert_eq!((v["onTime"].clone(), v["noDelay"].clone(), v["cantMeasure"].clone(), v["unmeasured"].clone(), v["otherTz"].clone(), v["measured"].clone()),
+                   (json!(0), json!(3), json!(2), json!(1), json!(1), json!(1)));
+        assert_eq!(v["noDelayText"], "No delay 75 % (on time 0 % · silent 25 % · can't measure 50 %; 1 of the silent was late before it went silent)");
+        // Thirds: 33.4 + 33.3 + 33.3, never 99.9 or 100.1.
+        for parts in [vec![1u64, 1, 1], vec![2, 1, 0, 4], vec![7, 11, 13, 17, 19, 23, 1], vec![1, 999_999]] {
+            assert_eq!(tenths(&parts).unwrap().iter().sum::<u64>(), 1000, "{parts:?}");
+        }
+        assert_eq!(tenths(&[0, 0]), None);
+        assert_eq!(Totals::default().json()["pctNoDelay"], Value::Null, "no device: no percentage");
+    }
+
+    #[test]
+    fn a_cluster_never_measured_or_whose_last_run_failed_has_no_percentage() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let r = Range::last_days(now, 7);
+        let good = cluster_input(now);
+        let mut failed = cluster_input(now);
+        failed.id = "bad".into();
+        let mut t = (*failed.tracker).clone();
+        t.last_failed = Some(crate::logdelay::state::FailedRun { at: now + 1, error: "connection refused".into() });
+        failed.tracker = Arc::new(t);
+        let never = ClusterInput { id: "new".into(), name: "New".into(), tracker: Arc::new(Tracker::default()), daily: BTreeMap::new(), levels: Levels::default(),
+                                   zone: LogTimeZone::Detect, tz_hints: vec![] };
+        let f = fleet(&[good, failed, never], &r, now, 2, 100);
+        let of = |id: &str| f["byCluster"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap();
+        assert_eq!((of("prod")["pctNoDelay"].clone(), of("prod")["notMeasured"].clone()), (json!(50.0), Value::Null));
+        assert_eq!((of("bad")["pctNoDelay"].clone(), of("bad")["belowPct"].clone(), of("bad")["latePct"].clone()), (Value::Null, Value::Null, Value::Null));
+        assert!(of("bad")["notMeasured"].as_str().unwrap().contains("connection refused") && of("bad")["notMeasured"].as_str().unwrap().contains("last measured"));
+        assert_eq!((of("new")["pctNoDelay"].clone(), of("new")["notMeasured"].clone()), (Value::Null, json!("never measured")));
+        assert_eq!(f["totals"]["pctOf"], json!({ "clusters": 1, "ofClusters": 3, "devices": 2, "ofDevices": 4 }));
+        assert_eq!(f["totals"]["pctLate"], 50.0);
+    }
+
+    #[test]
+    fn a_device_not_measured_since_is_late_when_last_measured_never_still_late() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let l = Levels::default();
+        // Measured once, 95 min late, eight hours ago; nothing since (no schedule covers it).
+        let at = now - 8 * H;
+        let mut t = Tracker { interval_ms: Some(2 * H), ..Tracker::default() };
+        t.apply(at, vec![reading("fw-1", Some(95.0), at, "dc1")], &l, 24 * H);
+        let c = ClusterInput { id: "prod".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l, zone: LogTimeZone::Detect, tz_hints: vec![] };
+        let r = Range::last_days(now, 7);
+        let d = device(&c, "fw-1", &r, now, 2, None).unwrap();
+        assert_eq!((d["lateMs"].clone(), d["latePct"].clone(), d["measuredMs"].clone()), (json!(0), Value::Null, json!(0)), "one measurement is no stretch of time");
+        assert_eq!((d["stale"].clone(), d["lastMeasuredMs"].clone(), d["measuredUntilMs"].clone()), (json!(true), json!(at), json!(at)));
+        assert!(d["stateText"].as_str().unwrap().starts_with("late when last measured ") && d["stateText"].as_str().unwrap().ends_with("not measured since"), "{}", d["stateText"]);
+        assert_eq!((d["periods"][0]["stale"].clone(), d["periods"][0]["lastedMs"].clone()), (json!(true), json!(0)));
+        assert_eq!((d["docsPerDay"].clone(), d["docsCounted"].clone(), d["docsCountedHours"].clone()), (Value::Null, json!(100), json!(2.0)), "two hours of logs are not a day's");
+        // Measured again and again: late 4 of the 6 hours measured.
+        let c = cluster_input(now);
+        let d = device(&c, "fw-1", &r, now, 2, None).unwrap();
+        assert_eq!((d["stale"].clone(), d["measuredMs"].clone(), d["lateMeasuredMs"].clone(), d["latePct"].clone()), (json!(false), json!(6 * H), json!(4 * H), json!(66.7)));
     }
 
     #[test]

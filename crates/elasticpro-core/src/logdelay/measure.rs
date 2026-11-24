@@ -36,6 +36,9 @@ pub struct Reading {
     pub event_ms: Option<i64>,
     /// `None` when either clock could not be read: can't measure, never 0.
     pub delay_minutes: Option<f64>,
+    /// Which of the event-time fields its newest document's event time was read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_field: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extras: BTreeMap<String, String>,
 }
@@ -173,7 +176,8 @@ pub fn readings(res: &Value, f: &Fields) -> Vec<Reading> {
         let docs = b.get("doc_count").and_then(Value::as_u64).unwrap_or(0);
         let src = b.pointer("/latest/hits/hits/0/_source");
         let arrival = src.and_then(|s| to_ms(dotted(s, &f.arrival)));
-        let event = src.and_then(|s| f.event_time.iter().find_map(|e| to_ms(dotted(s, e))));
+        let from = src.and_then(|s| f.event_time.iter().find_map(|e| to_ms(dotted(s, e)).map(|t| (t, e.clone()))));
+        let event = from.as_ref().map(|(t, _)| *t);
         let delay = match (arrival, event) {
             (Some(a), Some(e)) => Some((a - e) as f64 / 60_000.0),
             _ => None,
@@ -187,7 +191,7 @@ pub fn readings(res: &Value, f: &Fields) -> Vec<Reading> {
                 }
             }
         }
-        out.push(Reading { device, docs, arrival_ms: arrival, event_ms: event, delay_minutes: delay, extras });
+        out.push(Reading { device, docs, arrival_ms: arrival, event_ms: event, delay_minutes: delay, event_field: from.map(|(_, e)| e), extras });
     }
     out
 }
@@ -271,6 +275,7 @@ mod tests {
         let res = json!({ "aggregations": { "devices": { "buckets": [
             { "key": { "d": "n" }, "doc_count": 1, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": 1_762_250_400_000i64, "ingested_time": 1_762_248_600_000i64 } } ] } } },
         ] } } });
+        assert_eq!(readings(&res, &fields())[0].event_field.as_deref(), Some("ingested_time"), "the field it was read from, not the first asked for");
         assert_eq!(readings(&res, &fields())[0].delay_minutes, Some(30.0), "the second candidate when the first is absent; epoch ms read as ms");
     }
 
@@ -288,6 +293,7 @@ mod tests {
         assert_eq!(r[0].delay_minutes, Some(41.0));
         assert_eq!(r[0].extras.get("fwd_tag").map(String::as_str), Some("syslog-dc1-02"), "an array's first value");
         assert_eq!(r[0].extras.get("Zone").map(String::as_str), Some("dc1"));
+        assert_eq!((r[0].event_field.as_deref(), r[1].event_field.as_deref()), (Some("event_created"), None));
         assert_eq!(r[1].delay_minutes, None, "no event time: can't measure, not 0");
         assert!(r[1].extras.is_empty(), "a blank extra is not a value");
         assert!(r[1].arrival_ms.is_some());
