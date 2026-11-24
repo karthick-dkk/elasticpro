@@ -30,7 +30,7 @@ export const FOCUS = {
   // Nodes & shards: the nodes and their disk; an item narrows the shard table to that node.
   disk: (m, it) => ({ section: 'disk', ...(it && it.node ? { node: it.node } : {}) }),
   'disk-balance': () => ({ section: 'disk' }),
-  'disk-unaccounted': () => ({ section: 'disk' }),
+  'disk-unaccounted': () => ({ section: 'dangling' }),
   capacity: () => ({ section: 'disk' }),
   'no-master': () => ({ section: 'nodes' }),
   'master-changed': () => ({ section: 'nodes' }),

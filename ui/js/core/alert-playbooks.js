@@ -113,7 +113,7 @@ export const PLAYBOOKS = {
     steps: [
       { text: 'List dangling indices: indices found on a node\'s disk that the cluster state does not know about.',
         request: read('/_dangling?pretty', 'Prepare the dangling list in the REST console') },
-      { text: 'Compare the disk per node with what the indices add up to.', links: [{ label: 'Disk per node', page: 'shards', focus: { section: 'disk' } }] },
+      { text: 'See whether there are dangling indices, and how much of the disk in use is not index data.', links: [{ label: 'Disk & dangling indices', page: 'shards', focus: { section: 'dangling' } }] },
       { text: 'Import or delete a dangling index by its UUID, after checking it is not wanted. The request is prepared with a placeholder you must replace.',
         request: write('DELETE', '/_dangling/INDEX-UUID?accept_data_loss=true', '', 'Prepare the delete in the REST console') },
       { text: 'If there are none, look at the data path on the node for files that are not Elasticsearch\'s (old logs, a copied snapshot).' },

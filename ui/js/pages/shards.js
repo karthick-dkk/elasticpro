@@ -1,18 +1,19 @@
 /**
  * Page — nodes and shards: what the cluster is made of, and moving pieces of it.
  *
- * Four things and nothing else (the owner's cut of 0.3.62): the nodes and their resource
- * usage, where the shards stand (and the allocation switch), whether the cluster is under
- * query pressure, and the shard table with its management. Storage accounting, dangling
- * indices and the rest of the old "Cluster at a glance" live on the Clusters overview.
+ * Five things and nothing else (the owner's cut of 0.3.62, and the disk card asked for after
+ * 0.3.86): the nodes and their resource usage, where the shards stand (and the allocation
+ * switch), whether the cluster is under query pressure, what the disk is used by besides index
+ * data with the dangling indices, and the shard table with its management. The rest of the old
+ * "Cluster at a glance" lives on the Clusters overview.
  */
 
 import { h, mount, reconcile } from '../lib/dom.js';
 import { tableSort } from '../lib/table-sort.js';
 import { nodeCache } from '../lib/keyed.js';
-import { bytes, num, compact } from '../lib/fmt.js';
+import { bytes, num, compact, ago } from '../lib/fmt.js';
 import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
-         datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
+         datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy, setDangling, danglingFor } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { freshnessText, refreshButton } from '../lib/freshness.js';
 import { card, table, empty, pill, edgeTile, connectionBanner, keptCard, usageBar } from './common.js';
@@ -22,10 +23,11 @@ import { toast, rowMenu } from '../ui/menu.js';
 import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writesAllowed, roleMayWrite, onWritesChange } from '../core/writes.js';
-import { splitGauge, STATUS } from '../lib/charts.js';
+import { splitGauge, ringGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortNodeId,
-         unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
+         unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING,
+         diskUse, danglingAnswer, danglingProblem } from '../core/nodes-shards.js';
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
 import { withFreshReads } from '../core/es.js';
@@ -71,7 +73,7 @@ const loading = new Set();
 
 /**
  * A link that opened this page with a problem in view (core/focus.js): `unassigned` shows
- * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, and a
+ * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, `dangling` the disk card, and a
  * `node` narrows the shard table to that node, largest first — for that visit only; the
  * remembered order is not touched. Applied once, on arrival.
  */
@@ -81,6 +83,7 @@ function applyFocus() {
   SHARD_SORT.forVisit(null);      // an order a link asked for lasts one visit
   if (!f) return;
   if (f.section === 'unassigned') showUnassigned();
+  else if (f.section === 'dangling') reveal = '[data-focus="dangling"]';
   else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
   // Largest first for this visit only: the remembered Shards order is left as it is.
   if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.forVisit({ key: 'store', dir: -1 }); }
@@ -150,7 +153,7 @@ function refresh() {
     // The index list is what the disk accounting is compared against; only the Indices
     // page fetches it otherwise.
     if (!state.indices.get(c.id)) fetchIndices(c.id, '*').catch(() => {});
-    if (isReachable(c.id)) { loadCores(c); loadRates(c); loadAllocation(c); }
+    if (isReachable(c.id)) { loadCores(c); loadRates(c); loadAllocation(c); loadDiskInfo(c); }
   }
 }
 
@@ -237,6 +240,29 @@ async function loadAllocation(c, force = false) {
 }
 
 /**
+ * The dangling indices (`GET /_dangling`), per cluster: read when the page opens on one or two
+ * clusters, kept ten minutes, and on that cluster's Refresh. Not read with All clusters by itself (a
+ * call per cluster). A read that failed is "not known" with its reason.
+ */
+const DISK_INFO_MAX_AGE_MS = 10 * 60 * 1000;
+const diskInfo = new Map();   // cluster id → { at, inflight, problem }
+async function loadDiskInfo(c, force = false) {
+  const cl = client(c.id);
+  const e = diskInfo.get(c.id) || { at: 0, inflight: false, problem: null };
+  if (!cl || e.inflight || (!force && Date.now() - e.at < DISK_INFO_MAX_AGE_MS)) return;
+  diskInfo.set(c.id, { ...e, inflight: true });
+  if (force) draw();
+  let answer = null, problem = null;
+  try {
+    answer = danglingAnswer(await (force ? withFreshReads(() => cl.danglingIndices()) : cl.danglingIndices()));
+    if (!answer) problem = danglingProblem(0, 'the answer to GET /_dangling is not a list of dangling indices');
+  } catch (err) { problem = danglingProblem(err.res && err.res.status, err.message || String(err)); }
+  setDangling(c.id, answer ? { ...answer, at: Date.now() } : null);
+  diskInfo.set(c.id, { at: Date.now(), inflight: false, problem });
+  draw();
+}
+
+/**
  * "All clusters": one message to the core per dataset for the whole fleet, the tables
  * filling in as its answers are pushed. A held request per cluster (and a second for its
  * index list) was two hundred and forty requests queued in front of every click. Without
@@ -315,6 +341,7 @@ function block(c) {
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
     nodesCard(c, d),
     h('div.ns-row', allocationCard(c, all, d), pressureCard(c)),
+    diskCard(c, d),
     shardsCard(c, d, all, raw)]);
 }
 
@@ -709,6 +736,92 @@ function pressureCard(c) {
     [headPill]));
 }
 
+/* ------------------------------- disk and dangling ------------------------------- */
+
+/**
+ * The cluster's disk as one ring (core/nodes-shards.js diskUse): index data, what is in use but is
+ * not index data, and free, the share in use in its middle; and whether there are dangling indices,
+ * which are part of "not index data".
+ */
+function diskCard(c, d) {
+  const io = diskInfo.get(c.id) || null;
+  const u = diskUse(d.disk && d.disk.nodes);
+  const pct = (v) => (u.total && v !== null ? `${((v / u.total) * 100).toFixed(1)} %` : '');
+  const known = u.total && u.used !== null && u.free !== null;
+  const parts = [
+    { label: 'Index data', value: u.indices, color: 'var(--chart-info)' },
+    { label: 'Not index data', value: u.notIndices, color: 'var(--series-2)' },
+    { label: 'Free', value: u.free, color: 'var(--surface-3)' },
+  ];
+  const drawn = known && u.notIndices !== null ? parts : [];
+  const sub = known ? `${c.name} · ${bytes(u.used)} of ${bytes(u.total)} in use` : `${c.name} · disk use not known`;
+  return focusable(snug(card('Disk & dangling indices', sub,
+    h('div.ns-disk',
+      ringGauge(drawn, { total: u.total || 0, size: 92, stroke: 16, centre: known ? `${Math.round((u.used / u.total) * 100)}%` : '–',
+        label: parts.map((p) => `${p.label} ${p.value === null ? 'not known' : bytes(p.value)}`).join(', ') }),
+      h('div.ns-disk-legend', ...parts.map((p) => h('div',
+        h('i', { style: { background: p.color } }), h('span', p.label),
+        h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', pct(p.value))))),
+      h('div.ns-disk-dangling', danglingBody(c, io))),
+    [diskHelp(c)])), 'dangling');
+}
+
+/** The dangling line: none, the list, or why it is not known. */
+function danglingBody(c, io) {
+  const dang = danglingFor(c.id);
+  const line = (...kids) => h('div.ns-dangling', h('span', 'Dangling indices: '), ...kids);
+  if (!dang && io && io.inflight) return h('div.ns-dangling.muted', 'Checking for dangling indices…');
+  if (!dang) {
+    return io && io.problem ? line(h('b', 'not known'), h('span.muted', ` · ${io.problem.why}`))
+      : line(h('b', 'not checked'), h('span.muted', fleetView ? ' · not asked with All clusters — press ↻ or pick one cluster' : ' · press ↻'));
+  }
+  const asked = `${dang.answered === null ? '' : `${num(dang.answered)} node${dang.answered === 1 ? '' : 's'} answered · `}checked ${ago(dang.at)}`;
+  const missing = dang.failed ? h('b', { style: { color: 'var(--warning-ink)' } }, ` · ${num(dang.failed)} node${dang.failed === 1 ? '' : 's'} did not answer, so there may be more`) : null;
+  if (!dang.indices.length) return line(h('b', dang.failed ? 'none found' : 'none'), missing, h('span.muted', ` · ${asked}`));
+  // /_dangling gives a node's whole id, _cat/nodes its first characters: a name is shown only when
+  // exactly one node's id begins it.
+  const nodes = (state.data.get(c.id) || {}).nodes || [];
+  const nameOf = (id) => { const m = nodes.filter((n) => n.id && String(id).startsWith(n.id)); return m.length === 1 ? m[0].name : id; };
+  return h('div',
+    line(h('b', { style: { color: 'var(--critical-ink)' } }, `${num(dang.indices.length)} found`), missing, h('span.muted', ` · ${asked} · Elasticsearch does not report their size`)),
+    h('div.ns-nodes', table(['Index', 'UUID', 'Created', 'On node', ''], dang.indices.map((x) => h('tr',
+      h('td', h('span.ns-name', { title: x.index_name }, x.index_name)),
+      h('td.mono.muted.id', x.index_uuid),
+      h('td.muted', x.creation_date_millis ? new Date(Number(x.creation_date_millis)).toISOString().slice(0, 10) : '–'),
+      h('td', (x.node_ids || []).map(nameOf).join(', ') || '–'),
+      h('td', danglingHelp(c, x)))))));
+}
+
+const inRest = (c, method, path, label, title) => h('button.btn.sm', { title, onclick: () => navigateTo('console', { method, path, body: '' }, { cluster: c.id }) }, label);
+
+/** The "i" of one dangling index: what it is, what importing and deleting do. Both are only prepared in REST. */
+function danglingHelp(c, x) {
+  const path = `/_dangling/${encodeURIComponent(x.index_uuid)}?accept_data_loss=true`;
+  return infoButton({ id: `${c.name} · ${x.index_name}`, head: 'dangling index · recommended fix', label: `About dangling index ${x.index_name}`, title: 'What this is, and the recommended fix',
+    items: [{
+      title: 'On a node\'s disk, not in the cluster',
+      cause: 'A node holds this index\'s data, but the cluster state does not list it: it was deleted while the node was away, or the node came from another cluster.',
+      fix: 'Import it if its data is still wanted (it may be old or incomplete); delete it if not. A delete cannot be undone.',
+      actions: [inRest(c, 'POST', path, 'Prepare the import in REST', 'Opens the request in the REST console; nothing is sent until you run it'),
+        inRest(c, 'DELETE', path, 'Prepare the delete in REST', 'Opens the request in the REST console; nothing is sent until you run it')],
+    }] });
+}
+
+/** The card's "i": what "not index data" can be, and where to look. */
+function diskHelp(c) {
+  // Asked when pressed: the button outlives a redraw that reads the same, and a ↻ may have changed the reason.
+  const problemOf = () => (diskInfo.get(c.id) || {}).problem || null;
+  return infoButton({ id: c.name, head: 'disk in use that is not index data', label: `About the disk of ${c.name}`, title: 'What is counted, and where to look',
+    items: () => [
+      { title: 'Not index data', cause: 'Disk in use minus the index data Elasticsearch has open: its translogs, the blocks the file system reserves, and other files on the same disk (logs, the operating system, dangling or orphaned shard directories). Nodes that share one disk each count all of it.',
+        fix: 'Elasticsearch cannot list other files. On the node, run du -xsh on the data path and the rest of that mount, and compare.' },
+      problemOf() ? { title: 'Dangling indices not known', cause: problemOf().why, fix: problemOf().fix,
+        actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] }
+        : { title: 'Dangling indices', cause: 'Index data on a node\'s disk that the cluster state does not list. Elasticsearch does not report their size; it is inside “Not index data”.', fix: null,
+          actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] },
+    ] });
+}
+
 /* ---------------------------------- the table ---------------------------------- */
 
 /** _cat gives strings; everything downstream wants the numbers as numbers. */
@@ -819,7 +932,7 @@ function shardsCard(c, d, all, raw) {
         title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.',
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
-      refreshButton(() => load(c), { busy: loading.has(c.id), title: 'read the shards again' }))]);
+      refreshButton(() => { load(c); loadDiskInfo(c, true); }, { busy: loading.has(c.id), title: 'read the shards and the dangling indices again' }))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length

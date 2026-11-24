@@ -9,7 +9,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const { shardSplit, isHiddenIndex, wantsHidden, visibleShards, USAGE_THRESHOLDS, usageLevel, loadPercent, coresByNode } =
+const { shardSplit, isHiddenIndex, wantsHidden, visibleShards, USAGE_THRESHOLDS, usageLevel, loadPercent, coresByNode,
+  diskUse, danglingAnswer, danglingProblem } =
   await import(pathToFileURL(path.join(ROOT, 'ui/js/core/nodes-shards.js')).href);
 
 const rows = [
@@ -149,4 +150,30 @@ test('shortNodeId is the first eight characters', () => {
   assert.equal(shortNodeId('Xk3pQ9aTn1'), 'Xk3pQ9aT');
   assert.equal(shortNodeId('abc'), 'abc');
   assert.equal(shortNodeId(null), '');
+});
+
+/* Staging's own figures: 41.5 GB used, of which 83.6 MB is index data. */
+const ROW = { node: 'a', 'disk.indices': '87669888', 'disk.used': '41538945024', 'disk.avail': '22684168192', 'disk.total': '64223113216' };
+
+test('what is not index data is used minus indices, summed over the nodes', () => {
+  assert.equal(diskUse([ROW]).notIndices, 41538945024 - 87669888);
+  const two = diskUse([ROW, ROW]);
+  assert.deepEqual([two.total, two.used, two.free], [2 * 64223113216, 2 * 41538945024, 2 * 22684168192]);
+  assert.equal(two.indices + two.notIndices + two.free, two.total, 'the ring adds up to the disk');
+});
+
+test('a figure one node did not report is unknown, never zero', () => {
+  const u = diskUse([ROW, { ...ROW, 'disk.indices': '' }]);
+  assert.deepEqual([u.indices, u.notIndices], [null, null]);
+  assert.equal(u.used, 2 * 41538945024);
+  assert.equal(diskUse([{ ...ROW, 'disk.used': '1' }]).notIndices, null, 'a minus figure is not a measurement');
+  assert.equal(diskUse([]).total, null);
+  assert.equal(diskUse(null).total, null);
+});
+
+test('no dangling indices is only said of a list', () => {
+  assert.deepEqual(danglingAnswer({ _nodes: { total: 3, successful: 2, failed: 1 }, dangling_indices: [] }), { indices: [], answered: 2, failed: 1 });
+  assert.equal(danglingAnswer({ acknowledged: true }), null);
+  assert.match(danglingProblem(403, 'x').fix, /"manage"/);
+  assert.match(danglingProblem(400, 'x').fix, /7\.9/);
 });

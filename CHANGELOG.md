@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.87
+
+- **Nodes & shards: disk and dangling indices.** A new card shows the cluster's disk as one ring (index data, in use but **not** index data, free) and whether it has dangling indices: none, or each one's name, UUID, creation date and node, with the import and the delete prepared in REST. What Elasticsearch does not report reads "–" or "not known" with the reason (an account without the cluster privilege `manage`, a cluster before 7.9), never 0. Dangling indices are read when the page opens on one or two clusters, kept 10 minutes, and on the page's Refresh; with All clusters only on that cluster's Refresh. The disk alert "not accounted for by any index" sends here again: since 0.3.63 it named a check that no longer existed.
+
 ## 0.3.86
 
 - **Log delay: the first run after a restart waits for the cluster list.** The timer ran within seconds of a start, before the clusters from Zabbix were read; it measured none of them, reported success, and the next run was an interval away, so every restart or upgrade lost one. The first run now waits until the list has been read (at most 10 minutes, then it measures what is known). docs/LOGDELAY.md.

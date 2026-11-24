@@ -323,7 +323,7 @@ await go('shards');
   const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
   ok(titles.some((t) => t.startsWith('Shards —')), `shards: no shard table card, saw ${titles.join(' | ')}`);
   ok(titles.includes('Nodes & resource usage'), `shards: no node pane, saw ${titles.join(' | ')}`);
-  // The page is four cards and nothing else: nodes, shard allocation, query pressure, the shards.
+  // The page is five cards and nothing else: nodes, shard allocation, query pressure, the disk, the shards.
   ok(!titles.includes('Cluster at a glance'), `shards: the glance card is still on this page (it belongs to the Clusters overview) — ${titles.join(' | ')}`);
   ok(titles.includes('Shard allocation') && titles.includes('Query pressure'), `shards: the allocation / pressure row is missing — ${titles.join(' | ')}`);
 
@@ -417,6 +417,22 @@ await go('shards');
     `shards: the old separate cards survive — ${titles.join(' | ')}`);
   ok(!doc.querySelector('.stat'), 'shards: the stat tiles are still here');
   ok(!/Indices hold|Unaccounted/.test(doc.getElementById('view').textContent), 'shards: the storage accounting is still on this page (it belongs to the Clusters overview)');
+
+  // Disk & dangling indices: one ring over the cluster, its three figures, and the dangling indices.
+  {
+    const dc = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Disk & dangling indices');
+    const { bytes: fmtBytes } = await load('lib/fmt.js');
+    ok(!!dc(), 'shards: no disk card');
+    await waitFor(() => /1 found/.test(dc().textContent), `shards: the dangling list was not read (${dc() && dc().textContent.slice(0, 300)})`);
+    ok(dc().querySelectorAll('.ring-gauge').length === 1 && dc().querySelectorAll('.ring-gauge circle').length === 4, 'shards: the disk is not one ring of three parts');
+    // The fixture: 300 GB, 167 in use, 154 of it index data.
+    ok([...dc().querySelectorAll('.ns-disk-legend b')].map((b) => b.textContent).join(' ') === [154e9, 13e9, 133e9].map((v) => fmtBytes(v)).join(' ')
+      && dc().querySelector('.ring-centre').textContent === '56%', `shards: the disk reads ${dc().textContent.slice(0, 200)}`);
+    ok(dc().querySelectorAll('table.tbl').length === 1 && /logstash-old-2025\.01\.02/.test(dc().textContent) && /2025-01-02/.test(dc().textContent), `shards: the dangling table reads ${dc().textContent}`);
+    press(dc().querySelector('table.tbl button.ld-ibtn'));
+    ok(/Prepare the import in REST/.test((doc.querySelector('.ld-fixpop') || {}).textContent || ''), 'shards: a dangling index has no fix');
+    press(doc.querySelector('.ld-fixpop-x'));
+  }
 
   // Shard allocation: the 96 px ring with the total inside, three edge tiles (the unassigned one
   // with its reasons and a "show" that narrows the table), shards per node as bars, and the

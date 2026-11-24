@@ -199,3 +199,44 @@ export function staleIndices(liveRetention, indices, now = Date.now()) {
     .sort((a, b) => String(a.day).localeCompare(String(b.day)));
   return { list, bytes: list.reduce((n, i) => n + (i.size || 0), 0), policy: ret.label };
 }
+
+/* ----------------------------- disk and dangling ----------------------------- */
+
+/** A byte count as a number, or null when Elasticsearch did not report one (unknown is not zero). */
+const byteCount = (v) => (v === null || v === undefined || v === '' || !isFinite(Number(v)) ? null : Number(v));
+
+/**
+ * What the cluster's disk is used by, over its nodes (`_cat/allocation` rows): the index data
+ * Elasticsearch has open (`disk.indices`), what else is in use (used - indices: translogs, blocks
+ * the file system reserves, logs, the operating system, dangling shard data), and what is free.
+ * A figure one node did not report is null for the whole cluster, and so is a negative remainder.
+ */
+export function diskUse(rows) {
+  const sum = (k) => {
+    const v = (rows || []).map((r) => byteCount(r && r[k]));
+    return v.length && v.every((x) => x !== null) ? v.reduce((n, x) => n + x, 0) : null;
+  };
+  const total = sum('disk.total'), used = sum('disk.used'), free = sum('disk.avail'), indices = sum('disk.indices');
+  return { total, used, free, indices, notIndices: used !== null && indices !== null && used >= indices ? used - indices : null };
+}
+
+/**
+ * The answer of `GET /_dangling`: the indices, and how many nodes answered and did not. Null when
+ * it is not one; "none" is only ever said of a list Elasticsearch sent.
+ */
+export function danglingAnswer(ans) {
+  if (!ans || !Array.isArray(ans.dangling_indices)) return null;
+  const n = ans._nodes || {};
+  return {
+    indices: ans.dangling_indices,
+    answered: byteCount(n.successful),
+    failed: byteCount(n.failed) || 0,
+  };
+}
+
+/** Why the dangling list could not be read, and what would make it readable. */
+export function danglingProblem(status, message) {
+  if (status === 403) return { why: message, fix: 'Give the cluster account the Elasticsearch cluster privilege "manage": listing dangling indices needs it.' };
+  if (status === 400 || status === 404 || status === 405) return { why: `Elasticsearch did not accept GET /_dangling (${message})`, fix: 'The list exists from Elasticsearch 7.9 on. On an older cluster, look in the data path on each node.' };
+  return { why: message, fix: 'Try again; if it stays, run GET /_dangling in the REST console to see the whole answer.' };
+}
