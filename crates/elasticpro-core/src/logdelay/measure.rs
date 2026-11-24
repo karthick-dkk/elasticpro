@@ -89,7 +89,7 @@ pub struct Reading {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<TypeReading>>,
     /// It has more log types than were read (`TYPES_PER_DEVICE`); without `types`, none were
-    /// (`TYPES_PER_RUN`).
+    /// (`TYPES_PER_RUN`): nothing is known of them.
     #[serde(default)]
     pub types_truncated: bool,
 }

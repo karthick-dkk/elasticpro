@@ -282,17 +282,10 @@ impl Core {
         let st = self.logdelay_store().ok_or("no data directory")?;
         let mut t = (*st.read_tracker(cluster)).clone();
         let complete = read.complete && !read.is_partial();
-        let before = t.last_run_ms;
+        let before = t.coverage();
         t.interval_ms = Some((self.logdelay_every_hours() as i64) * 3_600_000);
         let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete, zone);
-        if read.is_partial() {
-            // One device, or the late devices, measured again is not the cluster's run: "in the
-            // last run" and how the last run read the list stay the cluster's.
-            t.last_run_ms = before.or(Some(run_ms));
-        } else {
-            t.last_read = Some(read);
-            t.last_failed = None;
-        }
+        t.run_read(run_ms, read, before);
         let day = time::local_date(run_ms);
         let key = time::local_day_key(run_ms);
         let (from, to) = time::day_bounds(day);

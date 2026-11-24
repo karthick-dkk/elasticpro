@@ -127,6 +127,14 @@ fn no_delay_line(t: &Value) -> String {
         None => "No delay: not measured".into(),
     }
 }
+
+/// How many devices are counted as they were, their log types not read; empty of none.
+fn unread_text(t: &Value) -> String {
+    match t["typesUnread"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        n => format!("{n} of the devices are counted as when their log types were last read: the last run reads {} log types of a cluster and did not come to theirs.", crate::logdelay::measure::TYPES_PER_RUN),
+    }
+}
 const INK: &str = "#1b1f24";
 const MUTED: &str = "#5b6470";
 const LINE: &str = "#e3e6ea";
@@ -575,6 +583,7 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
             vec![Cell::text(format!("  {}", ln.over)), int(&t["critical"])],
             vec![Cell::text("Part delayed (some of its log types late)"), int(&t["partDelayed"]), Cell::text(pct(&t["pctPartDelayed"]))],
             vec![Cell::text("Log types late"), types_late(&t["logTypes"]), Cell::text(t["logTypes"]["above"].as_u64().map(|a| format!("{a} {}", ln.over)).unwrap_or_default())],
+            vec![Cell::text("Log types not read in the last run, counted as before (devices)"), int(&t["typesUnread"]), Cell::text(unread_text(t))],
             vec![Cell::text("Other time zone"), int(&t["otherTz"]), Cell::text(pct(&t["pctOtherTz"]))],
             vec![Cell::text("Newly late today"), int(&fleet["newlyLateToday"])],
             vec![Cell::text("Solved today"), int(&fleet["solvedToday"])],
@@ -731,9 +740,6 @@ fn about(i: &Inputs<'_>, fleet: &Value) -> crate::report::about::About {
         if c.tracker.types_not_kept > 0 {
             a.notes.push(format!("{}: the last run read {} more log types than are kept; they count in their device's state, and have no row of their own", c.name, c.tracker.types_not_kept));
         }
-        if c.tracker.types_unread > 0 {
-            a.notes.push(format!("{}: {} devices were read without their log types, the last run's limit of {} log types was reached; their state is their newest document's", c.name, c.tracker.types_unread, crate::logdelay::measure::TYPES_PER_RUN));
-        }
     }
     a.warnings = warnings(fleet, i.now);
     a
@@ -847,6 +853,9 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         h.push_str("</tr></table>");
         h.push_str(&format!("<div style=\"font-size:13px;margin:6px 0 0\">{}</div>", esc(&no_delay_line(t))));
         h.push_str(&format!("<div style=\"font-size:11px;color:{MUTED}\">{}{}</div>", esc(NO_DELAY_NOTE), if t["logTypes"].is_object() { format!(" {}", esc(LOG_TYPES_NOTE)) } else { String::new() }));
+        if !unread_text(t).is_empty() {
+            h.push_str(&format!("<div style=\"font-size:12px;margin:4px 0 0\">{}</div>", esc(&unread_text(t))));
+        }
         let y = &fleet["yesterday"];
         h.push_str(&format!("<div style=\"font-size:13px;margin:8px 0 0\">Yesterday: {} devices became late, {} were solved{}.</div>",
             n(&y["newlyLate"]) as i64, n(&y["solved"]) as i64,
@@ -965,7 +974,7 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
 /// A late device's delay and level in words, with when it was measured if not lately.
 fn top_delay(d: &DeviceRow, now: i64) -> String {
     let m = d.now_minutes.map(time::minutes).unwrap_or_else(|| "can't measure".into());
-    if d.stale || d.measured_until_ms.is_some() { format!("{m} · {}", summary::state_text(d, now)) } else { format!("{m} · {}", d.state.label()) }
+    if d.stale || d.measured_until_ms.is_some() || d.types_unread.is_some() { format!("{m} · {}", summary::state_text(d, now)) } else { format!("{m} · {}", d.state.label()) }
 }
 
 /// An empty list of late devices: none late, or nothing measured to say so.
@@ -1000,6 +1009,9 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         n(&t["silent"]) as i64, n(&t["cantMeasure"]) as i64, no_delay_line(t)));
     if let (Some(a), Some(b)) = (t["logTypes"]["late"].as_u64(), t["logTypes"]["total"].as_u64()) {
         s.push_str(&format!("Part delayed {} ({}) · log types late {a} of {b}. {LOG_TYPES_NOTE}\n", n(&t["partDelayed"]) as i64, pct(&t["pctPartDelayed"])));
+    }
+    if !unread_text(t).is_empty() {
+        s.push_str(&format!("{}\n", unread_text(t)));
     }
     s.push_str("By cluster\n");
     for c in fleet["byCluster"].as_array().into_iter().flatten() {

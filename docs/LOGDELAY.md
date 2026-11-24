@@ -101,8 +101,15 @@ the same on every cluster; no setting). Only the mapping decides `log_type` or `
   never a reason to call the device silent, and it solves nothing. Counted as not late.
 * **More than 20 log types in a device's window** (`types_truncated`): those not read are left as they
   were and said (`types.truncated`). An index that maps the field otherwise counts here too. After
-  150 000 log types of a cluster a run reads the rest of its devices without them (`TYPES_PER_RUN`):
-  their state is their newest document's, `types.truncated`, `logTypesUnreadDevices`.
+  150 000 log types of a cluster a run reads the rest of its devices without them (`TYPES_PER_RUN`).
+  **Not read is not on time**: such a device keeps its state, periods, points and log types, all
+  `stale` as of their own last measurement, and `stateText` ends "log types not read in this run (N
+  devices over the limit)"; nothing is solved, opened or forgotten. One never read by log types has its
+  newest document's state, and says the same. `typesUnread` counts them (totals, per cluster; on a device
+  the cluster's count, else `null`). The next run begins where the limit was reached and turns at the
+  last name (`collect::Walk`), so no device is always past it.
+* **A run over part of the cluster** (one device, the late ones) replaces nothing the cluster's run said
+  of its coverage (`Tracker::run_read`): last run, how it was read, `logTypesNotKept`.
 * **A name over 256 bytes** is its first 200, "…" and 8 hex of its sha256 (`measure::type_name`): never
   another one's, never `(no log type)`.
 * **Periods.** A device's own period is open only while the whole device is late; when it becomes part

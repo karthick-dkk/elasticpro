@@ -253,7 +253,7 @@ pub struct DeviceState {
     /// `last_run_ms` is the last run that had documents of it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<DeviceState>,
-    /// The first run that read it by log types, and the last that did or was to (`types_truncated`).
+    /// The first and the last run that read it by log types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types_since_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,6 +261,13 @@ pub struct DeviceState {
     /// That run did not read, or could not keep, every log type it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub types_truncated: bool,
+    /// The last run that saw it did not read its log types (`measure::TYPES_PER_RUN`): its state,
+    /// periods and log types are as of `types_run_ms`, or its newest document's when never read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub types_unread: bool,
+    /// In `types`: how long since `last_run_ms` nobody looked for it.
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub unlooked_ms: i64,
     /// Its state is its log types' (`State::of_types`), not its newest document's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_types: bool,
@@ -276,6 +283,9 @@ fn unmeasured() -> State {
 }
 
 fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+fn is_zero_ms(n: &i64) -> bool {
     *n == 0
 }
 
@@ -317,9 +327,6 @@ pub struct Tracker {
     /// Log types the last run read and had no room to keep (`TYPES_KEPT`, `SERIES_KEPT`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub types_not_kept: u32,
-    /// Devices the last run read without their log types (`measure::TYPES_PER_RUN`).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub types_unread: u32,
 }
 
 /// A run that read nothing of the cluster.
@@ -661,10 +668,28 @@ impl DeviceState {
         v
     }
 
+    /// Its log types are looked for again: how long they were not is not time without a document.
+    fn types_looked(&mut self, run_ms: i64) {
+        if std::mem::take(&mut self.types_unread) {
+            let gap = run_ms - self.types_run_ms.unwrap_or(run_ms);
+            self.types.iter_mut().for_each(|s| s.unlooked_ms += gap);
+        }
+    }
+
+    /// Seen by a run that did not read its log types, though one before did: it keeps what it was.
+    /// Back from a silence, what it was before that.
+    fn keep_unread(&mut self) {
+        self.types_unread = true;
+        if self.state == State::Silent {
+            self.state = self.recent.iter().rev().map(|p| p.s).find(|s| *s != State::Silent).unwrap_or(State::Unmeasured);
+        }
+    }
+
     /// One run's log types applied: each its own series, one that had no document in the window
     /// "no logs" (unless not all were read). Returns them as the measurement row has them.
     /// `room`: how many more the cluster may keep.
     fn take_types(&mut self, key: &str, types: Vec<TypeReading>, all_read: bool, room: &mut Room, cx: &RunCx, out: &mut Applied) -> Vec<RowType> {
+        self.types_looked(cx.run_ms);
         self.types_since_ms.get_or_insert(cx.run_ms);
         self.types_run_ms = Some(cx.run_ms);
         self.types_truncated = !all_read;
@@ -691,7 +716,7 @@ impl DeviceState {
             if s.home.is_none() && s.last_measured_ms.is_none() {
                 s.home = self.home;
             }
-            s.last_run_ms = cx.run_ms;
+            (s.last_run_ms, s.unlooked_ms) = (cx.run_ms, 0);
             s.docs = t.docs;
             s.last_arrival_ms = t.arrival_ms.or(s.last_arrival_ms);
             if t.event_ms.is_some() {
@@ -726,7 +751,7 @@ impl DeviceState {
     /// Log types not seen for a week are dropped, their open periods ended, unsolved.
     fn forget_types(&mut self, run_ms: i64, all: bool, out: &mut Applied) {
         self.types.retain_mut(|s| {
-            let keep = !all && run_ms - s.last_run_ms < FORGET_MS;
+            let keep = !all && run_ms - s.last_run_ms - s.unlooked_ms < FORGET_MS;
             if !keep {
                 let last = Tracker::last_measured(s);
                 if let Some(mut e) = s.open.take() {
@@ -739,6 +764,13 @@ impl DeviceState {
             keep
         });
     }
+}
+
+/// `Tracker::coverage`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Coverage {
+    last_run_ms: Option<i64>,
+    types_not_kept: u32,
 }
 
 /// How many more log types a cluster may keep, and how many a run had no room for.
@@ -881,7 +913,6 @@ impl Tracker {
             }
         };
         let cx = RunCx { run_ms, levels, offsets: &offsets, named: matches!(zone, LogTimeZone::Named(_)), cluster_offset: &cluster_offset };
-        self.types_unread = 0;
         let mut room = Room { left: SERIES_KEPT.saturating_sub(self.devices.values().map(|d| d.types.len()).sum()), not_kept: 0 };
         for r in readings {
             seen.insert(r.device.clone());
@@ -911,19 +942,23 @@ impl Tracker {
             if let Some(a) = r.arrival_ms {
                 d.last_arrival_ms = Some(a);
             }
+            let unread = r.types.is_none() && r.types_truncated;
+            if unread && d.types_since_ms.is_some() {
+                // Its newest document says nothing of its log types: nothing is solved, opened or
+                // forgotten by it, and nothing was measured.
+                d.keep_unread();
+                continue;
+            }
             if let Some(e) = r.event_ms {
                 d.last_event_ms = Some(e);
                 d.event_field = r.event_field.clone();
             }
             let mut j = d.judge(raw_of(&r), cluster_offset(r.event_ms), &cx);
             let ended = out.type_ended.len();
-            if r.types.is_none() && r.types_truncated {
-                // The run had read as many as it does: what its log types are now is not known.
-                (d.types_truncated, d.types_run_ms, self.types_unread) = (true, Some(run_ms), self.types_unread + 1);
-            }
             let types = r.types.map(|t| d.take_types(&r.device, t, !r.types_truncated, &mut room, &cx, &mut out));
             let typed = types.as_deref().and_then(|t| device_by_types(t, j.state));
             d.by_types = typed.is_some();
+            d.types_unread = unread;
             if let Some((state, at)) = typed {
                 if let Some(t) = at.and_then(|i| types.as_ref()?.get(i)) {
                     j = Judged { raw: t.raw_gap_minutes, minutes: t.delay_minutes, state, applied: t.tz_offset_minutes, zone: t.device_tz_offset, moved: false };
@@ -946,7 +981,7 @@ impl Tracker {
             }
             out.rows.push(Row { device: r.device, docs: r.docs, arrival_ms: d.last_arrival_ms, event_ms: d.last_event_ms, event_field: d.event_field.clone(),
                                 delay_minutes: c.minutes, raw_gap_minutes: d.last_raw_minutes, device_tz_offset: c.zone, tz_offset_minutes: d.applied_offset,
-                                state: d.state, extras: d.extras.clone(), types, by_type: typed.and_then(|(_, at)| at), types_truncated: d.types_truncated });
+                                state: d.state, extras: d.extras.clone(), types, by_type: typed.and_then(|(_, at)| at), types_truncated: d.types_truncated || unread });
         }
         // Devices the run did not see: silent after the limit, forgotten after a week.
         let mut forget = vec![];
@@ -973,6 +1008,7 @@ impl Tracker {
             }
             d.recent.push(Point { t: run_ms, m: None, s: State::Silent });
             d.by_types = false;
+            d.types_looked(run_ms);
             d.quiet_types(run_ms);
             d.forget_types(run_ms, false, &mut out);
             out.rows.push(Row { device: name.clone(), docs: 0, arrival_ms: d.last_arrival_ms, event_ms: d.last_event_ms, event_field: d.event_field.clone(),
@@ -1004,6 +1040,28 @@ impl Tracker {
         self.last_run_ms = Some(run_ms);
         self.silent_after_ms = Some(silent_after_ms);
         out
+    }
+
+    /// Devices whose log types the last run that saw them did not read.
+    pub fn types_unread(&self) -> u64 {
+        self.devices.values().filter(|d| d.types_unread).count() as u64
+    }
+
+    /// What only a run over the whole cluster says of it; taken before the run is applied.
+    pub fn coverage(&self) -> Coverage {
+        Coverage { last_run_ms: self.last_run_ms, types_not_kept: self.types_not_kept }
+    }
+
+    /// How an applied run read the cluster. One device, or the late devices, measured again is not
+    /// the cluster's run: what a run over all of it said stays.
+    pub fn run_read(&mut self, run_ms: i64, read: super::collect::RunInfo, before: Coverage) {
+        if read.is_partial() {
+            self.last_run_ms = before.last_run_ms.or(Some(run_ms));
+            self.types_not_kept = before.types_not_kept;
+        } else {
+            self.last_read = Some(read);
+            self.last_failed = None;
+        }
     }
 
     /// Drop what the built-in store no longer keeps.
@@ -1115,9 +1173,11 @@ pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
         for s in dev.types.iter().filter_map(|s| s.recent.iter().rev().find(|p| p.t >= from && p.t < to)) {
             d.log_types.get_or_insert_default().add(s.s);
         }
-        let Some(last) = in_day.last() else { continue };
+        // Seen that day, and its log types not read: it counts as what it was when they were.
+        let kept = || (dev.types_unread && dev.last_run_ms >= from && dev.last_run_ms < to).then_some(dev.state);
+        let Some(s) = in_day.last().map(|p| p.s).or_else(kept) else { continue };
         d.devices += 1;
-        match last.s {
+        match s {
             State::NoDelay => d.on_time += 1,
             State::Little => d.little += 1,
             State::Delay => d.delayed += 1,
@@ -1128,7 +1188,7 @@ pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
             State::Unmeasured => d.unmeasured += 1,
             State::PartDelay => d.part_delayed += 1,
         }
-        if last.s == State::Silent && dev.open.as_ref().is_some_and(|e| e.started_ms < to) {
+        if s == State::Silent && dev.open.as_ref().is_some_and(|e| e.started_ms < to) {
             d.late_before_silent += 1;
         }
         if let Some(m) = in_day.iter().rev().filter(|p| !p.s.cant_measure()).find_map(|p| p.m) {
@@ -1806,20 +1866,81 @@ mod tests {
         assert_eq!((t.type_episodes.len(), t.type_episodes_cut_ms), (TYPE_EPISODES_KEPT, Some(NOW + 1)));
     }
 
+    /// A reading of `device` past the run's log types: its newest document only, on time.
+    fn past(device: &str, run: i64) -> Reading {
+        Reading { types_truncated: true, types: None, ..rt(device, run, &[("a", Some(1.0))]) }
+    }
+
     #[test]
-    fn a_device_read_past_the_runs_log_types_has_its_own_state_and_it_is_said() {
+    fn log_types_not_read_for_the_limit_solve_nothing_and_the_device_stays_what_it_was() {
+        for (types, state) in [(vec![("a", Some(1.0)), ("b", Some(95.0))], State::PartDelay), (vec![("a", Some(45.0)), ("b", Some(95.0))], State::Critical)] {
+            let mut t = Tracker::default();
+            fw(&mut t, 0, &types);
+            let before = t.devices["fw"].clone();
+            let x = at(&mut t, 1, vec![past("fw", NOW + 2 * H)]);
+            let d = &t.devices["fw"];
+            assert_eq!((before.state, d.state, d.types_unread, t.types_unread()), (state, state, true, 1));
+            assert!(x.solved.is_empty() && x.ended.is_empty() && x.type_solved.is_empty() && x.type_ended.is_empty() && x.rows.is_empty(), "nothing measured, nothing solved");
+            assert_eq!((&d.open, &d.types, &d.recent, d.last_minutes, d.last_measured_ms, d.last_event_ms, d.types_run_ms, d.by_types),
+                       (&before.open, &before.types, &before.recent, before.last_minutes, before.last_measured_ms, before.last_event_ms, before.types_run_ms, true));
+            assert_eq!(d.last_run_ms, NOW + 2 * H, "seen: not silent");
+            let (from, to) = (NOW + H, NOW + 3 * H);
+            let day = daily(&t, "d", from, to, to);
+            assert_eq!((day.devices, day.part_delayed + day.critical, day.on_time, day.measured), (1, 1, 0, 0), "and it counts as what it was");
+            // Read again: as it is.
+            let y = fw(&mut t, 2, &[("a", Some(1.0)), ("b", Some(1.0))]);
+            assert_eq!((t.devices["fw"].state, t.types_unread(), y.type_solved.is_empty()), (State::NoDelay, 0, false));
+        }
+        // Back from a silence, its log types not read: what it was before that, not on time.
+        let mut t = Tracker::default();
+        fw(&mut t, 0, &[("a", Some(45.0)), ("b", Some(95.0))]);
+        at(&mut t, 2, vec![]);
+        assert_eq!(t.devices["fw"].state, State::Silent);
+        at(&mut t, 3, vec![past("fw", NOW + 6 * H)]);
+        assert!(t.devices["fw"].state == State::Critical && t.devices["fw"].open.is_some() && t.devices["fw"].silence.is_none());
+        // Never read by log types: its newest document's state, and it is said.
+        let mut t = Tracker::default();
+        let x = at(&mut t, 0, vec![past("fw", NOW)]);
+        assert_eq!((t.devices["fw"].state, t.types_unread(), x.rows.len(), x.rows[0].types_truncated), (State::NoDelay, 1, 1, true));
+    }
+
+    #[test]
+    fn a_log_type_is_not_forgotten_for_the_time_nobody_looked_for_it() {
+        let day = 12;
         let mut t = Tracker::default();
         fw(&mut t, 0, &[("a", Some(1.0)), ("b", Some(95.0))]);
-        assert_eq!(t.devices["fw"].state, State::PartDelay);
-        let mut r = rt("fw", NOW + 2 * H, &[("a", Some(1.0))]);
-        (r.types, r.types_truncated) = (None, true);
-        let x = at(&mut t, 1, vec![r]);
-        let d = &t.devices["fw"];
-        assert_eq!((d.state, d.by_types, d.types_truncated, t.types_unread), (State::NoDelay, false, true, 1), "its newest document's, as before");
-        assert!(d.types.iter().all(|s| d.type_state(s).is_none()) && d.late_types().is_empty(), "not what they were");
-        assert!(of(&t, "b").open.is_some() && x.type_solved.is_empty() && x.rows[0].types.is_none() && x.rows[0].types_truncated);
-        fw(&mut t, 2, &[("a", Some(1.0)), ("b", Some(1.0))]);
-        assert_eq!((t.types_unread, t.devices["fw"].types_truncated), (0, false));
+        (1..=8 * day).for_each(|i| { at(&mut t, i, vec![past("fw", NOW + i * 2 * H)]); });
+        assert_eq!(t.devices["fw"].types.len(), 2, "eight days, and nobody looked");
+        fw(&mut t, 8 * day + 1, &[("a", Some(1.0))]);
+        assert!(of(&t, "b").state == State::Silent && of(&t, "b").open.is_some());
+        (8 * day + 2..15 * day).for_each(|i| { fw(&mut t, i, &[("a", Some(1.0))]); });
+        assert_eq!(t.devices["fw"].types.len(), 2, "not a week of looking yet");
+        let x: Vec<Applied> = (15 * day..=15 * day + 2).map(|i| fw(&mut t, i, &[("a", Some(1.0))])).collect();
+        assert_eq!((t.devices["fw"].types.len(), x.iter().flat_map(|x| &x.type_ended).count()), (1, 1));
+    }
+
+    #[test]
+    fn a_partial_run_keeps_what_the_clusters_run_said() {
+        let names: Vec<String> = (0..TYPES_KEPT + 1).map(|i| format!("t{i:02}")).collect();
+        let many: Vec<(&str, Option<f64>)> = names.iter().map(|n| (n.as_str(), Some(1.0))).collect();
+        let mut t = Tracker::default();
+        let info = |only: bool| crate::logdelay::collect::RunInfo { only: only.then(|| "late".to_string()), devices: 3, complete: !only, ..Default::default() };
+        let run = |t: &mut Tracker, i: i64, v: Vec<Reading>, only: bool| {
+            let before = t.coverage();
+            t.apply_run(NOW + i * 2 * H, v, &Levels::default(), 24 * H, !only, &LogTimeZone::Utc);
+            t.run_read(NOW + i * 2 * H, info(only), before);
+        };
+        run(&mut t, 0, vec![rt("fw", NOW, &many), rt("x", NOW, &[("a", Some(1.0))]), past("y", NOW), past("z", NOW)], false);
+        assert_eq!((t.types_not_kept, t.types_unread(), t.last_run_ms), (1, 2, Some(NOW)));
+        // One other device measured again: nothing of that changes, the device itself does.
+        run(&mut t, 1, vec![rt("x", NOW + 2 * H, &[("a", Some(95.0))])], true);
+        assert_eq!((t.types_not_kept, t.types_unread(), t.last_run_ms, t.devices["x"].state), (1, 2, Some(NOW), State::Critical));
+        assert!(t.last_read.as_ref().is_some_and(|r| r.complete));
+        // Those two read: no longer unread.
+        run(&mut t, 2, vec![rt("y", NOW + 4 * H, &[("a", Some(1.0))])], true);
+        assert_eq!((t.types_not_kept, t.types_unread()), (1, 1));
+        run(&mut t, 3, vec![rt("fw", NOW + 6 * H, &[("t00", Some(1.0))]), rt("z", NOW + 6 * H, &[("a", Some(1.0))])], false);
+        assert_eq!((t.types_not_kept, t.types_unread()), (0, 0));
     }
 
     #[test]
