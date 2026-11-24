@@ -65,8 +65,10 @@ out('        - name: Templates/Applications');
 out('      items:');
 for (const d of DELAY_ITEMS) {
   item({ id: d.key, name: `Log delay: ${d.label}`, key: `elasticpro.delay[${d.key}]`,
-         type: d.units === 's' ? 'FLOAT' : 'UNSIGNED', units: d.units });
+         type: d.units === 's' ? 'FLOAT' : 'UNSIGNED', units: d.units, description: d.description });
 }
 item({ id: 'worst_device', name: 'Log delay: Worst device', key: 'elasticpro.delay[worst_device]', type: 'TEXT',
        description: 'The device furthest behind at the last measurement.' });
+item({ id: 'worst_log_type', name: 'Log delay: Worst log type', key: 'elasticpro.delay[worst_log_type]', type: 'TEXT',
+       description: 'The log type furthest behind at the last measurement, and its device. Not sent for a cluster whose mapping has no log_type.' });
 process.stdout.write(`${lines.join('\n')}\n`);
