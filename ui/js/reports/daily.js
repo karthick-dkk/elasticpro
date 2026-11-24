@@ -26,7 +26,7 @@ import { toast } from '../ui/menu.js';
 import { fromHistory, historyMarkText, historyLine } from '../core/history-store.js';
 import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
-  NEEDS_VERSION, collectDue, utcDay, monthName,
+  NEEDS_VERSION, collectDue, utcDay, monthName, daysCoverText,
   lastMonths, breakdownPeriods, breakdownLabel, breakdownCsvRows, BREAKDOWN_CSV, shortDay,
   addDays, eventBytesOf, perDayEventBytes, eventVsAvgPct, eventYesterday, eventMonthSoFar, eventPeak,
   monthEventPeak, monthVsPrevious, daysInMonth, dayStatus, breakdownEventShares,
@@ -450,7 +450,7 @@ function dailyCards(reply) {
     statTile('Peak day in period', peak ? bytes(peak.value) : tileValue(null, field),
       peak ? `${shortDay(peak.day)} · ${weekday(peak.day)}` : `last ${SHOWN_DAYS} days`),
     statTile('Month so far', month.days ? tileValue(month.value, field) : dash(),
-      month.days ? `${dayRange(month.from, month.to)}${month.docs !== null ? ` · ${num(month.docs)} docs` : ''}` : 'no finished day this month yet'));
+      month.days ? `${daysCoverText(month.measured, month.days)} measured · ${dayRange(month.from, month.to)}${month.docs !== null ? ` · ${num(month.docs)} docs` : ''}` : 'no finished day this month yet'));
 }
 
 function dailyChart(reply) {
@@ -686,7 +686,7 @@ function monthlyTable(c, rows, settings, peaks) {
     if (key === 'daysWithData') {
       const all = daysInMonth(m.month);
       const short = has && (m.partial || m.daysWithData < all);
-      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days missing from the record' }, `${num(m.daysWithData)} of ${all}`) : num(m.daysWithData || 0);
+      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days missing from the record' }, daysCoverText(m.daysWithData, all)) : num(m.daysWithData || 0);
     }
     if (!has) return dash();
     switch (key) {

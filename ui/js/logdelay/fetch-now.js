@@ -53,6 +53,9 @@ export function fetchNowLeave() {
   if (F.phase === 'starting' || F.phase === 'following') { F.phase = 'idle'; F.message = ''; }
 }
 
+/** The schedule's interval in hours (the window a run reads), null while unknown. */
+export const fetchNowEvery = () => (Number.isFinite(INFO.everyHours) ? INFO.everyHours : null);
+
 /** Whether a Fetch Now is being followed (the page's loading line). */
 export const fetchNowBusy = () => F.phase === 'starting' || F.phase === 'following';
 
@@ -145,8 +148,11 @@ async function loadSchedule(force) {
 /** The scope's words for the tooltip. */
 const scopeWord = (scope) => (scope.device ? 'the named device' : scope.devices === 'all' ? 'Whole cluster' : 'Late devices');
 
+/** How the last run ended is said on the cluster it measured; on another one's control nothing ran. */
+const ranHere = (scope) => !!F.scope && (F.scope.clusterIds || [])[0] === (scope.clusterIds || [])[0];
+
 /** idle | running | done | error, for the wrapper's data-phase. */
-const phaseName = () => (fetchNowBusy() ? 'running' : F.phase === 'done' ? 'done' : F.phase === 'refused' || F.phase === 'ended' ? 'error' : 'idle');
+const phaseName = (scope) => (fetchNowBusy() ? 'running' : !ranHere(scope) ? 'idle' : F.phase === 'done' ? 'done' : F.phase === 'refused' || F.phase === 'ended' ? 'error' : 'idle');
 
 /** Run Fetch now for `scope` from elsewhere (the device board's "Fetch this device"). */
 export function fetchNowPress(scope) {
@@ -181,7 +187,7 @@ function sync() {
   main.setAttribute('aria-label', busy ? text : `Fetch now — ${scope.label}`);
   const msg = F.phase === 'done' ? `Measured ${F.scope ? F.scope.label : ''}: ${runText(F.run)}.` : '';
   if (status.textContent !== msg) status.textContent = msg;
-  live.root.dataset.phase = phaseName();
+  live.root.dataset.phase = phaseName(scope);
   const every = Number.isFinite(INFO.everyHours) ? `every ${INFO.everyHours} h` : 'interval not known yet';
   const nx = Number.isFinite(INFO.nextDueAt) ? INFO.nextDueAt : S.next;
   const next = nx ? whenText(nx) : (S.note || 'not known yet');

@@ -5903,6 +5903,7 @@ impl Core {
             s.state.next_due_at.unwrap_or(now)
         };
         if now < due {
+            self.delay_sink_retry(now).await;
             return;
         }
         // Paused, or its automatic runs off (docs/JOBS.md): the timer does not start it.
@@ -5911,6 +5912,26 @@ impl Core {
         }
         // A run somebody started by hand is still going: this tick leaves it be.
         self.run_delay_sink(crate::jobs::Trigger::Timer, delay_sink::MeasureScope::default()).await;
+    }
+
+    /// The clusters the last scheduled run could not read, once more (`delay_sink::RETRY_AFTER_MS`
+    /// later) instead of at the next interval. Once: what fails again waits for the next run. Only
+    /// while armed, with nothing in the way — the same asks as the run itself.
+    async fn delay_sink_retry(self: &Arc<Self>, now: i64) {
+        let due = self.delay_sink.read().state.retry.as_ref().is_some_and(|r| now >= r.at);
+        if !due || self.jobs.held(crate::jobs::LOGDELAY_MEASURE).is_some() || self.jobs.running(crate::jobs::LOGDELAY_MEASURE).is_some()
+            || self.delay_sink_halt().is_some() {
+            return;
+        }
+        let Some(r) = self.delay_sink.write().state.retry.take() else { return };
+        // Still measured: the config may have changed since.
+        let targets = self.delay_sink_targets(&self.delay_sink.read().config.clone());
+        let ids: Vec<String> = r.ids.into_iter().filter(|id| targets.contains(id)).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let scope = delay_sink::MeasureScope { clusters: Some(ids), retry: true, ..Default::default() };
+        self.run_delay_sink(crate::jobs::Trigger::Timer, scope).await;
     }
 
     /// What to show an admin as standing in the way, if anything.
@@ -5951,7 +5972,7 @@ impl Core {
         let until = self.delay_sink.read().state.pacing_until.filter(|u| *u > now);
         if let (Some(u), Some(m)) = (until, v["message"].as_str().map(String::from)) {
             let min = (u - now + 59_999) / 60_000;
-            v["message"] = json!(format!("{m} — the scheduled run is measuring its clusters one after another; its last one starts in about {min} min"));
+            v["message"] = json!(format!("{m} — the scheduled run is measuring its clusters, a few at a time; its last one starts in about {min} min"));
             v["pacingUntil"] = json!(u);
         }
         v
@@ -6126,7 +6147,11 @@ impl Core {
         let mut write_failed = 0usize;
         // Every cluster the run could not read or write, named in the log and the answer.
         let mut failed_ids: Vec<String> = vec![];
-        let mut first_error: Option<SinkNote> = None;
+        // Of those, the ones that could not be read (whole or in part): read once more, soon.
+        let mut retry: Vec<String> = vec![];
+        // Every failure, with its cluster's place: the reads end in any order, the answer names the
+        // first by the targets' order.
+        let mut errors: Vec<(usize, SinkNote)> = vec![];
         let mut opened = 0usize;
         let mut solved = 0usize;
         let mut truncated: Vec<String> = vec![];
@@ -6162,93 +6187,158 @@ impl Core {
             r.window(from_ms, to_ms);
         }
 
-        for (done, id) in targets.iter().enumerate() {
-            // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
-            if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
+        // Clusters are read together, up to the job's own request limit (its governor lane, 4 unless
+        // an admin set it otherwise): one that is slow, or down, holds up no other. What was read is
+        // applied and written here, one cluster at a time, as each read ends — nothing to race.
+        // Every cluster reads the same window, fixed above.
+        use tracing::Instrument as _;
+        let lane = crate::jobs::governor::current();
+        let read_so_far = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut reading: tokio::task::JoinSet<(delay_sink::ClusterRead, crate::logdelay::collect::Collected)> = tokio::task::JoinSet::new();
+        // Which cluster a task reads, for one that dies without an answer.
+        let mut reading_ids: std::collections::HashMap<tokio::task::Id, (String, u64)> = std::collections::HashMap::new();
+        let (mut next, mut done, mut stopped, mut one_expected) = (0usize, 0usize, false, 0u64);
+        loop {
+            // Start what may start.
+            while !stopped && next < targets.len() && reading.len() < delay_sink::clusters_at_once(lane.as_ref().map(|l| l.limit())) {
+                // A person's JOB_CANCEL: no further cluster (and the reads stop between pages).
+                if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
+                    stopped = true;
+                    break;
+                }
+                let id = &targets[next];
+                // Switched off for this cluster (Edit cluster › Collection): never asked — a skipped
+                // part, not a failure. The interval stays the run's.
+                if !self.collection_for(id).on(crate::collection::Switch::LogDelay) {
+                    ld_part(run, id, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &crate::collection::off_text(crate::collection::Switch::LogDelay))));
+                    (next, done) = (next + 1, done + 1);
+                    if let Some(r) = run {
+                        if !one_cluster {
+                            r.progress(done as u64, targets.len() as u64);
+                        }
+                    }
+                    continue;
+                }
+                if paced {
+                    // Asked before every cluster, and while it waits for its place: the run was
+                    // decided up to ten minutes ago, and an admin's disarm, the emergency stop or a
+                    // new refusal ends it here, like a cancel. The clusters it did not reach are
+                    // skipped, not failed.
+                    if let Some(why) = self.delay_sink_halt() {
+                        for left in &targets[next..] {
+                            ld_part(run, left, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &why)));
+                        }
+                        halted = Some((why, targets.len() - next));
+                        stopped = true;
+                        break;
+                    }
+                    if begun.elapsed() < std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms)) {
+                        break;
+                    }
+                }
+                next += 1;
+                let fields = self.logdelay_fields(id, &settings).await;
+                // This cluster's part of the run's details (docs/JOBS.md "Run details").
+                let part_at = crate::fleet::now_ms();
+                // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
+                // stored at this moment (late = delay or critical by the cluster's own levels, on the
+                // corrected delay — levels.rs is the one definition), or every one.
+                let (filter, expected) = match (&scope.device, scope.devices) {
+                    (Some(d), _) => (crate::logdelay::measure::DeviceFilter::One(d.clone()), Some(1u64)),
+                    (None, delay_sink::Devices::Late) if !full => {
+                        let t = self.logdelay_store().map(|st| st.read_tracker(id));
+                        let known = t.as_ref().map(|t| t.devices.len()).unwrap_or(0);
+                        let late: Vec<String> = t.as_ref().map(|t| t.devices.iter()
+                            .filter(|(_, d)| d.state.late())
+                            .map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                        if late.is_empty() {
+                            scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
+                                                       Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
+                            if let Some(r) = run { r.progress(0, 0); }
+                            ld_part(run, id, part_at, 0, None);
+                            done += 1;
+                            continue;
+                        }
+                        if late.len() > LATE_FILTER_MAX {
+                            // More late devices than one query's terms filter should carry: the whole cluster.
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
+                            (crate::logdelay::measure::DeviceFilter::All, Some(known as u64))
+                        } else {
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start)", self.cluster_name(id), late.len()));
+                            let n = late.len() as u64;
+                            (crate::logdelay::measure::DeviceFilter::Some(late), Some(n))
+                        }
+                    }
+                    (None, _) => {
+                        if !full {
+                            scope_note = Some(format!("fetch now: {}, whole cluster", self.cluster_name(id)));
+                        }
+                        (crate::logdelay::measure::DeviceFilter::All, (!full).then(|| self.logdelay_store().map(|st| st.read_tracker(id).devices.len() as u64).unwrap_or(0)))
+                    }
+                };
+                one_expected = expected.unwrap_or(0);
+                if let (Some(r), Some(total), true) = (run, expected, one_cluster) {
+                    r.progress(0, total);
+                }
+                let (core, total) = (self.clone(), read_so_far.clone());
+                let cluster = delay_sink::ClusterRead { id: id.clone(), part_at, filter };
+                let of = cluster.id.clone();
+                let task = reading.spawn(crate::jobs::governor::within(lane.clone(), async move {
+                    let mut seen = 0usize;
+                    let got = core.logdelay_collect(&cluster.id, &fields, from_ms, to_ms, max_devices, &cluster.filter, |n| {
+                        total.fetch_add(n.saturating_sub(seen) as u64, std::sync::atomic::Ordering::Relaxed);
+                        seen = n;
+                    }).await;
+                    (cluster, got)
+                }).instrument(tracing::Span::current()));
+                reading_ids.insert(task.id(), (of, part_at));
+            }
+            if reading.is_empty() && (stopped || next >= targets.len()) {
                 break;
             }
-            // Switched off for this cluster (Edit cluster › Collection): never asked — a skipped
-            // part, not a failure. The interval stays the run's.
-            if !self.collection_for(id).on(crate::collection::Switch::LogDelay) {
-                ld_part(run, id, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &crate::collection::off_text(crate::collection::Switch::LogDelay))));
-                if let Some(r) = run {
-                    if !one_cluster {
-                        r.progress(done as u64 + 1, targets.len() as u64);
-                    }
+            // One read ended, or a moment passed: then look again (a cluster's place has come, a
+            // cancel, the stop) and say how far the reads are.
+            let tick = tokio::time::sleep(std::time::Duration::from_millis(250));
+            let joined = tokio::select! {
+                j = reading.join_next_with_id(), if !reading.is_empty() => j,
+                _ = tick => None,
+            };
+            if let Some(r) = run {
+                let n = read_so_far.load(std::sync::atomic::Ordering::Relaxed);
+                if n > 0 {
+                    r.records(n);
                 }
-                continue;
-            }
-            if paced {
-                let place = std::time::Duration::from_millis(crate::jobs::spread::offset_ms(&members, id, spread_ms));
-                // A second at a time, so a cancel, the emergency stop or a disarm is heard while it waits.
-                while begun.elapsed() < place && self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_none() && self.delay_sink_halt().is_none() {
-                    tokio::time::sleep(place.saturating_sub(begun.elapsed()).min(std::time::Duration::from_secs(1))).await;
-                }
-                if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
-                    break;
-                }
-                // Asked again before every cluster: the run was decided up to ten minutes ago, and
-                // an admin's disarm, the emergency stop or a new refusal ends it here, like a
-                // cancel. The clusters it did not reach are skipped, not failed.
-                if let Some(why) = self.delay_sink_halt() {
-                    for left in &targets[done..] {
-                        ld_part(run, left, crate::fleet::now_ms(), 0, Some((PartStatus::Skipped, &why)));
-                    }
-                    halted = Some((why, targets.len() - done));
-                    break;
+                if one_cluster && n > 0 {
+                    // Devices read so far, of the number set out for (or of themselves, past it).
+                    r.progress(n, one_expected.max(n));
                 }
             }
-            let fields = self.logdelay_fields(id, &settings).await;
-            let before = read_total;
-            // This cluster's part of the run's details (docs/JOBS.md "Run details").
-            let part_at = crate::fleet::now_ms();
-            // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
-            // stored at this moment (late = delay or critical by the cluster's own levels, on the
-            // corrected delay — levels.rs is the one definition), or every one.
-            let (filter, expected) = match (&scope.device, scope.devices) {
-                (Some(d), _) => (crate::logdelay::measure::DeviceFilter::One(d.clone()), Some(1u64)),
-                (None, delay_sink::Devices::Late) if !full => {
-                    let t = self.logdelay_store().map(|st| st.read_tracker(id));
-                    let known = t.as_ref().map(|t| t.devices.len()).unwrap_or(0);
-                    let late: Vec<String> = t.as_ref().map(|t| t.devices.iter()
-                        .filter(|(_, d)| d.state.late())
-                        .map(|(n, _)| n.clone()).collect()).unwrap_or_default();
-                    if late.is_empty() {
-                        scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
-                                                   Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
-                        if let Some(r) = run { r.progress(0, 0); }
-                        ld_part(run, id, part_at, 0, None);
-                        continue;
-                    }
-                    if late.len() > LATE_FILTER_MAX {
-                        // More late devices than one query's terms filter should carry: the whole cluster.
-                        scope_note = Some(format!("fetch now: {}, late devices ({} of {known}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
-                        (crate::logdelay::measure::DeviceFilter::All, Some(known as u64))
-                    } else {
-                        scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start)", self.cluster_name(id), late.len()));
-                        let n = late.len() as u64;
-                        (crate::logdelay::measure::DeviceFilter::Some(late), Some(n))
-                    }
+            let (cluster, got) = match joined {
+                None => continue,
+                Some(Ok((task, x))) => {
+                    reading_ids.remove(&task);
+                    x
                 }
-                (None, _) => {
-                    if !full {
-                        scope_note = Some(format!("fetch now: {}, whole cluster", self.cluster_name(id)));
-                    }
-                    (crate::logdelay::measure::DeviceFilter::All, (!full).then(|| self.logdelay_store().map(|st| st.read_tracker(id).devices.len() as u64).unwrap_or(0)))
+                Some(Err(e)) => {
+                    // The read died (a bug, never an answer): that cluster failed, the rest go on.
+                    let Some((id, at)) = reading_ids.remove(&e.id()) else { continue };
+                    let cluster = delay_sink::ClusterRead { id, part_at: at, filter: crate::logdelay::measure::DeviceFilter::All };
+                    let error = Some("the read ended unexpectedly: see the core's log".to_string());
+                    (cluster, crate::logdelay::collect::Collected { error, ..Default::default() })
                 }
             };
-            if let (Some(r), Some(total), true) = (run, expected, one_cluster) {
-                r.progress(0, total);
-            }
-            let got = self.logdelay_collect(id, &fields, from_ms, to_ms, max_devices, &filter, |n| {
-                if let Some(r) = run {
-                    r.records(before + n as u64);
-                    if one_cluster {
-                        // Devices read so far, of the number set out for (or of themselves, past it).
-                        r.progress(n as u64, expected.unwrap_or(0).max(n as u64));
-                    }
+            done += 1;
+            let delay_sink::ClusterRead { id, part_at, filter } = &cluster;
+            let part_at = *part_at;
+            let place = targets.iter().position(|t| t == id).unwrap_or(usize::MAX);
+            // Read before a disarm or the stop, not yet kept: not written after it.
+            if paced {
+                if let Some(why) = self.delay_sink_halt() {
+                    ld_part(run, id, part_at, 0, Some((PartStatus::Skipped, &why)));
+                    halted = Some(match halted.take() { Some((w, n)) => (w, n + 1), None => (why, 1) });
+                    continue;
                 }
-            }).await;
+            }
             pages += got.pages;
             read_total += got.readings.len() as u64;
             let n_read = got.readings.len() as u64;
@@ -6259,27 +6349,29 @@ impl Core {
                     let n = got.readings.len() as u64;
                     r.progress(n, n);
                 } else {
-                    r.progress(done as u64 + 1, targets.len() as u64);
+                    r.progress(done as u64, targets.len() as u64);
                 }
             }
             if got.readings.is_empty() && got.error.is_some() {
                 failed += 1;
                 failed_ids.push(id.clone());
-                first_error.get_or_insert_with(|| SinkNote::read(id, got.error.clone().unwrap_or_default()));
+                retry.push(id.clone());
+                errors.push((place, SinkNote::read(id, got.error.clone().unwrap_or_default())));
                 ld_part(run, id, part_at, 0, Some((PartStatus::Failed, got.error.as_deref().unwrap_or(""))));
                 continue;
             }
             if got.truncated {
                 truncated.push(id.clone());
             }
-            let read = got.info(now, from_ms, to_ms, max_devices, &filter);
+            let read = got.info(now, from_ms, to_ms, max_devices, filter);
             // Part of the list read: the cluster's part is partial, whatever is written.
             let partly = got.error.clone();
             if let Some(e) = &got.error {
                 // Part of the list read: kept, nobody it did not read turned silent; the run says so.
                 failed += 1;
                 failed_ids.push(id.clone());
-                first_error.get_or_insert_with(|| SinkNote::read(id, e.clone()));
+                retry.push(id.clone());
+                errors.push((place, SinkNote::read(id, e.clone())));
             }
             let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
             let zone = self.log_time_zone_for(id);
@@ -6294,7 +6386,7 @@ impl Core {
                     failed_ids.push(id.clone());
                     let why = format!("the built-in store could not be written: {e}");
                     ld_part(run, id, part_at, n_read, Some((PartStatus::Failed, &why)));
-                    first_error.get_or_insert(SinkNote::write(Some(id), None, why));
+                    errors.push((place, SinkNote::write(Some(id), None, why)));
                     continue;
                 }
             };
@@ -6327,7 +6419,7 @@ impl Core {
                     // Into the sink cluster (as named for this run), or the history store.
                     let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
                     ld_part(run, id, part_at, n_read, Some((PartStatus::Failed, &format!("writing the measurements failed: {e}"))));
-                    first_error.get_or_insert(SinkNote::write(Some(id), sink, e));
+                    errors.push((place, SinkNote::write(Some(id), sink, e)));
                     break;
                 }
             }
@@ -6336,6 +6428,11 @@ impl Core {
                 done_part(applied.rows.len() as u64);
             }
         }
+        let at = |id: &String| targets.iter().position(|t| t == id);
+        failed_ids.sort_by_key(at);
+        retry.sort_by_key(at);
+        truncated.sort_by_key(at);
+        let first_error = errors.into_iter().min_by_key(|(p, _)| *p).map(|(_, n)| n);
         if paced {
             self.delay_sink.write().state.pacing_until = None;
         }
@@ -6359,6 +6456,20 @@ impl Core {
                 if delay_sink::backs_off(measured, failed, write_failed) { s.state.consecutive_failures + 1 } else { 0 };
             s.state.next_due_at =
                 Some(delay_sink::next_due(now, cfg.every_hours, s.state.consecutive_failures));
+            // What could not be read is read once more, soon (the timer's run only; not one a
+            // person cancelled, or the stop ended).
+            let cancelled = self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some();
+            s.state.retry = delay_sink::retry_soon(paced && !cancelled && halted.is_none(), &retry, delay_sink::now_ms());
+        } else if scope.retry {
+            // The second try: what it read is no longer failed. It never schedules a third.
+            let mut s = self.delay_sink.write();
+            s.state.last_failed = failed;
+            s.state.last_ok = ok;
+            s.state.last_error = first_error.clone();
+            if measured > 0 && s.state.consecutive_failures > 0 && write_failed == 0 {
+                s.state.consecutive_failures = 0;
+                s.state.next_due_at = Some(delay_sink::next_due(s.state.last_run_at.unwrap_or(now), cfg.every_hours, 0));
+            }
         }
         tracing::info!(
             target: "audit",
@@ -6371,6 +6482,7 @@ impl Core {
         let mut notes: Vec<String> = vec![];
         if !full {
             notes.push(match scope_note {
+                _ if scope.retry => format!("second try of {} cluster(s) the scheduled run could not read", targets.len()),
                 Some(n) if scope.device.is_none() => n,
                 _ => format!("fetch now: {}{}", targets.first().map(|id| self.cluster_name(id)).unwrap_or_else(|| format!("{} cluster(s)", targets.len())),
                              scope.device.as_ref().map(|d| format!(", device {d}")).unwrap_or_default()),
@@ -6502,6 +6614,8 @@ impl Core {
         s.config = cfg;
         s.state.next_due_at = armed.then(|| delay_sink::next_due(now, every, 0));
         s.state.consecutive_failures = 0;
+        // A second try belongs to the schedule that asked for it.
+        s.state.retry = None;
         // A skip reason was about the config it was decided under; this one is new.
         s.state.last_skipped = None;
         Ok(())

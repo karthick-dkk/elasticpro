@@ -52,6 +52,7 @@ import {
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
 import { fetchNowPress } from './fetch-now.js';
+import { measureAgainButton } from './measure-again.js';
 import { summaryCards } from './summary.js';
 import { normaliseRange, rangeBounds, rangeWords, zonedParts, zonedText, BOARD_RANGES } from '../core/log-range.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
@@ -417,17 +418,24 @@ function clusterFixItems(c) {
  * Devices tab on that filter. A figure the core did not give reads "—", never 0; can't-measure
  * devices are said under Silent (they have no figure either).
  */
-function tiles(t, b, scopeId, keyPrefix) {
-  const tile = (k, filter, label, value, colour, detail) => h('button.ld-kpi.ld-kpi-btn', {
-    type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
-    onclick: () => openDevicesOn(filter, scopeId),
-  }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail));
+function tiles(t, b, scopeId, keyPrefix, unmeasured = false) {
+  if (unmeasured) { t = {}; }
+  const cnt = (v) => (unmeasured ? '—' : countText(v));
+  const note = (d) => (unmeasured ? 'not measured yet' : d);
+  // Not measured: a plain tile (no Devices link: nothing to list) carrying the ↻ Measure again button.
+  const tile = (k, filter, label, value, colour, detail) => (unmeasured
+    ? h('div.ld-kpi', { dataset: { kpi: k } }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail),
+      measureAgainButton({ clusterIds: [scopeId], devices: 'all', label: nameOf(scopeId) }, { zone: S.zone }))
+    : h('button.ld-kpi.ld-kpi-btn', {
+      type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
+      onclick: () => openDevicesOn(filter, scopeId),
+    }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail)));
   return h(`div.ld-kpis.ld-5#${keyPrefix}-tiles`,
-    tile('below', 'ok', b.below, countText(t.onTime), C.ok, 'devices under the delay line'),
-    tile('delay', 'delay', b.mid, countText(t.delay), C.delay, 'delay'),
-    tile('critical', 'critical', b.high, countText(t.critical), C.crit, 'critical'),
-    tile('tz', 'tz', 'Other time zone', countText(t.otherTz), C.tz, 'not counted as late'),
-    tile('silent', 'silent', 'Silent', countText(t.silent), C.silent, finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
+    tile('below', 'ok', b.below, cnt(t.onTime), C.ok, note('devices under the delay line')),
+    tile('delay', 'delay', b.mid, cnt(t.delay), C.delay, note('delay')),
+    tile('critical', 'critical', b.high, cnt(t.critical), C.crit, note('critical')),
+    tile('tz', 'tz', 'Other time zone', cnt(t.otherTz), C.tz, note('not counted as late')),
+    tile('silent', 'silent', 'Silent', cnt(t.silent), C.silent, unmeasured ? 'not measured yet' : finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
 }
 
 /* ------------------------------------ charts ------------------------------------ */
@@ -507,7 +515,7 @@ function lateGrid(res, b) {
   const tr = (r) => {
     const kids = [h('th.ld-g-nm', { scope: 'row' }, link(clusterHref(r.id), r.name, { title: `${r.name} · log delay details` }))];
     if (r.never) {
-      kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED)));
+      kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED), ' ', measureAgainButton({ clusterIds: [r.id], devices: 'all', label: r.name }, { zone: S.zone })));
       return h('tr', { dataset: { cluster: r.id } }, ...kids);
     }
     // Late now is the last measurement; before today's first run that is yesterday's last, said so.
@@ -726,7 +734,8 @@ function fleetView() {
           : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
-        neverRun ? h('td', { colspan: anyZone ? 9 : 8 }, h('span.muted', LD_NEVER_MEASURED))
+        neverRun ? h('td', { colspan: anyZone ? 9 : 8 }, h('span.muted', LD_NEVER_MEASURED), ' ',
+          measureAgainButton({ clusterIds: [c.id], devices: 'all', label: c.name || nameOf(c.id) }, { zone: S.zone }))
           : [h('td', stateBar(c, cb)),
             // Late now and its share in one cell: "12 · 3 %".
             h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now · their share of the cluster's devices` },
@@ -824,12 +833,12 @@ function clusterView(id) {
   const rid = objId(res);
   const t = res.totals || {};
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
-  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl'));
+  const never = res.lastRunAt === null || res.lastRunAt === undefined;
+  const lr = res.lastRead || (res.counts && res.counts.lastRead);
+  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl', never || (!lr && !(t.devices > 0))));
   const tzFilterNote = B.get('cl:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices. The tiles and the table count these devices; the charts are the core’s day totals for every zone.`)
     : null));
-  const never = res.lastRunAt === null || res.lastRunAt === undefined;
-  const lr = res.lastRead || (res.counts && res.counts.lastRead);
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
   const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
     h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
@@ -862,7 +871,7 @@ function clusterView(id) {
   const cdShowAll = () => { S.cdSet = 'all'; S.cdAll = false; repaint(); };
   const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${S.cdSet}|${S.tz}|${sortSig(sorts.clusterDevices)}`, () => [
     deviceTable({ id: 'ld-cluster-devices', sort: sorts.clusterDevices, rows: shown.map((r) => ({ ...r, cluster: r.cluster || id })), keys, extra: xc,
-      labels: { arrival, event }, ctx: { now: res.now },
+      labels: { arrival, event }, ctx: { now: res.now, zone: S.zone },
       emptyText: S.cdSet === 'delayed' ? delayedEmpty(cdLate > 0, !!S.cdFilter, cdShowAll) : S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
     footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `${event} (event time)`].join(', ')} · delay = ${arrival} − ${event}`
       + (res.timeZone && res.timeZone.mode !== 'none' ? ` − time zone (${res.timeZone.offset || offsetLabel(res.timeZone.offsetMinutes)})` : '')
@@ -968,7 +977,7 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
   const keys = narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS;
   const narrowed = !!(S.devFilter || S.devState !== 'all' || S.devZone || S.devTag);
   const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.devSet}|${S.tz}|${sortSig(sorts.devices)}|${narrow}|${pinned ? openDevice : ''}`, () => [
-    deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys, ctx: { now: res.now },
+    deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys, ctx: { now: res.now, zone: S.zone },
       emptyText: S.devSet === 'delayed' ? delayedEmpty(counts.late > 0, narrowed, devShowAll)
         : narrowed ? 'No device matches. Clear the search or pick another level.' : 'No device measured in this period.' }),
     pinned ? h('div.muted.ld-note#ld-dev-pinned', `${pinned.device} is listed because it is open; it is not delayed. The list holds the delayed devices only.`) : null,

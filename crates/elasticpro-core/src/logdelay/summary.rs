@@ -153,7 +153,7 @@ pub struct DeviceRow {
     /// device's own for one in another time zone. `None` = nothing taken out (no zone).
     pub raw_gap_minutes: Option<f64>,
     pub tz_offset_minutes: Option<i32>,
-    /// The real UTC offset the device's gap sits at, if it sits at one.
+    /// The device's own zone from its gap, if it sits at one (−330 on a UTC cluster: +05:30).
     pub device_tz_offset: Option<i32>,
     /// The cluster's offset now (set or detected); `None` = the cluster has no zone.
     pub cluster_tz_offset: Option<i32>,

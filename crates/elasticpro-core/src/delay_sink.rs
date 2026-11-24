@@ -215,6 +215,8 @@ pub struct MeasureScope {
     pub device: Option<String>,
     /// Which of the cluster's devices: its late ones (the default for a person's run) or all.
     pub devices: Devices,
+    /// The timer's second try of the clusters its run could not read (`RETRY_AFTER_MS`).
+    pub retry: bool,
 }
 
 /// Which devices a person's *Fetch now* measures again (docs/LOGDELAY.md "Fetch now").
@@ -273,7 +275,7 @@ impl MeasureScope {
             Some(Value::String(s)) if s.eq_ignore_ascii_case("all") => Devices::All,
             Some(_) => return Err("devices: late (the devices delayed or critical at the run's start — the default) or all (the whole cluster)".into()),
         };
-        Ok(MeasureScope { clusters, device, devices })
+        Ok(MeasureScope { clusters, device, devices, retry: false })
     }
 
     pub fn to_json(&self) -> Value {
@@ -354,6 +356,8 @@ pub struct SinkState {
     /// While the timer's run spreads its clusters (`jobs::spread`): when its last cluster may
     /// start, epoch ms — what a person refused as "already running" is told. Never stored.
     pub pacing_until: Option<i64>,
+    /// What the last scheduled run could not read, to be read once more. Never stored, never answered.
+    pub retry: Option<RetrySoon>,
 }
 
 /// What one caller may read of the scheduled measurement: the one place its notes, state and
@@ -405,6 +409,45 @@ pub fn next_due(now_ms: i64, every_hours: u64, consecutive_failures: u32) -> i64
     let base = (every_hours.clamp(1, 24) as i64) * 3_600_000;
     let factor = 1i64 << consecutive_failures.min(4); // 1, 2, 4, 8, 16
     now_ms + (base * factor).min(24 * 3_600_000)
+}
+
+/// How long after a scheduled run the clusters it could not read are read once more: a cluster
+/// that restarted, or a tunnel that dropped, is measured again now and not an interval later.
+pub const RETRY_AFTER_MS: i64 = 5 * 60_000;
+
+/// One cluster's read may take this long; what was read by then is kept, the rest not measured
+/// this run. With the spread (at most 10 min) a run still ends inside the shortest interval.
+pub const CLUSTER_READ_MAX: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// The clusters read at the same time when the job has no lane of its own.
+pub const CLUSTERS_AT_ONCE: usize = 4;
+
+/// How many clusters a run reads at the same time: its governor lane's limit (docs/JOBS.md
+/// "Governor"), never none.
+pub fn clusters_at_once(lane_limit: Option<u32>) -> usize {
+    lane_limit.map_or(CLUSTERS_AT_ONCE, |n| n as usize).max(1)
+}
+
+/// The clusters to read once more, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetrySoon {
+    pub at: i64,
+    pub ids: Vec<String>,
+}
+
+/// The second try a run asks for: of `ids`, when `may` (the timer's own run, not cancelled, not
+/// ended by the stop) and something could not be read.
+pub fn retry_soon(may: bool, ids: &[String], now_ms: i64) -> Option<RetrySoon> {
+    (may && !ids.is_empty()).then(|| RetrySoon { at: now_ms + RETRY_AFTER_MS, ids: ids.to_vec() })
+}
+
+/// One cluster's read on its way: what `measure_delay_sink` needs when it ends.
+#[derive(Clone, Debug)]
+pub struct ClusterRead {
+    pub id: String,
+    /// When its part of the run began (docs/JOBS.md "Run details").
+    pub part_at: u64,
+    pub filter: crate::logdelay::measure::DeviceFilter,
 }
 
 /// Whether a scheduled run counts as failed for the back-off: it wrote nothing it read (the
@@ -729,6 +772,21 @@ mod tests {
         assert!(backs_off(16_000, 1, 1), "a write that failed backs off: the sink may be down");
         assert!(backs_off(0, 3, 0), "nothing read at all: back off");
         assert!(!backs_off(0, 0, 0), "nothing to measure and nothing failed is not a failure");
+    }
+
+    #[test]
+    fn what_could_not_be_read_is_read_once_more_and_only_by_the_schedule() {
+        let ids = vec!["b".to_string()];
+        assert_eq!(retry_soon(true, &ids, 1_000), Some(RetrySoon { at: 1_000 + RETRY_AFTER_MS, ids: ids.clone() }));
+        assert_eq!(retry_soon(false, &ids, 1_000), None, "cancelled, stopped, or not the timer's run");
+        assert_eq!(retry_soon(true, &[], 1_000), None, "nothing failed");
+    }
+
+    #[test]
+    fn a_run_reads_as_many_clusters_at_once_as_its_lane_allows() {
+        assert_eq!(clusters_at_once(None), CLUSTERS_AT_ONCE);
+        assert_eq!(clusters_at_once(Some(2)), 2);
+        assert_eq!(clusters_at_once(Some(0)), 1, "never none: the run would not end");
     }
 
     #[test]

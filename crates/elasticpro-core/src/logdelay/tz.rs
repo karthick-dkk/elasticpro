@@ -168,6 +168,47 @@ impl Offsets {
     }
 }
 
+/// The zone a device's raw gap puts it in, against the cluster's offset: `zone` is the device's
+/// own offset as the pages write it, `gap` the figure in the gap that is taken out for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceZone {
+    pub zone: i32,
+    pub gap: i32,
+}
+
+impl DeviceZone {
+    fn at(o: i32) -> DeviceZone {
+        DeviceZone { zone: o, gap: o }
+    }
+}
+
+impl Offsets {
+    /// A device's zone from its raw gap, `cluster` the cluster's offset (`None`: no zone, the gap
+    /// is only matched as it is). Two ways a device sits in another zone:
+    ///
+    /// * its gap sits at a real offset `o` (the cluster's own way: arrival stamped in `o`) —
+    ///   zone `o`, gap `o`; at the cluster's offset it is the cluster's zone;
+    /// * its event runs **ahead** of the cluster's offset (gap under it): the device writes its
+    ///   local time as UTC, east of the cluster, so `cluster − gap` is its offset — an India device
+    ///   on a UTC cluster has a gap of −330 and is at +05:30 (zone 330, gap −330). Only for a
+    ///   real offset other than UTC and the cluster's (those would say "same zone"); otherwise
+    ///   the gap is matched as it is, as before. A gap under the cluster's offset that matches
+    ///   neither (−400 on UTC) is a clock ahead.
+    pub fn device_zone(&self, raw_minutes: f64, cluster: Option<i32>, tolerance: f64) -> Option<DeviceZone> {
+        let direct = self.matching(raw_minutes, tolerance);
+        let Some(co) = cluster else { return direct.map(DeviceZone::at) };
+        if direct == Some(co) {
+            return Some(DeviceZone::at(co));
+        }
+        if raw_minutes < co as f64 {
+            if let Some(z) = self.matching(co as f64 - raw_minutes, tolerance).filter(|z| *z != 0 && *z != co) {
+                return Some(DeviceZone { zone: z, gap: co - z });
+            }
+        }
+        direct.map(DeviceZone::at)
+    }
+}
+
 /// Whether a gap sits at a real UTC offset (other than UTC itself): the "time-zone shaped"
 /// test the delay periods and the fixes read (`Episode::whole_hour`), at the run's own time.
 pub fn offset_like(raw_minutes: f64, run_ms: i64) -> bool {
@@ -359,6 +400,20 @@ mod tests {
         assert_eq!(o.matching(f64::NAN, TOLERANCE_MINUTES), None);
         assert!(offset_like(330.0, NOV) && offset_like(60.0, NOV) && offset_like(-210.0, NOV));
         assert!(!offset_like(0.5, NOV) && !offset_like(45.0, NOV) && !offset_like(100.0, NOV));
+        // A device east of the cluster writing its local time as UTC: its event runs ahead.
+        assert_eq!(o.device_zone(-330.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -330 }), "India on a UTC cluster");
+        assert_eq!(o.device_zone(-327.22, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -330 }), "India, its log 2.8 min on the way");
+        assert_eq!(o.device_zone(-326.66, Some(0), TOLERANCE_MINUTES), None, "past the tolerance, east as west");
+        assert_eq!(o.device_zone(-345.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 345, gap: -345 }), "Nepal");
+        assert_eq!(o.device_zone(-480.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 480, gap: -480 }), "Singapore, named east not west");
+        assert_eq!(o.device_zone(-270.0, Some(60), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -270 }), "India on a +01:00 cluster");
+        assert_eq!(o.device_zone(-400.0, Some(0), TOLERANCE_MINUTES), None, "no zone: a clock ahead");
+        assert_eq!(o.device_zone(-1.5, Some(0), TOLERANCE_MINUTES), Some(DeviceZone::at(0)), "on time");
+        assert_eq!(o.device_zone(329.0, Some(330), TOLERANCE_MINUTES), Some(DeviceZone::at(330)), "on time on an IST cluster");
+        assert_eq!(o.device_zone(480.0, Some(330), TOLERANCE_MINUTES), Some(DeviceZone::at(480)), "a gap over the cluster's: as it is");
+        assert_eq!(o.device_zone(60.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone::at(60)), "a positive whole hour: as it is");
+        assert_eq!(o.device_zone(0.0, Some(330), TOLERANCE_MINUTES), Some(DeviceZone::at(0)), "never named the cluster's own zone");
+        assert_eq!(o.device_zone(-330.0, None, TOLERANCE_MINUTES), None, "no cluster zone: matched as it is");
         assert_eq!(offset_text(330), "+05:30");
         assert_eq!(offset_text(-210), "−03:30");
         assert_eq!(offset_text(0), "+00:00");

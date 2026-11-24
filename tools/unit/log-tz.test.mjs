@@ -115,6 +115,7 @@ test('the texts: chip, column, device time zone, the delay sum', () => {
   const same = { state: 'delay', nowMinutes: 42, rawGapMinutes: 372, tzOffsetMinutes: 330, deviceTzOffset: null, clusterTzOffset: 330, lastArrival: NOV, lastEvent: NOV - 372 * 60000 };
   assert.equal(tz.deviceZoneText(same), 'same as cluster');
   assert.equal(tz.deviceZoneText({ state: 'other_tz', nowMinutes: 1, tzOffsetMinutes: 480, deviceTzOffset: 480, clusterTzOffset: 330 }), '+08:00');
+  assert.equal(tz.deviceZoneText({ state: 'other_tz', nowMinutes: 3.3, tzOffsetMinutes: -330, deviceTzOffset: 330, clusterTzOffset: 0 }), '+05:30', 'an India device on a UTC cluster: its zone, not the gap taken out');
   assert.equal(tz.deviceZoneText({ state: 'no_delay', nowMinutes: 2, clusterTzOffset: null }), '—', 'no cluster zone: nothing to compare against');
   assert.equal(tz.deviceZoneText({ state: 'silent', nowMinutes: null, clusterTzOffset: 330 }), '—');
   assert.equal(tz.deviceZoneText({ state: 'critical', nowMinutes: 151, live: true, deviceTzOffset: 480, clusterTzOffset: 330 }), 'looks like +08:00', 'a live row cannot know it is steady');

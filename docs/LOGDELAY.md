@@ -95,7 +95,11 @@ offset, not a queue" matched whole hours alone, so +05:30 and +05:45 never match
    parser's date filter for it. Not late, counted apart (`totals.otherTz`), its delay shown against
    its own offset, with its own offset (`+08:00`) in the *Device time zone* column. One run at
    another offset could still be a backlog, so the first one is levelled as measured. A device in
-   another zone solves any open delay period of its own (it is not late).
+   another zone solves any open delay period of its own (it is not late). A device **east** of the
+   cluster that writes its local time as UTC has its event *ahead*: its gap sits under the
+   cluster's offset, and `cluster offset − gap` is its zone (`Offsets::device_zone`) — an India
+   device on a UTC cluster, gap −330, is `other_tz` at `+05:30` (−330 taken out), not a clock
+   ahead; a gap under the cluster's at no zone (−400) stays `clock_ahead`.
 5. **Unknown is not zero.** Under the majority, or not yet steady, the cluster says
    `timeZone.mode: "none"` — "not detected (41 % agree)" — nothing is corrected, delays are as
    measured, and no device is called "other time zone" (there is nothing to compare against). A
@@ -187,6 +191,14 @@ named in the card's head, so the difference seen is the delay.
   epoch milliseconds. Every bucket is a reading; unreadable times give `delay_minutes: null`.
   One page's answer is held at a time and dropped once read; the run keeps the readings
   (a few hundred bytes a device: 25 000 devices ≈ 10 MB), never the answers.
+* **Clusters together.** A run reads its clusters at the same time, up to the job's governor lane
+  (Jobs › requests at once, 4 by default); what each read gave is applied and written one cluster at
+  a time as it ends. A cluster that is slow or down holds up no other, and one cluster's read ends
+  after 20 min (`CLUSTER_READ_MAX`) with what it has. Every cluster of a run reads the same window.
+  What the timer's run could not read (whole or in part) is read **once more 5 min after it ended**
+  (`RETRY_AFTER_MS`), over the `everyHours` before that moment; what fails again waits for the next
+  run. Nothing is read again after a cancel, a disarm or the emergency stop, and a cluster read
+  before a disarm but not kept yet is not written after it.
 * **The window** is absolute: `[now − everyHours, now]` in epoch ms, fixed when the run starts,
   so every page reads the same documents however long the run takes.
 * **Max devices per run** (`DELAY_SINK_SET config.maxDevices`, *Max devices per run*): 1–100 000,

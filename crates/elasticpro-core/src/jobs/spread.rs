@@ -32,7 +32,7 @@ pub const HOSTS_WINDOW_MS: u64 = 2 * 3_600_000;
 /// before it: with `collectAt` just after UTC midnight (06:00 IST is 00:30 UTC) a start before
 /// it would read the day before as final with too little time for its late logs.
 pub const VOLUME_WINDOW_MS: u64 = 30 * 60_000;
-/// The scheduled log delay measurement reads its clusters one after another; on the timer's run
+/// The scheduled log delay measurement reads a few clusters at once; on the timer's run
 /// their starts are spread over the first quarter of its interval, at most ten minutes, so a
 /// run still ends well inside its interval (`measure_spread_ms`).
 pub const MEASURE_SPREAD_SHARE: u64 = 4;

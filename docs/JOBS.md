@@ -582,7 +582,7 @@ fixed place in its job's window, worked out in one place (`jobs::spread`):
 |---|---|
 | `hosts.collect` | the two hours from `UI_REPORT_HOSTS_AT` (06:00–08:00 by default). Its retries (15 min after a failed try, three tries a day) follow from each cluster's own start, so they are spread too |
 | `volume.daily` | the 30 minutes from each cluster's `collectAt`, never before it (with `collectAt` just after UTC midnight an earlier start would close the day before too soon for its late logs) and never into the next day. *Refresh now* starts at once |
-| `logdelay.measure` | the timer's own run reads its clusters one after another in the spread's order, each started no sooner than its place in the first quarter of the interval, at most 10 minutes, so a run still ends well inside `everyHours`. A cluster that took longer than its slot is followed at once. *Run now* and *Fetch now* read at once |
+| `logdelay.measure` | the timer's own run reads its clusters in the spread's order, each started no sooner than its place in the first quarter of the interval, at most 10 minutes, so a run still ends well inside `everyHours`. Clusters are read together, up to the job's requests at once (4 unless set otherwise), so one that is slow or down holds up no other (docs/LOGDELAY.md "Clusters together"). *Run now* and *Fetch now* read at once |
 
 Why: production saw twelve clusters deferred or timed out between 08:03 and 08:11 UTC, the
 hosts collection having started all of them at 06:00 and retried them together. The places only

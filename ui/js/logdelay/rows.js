@@ -17,6 +17,7 @@ import {
 } from '../core/logdelay-report.js';
 import { deviceZoneText, delaySumText } from '../core/log-tz.js';
 import { fixButton, fixesFor } from './fix-popover.js';
+import { measureAgainButton } from './measure-again.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const nameOf = (id) => { const c = clusters().find((x) => x.id === id); return c ? c.name : id; };
@@ -114,6 +115,7 @@ export function deviceRow(r, keys, ctx = {}, extra = {}) {
   const watching = live && ctx.watching ? ctx.watching(r) : false;
   const acts = [
     fixButton({ kind: 'device', id: r.device, items: () => fixesFor(r, 'device') }),
+    r.state === 'unmeasured' ? measureAgainButton({ clusterIds: [r.cluster], device: r.device, label: r.device }, { zone: ctx.zone }) : null,
     // Live: Watch narrows the Logs card below to the device (nothing is searched until Search).
     live ? h(`button.btn.sm.ld-watch-btn${watching ? '.on' : ''}`, { type: 'button', 'aria-pressed': String(watching), title: watching ? `Stop watching ${r.device}` : `${r.device}: its delay and its logs below`, onclick: () => ctx.onWatch && ctx.onWatch(r) },
       svg('svg', { viewBox: '0 0 24 24', width: '14', height: '14', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },

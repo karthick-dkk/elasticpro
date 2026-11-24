@@ -8458,6 +8458,20 @@ await settleFor(300);
     // A cluster name opens the cluster.
     press(doc.querySelector('.ld-tabs a[data-tab="fleet"]'));
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the Dashboard tab did not draw the fleet');
+    // A cluster never measured has a ↻ Measure again button: its title names the window, a press is Fetch now's JOB_RUN for that cluster.
+    if (list.length > 1) {
+      const neverId = list[list.length - 1].id;
+      const mb = g('ld-by-cluster').querySelector(`tr[data-cluster="${neverId}"] .ld-measure`);
+      ok(mb && /^Measure now · last 2 h \(\d\d:\d\d–\d\d:\d\d\)$/.test(mb.title), `log delay: the never-measured cluster's Measure again title reads "${mb && mb.title}"`);
+      ok(!g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] .ld-measure`), 'log delay: a measured cluster has a Measure again button');
+      const runsBefore = lsent.filter((m) => m.type === 'JOB_RUN').length;
+      if (mb) { fetchAnswer = 'ok'; jobPolls = 0; mb.click(); await settleFor(150); }
+      const mr = lsent.filter((m) => m.type === 'JOB_RUN').at(-1);
+      ok(lsent.filter((m) => m.type === 'JOB_RUN').length === runsBefore + 1 && mr.jobId === 'logdelay.measure' && mr.clusterIds && mr.clusterIds[0] === neverId && mr.devices === 'all' && !mr.device,
+        `log delay: Measure again sent ${JSON.stringify(mr)}`);
+      await waitFor(() => !doc.querySelector('.ld-fetch') || doc.querySelector('.ld-fetch').dataset.phase !== 'running', 'log delay: the Measure again run did not end', 9000);
+      jobPolls = 0;
+    }
     press(g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] td a`));
     await waitFor(() => ldView() === 'cluster' && g('ld-cluster-devices'), 'log delay: the cluster link did not open the cluster');
     ok(location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: the cluster address reads ${location.hash}`);

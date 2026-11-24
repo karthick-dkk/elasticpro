@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.85
+
+- **Log delay: clusters are measured together.** A run read its clusters one after another, so a slow one held up every cluster after it. It now reads several at once (the job's requests at once, 4 by default); a slow or failed cluster holds up no other, one cluster's read ends after 20 minutes with what it has, and every cluster still reads the same window. Results are kept one cluster at a time, as before. A disarm or the emergency stop during a scheduled run now also keeps out what was read but not yet kept.
+- **Log delay: a cluster that could not be read is tried again 5 minutes after the run**, once, instead of at the next interval.
+- **Log Delay: Measure again.** Where a cluster or a device is not measured, a ↻ button measures it now (the same job as *Fetch now*); its hover names the period it reads, "Measure now · last 1 h (20:24–21:24)".
+- **Log Delay: never measured is not 0.** A cluster that was never measured shows "—, not measured yet" in its state tiles.
+- **Log Delay: a device east of its cluster's time zone is another time zone.** A device in India (+05:30) or Nepal (+05:45) that writes its local time as UTC has its events ahead of their arrival; it was called "clock ahead" and counted as on time. It is now counted under *Other time zone* with its own zone (+05:30), after two runs in a row, as devices west of the cluster already were. An east device whose offset also exists in the west (+02:00) is now named east.
+- **Reports › Daily & monthly: say what is counted.** The *Month so far* card and the Monthly table name how many days of the month are measured.
+
 ## 0.3.84
 
 - **Log delay: clusters that come from Zabbix are measured.** The scheduled measurement (and *Run now*, and *Fetch now*) chose its clusters from those an administrator primed in ElasticPro and left out every cluster that comes from Zabbix, so those clusters were never measured, their Log Delay boards said "never measured", and the run still reported success with 0 measured. It now measures every cluster the server can reach, Zabbix hosts included, the same set the rest of the server works with; a sink cluster may be a Zabbix host too. One definition, `SinkConfig::targets` (docs/LOGDELAY.md).
