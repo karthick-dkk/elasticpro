@@ -113,10 +113,13 @@ pub const ENDED_ZONE: &str = "time zone changed";
 pub const ENDED_PART: &str = "only some of its log types are late";
 
 /// How long after a measurement an open period may still count as late: one measurement
-/// interval, or the silence limit, whichever is smaller. Past it nothing is known, so the period
-/// counts up to its last measurement (docs/LOGDELAY.md "Delay periods").
+/// interval, or the silence limit, whichever is smaller, and half of it (30 minutes at least) for
+/// the next run to be spread, to read its clusters and to be written — else every late device read
+/// "not measured since" during each run. Past it nothing is known, so the period counts up to its
+/// last measurement (docs/LOGDELAY.md "Delay periods").
 pub fn stale_after_ms(interval_ms: i64, silent_after_ms: i64) -> i64 {
-    interval_ms.min(silent_after_ms).max(1)
+    let due = interval_ms.min(silent_after_ms).max(1);
+    due + (due / 2).max(30 * 60_000)
 }
 
 impl Episode {
@@ -1498,7 +1501,7 @@ mod tests {
         let mut t = Tracker { interval_ms: Some(2 * H), ..Tracker::default() };
         t.apply(NOW, vec![r("fw", Some(95.0), NOW)], &l, 24 * H);
         t.apply(NOW + 2 * H, vec![r("fw", Some(95.0), NOW + 2 * H)], &l, 24 * H);
-        assert_eq!(t.stale_after(), 2 * H, "the interval, smaller than the silence limit");
+        assert_eq!(t.stale_after(), 3 * H, "the interval, smaller than the silence limit, and half of it for the next run to be written");
         let e = &t.all_episodes(NOW + 4 * H)[0];
         assert_eq!((e.stale(), e.lasted_ms(NOW + 4 * H)), (false, 4 * H), "within the interval: still late now");
         let later = NOW + 10 * H;
@@ -1513,7 +1516,8 @@ mod tests {
         d.last_measured_ms = None;
         d.open.as_mut().unwrap().last_measured_ms = None;
         assert_eq!(old.all_episodes(later)[0].measured_until_ms, Some(NOW + 2 * H));
-        assert_eq!(stale_after_ms(24 * H, 2 * H), 2 * H, "the silence limit, when it is the smaller");
+        assert_eq!(stale_after_ms(24 * H, 2 * H), 3 * H, "the silence limit, when it is the smaller");
+        assert_eq!(stale_after_ms(H / 2, 2 * H), H, "30 minutes at least: a run spread over 10 minutes and a read of 20");
     }
 
     #[test]

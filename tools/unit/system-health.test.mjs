@@ -58,6 +58,7 @@ test('unknown is not zero and never green', () => {
   assert.equal(S.oomText({ oomKills: null }), 'not known');
   assert.equal(S.oomText({ oomKills: 0, oomKills24h: 0 }), 'none');
   assert.equal(S.oomText({ oomKills: 2, oomKills24h: 1 }), '2 (1 in 24 h)');
+  assert.equal(S.oomText({ oomKills: 0, oomKills24h: 0, restarts24h: 1 }), 'none counted since the last restart', 'a kill that ended the container is in no counter');
   assert.equal(S.cpuLine({ pct1m: null }), 'not known yet');
   assert.equal(S.cpuLine({ pct1m: 37.2, limitCpus: 1.5, pctOfLimit: 24.8 }), '37% of one CPU · 25% of its 1.5');
   assert.equal(S.throttleLine({ pct1m: 3, nrPeriods: null }), 'no CPU limit');

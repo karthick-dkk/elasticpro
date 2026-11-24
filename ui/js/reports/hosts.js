@@ -118,13 +118,19 @@ function paintTable() {
     const cell = cellOf(r.eventBytes, (x) => bytes(x));
     return r.eventMissingDocs ? h('span', { title: `${num(r.eventMissingDocs)} document(s) had no event size` }, cell, h('span.hv-inc', `${num(r.eventMissingDocs)} without`)) : cell;
   };
+  const subCell = (r) => {
+    const cell = cellOf(r.subBytes, (x) => bytes(x));
+    const n = (r.subMissingDocs || 0) + (r.subNotCountedDocs || 0);
+    return n ? h('span', { title: `${num(n)} document(s) have no counted sub size` }, cell, h('span.hv-inc', `${num(n)} without`)) : cell;
+  };
+  const notFinal = (r) => (r.notFinal ? h('span.hv-inc', { title: `Read ${r.readAt ? `${new Date(r.readAt).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'early'}, less than 24 hours after the day ended: later documents are not in it yet` }, 'not final') : null);
   const row = (r) => h(`tr${r.incomplete ? '.hv-row-inc' : ''}`,
-    h('td.mono', r.day, r.incomplete ? h('span.hv-inc', { title: 'The collection hit its page bound on this day: the rows are a lower bound' }, 'incomplete') : null),
+    h('td.mono', r.day, r.incomplete ? h('span.hv-inc', { title: 'The collection hit its page bound on this day: the rows are a lower bound' }, 'incomplete') : null, notFinal(r)),
     h('td.mono', r.index), h('td', r.source ?? ''), h('td.mono', r.host ?? h('span.muted', 'no host')),
-    h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', cellOf(r.subBytes, (x) => bytes(x))),
+    h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', subCell(r)),
     ...cols.slice(FIXED.length).map((c) => metaCell(r, c)));
   const totals = h('tr.hv-totals', h('th', { scope: 'row', colspan: 4 }, `Total · ${plural(d.total, 'row')}`),
-    h('td.num', cellOf(d.totals.docs, num)), h('td.num', eventCell(d.totals)), h('td.num', cellOf(d.totals.subBytes, (x) => bytes(x))),
+    h('td.num', cellOf(d.totals.docs, num)), h('td.num', eventCell(d.totals)), h('td.num', subCell(d.totals)),
     ...d.fields.map(() => h('td')));
   const from = d.total ? v.offset + 1 : 0;
   const to = Math.min(d.total, v.offset + d.rows.length);
@@ -135,6 +141,8 @@ function paintTable() {
   mount(table,
     d.incompleteDays.length ? h('div.banner.warn.hv-incomplete', { style: { margin: '0 0 6px', fontSize: '12px' } },
       `Incomplete: ${d.incompleteDays.join(', ')}. The collection hit its page bound on ${d.incompleteDays.length === 1 ? 'that day' : 'those days'}, so its rows are a lower bound.`) : null,
+    d.notFinalDays.length ? h('div.muted.hv-days.hv-notfinal', { style: { margin: '0 0 6px', fontSize: '12px' } },
+      `Not final: ${d.notFinalDays.map((x) => x.day).join(', ')}. Read less than 24 hours after the day ended; read once more when it can be final.`) : null,
     d.failedDays.length ? h('div.banner.warn.hv-days.hv-failed',
       `Not held: ${d.failedDays.map((x) => `${x.day} (${x.failed})`).join(', ')}. The collection is tried again on the next ticks; Run now with Collect again asks at once.`) : null,
     d.collectingDays.length ? h('div.muted.hv-days.hv-collecting',

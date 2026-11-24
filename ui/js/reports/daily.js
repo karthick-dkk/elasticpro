@@ -689,7 +689,7 @@ function monthlyTable(c, rows, settings, peaks) {
     if (key === 'daysWithData') {
       const all = daysInMonth(m.month);
       const n = eventDaysOf(m); const short = has && (m.partial || n < all);
-      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days without a measured event_logsize' }, daysCoverText(n, all)) : num(m.daysWithData || 0);
+      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far, today included' : 'Days without a measured event_logsize' }, daysCoverText(n, all)) : num(m.daysWithData || 0);
     }
     if (!has) return dash();
     switch (key) {

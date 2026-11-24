@@ -89,11 +89,12 @@ export function memoryLine(m) {
   return { text: `${Math.round(pct)}% · ${sizeText(m.rssBytes)} of ${sizeText(m.limitBytes)}`, frac: Math.min(1, pct / 100), pct };
 }
 
-/** OOM kills: "none", "2 (1 in 24 h)", or "not known" (no cgroup). */
+/** OOM kills: "none", "none counted since the last restart", "2 (1 in 24 h)", or "not known" (no cgroup). */
 export function oomText(m) {
   if (!m || !known(m.oomKills)) return 'not known';
   const all = Number(m.oomKills), day = known(m.oomKills24h) ? Number(m.oomKills24h) : null;
-  if (!all && !day) return 'none';
+  // A kill that ends the container takes its counter with it: after a restart "none" is not known.
+  if (!all && !day) return Number(m.restarts24h) > 0 ? 'none counted since the last restart' : 'none';
   return day === null ? String(all) : `${all} (${day} in 24 h)`;
 }
 

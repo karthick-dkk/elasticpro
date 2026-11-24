@@ -114,7 +114,7 @@ export function listingCut(n, t) {
   if (t && t.whole) return { total: n, cut: false };
   const total = t && Number.isFinite(t.total) ? Number(t.total) : t && Number.isFinite(t.remaining) ? n + Number(t.remaining) : null;
   if (total !== null) return { total: Math.max(total, n), cut: total > n };
-  // No total said (before 7.14): a full page may be all of them or not.
+  // No total said (before 7.16): a full page may be all of them or not.
   return n >= LISTING_SIZE ? { total: null, cut: true } : { total: n, cut: false };
 }
 

@@ -236,6 +236,8 @@ fn pct_text(tenths: u64) -> String {
 }
 
 /// Shares in tenths of a percent that add up to exactly 1000 (largest remainder); `None` of none.
+/// A part that has any is at least 0.1 %, taken from the largest: one late device of 5,000 is
+/// never "0 %", and the rest never "100 %".
 pub fn tenths(parts: &[u64]) -> Option<Vec<u64>> {
     let all: u64 = parts.iter().sum();
     if all == 0 {
@@ -247,6 +249,14 @@ pub fn tenths(parts: &[u64]) -> Option<Vec<u64>> {
     let left = 1000 - out.iter().sum::<u64>() as usize;
     for i in by_rest.into_iter().take(left) {
         out[i] += 1;
+    }
+    for (i, part) in parts.iter().enumerate() {
+        if *part > 0 && out[i] == 0 {
+            // The first of the largest; the pages' `shareTenths` takes the same one.
+            let from = (0..out.len()).rev().max_by_key(|k| out[*k])?;
+            out[from] -= 1;
+            out[i] = 1;
+        }
     }
     Some(out)
 }
@@ -1119,6 +1129,8 @@ mod tests {
             assert_eq!(tenths(&parts).unwrap().iter().sum::<u64>(), 1000, "{parts:?}");
         }
         assert_eq!(tenths(&[0, 0]), None);
+        assert_eq!(tenths(&[4_999, 0, 1]).unwrap(), [999, 0, 1], "one late of 5,000: never 100 % and 0 %");
+        assert_eq!(tenths(&[5_000, 5_000, 1]).unwrap(), [499, 500, 1], "taken from the first of the largest, as the pages do");
         assert_eq!(Totals::default().json()["pctNoDelay"], Value::Null, "no device: no percentage");
     }
 

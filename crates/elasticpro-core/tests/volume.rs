@@ -232,9 +232,11 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     assert_eq!(daily["totals"]["days"], daily["days"].as_array().unwrap().len());
     assert_eq!(daily["cards"]["average"]["value"], 200, "(300 + 200 + 100) / 3");
     assert_eq!(daily["cards"]["average"]["daysWithData"], 3);
-    let month: u64 = [(t, 1000u64), (d1, 300), (d2, 200), (d3, 100)].iter()
+    // The month's finished days; today (1000) beside them. On the 1st there is none: not measured.
+    let month: u64 = [(d1, 300u64), (d2, 200), (d3, 100)].iter()
         .filter(|(d, _)| d.format("%Y-%m").to_string() == t.format("%Y-%m").to_string()).map(|(_, v)| v).sum();
-    assert_eq!(daily["cards"]["monthSoFar"]["value"], month);
+    assert_eq!(daily["cards"]["monthSoFar"]["value"], if month > 0 { serde_json::json!(month) } else { Value::Null });
+    assert_eq!(daily["cards"]["monthSoFar"]["todayValue"], 1000);
     let r1 = row(&daily, d1);
     assert_eq!((r1["basis"].as_u64(), r1["avg"].as_u64(), r1["changeVsAvgPct"].as_f64()), (Some(300), Some(150), Some(100.0)),
                "d1 against the mean of d2 and d3: {r1}");

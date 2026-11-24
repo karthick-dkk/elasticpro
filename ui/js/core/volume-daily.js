@@ -18,7 +18,7 @@
  * sent is shown as unknown, never filled in here):
  *
  *   VOLUME_DAILY   cards.yesterday {day, value, changeVsAvgPct}   cards.average {days, value}
- *                  cards.monthSoFar {month, value, asOf}   cards.eventBytes30 {value|null}
+ *                  cards.monthSoFar {month, value (finished days), todayValue, asOf}   cards.eventBytes30 {value|null}
  *                  totals {indices, docs, priBytes, totalBytes, eventBytes, subBytes} (the
  *                  table's totals row; no row when absent). A card's figure may also be
  *                  named `basis` or `bytes`.

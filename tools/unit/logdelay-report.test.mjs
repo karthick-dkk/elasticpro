@@ -324,6 +324,9 @@ test('device graph: unknown points break the line; the scale holds the critical 
   const g = R.deviceGraph([{ t: 0, m: 5 }, { t: 1, m: 10 }, { t: 2, m: null }, { t: 3, m: 40 }], { fromMs: 0, toMs: 3, height: 100, levels: { criticalOver: 60 } });
   assert.equal(g.segments.length, 2);
   assert.ok(g.scaleMax >= 90, `scale ${g.scaleMax} holds 1.5 × critical`);
+  assert.equal(R.periodBand({ started: 1, ended: 4, lastMeasuredMs: 2 }, 0, 4, 4).width, 25, 'a period that ended unsolved is shaded to its last measurement');
+  assert.deepEqual(R.shareTenths([4999, 0, 1]), [999, 0, 1], 'one late of 5,000 is never 0 %');
+  assert.deepEqual(R.shareTenths([5000, 5000, 1]), [499, 500, 1], 'the core takes it from the same one');
   const band = R.periodBand({ started: 1, solved: null, worstState: 'critical' }, 0, 4, 3);
   assert.equal(band.critical, true);
   assert.equal(Math.round(band.left), 25);
