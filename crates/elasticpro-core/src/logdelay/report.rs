@@ -270,7 +270,7 @@ fn column_label(c: &str) -> String {
 /// zone, or `—` when the cluster has no zone (nothing to compare against).
 pub fn device_time_zone(r: &DeviceRow) -> String {
     match (r.cluster_tz_offset, r.state) {
-        (_, State::OtherTz) => r.tz_offset_minutes.map(tz::offset_text).unwrap_or_else(|| "other".into()),
+        (_, State::OtherTz) => r.device_tz_offset.or(r.tz_offset_minutes).map(tz::offset_text).unwrap_or_else(|| "other".into()),
         (Some(_), s) if s.measured() => "same as cluster".into(),
         _ => "—".into(),
     }

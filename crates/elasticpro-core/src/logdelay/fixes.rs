@@ -115,7 +115,7 @@ pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> 
     let mut by_offset: BTreeMap<i32, Vec<String>> = BTreeMap::new();
     for (name, d) in &t.devices {
         if d.state == State::OtherTz {
-            if let Some(o) = d.applied_offset {
+            if let Some(o) = d.tz_offset.or(d.applied_offset) {
                 by_offset.entry(o).or_default().push(name.clone());
             }
         }

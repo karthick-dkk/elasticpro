@@ -154,7 +154,7 @@ export function timeZoneShort(tz) {
  */
 export function deviceZoneText(row) {
   if (!row) return '—';
-  if (row.state === 'other_tz') return offsetLabel(row.tzOffsetMinutes ?? row.deviceTzOffset);
+  if (row.state === 'other_tz') return offsetLabel(row.deviceTzOffset ?? row.tzOffsetMinutes);
   if (!finite(row.clusterTzOffset)) return '—';
   if (row.state === 'silent' || row.state === 'unmeasured' || !finite(row.nowMinutes)) return '—';
   if (row.live && finite(row.deviceTzOffset) && row.deviceTzOffset !== row.clusterTzOffset) return `looks like ${offsetLabel(row.deviceTzOffset)}`;

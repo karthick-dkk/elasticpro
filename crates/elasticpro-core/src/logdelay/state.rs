@@ -153,7 +153,8 @@ pub struct DeviceState {
     /// The raw gap, arrival − event, as measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_raw_minutes: Option<f64>,
-    /// The real UTC offset the raw gap sits at, when it sits at one, and for how many runs in a row.
+    /// The device's zone from its raw gap (tz.rs `Offsets::device_zone`), when it sits at a real
+    /// offset, and for how many runs in a row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tz_offset: Option<i32>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -241,9 +242,11 @@ pub struct Row {
     pub delay_minutes: Option<f64>,
     /// Arrival − event, as measured.
     pub raw_gap_minutes: Option<f64>,
-    /// The real UTC offset the raw gap sits at, if any (the device's apparent zone).
+    /// The device's apparent zone, if its gap puts it at a real UTC offset (tz.rs
+    /// `Offsets::device_zone`: −330 on a UTC cluster is +05:30).
     pub device_tz_offset: Option<i32>,
-    /// What was taken out: the cluster's offset, or the device's own for another zone. `None`:
+    /// What was taken out: the cluster's offset, or the device's own gap figure for another zone
+    /// (−330 for a +05:30 device on a UTC cluster). `None`:
     /// the cluster has no zone (nothing corrected).
     pub tz_offset_minutes: Option<i32>,
     pub state: State,
@@ -298,9 +301,8 @@ impl Tracker {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let offsets = Offsets::at_run(run_ms);
         let raw_of = |r: &Reading| r.delay_minutes.filter(|m| m.is_finite());
-        let matched: Vec<Option<i32>> = readings.iter().map(|r| raw_of(r).and_then(|m| offsets.matching(m, tz::TOLERANCE_MINUTES))).collect();
         if complete {
-            self.tz.record(RunTally::count(run_ms, readings.iter().zip(&matched).filter(|(r, _)| raw_of(r).is_some()).map(|(_, m)| *m)));
+            self.tz.record(RunTally::count(run_ms, readings.iter().filter_map(raw_of).map(|m| offsets.matching(m, tz::TOLERANCE_MINUTES))));
         }
         let detected = self.tz.detected.map(|d| d.offset_minutes);
         let cluster_offset = |event_ms: Option<i64>| -> Option<i32> {
@@ -309,7 +311,7 @@ impl Tracker {
                 set => set.offset_at(event_ms.unwrap_or(run_ms)),
             }
         };
-        for (r, dev_off) in readings.into_iter().zip(matched) {
+        for r in readings {
             seen.insert(r.device.clone());
             let d = self.devices.entry(r.device.clone()).or_insert_with(|| DeviceState { first_seen_ms: run_ms, ..DeviceState::default() });
             d.last_run_ms = run_ms;
@@ -342,17 +344,23 @@ impl Tracker {
             }
             // The zone step: the device's apparent offset and how long it has sat there, the
             // cluster's offset at this event's time, and the corrected delay that is levelled.
+            // A device east of the cluster (event ahead) is matched by its own offset too (tz.rs
+            // `Offsets::device_zone`); the zone is what the streak and the pages carry, the gap
+            // figure what is taken out.
             let raw = raw_of(&r);
+            let co = cluster_offset(r.event_ms);
+            let dev = raw.and_then(|m| offsets.device_zone(m, co, tz::TOLERANCE_MINUTES));
+            let dev_off = dev.map(|z| z.zone);
             match dev_off {
                 Some(o) if d.tz_offset == Some(o) => d.tz_streak = d.tz_streak.saturating_add(1),
                 Some(o) => { d.tz_offset = Some(o); d.tz_streak = 1; }
                 None => { d.tz_offset = None; d.tz_streak = 0; }
             }
-            let (corrected, applied, other) = match (raw, cluster_offset(r.event_ms)) {
+            let (corrected, applied, other) = match (raw, co) {
                 (None, _) => (None, None, false),
                 (Some(raw), None) => (Some(raw), None, false),
-                (Some(raw), Some(co)) => match dev_off.filter(|o| *o != co && d.tz_streak >= tz::DEVICE_STEADY_RUNS) {
-                    Some(own) => (Some(raw - own as f64), Some(own), true),
+                (Some(raw), Some(co)) => match dev.filter(|z| z.gap != co && d.tz_streak >= tz::DEVICE_STEADY_RUNS) {
+                    Some(own) => (Some(raw - own.gap as f64), Some(own.gap), true),
                     None => (Some(raw - co as f64), Some(co), false),
                 },
             };
@@ -731,6 +739,47 @@ mod tests {
         assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(330), "one device elsewhere does not move the cluster");
         let day = daily(&t, "d", NOW, NOW + 24 * H, NOW + 11 * H);
         assert_eq!((day.other_tz, day.on_time, day.critical), (1, 10, 0));
+    }
+
+    /// A UTC cluster (detected from ten on-time devices) with one more device at `raw`.
+    fn utc_with(run: i64, extra: &[(&str, f64)]) -> Vec<Reading> {
+        let mut v: Vec<Reading> = (1..=10).map(|i| r(&format!("utc-{i}"), Some(0.5), run)).collect();
+        v.extend(extra.iter().map(|(n, m)| r(n, Some(*m), run)));
+        v
+    }
+
+    #[test]
+    fn a_device_east_of_a_utc_cluster_is_in_another_zone_not_a_clock_ahead() {
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        for i in 0..3 {
+            t.apply(NOW + i * 2 * H, utc_with(NOW + i * 2 * H, &[]), &l, 2 * H);
+        }
+        assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(0), "UTC detected");
+        // India (+05:30) and Nepal (+05:45) devices writing local time as UTC: the event runs
+        // ahead by the zone. −400 sits at no zone: a clock ahead, every run.
+        let east = [("win-del-03", -326.66), ("ktm", -345.0), ("odd", -400.0)];
+        let a1 = t.apply(NOW + 6 * H, utc_with(NOW + 6 * H, &east), &l, 2 * H);
+        let row = |a: &Applied, n: &str| a.rows.iter().find(|x| x.device == n).cloned().unwrap();
+        for n in ["win-del-03", "ktm", "odd"] {
+            assert_eq!(row(&a1, n).state, State::ClockAhead, "{n}: the first run is levelled as measured");
+        }
+        assert_eq!(row(&a1, "win-del-03").device_tz_offset, Some(330));
+        let a2 = t.apply(NOW + 8 * H, utc_with(NOW + 8 * H, &east), &l, 2 * H);
+        let ind = row(&a2, "win-del-03");
+        assert_eq!((ind.state, ind.device_tz_offset, ind.tz_offset_minutes, ind.delay_minutes), (State::OtherTz, Some(330), Some(-330), Some(3.34)));
+        let ktm = row(&a2, "ktm");
+        assert_eq!((ktm.state, ktm.device_tz_offset, ktm.tz_offset_minutes, ktm.delay_minutes), (State::OtherTz, Some(345), Some(-345), Some(0.0)));
+        let odd = row(&a2, "odd");
+        assert_eq!((odd.state, odd.device_tz_offset, odd.tz_offset_minutes), (State::ClockAhead, None, Some(0)));
+        assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(0), "the cluster stays UTC");
+        // Late by whole hours on the same cluster: still late, not another zone.
+        let mut u = Tracker::default();
+        for i in 0..5 {
+            u.apply_run(NOW + i * 2 * H, utc_with(NOW + i * 2 * H, &[("slow1", 60.0), ("slow2", 120.0)]), &l, 2 * H, true, &LogTimeZone::Detect);
+        }
+        assert_eq!(u.tz.detected.map(|d| d.offset_minutes), Some(0));
+        assert_eq!((u.devices["slow1"].tz_offset, u.devices["slow2"].tz_offset), (Some(60), Some(120)), "positive gaps read as they are, as before");
     }
 
     #[test]

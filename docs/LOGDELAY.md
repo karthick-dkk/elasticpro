@@ -95,7 +95,11 @@ offset, not a queue" matched whole hours alone, so +05:30 and +05:45 never match
    parser's date filter for it. Not late, counted apart (`totals.otherTz`), its delay shown against
    its own offset, with its own offset (`+08:00`) in the *Device time zone* column. One run at
    another offset could still be a backlog, so the first one is levelled as measured. A device in
-   another zone solves any open delay period of its own (it is not late).
+   another zone solves any open delay period of its own (it is not late). A device **east** of the
+   cluster that writes its local time as UTC has its event *ahead*: its gap sits under the
+   cluster's offset, and `cluster offset − gap` is its zone (`Offsets::device_zone`) — an India
+   device on a UTC cluster, gap −330, is `other_tz` at `+05:30` (−330 taken out), not a clock
+   ahead; a gap under the cluster's at no zone (−400) stays `clock_ahead`.
 5. **Unknown is not zero.** Under the majority, or not yet steady, the cluster says
    `timeZone.mode: "none"` — "not detected (41 % agree)" — nothing is corrected, delays are as
    measured, and no device is called "other time zone" (there is nothing to compare against). A
