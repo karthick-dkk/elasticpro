@@ -2030,6 +2030,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-tline.orange { color: var(--tv-orange); }
 .pl-tline.green { color: var(--tv-green); }
 .pl-tfig { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: .1em .8em; font-size: .9em; color: var(--tv-text-2); }
+.pl-tiles.s .pl-tfig { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
 .pl-tfig > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pl-tfig b { color: var(--tv-text); }
 .pl-tdev { display: flex; gap: .35em; font-size: .9em; }
