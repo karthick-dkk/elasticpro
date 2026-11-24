@@ -425,7 +425,7 @@ function tiles(t, b, scopeId, keyPrefix, unmeasured = false) {
   // Not measured: a plain tile (no Devices link: nothing to list) carrying the ↻ Measure again button.
   const tile = (k, filter, label, value, colour, detail) => (unmeasured
     ? h('div.ld-kpi', { dataset: { kpi: k } }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail),
-      measureAgainButton({ clusterIds: [scopeId], devices: 'all', label: nameOf(scopeId) }, { now: Date.now(), zone: S.zone }))
+      measureAgainButton({ clusterIds: [scopeId], devices: 'all', label: nameOf(scopeId) }, { zone: S.zone }))
     : h('button.ld-kpi.ld-kpi-btn', {
       type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
       onclick: () => openDevicesOn(filter, scopeId),
@@ -515,7 +515,7 @@ function lateGrid(res, b) {
   const tr = (r) => {
     const kids = [h('th.ld-g-nm', { scope: 'row' }, link(clusterHref(r.id), r.name, { title: `${r.name} · log delay details` }))];
     if (r.never) {
-      kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED), ' ', measureAgainButton({ clusterIds: [r.id], devices: 'all', label: r.name }, { now: Date.now(), zone: S.zone })));
+      kids.push(h('td.ld-g-never', { colspan: n + 3 }, h('span.muted', LD_NEVER_MEASURED), ' ', measureAgainButton({ clusterIds: [r.id], devices: 'all', label: r.name }, { zone: S.zone })));
       return h('tr', { dataset: { cluster: r.id } }, ...kids);
     }
     // Late now is the last measurement; before today's first run that is yesterday's last, said so.
@@ -735,7 +735,7 @@ function fleetView() {
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
         neverRun ? h('td', { colspan: anyZone ? 9 : 8 }, h('span.muted', LD_NEVER_MEASURED), ' ',
-          measureAgainButton({ clusterIds: [c.id], devices: 'all', label: c.name || nameOf(c.id) }, { now: Date.now(), zone: S.zone }))
+          measureAgainButton({ clusterIds: [c.id], devices: 'all', label: c.name || nameOf(c.id) }, { zone: S.zone }))
           : [h('td', stateBar(c, cb)),
             // Late now and its share in one cell: "12 · 3 %".
             h(`td.num${c.lateNow ? '.ld-delay' : ''}`, { title: `devices ${cb.late} now · their share of the cluster's devices` },

@@ -17,14 +17,19 @@ export function measureAgainTitle({ everyHours, now = Date.now(), zone } = {}) {
 
 /**
  * The button for `scope` ({clusterIds:[id], device?, devices?, label}). Icon only, compact.
- * `opts`: `now`, `zone`, `everyHours` (default: the schedule Fetch now was given).
+ * `opts`: `zone`, `everyHours` (default: the schedule Fetch now was given).
  */
 export function measureAgainButton(scope, opts = {}) {
   const busy = fetchNowBusy();
-  const title = measureAgainTitle({ everyHours: Number.isFinite(opts.everyHours) ? opts.everyHours : fetchNowEvery(), now: opts.now, zone: opts.zone });
+  const title = () => {
+    const t = measureAgainTitle({ everyHours: Number.isFinite(opts.everyHours) ? opts.everyHours : fetchNowEvery(), zone: opts.zone });
+    return fetchNowBusy() ? `A measurement is running · ${t}` : t;
+  };
   return h('button.btn.sm.ld-measure', {
-    type: 'button', disabled: busy, title: busy ? `A measurement is running · ${title}` : title,
+    type: 'button', disabled: busy, title: title(),
     'aria-label': `Measure ${scope.label || 'now'} again`, dataset: { measure: scope.device ? 'device' : 'cluster' },
+    // The period is the one a press would read now, not when the page was drawn.
+    onmouseenter: (e) => { e.currentTarget.title = title(); },
     onclick: (e) => { e.stopPropagation(); fetchNowPress(scope); },
   }, '↻');
 }

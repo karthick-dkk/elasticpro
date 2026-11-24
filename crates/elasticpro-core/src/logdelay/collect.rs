@@ -111,9 +111,15 @@ impl Core {
         let mut size = measure::PAGE_SIZE;
         let mut after: Option<Value> = None;
         let mut tries = 0u32;
+        let begun = std::time::Instant::now();
         loop {
             if let Some(by) = self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE) {
                 out.error = Some(format!("stopped by {by} after {} devices", out.readings.len()));
+                break;
+            }
+            if begun.elapsed() >= crate::delay_sink::CLUSTER_READ_MAX {
+                out.error = Some(format!("the cluster took longer than {} min to read: {} devices read, the rest not measured this run",
+                                         crate::delay_sink::CLUSTER_READ_MAX.as_secs() / 60, out.readings.len()));
                 break;
             }
             // One more than the cap leaves room for: a device beyond it says the list was cut.

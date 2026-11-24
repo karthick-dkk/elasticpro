@@ -402,7 +402,8 @@ mod tests {
         assert!(!offset_like(0.5, NOV) && !offset_like(45.0, NOV) && !offset_like(100.0, NOV));
         // A device east of the cluster writing its local time as UTC: its event runs ahead.
         assert_eq!(o.device_zone(-330.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -330 }), "India on a UTC cluster");
-        assert_eq!(o.device_zone(-326.66, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -330 }), "staging's win-del-03");
+        assert_eq!(o.device_zone(-327.22, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -330 }), "India, its log 2.8 min on the way");
+        assert_eq!(o.device_zone(-326.66, Some(0), TOLERANCE_MINUTES), None, "past the tolerance, east as west");
         assert_eq!(o.device_zone(-345.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 345, gap: -345 }), "Nepal");
         assert_eq!(o.device_zone(-480.0, Some(0), TOLERANCE_MINUTES), Some(DeviceZone { zone: 480, gap: -480 }), "Singapore, named east not west");
         assert_eq!(o.device_zone(-270.0, Some(60), TOLERANCE_MINUTES), Some(DeviceZone { zone: 330, gap: -270 }), "India on a +01:00 cluster");

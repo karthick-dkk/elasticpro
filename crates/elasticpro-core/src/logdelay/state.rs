@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(0), "UTC detected");
         // India (+05:30) and Nepal (+05:45) devices writing local time as UTC: the event runs
         // ahead by the zone. −400 sits at no zone: a clock ahead, every run.
-        let east = [("win-del-03", -326.66), ("ktm", -345.0), ("odd", -400.0)];
+        let east = [("win-del-03", -327.22), ("ktm", -345.0), ("odd", -400.0)];
         let a1 = t.apply(NOW + 6 * H, utc_with(NOW + 6 * H, &east), &l, 2 * H);
         let row = |a: &Applied, n: &str| a.rows.iter().find(|x| x.device == n).cloned().unwrap();
         for n in ["win-del-03", "ktm", "odd"] {
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(row(&a1, "win-del-03").device_tz_offset, Some(330));
         let a2 = t.apply(NOW + 8 * H, utc_with(NOW + 8 * H, &east), &l, 2 * H);
         let ind = row(&a2, "win-del-03");
-        assert_eq!((ind.state, ind.device_tz_offset, ind.tz_offset_minutes, ind.delay_minutes), (State::OtherTz, Some(330), Some(-330), Some(3.34)));
+        assert_eq!((ind.state, ind.device_tz_offset, ind.tz_offset_minutes, ind.delay_minutes), (State::OtherTz, Some(330), Some(-330), Some(2.78)));
         let ktm = row(&a2, "ktm");
         assert_eq!((ktm.state, ktm.device_tz_offset, ktm.tz_offset_minutes, ktm.delay_minutes), (State::OtherTz, Some(345), Some(-345), Some(0.0)));
         let odd = row(&a2, "odd");

@@ -15,7 +15,7 @@ use elasticpro_core::auth::Edition;
 use elasticpro_core::Core;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use support::{TempDir, TestServer};
+use support::{GaugedServer, TempDir, TestServer};
 
 /// A cluster that answers the delay search with two devices — one measurable, one whose
 /// event time is missing — and accepts a bulk.
@@ -259,4 +259,55 @@ async fn a_switched_off_schedule_is_not_reported_as_blocked() {
     let run = c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
     assert_eq!(run["ok"], json!(false), "{run}");
     assert!(run["skipped"].as_str().is_some(), "a refused run must say why: {run}");
+}
+
+/// One page of one device, 41 minutes behind.
+fn one_device() -> String {
+    json!({ "took": 5, "aggregations": { "devices": { "buckets": [
+        { "key": "fw-1", "doc_count": 120, "latest": { "hits": { "hits": [
+            { "_source": { "@timestamp": "2026-09-19T12:41:00Z", "ingested_time": "2026-09-19T12:00:00Z" } } ] } } },
+    ] } } }).to_string()
+}
+
+#[tokio::test]
+async fn a_slow_cluster_and_a_failed_one_hold_up_no_other() {
+    let dir = TempDir::new("sink-together");
+    // `a-slow` answers after 3 s, `b-down` refuses; the rest answer in 300 ms.
+    let slow = GaugedServer::start(|_| (200, one_device(), 3_000)).await;
+    let down = TestServer::with(|_| (403, json!({ "error": { "reason": "no" } }).to_string())).await;
+    let quick = GaugedServer::start(|_| (200, one_device(), 300)).await;
+    let c = core(&dir, Edition::Hosted);
+    let s = admin(&c).await;
+    let mut clusters = vec![json!({ "id": "a-slow", "url": slow.url() }), json!({ "id": "b-down", "url": down.url() })];
+    clusters.extend((1..=5).map(|i| json!({ "id": format!("c{i}"), "url": quick.url() })));
+    let res = c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": clusters })).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let set = c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": {
+        "enabled": true, "destination": "builtin", "everyHours": 1, "indexPattern": "logstash-*" } })).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+
+    let run = c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
+    // Six read and kept, the refused one named, whatever order they ended in.
+    assert_eq!((run["clusters"].clone(), run["measured"].clone(), run["failed"].clone()), (json!(7), json!(6), json!(1)), "{run}");
+    assert_eq!(run["failedClusters"], json!(["b-down"]), "{run}");
+    // While the slow one was read, the others were: more than one at a time, never above the lane.
+    assert!((2..=4).contains(&quick.peak()), "read together, at most 4 at once: {}", quick.peak());
+    assert_eq!(quick.hits().len(), 5, "each cluster asked once");
+    // Every cluster reads the same window.
+    let window = |b: &str| {
+        let v: Value = serde_json::from_str(b).expect("a body");
+        let mut found = vec![];
+        fn walk(v: &Value, out: &mut Vec<Value>) {
+            match v {
+                Value::Object(m) => { if let Some(r) = m.get("range") { out.push(r.clone()); } m.values().for_each(|x| walk(x, out)); }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        walk(&v, &mut found);
+        assert!(!found.is_empty(), "a window in {b}");
+        found
+    };
+    let first = window(&slow.hits()[0].body);
+    assert!(quick.hits().iter().all(|h| window(&h.body) == first), "one window for every cluster");
 }
