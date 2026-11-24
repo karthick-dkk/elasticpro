@@ -322,6 +322,6 @@ export function ilmSummary(d, c, defaults, indices, now = Date.now()) {
   };
 }
 
-/** The ILM card's figure with what it was counted over: "0 of 12 log indices managed" — the open indices of the cluster's log pattern, not every index; null when not known. */
-export const ilmNote = (s) => (s.managed === null || s.total === null ? null : `${countText(s.managed)} of ${countText(s.total)} log ${s.total === 1 ? 'index' : 'indices'} managed`);
+/** The ILM card's figure with what it was counted over: "0 of 12 open log indices managed" — the open indices of the cluster's log pattern, not every index; null when not known. */
+export const ilmNote = (s) => (s.managed === null || s.total === null ? null : `${countText(s.managed)} of ${countText(s.total)} open log ${s.total === 1 ? 'index' : 'indices'} managed`);
 export const ilmNoteTitle = (s) => (ilmNote(s) === null ? null : `Open ${s.pattern} indices with an ILM policy. Other indices (hidden and system ones too) are not counted here.`);

@@ -153,10 +153,10 @@ test('the ILM line: managed count, the past-retention figure from the index date
   assert.deepEqual([s.pill.word, s.known, s.managed, s.total, s.errors], ['running', true, 3, 3, 1]);
   assert.deepEqual(s.stale, { count: 2, bytes: 150, policy: '30 days', known: true }, 'two dated indices are older than 30 days; the undated one is not guessed');
   // The figure says what it was counted over: the open indices of the log pattern, not every index.
-  assert.equal(O.ilmNote(s), '3 of 3 log indices managed');
+  assert.equal(O.ilmNote(s), '3 of 3 open log indices managed');
   assert.match(O.ilmNoteTitle(s), /^Open logstash-\*.* indices with an ILM policy\. Other indices \(hidden and system ones too\) are not counted here\.$/);
   const none = O.ilmSummary({ ilm: { operation_mode: 'RUNNING' }, ilmOfIndex: { 'logstash-a-2026.09.01': null, '.ds-logs-1': 'p', '.ds-logs-2': 'p' } }, CLUSTER, DEFAULTS, idx, now);
-  assert.equal(O.ilmNote(none), '0 of 1 log index managed', 'two managed hidden indices are not called unmanaged: they are not counted');
+  assert.equal(O.ilmNote(none), '0 of 1 open log index managed', 'two managed hidden indices are not called unmanaged: they are not counted');
   assert.equal(O.ilmNote(O.ilmSummary({}, CLUSTER, DEFAULTS, null, now)), null, 'not read: no figure');
   const noRet = O.ilmSummary(d, { ...CLUSTER, liveRetention: undefined }, DEFAULTS, idx, now);
   assert.deepEqual([noRet.stale.known, noRet.stale.policy], [false, ''], 'no retention set: not known, not 0');
