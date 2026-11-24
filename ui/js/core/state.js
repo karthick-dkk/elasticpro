@@ -2114,7 +2114,7 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
       const dang = danglingFor(c.id);
       const named = dang && dang.indices && dang.indices.length
         ? ` ${dang.indices.length} dangling index(es): ${dang.indices.slice(0, 3).map((x) => x.index_name).join(', ')}.`
-        : dang ? ' No dangling indices, so it is orphaned shard data rather than a lost index.'
+        : dang && !dang.failed ? ' No dangling indices, so it is orphaned shard data rather than a lost index.'
                : ' Open Nodes & shards to check for dangling indices.';
       add({ key: `${c.id}:disk-unaccounted`, level: 'warning', cluster: c,
         title: `${c.name}: ${bytesish(acct.gap)} of disk is not accounted for by any index`,
@@ -2387,7 +2387,7 @@ export function diskAccounting(d, indices) {
   return { known: true, held, accounted, gap, material };
 }
 
-/** Dangling indices, per cluster — read by the Nodes & shards page, on demand. */
+/** Dangling indices, per cluster (core/nodes-shards.js danglingAnswer, plus `at`) — read by the Nodes & shards page; null: not known. */
 const dangling = new Map();
 export function setDangling(clusterId, v) { dangling.set(clusterId, v); }
 export function danglingFor(clusterId) { return dangling.get(clusterId) || null; }

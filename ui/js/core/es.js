@@ -438,6 +438,11 @@ export class EsClient {
   }
 
   danglingIndices() { return this.json('GET', '/_dangling'); }
+  /** What the disk holds besides index data, per node (core/nodes-shards.js diskDetails): translog, reserved blocks, data paths. */
+  diskDetail() {
+    return this.json('GET', '/_nodes/stats/indices,fs/translog?filter_path=nodes.*.name,nodes.*.indices.translog.size_in_bytes,'
+      + 'nodes.*.fs.total.free_in_bytes,nodes.*.fs.total.available_in_bytes,nodes.*.fs.data.path,nodes.*.fs.data.mount');
+  }
 
   /**
    * What the cluster is busy doing, and how hard.

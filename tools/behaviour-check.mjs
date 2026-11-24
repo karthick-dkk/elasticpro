@@ -323,7 +323,7 @@ await go('shards');
   const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
   ok(titles.some((t) => t.startsWith('Shards —')), `shards: no shard table card, saw ${titles.join(' | ')}`);
   ok(titles.includes('Nodes & resource usage'), `shards: no node pane, saw ${titles.join(' | ')}`);
-  // The page is four cards and nothing else: nodes, shard allocation, query pressure, the shards.
+  // The page is five cards and nothing else: nodes, shard allocation, query pressure, the disk, the shards.
   ok(!titles.includes('Cluster at a glance'), `shards: the glance card is still on this page (it belongs to the Clusters overview) — ${titles.join(' | ')}`);
   ok(titles.includes('Shard allocation') && titles.includes('Query pressure'), `shards: the allocation / pressure row is missing — ${titles.join(' | ')}`);
 
@@ -417,6 +417,24 @@ await go('shards');
     `shards: the old separate cards survive — ${titles.join(' | ')}`);
   ok(!doc.querySelector('.stat'), 'shards: the stat tiles are still here');
   ok(!/Indices hold|Unaccounted/.test(doc.getElementById('view').textContent), 'shards: the storage accounting is still on this page (it belongs to the Clusters overview)');
+
+  // Disk & dangling indices: read on opening one cluster; the fixture has one dangling index, on
+  // node-3, and node-3 is named, not its id. With more clusters it is not asked, and says so.
+  {
+    const dc = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Disk & dangling indices');
+    const { bytes: fmtBytes } = await load('lib/fmt.js');
+    ok(!!dc(), 'shards: no disk card');
+    await waitFor(() => /1 found/.test(dc().textContent) && /\/var\/lib\/elasticsearch/.test(dc().textContent), `shards: the disk card did not read the dangling list and the details (${dc() && dc().textContent.slice(0, 300)})`);
+    const [dt, nt] = dc().querySelectorAll('table.tbl');
+    ok(/logstash-old-2025\.01\.02/.test(dt.textContent) && /2025-01-02/.test(dt.textContent) && /node-3/.test(dt.textContent), `shards: the dangling table reads ${dt.textContent}`);
+    const n1 = [...nt.querySelectorAll('tbody tr')].find((tr) => /^node-1/.test(tr.textContent));
+    // node-1: 91 GB used, 86 GB indices: 5 GB not indices = 1 translog + 1 reserved + 3 other.
+    ok([...n1.children].slice(2, 7).map((td) => td.textContent).join(' ') === [86e9, 5e9, 1e9, 1e9, 3e9].map((v) => fmtBytes(v)).join(' '), `shards: node-1's disk row reads ${[...n1.children].map((td) => td.textContent).join(' | ')}`);
+    ok(/All 3 nodes/.test(nt.textContent), 'shards: the disk table has no total');
+    press(dt.querySelector('button.ld-ibtn'));
+    ok(/Prepare the import in REST/.test((doc.querySelector('.ld-fixpop') || {}).textContent || ''), 'shards: a dangling index has no fix');
+    press(doc.querySelector('.ld-fixpop-x'));
+  }
 
   // Shard allocation: the 96 px ring with the total inside, three edge tiles (the unassigned one
   // with its reasons and a "show" that narrows the table), shards per node as bars, and the

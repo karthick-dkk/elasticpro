@@ -199,3 +199,92 @@ export function staleIndices(liveRetention, indices, now = Date.now()) {
     .sort((a, b) => String(a.day).localeCompare(String(b.day)));
   return { list, bytes: list.reduce((n, i) => n + (i.size || 0), 0), policy: ret.label };
 }
+
+/* ----------------------------- disk and dangling ----------------------------- */
+
+/** A byte count as a number, or null when Elasticsearch did not report one (unknown is not zero). */
+const byteCount = (v) => (v === null || v === undefined || v === '' || !isFinite(Number(v)) ? null : Number(v));
+
+/**
+ * What a node's disk is used by, from its `_cat/allocation` row and, when it was read, its
+ * `_nodes/stats/indices,fs` entry (diskDetails below).
+ *
+ *   indices     the shard data Elasticsearch has open on the node (`disk.indices`)
+ *   notIndices  everything else in use: used - indices
+ *   translog, reserved, other   what that is made of: Elasticsearch's own transaction logs, the
+ *               blocks the file system keeps back (free - available; `disk.used` counts them as
+ *               used), and the rest: logs, the operating system, dangling or orphaned shard
+ *               directories, anything else on that disk.
+ *
+ * A part that cannot be worked out is null. A negative remainder is null too: the two readings
+ * are not of the same instant, and a minus figure is not a measurement.
+ */
+export function diskSplit(row, detail = null) {
+  const total = byteCount(row && row['disk.total']);
+  const used = byteCount(row && row['disk.used']);
+  const free = byteCount(row && row['disk.avail']);
+  const indices = byteCount(row && row['disk.indices']);
+  const notIndices = used !== null && indices !== null && used >= indices ? used - indices : null;
+  const translog = detail ? detail.translog : null;
+  const reserved = detail ? detail.reserved : null;
+  const rest = notIndices !== null && translog !== null && reserved !== null ? notIndices - translog - reserved : null;
+  return { total, used, free, indices, notIndices, translog, reserved, other: rest !== null && rest >= 0 ? rest : null };
+}
+
+/** The same, for all the nodes: a figure is known only when every node reported it. */
+export function diskTotals(splits) {
+  const out = {};
+  for (const k of ['total', 'used', 'free', 'indices', 'notIndices', 'translog', 'reserved', 'other']) {
+    out[k] = splits.length && splits.every((s) => s[k] !== null) ? splits.reduce((n, s) => n + s[k], 0) : null;
+  }
+  return out;
+}
+
+/** `_nodes/stats/indices,fs/translog` by node name: translog bytes, reserved bytes, data paths. */
+export function diskDetails(ans) {
+  const nodes = ans && ans.nodes && typeof ans.nodes === 'object' ? Object.values(ans.nodes) : [];
+  const out = new Map();
+  for (const n of nodes) {
+    if (!n || !n.name) continue;
+    const fs = n.fs || {}, t = fs.total || {};
+    const free = byteCount(t.free_in_bytes), avail = byteCount(t.available_in_bytes);
+    out.set(n.name, {
+      translog: byteCount(n.indices && n.indices.translog && n.indices.translog.size_in_bytes),
+      reserved: free !== null && avail !== null && free >= avail ? free - avail : null,
+      paths: (Array.isArray(fs.data) ? fs.data : []).filter((p) => p && p.path).map((p) => ({ path: p.path, mount: p.mount || '' })),
+    });
+  }
+  return out;
+}
+
+/** Groups of nodes on one host: they may share a disk, and then each counts the others' data as not its own. */
+export function sharedHosts(rows) {
+  const by = new Map();
+  for (const r of rows || []) {
+    const host = r && (r.host || r.ip);
+    if (!host) continue;
+    by.set(host, [...(by.get(host) || []), r.node]);
+  }
+  return [...by.values()].filter((g) => g.length > 1);
+}
+
+/**
+ * The answer of `GET /_dangling`: the indices, and how many nodes answered and did not. Null when
+ * it is not one; "none" is only ever said of a list Elasticsearch sent.
+ */
+export function danglingAnswer(ans) {
+  if (!ans || !Array.isArray(ans.dangling_indices)) return null;
+  const n = ans._nodes || {};
+  return {
+    indices: ans.dangling_indices,
+    answered: byteCount(n.successful),
+    failed: byteCount(n.failed) || 0,
+  };
+}
+
+/** Why the dangling list could not be read, and what would make it readable. */
+export function danglingProblem(status, message) {
+  if (status === 403) return { why: message, fix: 'Give the cluster account the Elasticsearch cluster privilege "manage": listing dangling indices needs it.' };
+  if (status === 400 || status === 404 || status === 405) return { why: `Elasticsearch did not accept GET /_dangling (${message})`, fix: 'The list exists from Elasticsearch 7.9 on. On an older cluster, look in the data path on each node.' };
+  return { why: message, fix: 'Try again; if it stays, run GET /_dangling in the REST console to see the whole answer.' };
+}
