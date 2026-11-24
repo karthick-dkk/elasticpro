@@ -10,7 +10,7 @@
  * anything again; a day the record does not have is unknown, never a 0.
  */
 
-import { dayBasis, basisOf, addDays, utcDay, dayStatus, todayText } from './volume-daily.js';
+import { dayBasis, basisOf, addDays, utcDay, dayStatus, todayText, notesOf } from './volume-daily.js';
 
 /** The day buttons, each a window that always ends today. */
 export const DAY_CHOICES = [15, 30, 60, 90];
@@ -131,10 +131,11 @@ export function sizeDayStatus(row, basis, { today = utcDay() } = {}) {
   if (row.day === today) return { text: todayText(row), kind: 'today' };
   if (row.final === false) {
     const s = dayStatus(row, { today });
-    if (s.kind === 'warn') return s;
+    if (s.kind === 'warn' || s.text === 'not final') return s;
   }
-  if (dayBasis(row, basis) === null) return { text: 'not measured', kind: 'na', title: 'Index size is not measured for this day: its indices are split into days by the time field, and Elasticsearch reports size per index.' };
-  return { text: 'final', kind: 'ok' };
+  const notes = notesOf(row).join('\n');
+  if (dayBasis(row, basis) === null) return { text: 'not measured', kind: 'na', title: notes || 'Index size is not measured for this day: its indices are split into days by the time field, and Elasticsearch reports size per index.' };
+  return notes ? { text: 'final · note', kind: 'ok', title: notes } : { text: 'final', kind: 'ok' };
 }
 
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

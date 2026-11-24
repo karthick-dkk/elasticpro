@@ -374,26 +374,6 @@ fn monthly_sheet(data: &ClusterData, p: &Period, layouts: &Value, today: NaiveDa
     rows
 }
 
-/// What a breakdown's counts rest on, when that is less than the whole period exactly counted.
-fn breakdown_notes(b: &Value, days: usize) -> Vec<String> {
-    let t = &b["totals"];
-    let n = |v: &Value| v.as_u64().unwrap_or(0);
-    let mut out = vec![];
-    if (n(&t["days"]) as usize) < days {
-        out.push(format!("measured on {} of {days} days", n(&t["days"])));
-    }
-    if n(&t["sizeUnmeasuredDays"]) > 0 {
-        out.push(format!("size measured on {} of {days} days", n(&t["days"]) - n(&t["sizeUnmeasuredDays"])));
-    }
-    if n(&b["errorBound"]) > 0 {
-        out.push(format!("documents approximate: each count ±{}", n(&b["errorBound"])));
-    }
-    if n(&b["errorBoundUnknownDays"]) > 0 {
-        out.push(format!("error of the counts not recorded on {} days", n(&b["errorBoundUnknownDays"])));
-    }
-    out
-}
-
 fn breakdown_sheet(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Vec<Cell>> {
     let days = ClusterData::period_days(p, today).len();
     let mut rows: Vec<Vec<Cell>> = vec![];
@@ -407,7 +387,7 @@ fn breakdown_sheet(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Vec<
             rows.push(vec![Cell::text(format!("{NOT_MEASURED}: {e}"))]);
             continue;
         }
-        for note in breakdown_notes(&b, days) {
+        for note in derive::breakdown_notes(&b, days) {
             rows.push(vec![Cell::text(note)]);
         }
         rows.push(["Value", "Documents", "Event bytes", "Primary size est. (bytes)", "Primary size est. GB", "Share % (est.)", "Days seen"]
@@ -523,7 +503,7 @@ pub fn csv_files(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Entry>
     let in_period = ClusterData::period_days(p, today).len();
     for (key, b) in data.breakdowns(p) {
         let error = b["error"].as_str().map(|e| format!("{NOT_MEASURED}: {e}"));
-        let note = breakdown_notes(&b, in_period).join("; ");
+        let note = derive::breakdown_notes(&b, in_period).join("; ");
         if let Some(e) = error {
             let mut row = vec![String::new(); BREAKDOWN_CSV.len()];
             (row[0], row[1], row[4], row[5]) = (data.id.clone(), key.to_string(), p.from.clone(), p.to.clone());

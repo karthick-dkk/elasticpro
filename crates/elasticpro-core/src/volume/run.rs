@@ -643,6 +643,8 @@ impl Core {
         let days = store.days_between(id, from, to);
         let refs: Vec<&super::Day> = days.iter().collect();
         let mut out = derive::breakdown(&refs, field, top);
+        let asked = (to.min(today) - from).num_days().max(-1) + 1;
+        out["notes"] = json!(derive::breakdown_notes(&out, asked as usize));
         out["ok"] = json!(true);
         out["clusterId"] = json!(id);
         out["period"] = json!({ "from": day_key(from), "to": day_key(to) });

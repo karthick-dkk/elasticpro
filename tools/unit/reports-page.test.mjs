@@ -218,6 +218,11 @@ test('a day\'s status: final, today so far, shards failed, not measured', () => 
     '2 of 28 shards failed · asked again');
   assert.equal(V.dayStatus({ day: '2026-11-01', final: true, eventBytes: null }, { today: TODAY }).text, 'not measured');
   assert.equal(V.dayStatus({ day: '2026-11-01', final: false }, { today: TODAY }).text, 'not aggregated yet');
+  const nf = V.dayStatus({ day: '2026-11-23', final: false, docs: 5, eventBytes: 9, notes: ['not final: read 2026-11-24 02:00 UTC'] }, { today: TODAY });
+  assert.deepEqual([nf.text, nf.kind, nf.title], ['not final', 'today', 'not final: read 2026-11-24 02:00 UTC'], 'read, but the day was not 24 h over');
+  const inc = V.dayStatus({ day: '2026-11-01', final: true, eventBytes: 1, eventMissingDocs: 3, notes: ['3 of 9 documents without event size: not in its sum'] }, { today: TODAY });
+  assert.deepEqual([inc.text, inc.kind, /3 of 9/.test(inc.title)], ['final · incomplete', 'warn', true]);
+  assert.equal(V.dayStatus({ day: '2026-11-01', final: true, eventBytes: 1, notes: ['kept from the record'] }, { today: TODAY }).text, 'final · note');
 });
 
 test('a month against the previous one only when both are whole', () => {
@@ -237,6 +242,13 @@ test('the Reports CSVs carry event_logsize and leave unmeasured cells empty', ()
   assert.equal(rows[2].event_bytes, null);
   assert.equal(rows[2].event_bytes_measured, 'false');
   assert.equal(rows[2].status, 'not measured');
+  assert.deepEqual(V.reportDailyCsvRows('p', { days: [{ day: '2026-11-01', final: true, docs: 1, eventBytes: 2, readAt: 0, notes: ['a', 'b'] }] }, 7, { today: TODAY })
+    .map((x) => [x.avg_days, x.read_at_utc, x.note]), [[0, '1970-01-01T00:00:00.000Z', 'a; b']], 'no earlier day: averaged over 0 days, not 7');
+  const pm = { month: '2026-10', daysWithData: 31, daysMeasured: { eventBytes: 12, docs: 31 }, finalDays: 30, eventBytes: 5, docs: 2 };
+  assert.equal(V.monthVsPrevious(pm, { month: '2026-09', daysWithData: 30, eventBytes: 100 }).why, 'partial', 'measured on 12 of its 31 recorded days');
+  assert.deepEqual(V.reportMonthlyCsvRows('p', [pm], null, { today: TODAY }).map((x) => [x.event_bytes_days_measured, x.docs_days_measured, x.final_days]), [[12, 31, 30]]);
+  assert.equal(V.monthlyAllEventCsvRows({ clusters: [{ name: 'a', months: [pm] }] }).rows[0].days_note, '2026-10: 12 of 31 days');
+  assert.equal(V.breakdownCsvRows('p', { field: 'tag', rows: [{ value: 'x', docs: 1 }], notes: ['documents approximate: each count ±4'] }, { from: 'a', to: 'b' })[0].note, 'documents approximate: each count ±4');
   const months = [{ month: '2026-09', daysWithData: 30, eventBytes: 100, docs: 1 }, { month: '2026-10', daysWithData: 31, eventBytes: 120, docs: 2 }];
   const mrows = V.reportMonthlyCsvRows('prod', months, null, { today: TODAY });
   assert.deepEqual(Object.keys(mrows[0]), V.REPORT_MONTHLY_CSV);

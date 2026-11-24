@@ -29,7 +29,7 @@ import { configErrorOf,
   NEEDS_VERSION, collectDue, utcDay, monthName, daysCoverText,
   lastMonths, breakdownPeriods, breakdownLabel, breakdownCsvRows, BREAKDOWN_CSV, shortDay,
   addDays, eventBytesOf, perDayEventBytes, eventVsAvgPct, eventYesterday, eventMonthSoFar, eventPeak,
-  monthEventPeak, monthVsPrevious, daysInMonth, dayStatus, breakdownEventShares, eventWindow, vsAvgWords, notFinalDay, notFinalText,
+  monthEventPeak, monthVsPrevious, daysInMonth, eventDaysOf, notesOf, dayStatus, breakdownEventShares, eventWindow, vsAvgWords, notFinalDay, notFinalText,
   reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV, recordEmptyWhy, backfillLine,
 } from '../core/volume-daily.js';
 import { forgetRecords } from './record.js';
@@ -688,8 +688,8 @@ function monthlyTable(c, rows, settings, peaks) {
     if (key === 'month') return h('span', monthName(m.month), historyMark(m));
     if (key === 'daysWithData') {
       const all = daysInMonth(m.month);
-      const short = has && (m.partial || m.daysWithData < all);
-      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days missing from the record' }, daysCoverText(m.daysWithData, all)) : num(m.daysWithData || 0);
+      const n = eventDaysOf(m); const short = has && (m.partial || n < all);
+      return short ? h('span.vs-notm', { title: m.partial ? 'The month so far' : 'Days without a measured event_logsize' }, daysCoverText(n, all)) : num(m.daysWithData || 0);
     }
     if (!has) return dash();
     switch (key) {
@@ -819,6 +819,8 @@ function breakdownCard(c, settings) {
         h('span.n', value === null ? notMeasured(field) : bytes(value)),
         h('span.p', share === null ? '—' : `${Math.round(share)} %`));
     });
+    const notes = notesOf(reply);
+    if (notes.length) items.push(h('div.muted.vs-bd-note', notes.join(' · ')));
     body = items.length ? h('div.vs-hbars', ...items) : h('div.tbl-empty', 'No value recorded in this period');
   }
   return card('Breakdown', `${p.label} · ${days} day${days === 1 ? '' : 's'}`, h('div', controls, body));

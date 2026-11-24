@@ -510,6 +510,11 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
   avg_7d_days_recorded, <tag>=<value>_bytes_estimated…`; a value's size is always headed
   "estimated by document share" on the page
 - breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen, note`
+- Reports › Daily & monthly's own files: the daily one ends in `avg_days` (the days really averaged), `status`,
+  `read_at_utc`, `note` (the server's notes, joined); the monthly one in `event_bytes_days_measured,
+  docs_days_measured, final_days`. A day read before it was 24 h over reads *not final*; one whose figures
+  leave documents or indices out, *final · incomplete*; the notes are on hover. The breakdown's notes are
+  under its bars and in its `note` column.
 
 ## Reports and mail
 

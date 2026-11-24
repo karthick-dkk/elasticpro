@@ -416,6 +416,27 @@ fn sum_f(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
+/// What a breakdown's counts rest on, when that is less than the whole period exactly counted: the one
+/// list the files and the page show. `days`: the period's calendar days, today included.
+pub fn breakdown_notes(b: &Value, days: usize) -> Vec<String> {
+    let t = &b["totals"];
+    let n = |v: &Value| v.as_u64().unwrap_or(0);
+    let mut out = vec![];
+    if (n(&t["days"]) as usize) < days {
+        out.push(format!("measured on {} of {days} days", n(&t["days"])));
+    }
+    if n(&t["sizeUnmeasuredDays"]) > 0 {
+        out.push(format!("size measured on {} of {days} days", n(&t["days"]) - n(&t["sizeUnmeasuredDays"])));
+    }
+    if n(&b["errorBound"]) > 0 {
+        out.push(format!("documents approximate: each count ±{}", n(&b["errorBound"])));
+    }
+    if n(&b["errorBoundUnknownDays"]) > 0 {
+        out.push(format!("error of the counts not recorded on {} days", n(&b["errorBoundUnknownDays"])));
+    }
+    out
+}
+
 /// **Breakdown** of one field over `[from, to]`: per value Σ docs, Σ eventBytes (measured),
 /// Σ estimated primary — Σ over days of (value docs ÷ day docs) × day primary size —, its
 /// share of the estimated total, and the days it was seen. "(not set)" (missing) and
