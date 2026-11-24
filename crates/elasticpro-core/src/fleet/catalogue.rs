@@ -90,10 +90,50 @@ pub fn snapshots_cat_path(repo: &str) -> String {
 
 /// The request the UI's `snapshots(repo, 500)` made: the verbose listing, with index names.
 pub fn snapshots_full_path(repo: &str) -> String {
-    format!("/_snapshot/{}/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=500", enc(repo))
+    format!("/_snapshot/{}/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size={SNAPSHOTS_FULL_SIZE}", enc(repo))
 }
 
-/// Where the repository names come from: the `repos` answer of the `policies` dataset.
+/// The most snapshots one verbose listing carries: the newest of the repository.
+pub const SNAPSHOTS_FULL_SIZE: usize = 500;
+
+/// What a repository's listing says about itself, beside its rows (additive):
+///
+/// * `cut: {shown, total|null, remaining|null}` when the verbose listing is not the whole
+///   repository — Elasticsearch's own `total`/`remaining` (7.16 and later), or, when it gives
+///   none, a listing exactly as long as was asked for (`total: null`: how many more is unknown);
+/// * `repoError` when the repository itself could not be read although the answer came: an error,
+///   or a 200 that carries the repository's failure inside (`responses[].error`, `failures`).
+///   Such a repository is not empty.
+pub fn note_listing(a: &mut Value) {
+    if a.get("ok") != Some(&Value::Bool(true)) {
+        let why = a.pointer("/json/error/reason").and_then(Value::as_str).or_else(|| a.get("message").and_then(Value::as_str))
+            .map(str::to_string).or_else(|| a.get("status").map(|s| format!("HTTP {s}"))).unwrap_or_else(|| "not read".into());
+        a["repoError"] = Value::String(why);
+        return;
+    }
+    let Some(j) = a.get("json").filter(|j| j.is_object()) else { return };
+    let inner = j.get("responses").and_then(Value::as_array).into_iter().flatten().find_map(|r| r.get("error"))
+        .or_else(|| j.get("failures").and_then(Value::as_object).and_then(|m| m.values().next()));
+    if let Some(e) = inner {
+        let why = e.get("reason").and_then(Value::as_str).or_else(|| e.get("type").and_then(Value::as_str)).unwrap_or("the repository could not be read").to_string();
+        a["repoError"] = Value::String(why);
+        return;
+    }
+    let Some(shown) = j.get("snapshots").and_then(Value::as_array).map(Vec::len) else { return };
+    let num = |k: &str| j.get(k).and_then(Value::as_u64);
+    let (total, remaining) = (num("total"), num("remaining"));
+    let cut = match (remaining, total) {
+        (Some(r), _) => r > 0,
+        (None, Some(t)) => t > shown as u64,
+        (None, None) => shown >= SNAPSHOTS_FULL_SIZE,
+    };
+    if cut {
+        let total = total.or_else(|| remaining.map(|r| r + shown as u64));
+        a["cut"] = json!({ "shown": shown, "total": total, "remaining": remaining });
+    }
+}
+
+/// Where the repository names come from, asked before every listing.
 pub const REPOS_PATH: &str = "/_snapshot?local=false";
 
 /// The snapshots in progress, cluster-wide: `_snapshot/_status` with no repository returns
@@ -356,6 +396,29 @@ mod tests {
         assert_eq!(snapshots_full_path("my repo"), "/_snapshot/my%20repo/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=500");
         assert!(snapshots_cat_path("r").starts_with("/_cat/snapshots/r?format=json&s=end_epoch:desc&h=id,status"));
         assert_eq!(enc("a/b:c"), "a%2Fb%3Ac");
+    }
+
+    #[test]
+    fn a_cut_listing_and_a_repository_error_are_said_and_are_not_an_empty_repository() {
+        let mut a = json!({ "ok": true, "json": { "snapshots": [{}, {}], "total": 740, "remaining": 738 } });
+        note_listing(&mut a);
+        assert_eq!(a["cut"], json!({ "shown": 2, "total": 740, "remaining": 738 }));
+        let mut a = json!({ "ok": true, "json": { "snapshots": [{}, {}], "total": 2, "remaining": 0 } });
+        note_listing(&mut a);
+        assert!(a.get("cut").is_none() && a.get("repoError").is_none());
+        // Before 7.16: no total. As many as were asked for may not be all.
+        let mut a = json!({ "ok": true, "json": { "snapshots": vec![json!({}); SNAPSHOTS_FULL_SIZE] } });
+        note_listing(&mut a);
+        assert_eq!(a["cut"], json!({ "shown": 500, "total": null, "remaining": null }));
+        let mut a = json!({ "ok": true, "json": { "responses": [{ "repository": "r", "error": { "type": "repository_exception", "reason": "bucket gone" } }] } });
+        note_listing(&mut a);
+        assert_eq!(a["repoError"], "bucket gone");
+        let mut a = json!({ "ok": false, "status": 500, "json": { "error": { "reason": "[r] could not read" } } });
+        note_listing(&mut a);
+        assert_eq!(a["repoError"], "[r] could not read");
+        let mut a = json!({ "ok": true, "json": [] });
+        note_listing(&mut a);
+        assert!(a.get("repoError").is_none(), "an empty _cat listing is an empty repository");
     }
 
     #[test]
