@@ -710,7 +710,7 @@ export function lifecycleButton(r, label, view, errs, titleOf) {
 }
 
 /** The CSV's yes / no / empty (unknown) for "looks after the log indices". */
-const coveredCsv = (v) => (v.covered === true ? 'yes' : v.covered === false ? 'no' : '');
+const coveredCsv = (v) => (v.covered === true ? 'yes' : v.covered === false ? 'no' : v.covered === 'part' ? 'part' : '');
 
 /**
  * The CSV's fields per column: [suffix, value]. The header is the column's name as this
@@ -1452,9 +1452,10 @@ export function backupsCard(r) {
     const tone = v.status === 'Success' ? 'good' : v.status === 'Failed' ? 'bad' : 'none';
     return card4('slm', '', head,
       h('div.cl-big-row',
-        h(`span.cl-big.${tone}`, v.status || 'Not run yet'),
+        h(`span.cl-big.${tone}`, v.headline),
         v.at ? h('span.muted.cl-when', { title: dt(v.at) }, clock(v.at)) : null),
-      h('div.cl-card-note.mono', { title: v.others > 0 ? `+${v.others} more policy take the log indices` : null }, v.policy));
+      h('div.cl-card-note.mono', { title: v.others > 0 ? `${v.others + 1} policies take the log indices` : null },
+        [v.failed.length ? v.failed.slice(0, 2).join(', ') : v.policy, v.part ? `takes ${v.takes}` : null].filter(Boolean).join(' · ')));
   }
   if (v.kind === 'none') {
     return card4('slm', '', head,

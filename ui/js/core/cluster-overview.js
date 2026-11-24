@@ -276,7 +276,8 @@ export function slmSummary(d, c, defaults) {
   const view = lifecycleView('SLM', d, pattern, c);
   const card = slmCard(d, view, pattern, clusterKind(c).ulm);
   const out = { pill: operationPill(d && d.slmStatus && d.slmStatus.operation_mode), kind: card.kind, policy: card.policy || null,
-    status: card.status || null, at: card.at || null, durationMs: null, indices: null, why: card.why || null, note: card.note || null };
+    status: card.status || null, headline: card.headline || null, takes: card.takes || null, part: !!card.part, failed: card.failed || [],
+    at: card.at || null, durationMs: null, indices: null, why: card.why || null, note: card.note || null };
   if (card.kind === 'unused') out.pill = { tone: 'grey', word: 'not used' };
   if (card.kind !== 'ok' || !out.policy) return out;
   const p = (d.slm || []).find((x) => x.id === out.policy);

@@ -521,12 +521,12 @@ function slmCardEl(c, d) {
   else if (s.kind === 'unknown' || s.kind === 'unread') line = h('span.muted', { title: s.why || null }, s.kind === 'unread' ? 'policies not readable' : (s.why || 'not readable'));
   else if (s.kind === 'stopped') line = statusDot('bad', 'SLM is stopped: nothing is snapshotted until it is started again');
   else if (s.kind === 'none') line = h('span', statusDot('bad', 'no policy'), h('span.muted', ` for ${s.note || 'the log indices'}`));
-  else if (!s.status) line = h('span.muted', 'never ran');
+  else if (!s.status) line = h('span.muted', s.headline && s.headline !== 'Not run yet' ? s.headline : 'never ran');
   else {
     const bits = [s.at ? whenText(s.at) : null, s.durationMs !== null ? dur(s.durationMs) : null, s.indices !== null ? `${num(s.indices)} ${s.indices === 1 ? 'index' : 'indices'}` : null].filter(Boolean);
-    line = h('span', statusDot(s.status === 'Success' ? 'ok' : 'bad', s.status.toLowerCase()), ' ', h('span', { title: s.at ? `${ago(s.at)} · ${dt(s.at)}` : null }, bits.join(' · ')));
+    line = h('span', statusDot(s.status === 'Success' ? 'ok' : 'bad', (s.headline || s.status).toLowerCase()), ' ', h('span', { title: s.at ? `${ago(s.at)} · ${dt(s.at)}` : null }, bits.join(' · ')));
   }
-  return lifecycleCard('slm', 'SLM', s.pill, s.policy, link, line);
+  return lifecycleCard('slm', 'SLM', s.pill, s.kind === 'ok' ? [s.failed.length ? s.failed.join(', ') : s.policy, s.part ? `takes ${s.takes}` : null].filter(Boolean).join(' · ') : s.policy, link, line);
 }
 
 function ilmCardEl(c, d, idx) {

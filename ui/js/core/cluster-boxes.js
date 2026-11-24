@@ -16,7 +16,7 @@
 
 import { offText } from './collection.js';
 import { shardAllocation, nodeTier, TIERS } from './cluster-detail.js';
-import { ilmPolicyState, ilmErrorsOf, slmCoverage, logsOf, NOT_KNOWN } from './lifecycle-errors.js';
+import { ilmPolicyState, ilmErrorsOf, slmCoverage, slmLastRun, slmTakesText, logsOf, NOT_KNOWN } from './lifecycle-errors.js';
 
 /* ----------------------------------- disks ----------------------------------- */
 
@@ -258,19 +258,22 @@ export function ilmCard(d, pattern) {
 /* --------------------------------- Backups (SLM) --------------------------------- */
 
 /**
- * The newest run among the given SLM policies: { policy, status: 'Success'|'Failed'|null, at }.
- * A policy that never ran gives status null (and the first policy's name).
+ * The last runs of the given SLM policies as one answer (slmLastRun, one per policy):
+ * { policy, status: 'Success'|'Failed'|null, at, headline, failed: [ids], never: [ids] }.
+ * 'Failed' when any policy's last run failed, 'Success' only when every one succeeded, null when
+ * one has never run. `policy` and `at` are the newest of the runs that decide it.
  */
 export function lastSlmRun(slm, ids) {
-  let best = null;
-  for (const p of slm || []) {
-    if (!p || !ids.includes(p.id)) continue;
-    for (const [status, rec] of [['Success', p.last_success], ['Failed', p.last_failure]]) {
-      const at = rec && Number(rec.time);
-      if (isFinite(at) && at > 0 && (!best || at > best.at)) best = { policy: p.id, status, at };
-    }
-  }
-  return best || { policy: ids[0] || null, status: null, at: null };
+  const runs = (slm || []).filter((p) => p && ids.includes(p.id)).map((p) => ({ policy: p.id, ...slmLastRun(p) }));
+  const pick = (status) => runs.filter((r) => r.status === status).sort((a, b) => (b.at || 0) - (a.at || 0));
+  const failed = pick('Failed'), never = pick(null), ok = pick('Success');
+  const from = failed.length ? failed : never.length ? never : ok;
+  const status = failed.length ? 'Failed' : never.length || !ok.length ? null : 'Success';
+  const n = runs.length;
+  const headline = failed.length ? (n > 1 ? `${failed.length} of ${n} failed` : 'Failed')
+    : status === 'Success' ? 'Success' : n > 1 && ok.length ? `${never.length} of ${n} never ran` : 'Not run yet';
+  return { policy: (from[0] || {}).policy || ids[0] || null, status, at: (from[0] || {}).at || null, headline,
+    failed: failed.map((r) => r.policy), never: never.map((r) => r.policy) };
 }
 
 /**
@@ -281,7 +284,7 @@ export function lastSlmRun(slm, ids) {
  *   unknown — SLM status not read / not supported: { why }
  *   stopped — SLM is not RUNNING
  *   none    — running, but no scheduled policy takes the log pattern: { logs }
- *   ok      — { policy, status, at } of the policy that takes the pattern (its newest run)
+ *   ok      — lastSlmRun over every policy that takes log indices, and { takes: "logstash-*" or "part of logstash-*" }
  *   unread  — running, policies could not be read
  */
 export function slmCard(d, view, pattern, ulm) {
@@ -301,5 +304,6 @@ export function slmCard(d, view, pattern, ulm) {
   const cov = slmCoverage(d, pattern);
   if (!cov.known) return { kind: 'unread', pill: { tone: 'grey', text: 'SLM Running ?' } };
   if (!cov.ok) return { kind: 'none', pill, logs };
-  return { kind: 'ok', pill, ...lastSlmRun(d.slm, cov.policies), others: cov.policies.length - 1 };
+  return { kind: 'ok', pill, ...lastSlmRun(d.slm, cov.policies), others: cov.policies.length - 1,
+    takes: slmTakesText(cov, pattern), part: !cov.whole.length };
 }
