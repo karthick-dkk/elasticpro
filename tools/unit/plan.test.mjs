@@ -150,9 +150,11 @@ test('a role switched off is not in the plan', () => {
   assert.equal(p.totals.servers, 2);
 });
 
-test('inputs are bounded like the board: volume and hot days at least 1, replicas whole', () => {
+test('inputs are bounded: the volume as it is (0.2 GB stays 0.2), hot days at least 1, replicas whole', () => {
   const i = P.normaliseInput({ perDay: '0', hotDays: 'x', warmDays: -3, replicas: 1.9, bkDays: '', backup: 'tape' });
-  assert.equal(i.perDay, 1);
+  assert.equal(i.perDay, 0);
+  assert.equal(P.normaliseInput({ perDay: '0.2' }).perDay, 0.2, 'no floor of 1 GB a day');
+  assert.equal(P.computePlan({ roles: [role('H', 'tier', { tier: 'hot', nodeTB: 3 })] }, { perDay: 0.2, hotDays: 30, buffer: 30 }).totals.liveText, '8 GB');
   assert.equal(i.hotDays, 1);
   assert.equal(i.warmDays, 0);
   assert.equal(i.replicas, 1);
@@ -185,7 +187,9 @@ test('CSV: [set] stays [set]; the /backup column follows the target', () => {
 });
 
 test('based on a cluster: the live retention policy as hot days, and the volume as GB', () => {
-  assert.deepEqual(P.inputsFromCluster({ perDayBytes: 412.34e9, liveRetention: '45d' }), { perDay: 412.3, hotDays: 45 });
+  assert.deepEqual(P.inputsFromCluster({ perDayBytes: 412.34 * 1024 ** 3, liveRetention: '45d' }), { perDay: 412.3, hotDays: 45 }, 'GB as every size on Reports: 1024³');
+  assert.deepEqual(P.inputsFromCluster({ perDayBytes: 0.2 * 1024 ** 3 }), { perDay: 0.2 }, 'a small volume is not raised to 1 GB');
+  assert.deepEqual(P.inputsFromCluster({ perDayBytes: 0.0234 * 1024 ** 3 }), { perDay: 0.023 });
   assert.deepEqual(P.inputsFromCluster({ perDayBytes: null, liveRetention: '' }), {});
   assert.equal(P.retentionDays('4w'), 28);
   assert.equal(P.retentionDays('3 months'), 90);

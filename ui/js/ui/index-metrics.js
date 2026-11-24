@@ -159,7 +159,7 @@ function analysisBody(c, a) {
            { label: 'Est. size', num: true }, 'State'],
       trs, { emptyText: 'No values returned — check that the field exists and is aggregatable.' }),
     h('div.muted', { style: { fontSize: '11px' } },
-      'Document counts are exact. Size is an estimate: Elasticsearch reports store size per index, ' +
+      `${a.notExact === null ? 'Document counts are exact.' : `Document counts are not exact: ${a.notExact || 'how they were counted is not known'}.`} Size is an estimate: Elasticsearch reports store size per index, ` +
       'never per field value, so a value’s share of the day’s documents is applied to that day’s index size.'));
 }
 
@@ -184,6 +184,7 @@ function exportAnalysis(c, a) {
         cluster: c.name, field: a.resolvedField, value: t.term, day: p.day,
         docs: p.docs, estimated_bytes: p.bytes,
         latest_day: t.latestDay || '', latest_docs: t.latest ? t.latest.docs : '',
+        counts: a.notExact === null ? 'exact' : `not exact: ${a.notExact || 'not known'}`,
         baseline_avg_docs: t.baseline === null || t.baseline === undefined ? '' : Math.round(t.baseline),
         change_pct: t.changePct === null ? '' : Math.round(t.changePct),
         spiked: t.spiked ? 'YES' : 'NO',

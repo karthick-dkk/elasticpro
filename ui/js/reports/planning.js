@@ -150,7 +150,7 @@ export function planningSection(ctx = {}) {
             h('option', { value: '', selected: !st.basedOn }, 'A new cluster'),
             ...list().map((c) => h('option', { value: c.id, selected: c.id === st.basedOn }, `${c.name || c.id} (existing)`)))),
           basedHint),
-        numField('pn-pd', 'perDay', 'Daily volume (GB)', 'event_logsize per day', { min: 1 }),
+        numField('pn-pd', 'perDay', 'Daily volume (GB)', 'event_logsize per day'),
         h('div.fld', h('span.lbl', 'Live retention policy'),
           h('div.num.pn-days',
             h('input', { id: 'pn-hot', type: 'number', min: 1, value: String(st.input.hotDays), 'aria-label': 'Hot days', style: { width: '90px' },
