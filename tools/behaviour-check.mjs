@@ -3203,7 +3203,7 @@ await go('log-delay');
       ok(must.some((x) => x.query_string && x.query_string.query === '"acme"' && x.query_string.fields[0] === 'tag1'), 'live: the tag1 filter is not an exact clause on tag1');
       ok(body.query.bool.filter[0].range['@timestamp'] && body.query.bool.filter[0].range['@timestamp'].gte, 'live: Search went without the time range');
       const heads = [...g('ld-live-logs').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
-      ok(heads.join('|') === 'Arrived|Event time|src_hostname|src_ip|tag1|Delay|Message', `live: the documents' columns read ${heads.join(' · ')}`);
+      ok(heads.join('|') === 'Arrived|Event time|src_hostname|src_ip|tag1|log_type|Delay|Message', `live: the documents' columns read ${heads.join(' · ')}`);
       ok(g('ld-live-logs').querySelectorAll('tbody tr.ld-log').length > 0 && /Documents over time · \d+ in range/.test(g('ld-logs-card').textContent), 'live: no documents or no chart after Search');
       ok(/times in .*UTC [+−]\d\d:\d\d/.test(subOf('ld-logs-card')), `live: the Logs head does not name the zone (${subOf('ld-logs-card')})`);
       // Start live tail only on press; Stop stops it.
@@ -8948,6 +8948,30 @@ await settleFor(300);
       ok(/log_type is not in the mapping/.test(g('ld-types-off').textContent) && !g('ld-by-type'), `log types: the note reads "${g('ld-types-off').textContent}"`);
       const off = view().querySelector('.ld-kpi[data-kpi="part"]');
       ok(off && off.querySelector('b').textContent === '—', `log types: part delayed reads "${off && off.textContent}" where it is not measured`);
+    }
+    // Live measures log types in the same search: one log type late is part delayed and listed with the delayed devices.
+    {
+      const answered = globalThis.fetch;
+      globalThis.fetch = async (input, init) => {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        const r = await answered(input, init);
+        if (body.type !== 'ES' || !/"no_type":\{"missing"/.test(body.body || '')) return r;
+        const o = JSON.parse(await r.text());
+        for (const b of o.json.aggregations.devices.buckets) {
+          const late = JSON.parse(JSON.stringify(b.latest)); const src = late.hits.hits[0]._source;
+          src.ingested_time = new Date(Date.parse(src['@timestamp']) - 46 * 60000).toISOString();
+          b.types = { sum_other_doc_count: 0, buckets: [{ key: 'traffic', doc_count: 90, latest: b.latest }, ...(b.key === 'fw-edge-01' ? [{ key: 'threat', doc_count: 7, latest: late }] : [])] };
+          b.no_type = { doc_count: 0, latest: { hits: { total: { value: 0 }, hits: [] } } };
+        }
+        return stubReply(o);
+      };
+      location.hash = '#/log-delay/live';
+      await waitFor(() => ldView() === 'live' && g('delay-fetch'), 'log types: Live did not draw');
+      press(g('delay-fetch')); await settleFor(120);
+      if (g('ld-warn-anyway')) press(g('ld-warn-anyway'));
+      const row = await waitFor(() => view().querySelector('#ld-watch-devices tbody tr[data-device="fw-edge-01"]'), 'log types: Live did not list the part-delayed device');
+      ok(row && /part delayed/.test(row.textContent) && /1 of 2 late: threat/.test(row.textContent) && !row.querySelector('.pill.ld-crit, .pill.ld-delay'), `log types: Live's row reads "${row && row.textContent}"`);
+      globalThis.fetch = answered;
     }
     // A log type's logs: the filter asks for that exact value, or for the documents without it, and can be taken away.
     location.hash = `${typesOn(named(6)).replace('/device/', '/live/')}?log_type=threat`;
