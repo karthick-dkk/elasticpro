@@ -1016,6 +1016,7 @@ a.arow-cluster:hover { text-decoration: underline; }
    height — the gauge 120 px, the figures 18–20 px, the tiles side by side, tight padding. Every
    figure and label is still there. */
 .dense .ns-compact > header { padding: 4px 10px; }
+.ns-compact > header .ld-ibtn { align-self: center; }
 .dense .ns-compact > .body { padding: 6px 10px 7px; }
 .ns-compact .edge-tile { padding: 0 0 0 8px; }
 .ns-compact .edge-tile > .v, .ns-compact .ns-alloc-tiles .edge-tile > .v { font-size: 18px; line-height: 1.15; }

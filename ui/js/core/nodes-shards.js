@@ -240,15 +240,16 @@ export function diskTotals(splits) {
   return out;
 }
 
-/** `_nodes/stats/indices,fs/translog` by node name: translog bytes, reserved bytes, data paths. */
+/** `_nodes/stats/indices,fs/translog` by node name: its whole id, translog bytes, reserved bytes, data paths. */
 export function diskDetails(ans) {
-  const nodes = ans && ans.nodes && typeof ans.nodes === 'object' ? Object.values(ans.nodes) : [];
+  const nodes = ans && ans.nodes && typeof ans.nodes === 'object' ? Object.entries(ans.nodes) : [];
   const out = new Map();
-  for (const n of nodes) {
+  for (const [id, n] of nodes) {
     if (!n || !n.name) continue;
     const fs = n.fs || {}, t = fs.total || {};
     const free = byteCount(t.free_in_bytes), avail = byteCount(t.available_in_bytes);
     out.set(n.name, {
+      id,
       translog: byteCount(n.indices && n.indices.translog && n.indices.translog.size_in_bytes),
       reserved: free !== null && avail !== null && free >= avail ? free - avail : null,
       paths: (Array.isArray(fs.data) ? fs.data : []).filter((p) => p && p.path).map((p) => ({ path: p.path, mount: p.mount || '' })),

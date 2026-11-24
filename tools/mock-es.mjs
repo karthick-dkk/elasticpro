@@ -525,7 +525,7 @@ const routes = [
   // thread pools that reject work. node-3 is the busy one.
   // One dangling index, on node-3; the disk card's translog, reserved blocks and data paths.
   [(u) => u.startsWith('/_dangling'), () => ({ _nodes: { total: 3, successful: 3, failed: 0 }, cluster_name: 'mock',
-    dangling_indices: [{ index_name: 'logstash-old-2025.01.02', index_uuid: 'zmM4e0JtBkeUjiHD-MihPQ', creation_date_millis: 1735776000000, node_ids: ['Qw8nZc4Hn3fullNodeId00'] }] })],
+    dangling_indices: [{ index_name: 'logstash-old-2025.01.02', index_uuid: 'zmM4e0JtBkeUjiHD-MihPQ', creation_date_millis: 1735776000000, node_ids: ['n3'] }] })],
   [(u) => u.startsWith('/_nodes/stats/indices,fs/translog'), () => ({ nodes: Object.fromEntries(['node-1', 'node-2', 'node-3'].map((name, i) => [`n${i + 1}`, {
     name, indices: { translog: { size_in_bytes: 1000000000 } },
     fs: { total: { free_in_bytes: 10000000000, available_in_bytes: 9000000000 }, data: [{ path: '/var/lib/elasticsearch', mount: '/data (/dev/sdb1)' }] } }])) })],

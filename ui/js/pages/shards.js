@@ -811,25 +811,23 @@ function diskCard(c, d) {
 function danglingBody(c, io) {
   const dang = danglingFor(c.id);
   const line = (...kids) => h('div.ns-dangling', h('span', 'Dangling indices: '), ...kids);
+  if (!dang && io && io.inflight) return h('div.ns-dangling.muted', 'Checking for dangling indices…');
   if (!dang) {
-    return io && io.problem && !io.inflight ? line(h('b', 'not known'), h('span.muted', ` · ${io.problem.why}`))
-      : io && io.inflight ? line(h('span.muted', 'checking…'))
+    return io && io.problem ? line(h('b', 'not known'), h('span.muted', ` · ${io.problem.why}`))
       : line(h('b', 'not checked'), h('span.muted', fleetView ? ' · not asked with All clusters — press ↻ or pick one cluster' : ' · press ↻'));
   }
   const asked = `${dang.answered === null ? '' : `${num(dang.answered)} node${dang.answered === 1 ? '' : 's'} answered · `}checked ${ago(dang.at)}`;
   const missing = dang.failed ? h('b', { style: { color: 'var(--warning-ink)' } }, ` · ${num(dang.failed)} node${dang.failed === 1 ? '' : 's'} did not answer, so there may be more`) : null;
   if (!dang.indices.length) return line(h('b', dang.failed ? 'none found' : 'none'), missing, h('span.muted', ` · ${asked}`));
-  // _cat/nodes gives the first characters of a node's id, /_dangling the whole id: a name is shown
-  // only when exactly one node's id begins it.
-  const nodes = (state.data.get(c.id) || {}).nodes || [];
-  const nameOf = (id) => { const m = nodes.filter((n) => n.id && String(id).startsWith(n.id)); return m.length === 1 ? m[0].name : id; };
+  // /_dangling names nodes by their whole id, which _cat/nodes cuts short; the disk details carry it.
+  const names = new Map([...((io && io.detail) || [])].map(([name, x]) => [x.id, name]));
   return h('div',
     line(h('b', { style: { color: 'var(--critical-ink)' } }, `${num(dang.indices.length)} found`), missing, h('span.muted', ` · ${asked} · Elasticsearch does not report their size`)),
     h('div.ns-nodes', table(['Index', 'UUID', 'Created', 'On node', ''], dang.indices.map((x) => h('tr',
       h('td', h('span.ns-name', { title: x.index_name }, x.index_name)),
       h('td.mono.muted.id', x.index_uuid),
       h('td.muted', x.creation_date_millis ? new Date(Number(x.creation_date_millis)).toISOString().slice(0, 10) : '–'),
-      h('td', (x.node_ids || []).map(nameOf).join(', ') || '–'),
+      h('td', (x.node_ids || []).map((id) => names.get(id) || id).join(', ') || '–'),
       h('td', danglingHelp(c, x)))))));
 }
 

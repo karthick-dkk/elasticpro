@@ -162,6 +162,7 @@ test('what is not index data is used minus indices, and its parts add up to it',
   assert.equal(s.notIndices, 41538945024 - 87669888);
   assert.equal(s.reserved, 25643880448 - 22683533312);
   assert.equal(s.translog + s.reserved + s.other, s.notIndices);
+  assert.equal(diskDetails(STATS).get('a').id, 'x');
   assert.deepEqual(diskDetails(STATS).get('a').paths, [{ path: '/data', mount: '/ (overlay)' }]);
 });
 
