@@ -73,7 +73,7 @@ const loading = new Set();
 
 /**
  * A link that opened this page with a problem in view (core/focus.js): `unassigned` shows
- * only the shards with nowhere to go, `disk`/`nodes` bring that card into view, and a
+ * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, `dangling` the disk card, and a
  * `node` narrows the shard table to that node, largest first — for that visit only; the
  * remembered order is not touched. Applied once, on arrival.
  */
@@ -83,8 +83,8 @@ function applyFocus() {
   SHARD_SORT.forVisit(null);      // an order a link asked for lasts one visit
   if (!f) return;
   if (f.section === 'unassigned') showUnassigned();
-  else if (f.section === 'disk') reveal = '[data-focus="disk"]';
-  else if (f.section === 'nodes') reveal = '[data-focus="nodes"]';
+  else if (f.section === 'dangling') reveal = '[data-focus="dangling"]';
+  else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
   // Largest first for this visit only: the remembered Shards order is left as it is.
   if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.forVisit({ key: 'store', dir: -1 }); }
 }
@@ -764,7 +764,7 @@ function diskCard(c, d) {
         h('i', { style: { background: p.color } }), h('span', p.label),
         h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', pct(p.value))))),
       h('div.ns-disk-dangling', danglingBody(c, io))),
-    [diskHelp(c), refreshButton(() => loadDiskInfo(c, true), { title: `ask ${c.name} for its dangling indices`, busy: !!(io && io.inflight) })])), 'disk');
+    [diskHelp(c), refreshButton(() => loadDiskInfo(c, true), { title: `ask ${c.name} for its dangling indices`, busy: !!(io && io.inflight) })])), 'dangling');
 }
 
 /** The dangling line: none, the list, or why it is not known. */
@@ -798,7 +798,7 @@ const inRest = (c, method, path, label, title) => h('button.btn.sm', { title, on
 /** The "i" of one dangling index: what it is, what importing and deleting do. Both are only prepared in REST. */
 function danglingHelp(c, x) {
   const path = `/_dangling/${encodeURIComponent(x.index_uuid)}?accept_data_loss=true`;
-  return infoButton({ id: x.index_name, head: 'dangling index · recommended fix', label: `About dangling index ${x.index_name}`, title: 'What this is, and the recommended fix',
+  return infoButton({ id: `${c.name} · ${x.index_name}`, head: 'dangling index · recommended fix', label: `About dangling index ${x.index_name}`, title: 'What this is, and the recommended fix',
     items: [{
       title: 'On a node\'s disk, not in the cluster',
       cause: 'A node holds this index\'s data, but the cluster state does not list it: it was deleted while the node was away, or the node came from another cluster.',

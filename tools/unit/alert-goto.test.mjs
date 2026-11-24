@@ -45,7 +45,8 @@ test('every rule has a Go to target, on a page that exists', () => {
 test('where each rule lands on its page', () => {
   const at = (id, extra) => GOTO.gotoFor(fake(ALERT_RULES.find((r) => r.id === id), extra));
   assert.deepEqual([at('health').page, at('health').focus], ['shards', { section: 'unassigned' }]);
-  for (const id of ['disk', 'disk-balance', 'disk-unaccounted', 'capacity']) assert.equal(at(id).page + ':' + at(id).focus.section, 'shards:disk');
+  for (const id of ['disk', 'disk-balance', 'capacity']) assert.equal(at(id).page + ':' + at(id).focus.section, 'shards:disk');
+  assert.equal(at('disk-unaccounted').page + ':' + at('disk-unaccounted').focus.section, 'shards:dangling');
   for (const id of ['no-master', 'master-changed']) assert.equal(at(id).focus.section, 'nodes');
   assert.deepEqual([at('ilm').page, at('ilm').focus.ilm], ['indices', true]);
   for (const id of ['slm-mode', 'slm-fail', 'slm-stale']) assert.deepEqual([at(id).page, at(id).focus.view, at(id).focus.section], ['snapshots', 'summary', 'policies']);
