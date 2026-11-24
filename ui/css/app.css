@@ -3495,3 +3495,7 @@ tr.slow-task > td { vertical-align: top; }
 .rc-wait { padding: 12px 0; }
 .rc-warn { color: var(--warning-ink); font-weight: 600; }
 #rc-top .rc-path { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Log Delay: the ↻ Measure again button beside a figure that is not measured (icon only, row height kept). */
+.ld .btn.sm.ld-measure { height: 22px; min-width: 22px; padding: 0 5px; line-height: 1; font-size: 13px; vertical-align: middle; }
+.ld .ld-kpi .ld-measure { margin-top: 2px; align-self: flex-start; }
