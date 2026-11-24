@@ -141,7 +141,7 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
       h('div.ld-ticks.ld-indent', ...axisTicks(g.lo, g.hi).map((t) => h('span', t))),
       h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement, in the log type’s colour${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
       finite(res.seriesFromMs) ? h('div.muted.ld-tiny.ld-indent#ld-series-from', `The log types’ measurements before ${whenText(res.seriesFromMs, res.now)} were not read: not all of the period is drawn.`) : null,
-      h('div.muted.ld-tiny.ld-whole-note', 'Peak: the worst log type’s then. Longest delay and Late most often: the whole device’s (every log type late).'),
+      h('div.muted.ld-tiny.ld-whole-note', 'Peak: the highest measurement, whichever log type. Longest delay and Late most often: the whole device’s (every log type late).'),
       insights(res, age, openText)],
     [h('span.ld-legend', before.length ? key(C.silent, 'whole device, before the first measurement with log types') : null, key(C.delayLine, `${lv.delayFrom ?? '?'} min`, true), key(C.critLine, `${lv.criticalOver ?? '?'} min`, true))]);
 }
