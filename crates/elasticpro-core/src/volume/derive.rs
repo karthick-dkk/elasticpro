@@ -203,9 +203,9 @@ pub fn cards_from(today: NaiveDate, avg_days: u32) -> NaiveDate {
 /// * yesterday's basis;
 /// * "Average per day · N days": the mean of the last N finished days, yesterday included
 ///   — which is `avg_before(today, N)`, the same rule as a row's average, on purpose;
-/// * "This month so far": Σ basis of the current month's days, today as of the last run; beside
-///   it how many of the month's finished days were measured (`daysMeasured` of `days`), and
-///   whether today is in it (`todayIncluded`): nine days out of twenty-three is not the month;
+/// * "This month so far": Σ basis of the current month's finished days; beside it how many of
+///   them were measured (`daysMeasured` of `days`: nine days out of twenty-three is not the month),
+///   how many of those are not final, and today as of the last run (`todayValue`), never in it;
 /// * "Event bytes · 30 days": Σ eventBytes over the last 30 finished days.
 pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: u32, b: SizeBasis, today_as_of: Option<i64>) -> Value {
     let yesterday = today - Duration::days(1);
@@ -214,8 +214,8 @@ pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: 
     let yv = history.get(&yesterday).and_then(|t| basis(t, b));
     let (yavg, _) = avg_before(history, yesterday, avg_days, b);
     let month_start = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap_or(today);
-    let month = sum_opt(history.range(month_start..=today).map(|(_, t)| basis(t, b)));
-    let finished_measured = history.range(month_start..today).filter(|(_, t)| basis(t, b).is_some()).count();
+    let month = sum_opt(history.range(month_start..today).map(|(_, t)| basis(t, b)));
+    let finished: Vec<&Totals> = history.range(month_start..today).map(|(_, t)| t).filter(|t| basis(t, b).is_some()).collect();
     let today_value = history.get(&today).and_then(|t| basis(t, b));
     let ev30: Vec<Option<u64>> = history.range(today - Duration::days(30)..today).map(|(_, t)| t.event_bytes).collect();
     json!({
@@ -224,8 +224,8 @@ pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: 
                        "final": history.get(&yesterday).map(|t| t.is_final) },
         "average": { "days": avg_days, "daysWithData": n, "value": avg_bytes(avg) },
         "monthSoFar": { "month": month_key(today), "value": month,
-                        "days": (today - month_start).num_days(), "daysMeasured": finished_measured,
-                        "todayIncluded": today_value.is_some(), "todayValue": today_value,
+                        "days": (today - month_start).num_days(), "daysMeasured": finished.len(),
+                        "notFinal": finished.iter().filter(|t| !t.is_final).count(), "todayValue": today_value,
                         "asOf": history.contains_key(&today).then_some(today_as_of).flatten() },
         "eventBytes30": { "days": 30, "daysMeasured": ev30.iter().filter(|x| x.is_some()).count(),
                           "value": sum_opt(ev30.into_iter()) },
@@ -428,6 +428,9 @@ pub fn breakdown_notes(b: &Value, days: usize) -> Vec<String> {
     if n(&t["sizeUnmeasuredDays"]) > 0 {
         out.push(format!("size measured on {} of {days} days", n(&t["days"]) - n(&t["sizeUnmeasuredDays"])));
     }
+    if n(&b["notFinalDays"]) > 0 {
+        out.push(format!("{} of the days not final", n(&b["notFinalDays"])));
+    }
     if n(&b["errorBound"]) > 0 {
         out.push(format!("documents approximate: each count ±{}", n(&b["errorBound"])));
     }
@@ -449,6 +452,7 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     // How far a value's count may be off, summed over the days that recorded it; the days that
     // did not are counted: their bound is unknown, not 0.
     let (mut bound, mut bound_unknown) = (None::<u64>, 0u64);
+    let mut not_final = 0u64;
     let mut fields: Vec<String> = vec![];
     let mut error: Option<String> = None;
     // A day whose size is not measured (split by time) adds its documents and event bytes,
@@ -466,6 +470,7 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
             continue;
         }
         let Some(day_docs) = d.docs.filter(|n| *n > 0) else { continue };
+        not_final += !d.is_final as u64;
         if let Some(name) = &f.field {
             if !fields.contains(name) {
                 fields.push(name.clone());
@@ -507,7 +512,7 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
         "field": key, "resolved": fields.last(), "resolvedAll": fields, "rows": rows,
         "totals": { "docs": total_docs, "priBytes": total_pri, "estPriBytes": est_total.map(|e| e.round() as u64), "days": measured_days,
                     "sizeUnmeasuredDays": size_unmeasured },
-        "errorBound": bound, "errorBoundUnknownDays": bound_unknown, "daysInPeriod": days.len(),
+        "errorBound": bound, "errorBoundUnknownDays": bound_unknown, "notFinalDays": not_final, "daysInPeriod": days.len(),
     });
     if measured_days == 0 {
         out["error"] = json!(error.unwrap_or_else(|| "no aggregated day in this period".into()));
@@ -568,8 +573,8 @@ mod tests {
         assert_eq!(c["yesterday"], json!({ "day": "2026-10-28", "value": 400, "changeVsAvgPct": 100.0, "final": false }),
                    "against the 25th..27th: only the 27th (200) has a record");
         assert_eq!(c["average"], json!({ "days": 3, "daysWithData": 2, "value": 300 }), "26th, 27th, 28th: two with a record");
-        assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 1700, "days": 28, "daysMeasured": 3, "todayIncluded": true,
-                                            "todayValue": 1000, "asOf": 123 }), "today included; three of the 28 finished days");
+        assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 700, "days": 28, "daysMeasured": 3, "notFinal": 3,
+                                            "todayValue": 1000, "asOf": 123 }), "today beside it, not in it; three of the 28 finished days, none final");
         assert_eq!(c["eventBytes30"]["value"], 46, "29 Sep .. 28 Oct, measured only; today excluded");
         assert_eq!(c["eventBytes30"]["daysMeasured"], 3);
         assert_eq!(cards_from(d("2026-10-29"), 3), d("2026-09-29"), "30 days back reaches furthest");

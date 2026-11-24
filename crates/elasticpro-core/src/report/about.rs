@@ -13,7 +13,7 @@ pub const NOT_READ: &str = "not read";
 
 /// The same for every file: a day is the UTC day, whatever the reader's zone.
 pub const DAYS_ARE_UTC: &str = "Days are UTC days (00:00 to 24:00 UTC).";
-/// What "final" means in the files (`volume::collect::FINAL_AFTER_MS`).
+/// What "final" means in the files (`volume::schedule::FINAL_AFTER_MS`).
 pub const FINAL_RULE: &str = "A day is final when it was read at least 24 hours after it ended; until then its figures may still grow.";
 
 /// An instant as a file states it: UTC, to the second.
@@ -63,6 +63,11 @@ pub struct About {
     pub table: Vec<Vec<String>>,
 }
 
+/// An error's text as a file that leaves the server may carry it: no credential in it.
+fn safe(text: &str) -> String {
+    crate::jobs::detail::scrub(text)
+}
+
 impl About {
     pub fn new(what: impl Into<String>, p: &Period, built_at: i64) -> About {
         About { what: what.into(), period: format!("{} – {} ({})", p.from, p.to, p.label), built_at, ..About::default() }
@@ -81,7 +86,7 @@ impl About {
         if self.warnings.is_empty() {
             out.push(row("Warnings", "none".into()));
         }
-        out.extend(self.warnings.iter().map(|w| row("Warning", w.clone())));
+        out.extend(self.warnings.iter().map(|w| row("Warning", safe(w))));
         out
     }
 
@@ -120,7 +125,7 @@ impl About {
         let mut out: String = self.clusters.iter().map(|(c, read)| format!("{c}: read from Elasticsearch {read}\n")).collect();
         if !self.warnings.is_empty() {
             out.push_str("\nNot complete:\n");
-            self.warnings.iter().for_each(|w| out.push_str(&format!("  {w}\n")));
+            self.warnings.iter().for_each(|w| out.push_str(&format!("  {}\n", safe(w))));
         }
         out
     }
@@ -147,6 +152,8 @@ mod tests {
         assert!(csv.contains("Warning,prod: 2 of 4 shards failed"));
         assert_eq!(span(std::iter::empty()), NOT_READ, "never a made-up time");
         assert_eq!(a.sheet().name, "About");
+        a.warnings.push("https://u:p4ss@es:9200: refused".into());
+        assert!(!a.csv().contains("p4ss") && !a.mail_lines().contains("p4ss"), "no credential leaves in a file");
         a.warnings.clear();
         assert!(a.csv().contains("Warnings,none"));
     }

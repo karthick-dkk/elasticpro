@@ -1036,7 +1036,7 @@ await go('reports');
       exp.click();
       const f = files.at(-1);
       ok(f && /^reports-daily-.+\.csv$/.test(f.name), `reports daily: the daily export is named "${f && f.name}"`);
-      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status,read_at_utc,note',
         `reports daily: the daily CSV header is "${f && f.text.split('\n')[0]}"`);
     }
     segBtn('Monthly').click();
@@ -1162,7 +1162,7 @@ await go('reports');
     // Export follows the Reports daily columns: event_logsize, no primary size.
     vsBtn('Export CSV').click();
     const f = files.at(-1);
-    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status,read_at_utc,note',
       `daily (stubbed): the daily CSV header is "${f && f.text.split('\n')[0]}"`);
 
     // Collect now, refused politely when it is too soon.
@@ -1186,7 +1186,7 @@ await go('reports');
     ok(!doc.querySelector('#vol-report-jobs') || !doc.querySelector('.vs #vol-report-jobs'), 'daily (stubbed): Generate report is still on Monthly (it moved to Exports & schedules)');
     vsBtn('Export CSV').click();
     const fm = files.at(-1);
-    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,days_in_month,docs,event_bytes,peak_day,peak_event_bytes,vs_previous_pct',
+    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,days_in_month,docs,event_bytes,peak_day,peak_event_bytes,vs_previous_pct,event_bytes_days_measured,docs_days_measured,final_days',
       `daily (stubbed): the monthly CSV header is "${fm && fm.text.split('\n')[0]}"`);
     segBtn('Daily').click();
     await settleFor(150);
@@ -1783,7 +1783,7 @@ await go('reports');
       ok(/every size is event_logsize/.test(dl.textContent), 'reports exports: the downloads do not say every size is event_logsize');
       doc.getElementById('rp-x-daily-csv').click();
       const f = files.at(-1);
-      ok(f && /^reports-daily-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name) && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+      ok(f && /^reports-daily-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name) && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status,read_at_utc,note',
         `reports exports: the daily record file is "${f && f.name}": ${f && f.text.split('\n')[0]}`);
       doc.getElementById('rp-x-overview-xlsx').click();
       ok(files.at(-1) && /^reports-overview-.+\.xlsx$/.test(files.at(-1).name), `reports exports: the fleet overview .xlsx is "${files.at(-1) && files.at(-1).name}"`);

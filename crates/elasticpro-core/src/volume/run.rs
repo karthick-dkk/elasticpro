@@ -1617,7 +1617,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(v["days"].as_array().unwrap().len(), 14, "the rows are the window's");
         assert_eq!(v["totals"]["priBytes"], 1400, "and so is the totals row");
-        assert_eq!(v["cards"]["monthSoFar"]["value"], 2900, "1 Oct .. 29 Oct, not only the window and its average days");
+        assert_eq!(v["cards"]["monthSoFar"]["value"], 2800, "1 Oct .. 28 Oct, not only the window and its average days");
         assert_eq!(v["cards"]["eventBytes30"]["value"], 300, "29 Sep .. 28 Oct");
         assert_eq!(v["cards"]["eventBytes30"]["daysMeasured"], 30);
         assert_eq!(v["cards"]["average"]["value"], 100);
@@ -1670,10 +1670,10 @@ mod tests {
     fn the_record_reads_across_month_and_year_ends() {
         let d = |s: &str| parse_day(s).unwrap();
         for (today, months, month_so_far) in [
-            ("2026-11-01", vec!["2026-09", "2026-10", "2026-11"], 150),
-            ("2026-10-31", vec!["2026-09", "2026-10"], 31 * 150),
-            ("2027-01-01", vec!["2026-11", "2026-12", "2027-01"], 150),
-            ("2026-12-31", vec!["2026-11", "2026-12"], 31 * 150),
+            ("2026-11-01", vec!["2026-09", "2026-10", "2026-11"], None),
+            ("2026-10-31", vec!["2026-09", "2026-10"], Some(30 * 150)),
+            ("2027-01-01", vec!["2026-11", "2026-12", "2027-01"], None),
+            ("2026-12-31", vec!["2026-11", "2026-12"], Some(30 * 150)),
         ] {
             let today = d(today);
             let root = std::env::temp_dir().join(format!("ep-volume-edge-{}-{}-{today}", std::process::id(), now_ms()));
@@ -1704,7 +1704,7 @@ mod tests {
             assert_eq!(v["cards"]["yesterday"]["value"], 150);
             assert_eq!(v["cards"]["average"]["daysWithData"], 7);
             assert_eq!(v["cards"]["monthSoFar"]["month"], month_key(today));
-            assert_eq!(v["cards"]["monthSoFar"]["value"], month_so_far, "{today}: this month so far");
+            assert_eq!(v["cards"]["monthSoFar"]["value"].as_u64(), month_so_far, "{today}: this month's finished days; on the 1st there is none");
             assert_eq!(v["sources"], json!(["acme", "beta"]));
             assert_eq!(one["days"].as_array().unwrap().len(), 30, "{today}: a source's rows too");
             assert_eq!(one["totals"]["priBytes"], 30 * 50);

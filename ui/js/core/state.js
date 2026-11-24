@@ -1367,7 +1367,7 @@ function parseListing(entry, repo, reSrc) {
   const a = (entry.data.byRepo || {})[repo];
   if (!a) return null;
   const at = local(entry.fetchedAt);
-  if (!a.ok) return { error: a.message || `HTTP ${a.status}`, at };
+  if (!a.ok || a.repoError) return { error: a.repoError || a.message || `HTTP ${a.status}`, at };
   const verbose = a.source === 'verbose';
   const rows = verbose ? snapshotRowsVerbose(a.json, reSrc) : snapshotRowsCat(a.json);
   // _cat has no size limit: it is the whole list. The verbose one is the newest LISTING_SIZE.

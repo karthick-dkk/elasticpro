@@ -446,7 +446,8 @@ export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
 
 /**
  * Shares in tenths of a percent that add up to exactly 100.0 % (largest remainder); null of nothing.
- * The core's own rounding (logdelay/summary.rs `tenths`), so a figure computed here agrees with it.
+ * The core's own rounding (logdelay/summary.rs `tenths`), so a figure computed here agrees with it:
+ * a part that has any is at least 0.1 %, taken from the largest, so nothing reads 0 % or 100 % that is not.
  */
 export function shareTenths(parts) {
   const all = parts.reduce((n, p) => n + p, 0);
@@ -455,6 +456,7 @@ export function shareTenths(parts) {
   const rest = parts.map((p, i) => [(p * 1000) % all, i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
   let left = 1000 - out.reduce((n, p) => n + p, 0);
   for (const [, i] of rest) { if (left <= 0) break; out[i] += 1; left -= 1; }
+  parts.forEach((p, i) => { if (p > 0 && out[i] === 0) { out[out.indexOf(Math.max(...out))] -= 1; out[i] = 1; } });
   return out;
 }
 
@@ -1129,7 +1131,7 @@ function niceCeil(v) {
 export function periodBand(p, lo, hi, until = Date.now()) {
   const span = hi - lo || 1;
   const a = Math.max(lo, finite(p.started) ? p.started : lo);
-  const b = Math.min(hi, finite(p.solved) ? p.solved : finite(p.ended) ? p.ended : finite(p.measuredUntilMs) ? p.measuredUntilMs : until);
+  const b = Math.min(hi, finite(p.solved) ? p.solved : finite(p.ended) ? Math.min(p.ended, finite(p.lastMeasuredMs) ? p.lastMeasuredMs : p.ended) : finite(p.measuredUntilMs) ? p.measuredUntilMs : until);
   if (b < lo || a > hi) return null;
   return { left: ((a - lo) / span) * 100, width: Math.max(((b - a) / span) * 100, 0.6), critical: p.worstState === 'critical' };
 }

@@ -423,8 +423,9 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   (`derive::day_notes`: not final, closed or deleted indices, documents without a size, failed
   shards), the same text in the tables, the workbook, the CSV and the mail.
 - **Cards**: yesterday's basis; "Average per day · N days" = mean of the last N finished
-  days (yesterday included); "This month so far" = Σ basis of the current month's days
-  (today as of the last run; `days`, `daysMeasured`, `todayIncluded`, `todayValue` beside it);
+  days (yesterday included); "This month so far" = Σ basis of the current month's
+  finished days, the rule of the page, the mail, the Monthly sheet and the hosts file (`days`,
+  `daysMeasured`, `notFinal`, and today as of the last run in `todayValue`, beside it, never in it);
   "Event bytes · 30 days" = Σ eventBytes over the last 30
   finished days (`null` if none measured). The cards do not depend on the table's window:
   the record is read from `derive::cards_from(today, N)` (the earliest of the N days before
@@ -497,7 +498,7 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
 
 - daily: `cluster, day, indices, docs, primary_bytes, total_bytes, event_bytes, event_bytes_measured, sub_bytes, change_vs_avg_pct, avg_days, final, read_at_utc, note`
   — one row per day of the period, a day without a record included; `avg_days` is the days averaged
-- monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days, period_from, period_to, days_in_period, docs_days_measured, event_bytes_days_measured, primary_bytes_days_measured`
+- monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days, period_from, period_to, days_in_period, docs_days_measured, event_bytes_days_measured, primary_bytes_days_measured, days_not_final`
   — the part of the month inside the report's period, its **final** days only (never today)
   — the primary columns are the month row's `priBytes`, `avgPriPerDay` and `peakPrimary`,
   never the basis figures (`avgPerDay`, `peakDay`), whatever `sizeBasis` is. In the .xlsx

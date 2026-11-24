@@ -43,6 +43,14 @@ fn late_colour(late: f64, critical: f64) -> &'static str {
     if critical > 0.0 { RED } else if late > 0.0 { YELLOW } else { GREEN }
 }
 
+/// A cluster's late devices; "not known" when its last run measured nothing — 0 would read as none late.
+fn late_text(c: &Value) -> String {
+    if c["notMeasured"].is_string() {
+        return "not known".into();
+    }
+    format!("{} ({} critical)", n(&c["lateNow"]) as i64, n(&c["critical"]) as i64)
+}
+
 /// The two lines in words, as the clusters have them: their minutes when every cluster has the
 /// same, else that each has its own.
 pub struct Lines {
@@ -484,12 +492,14 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                     Cell::head("Critical"), Cell::head("Other time zone"), Cell::head("No delay, previous period"), Cell::head("Silent"), Cell::head("Worst device"), Cell::head("Worst (min)"),
                     Cell::head("Can't measure"), Cell::head("Levels (min)"), Cell::head("Last read")]);
         for c in fleet["byCluster"].as_array().into_iter().flatten() {
-            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), Cell::text(time_zone_text(&c["timeZone"])), int(&c["devices"]), int(&c["lateNow"]), int(&c["newToday"]),
-                        Cell::text(match c["noDelayText"].as_str() { Some(s) => format!("{} · {s}", n(&c["noDelay"]) as i64), None => format!("no percentage: {}", c["notMeasured"].as_str().unwrap_or("no device")) }), int(&c["delay"]), int(&c["critical"]),
-                        if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { int(&c["otherTz"]) },
-                        Cell::text(pct(&c["belowPctPrevious"])), int(&c["silent"]),
+            // A cluster whose last run measured nothing has no counts: 0 would read as none.
+            let known = |v: &Value| if c["notMeasured"].is_string() { Cell::text("not known") } else { int(v) };
+            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), Cell::text(time_zone_text(&c["timeZone"])), int(&c["devices"]), known(&c["lateNow"]), known(&c["newToday"]),
+                        Cell::text(match c["noDelayText"].as_str() { Some(s) => format!("{} · {s}", n(&c["noDelay"]) as i64), None => format!("no percentage: {}", c["notMeasured"].as_str().unwrap_or("no device")) }), known(&c["delay"]), known(&c["critical"]),
+                        if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { known(&c["otherTz"]) },
+                        Cell::text(pct(&c["belowPctPrevious"])), known(&c["silent"]),
                         Cell::text(c["worst"]["device"].as_str().unwrap_or("—")), c["worst"]["minutes"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty),
-                        int(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now))]);
+                        known(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now))]);
         }
         r.push(vec![Cell::Empty]);
         r.push(vec![Cell::text(TZ_NOTE)]);
@@ -697,8 +707,10 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:12px 0 6px\">Summary · {}</div>", esc(&format!("{} cluster{}", i.clusters.len(), if i.clusters.len() == 1 { "" } else { "s" }))));
         h.push_str("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"6\"><tr>");
         h.push_str(&tile(format!("{}", n(&t["devices"]) as i64), "devices", &format!("{} measured", n(&t["measured"]) as i64), BLUE));
-        h.push_str(&tile(pct(&t["pctNoDelay"]), "no delay", &format!("{} devices", n(&t["noDelay"]) as i64), GREEN));
-        h.push_str(&tile(pct(&t["pctLate"]), "late", &format!("{} devices · {} delayed ({}) · {} critical ({})", n(&t["late"]) as i64, n(&t["delay"]) as i64, ln.band, n(&t["critical"]) as i64, ln.over), late_colour(n(&t["late"]), n(&t["critical"]))));
+        // No cluster measured: no percentage, and no colour that reads as good.
+        let none = !t["pctNoDelay"].is_number();
+        h.push_str(&tile(pct(&t["pctNoDelay"]), "no delay", &format!("{} devices", n(&t["noDelay"]) as i64), if none { GREY } else { GREEN }));
+        h.push_str(&tile(pct(&t["pctLate"]), "late", &format!("{} devices · {} delayed ({}) · {} critical ({})", n(&t["late"]) as i64, n(&t["delay"]) as i64, ln.band, n(&t["critical"]) as i64, ln.over), if none { GREY } else { late_colour(n(&t["late"]), n(&t["critical"])) }));
         h.push_str(&tile(format!("{}", n(&t["silent"]) as i64), "silent", "no logs for the silence limit", GREY));
         h.push_str("</tr></table>");
         h.push_str(&format!("<div style=\"font-size:13px;margin:6px 0 0\">{}</div>", esc(&no_delay_line(t))));
@@ -713,9 +725,9 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">By cluster</div><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Cluster</th><th style=\"{th}\">No delay</th><th style=\"{th}\">Late</th><th style=\"{th}\">Last read</th></tr>"));
         for c in &by_cluster {
             let unread = c["notMeasured"].is_string() || c["stale"] == true;
-            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{} ({} critical)</td><td style=\"{td}{}\">{}</td></tr>",
+            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{}</td><td style=\"{td}{}\">{}</td></tr>",
                 esc(c["name"].as_str().unwrap_or("")), esc(c["noDelayText"].as_str().unwrap_or("no percentage")),
-                if unread { GREY } else { late_colour(n(&c["lateNow"]), n(&c["critical"])) }, n(&c["lateNow"]) as i64, n(&c["critical"]) as i64,
+                if unread { GREY } else { late_colour(n(&c["lateNow"]), n(&c["critical"])) }, late_text(c),
                 if unread { format!(";background:{GREY}") } else { String::new() }, esc(&read_text(c, i.now))));
         }
         h.push_str("</table>");
@@ -842,8 +854,8 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         n(&t["silent"]) as i64, n(&t["cantMeasure"]) as i64, no_delay_line(t)));
     s.push_str("By cluster\n");
     for c in fleet["byCluster"].as_array().into_iter().flatten() {
-        s.push_str(&format!("  {} · {} · late {} ({} critical) · {}\n", c["name"].as_str().unwrap_or(""), c["noDelayText"].as_str().unwrap_or("no percentage"),
-            n(&c["lateNow"]) as i64, n(&c["critical"]) as i64, read_text(c, i.now)));
+        s.push_str(&format!("  {} · {} · late {} · {}\n", c["name"].as_str().unwrap_or(""), c["noDelayText"].as_str().unwrap_or("no percentage"),
+            late_text(c), read_text(c, i.now)));
     }
     let y = &fleet["yesterday"];
     if fleet["devicesInRange"].as_u64() == Some(0) {
@@ -1093,7 +1105,7 @@ mod tests {
         let opts = Options::default();
         let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &[], options: &opts, extras: &[], app_url: None };
         let b = build(&i).unwrap();
-        assert!(b.text.contains("5000 devices read, list cut at 5000") && b.text.contains("New · no percentage · late 0 (0 critical) · never measured"), "{}", b.text);
+        assert!(b.text.contains("5000 devices read, list cut at 5000") && b.text.contains("New · no percentage · late not known · never measured"), "{}", b.text);
         assert!(b.text.contains("1 of 2 clusters; the others were not measured") && !b.text.contains("30–60 min"), "{}", b.text);
         assert!(b.html.contains("never measured"));
         let parts = crate::report::zip::read(b.xlsx.as_ref().unwrap()).unwrap();

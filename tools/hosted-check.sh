@@ -477,9 +477,9 @@ echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_PREVI
 check "the right one previews"                  "$(cookie --data-binary "@$BKF" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("credentials",{}).get("state"))')" "True opened"
 # Settings files only: the session store, the health samples and the activity log move on their own,
 # and so do the files the minute timers own (the history-store queue retrying the alert queued above,
-# its spool, a cluster's volume state, the log delay store its run keeps, the job run log a timer's run
+# its spool, the in-flight searches' clusters (instance.json), a cluster's volume state, the log delay store its run keeps, the job run log a timer's run
 # writes). A slow sealed preview on CI is wide enough to catch a tick.
-PREVIEW_WROTE=$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/logdelay/*' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' ! -path '*/job-runs/*')
+PREVIEW_WROTE=$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name instance.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/logdelay/*' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' ! -path '*/job-runs/*')
 # Named when it fails, so a timer's file caught in the window can be told from a real write.
 [ -n "$PREVIEW_WROTE" ] && echo "  written during the preview: $(echo "$PREVIEW_WROTE" | sed "s|$D5/||" | tr '\n' ' ')"
 check "and a preview writes nothing"            "$(printf '%s' "$PREVIEW_WROTE" | grep -c . || true)" "0"
