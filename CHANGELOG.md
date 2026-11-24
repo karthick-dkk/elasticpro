@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.86
+
+- **Log delay: the first run after a restart waits for the cluster list.** The timer ran within seconds of a start, before the clusters from Zabbix were read; it measured none of them, reported success, and the next run was an interval away, so every restart or upgrade lost one. The first run now waits until the list has been read (at most 10 minutes, then it measures what is known). docs/LOGDELAY.md.
+- **Measure again: the period on every board.** On a never-measured cluster's own board the hover read "period not known yet" when no fleet summary had been read in the same visit; it now takes the interval from the answer on screen.
+
 ## 0.3.85
 
 - **Log delay: clusters are measured together.** A run read its clusters one after another, so a slow one held up every cluster after it. It now reads several at once (the job's requests at once, 4 by default); a slow or failed cluster holds up no other, one cluster's read ends after 20 minutes with what it has, and every cluster still reads the same window. Results are kept one cluster at a time, as before. A disarm or the emergency stop during a scheduled run now also keeps out what was read but not yet kept.

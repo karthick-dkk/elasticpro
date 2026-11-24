@@ -199,6 +199,9 @@ named in the card's head, so the difference seen is the delay.
   (`RETRY_AFTER_MS`), over the `everyHours` before that moment; what fails again waits for the next
   run. Nothing is read again after a cancel, a disarm or the emergency stop, and a cluster read
   before a disarm but not kept yet is not written after it.
+* **After a start** the timer's first run waits (at most 10 min, `LIST_WAIT_MAX_MS`) until Zabbix's
+  clusters have been read once and every cluster named in the schedule is known; before that a
+  run would measure none of them and report success.
 * **The window** is absolute: `[now − everyHours, now]` in epoch ms, fixed when the run starts,
   so every page reads the same documents however long the run takes.
 * **Max devices per run** (`DELAY_SINK_SET config.maxDevices`, *Max devices per run*): 1–100 000,

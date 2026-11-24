@@ -358,6 +358,8 @@ pub struct SinkState {
     pub pacing_until: Option<i64>,
     /// What the last scheduled run could not read, to be read once more. Never stored, never answered.
     pub retry: Option<RetrySoon>,
+    /// When the first run since the core started began to wait for the cluster list.
+    pub list_wait_since: Option<i64>,
 }
 
 /// What one caller may read of the scheduled measurement: the one place its notes, state and
@@ -426,6 +428,15 @@ pub const CLUSTERS_AT_ONCE: usize = 4;
 /// "Governor"), never none.
 pub fn clusters_at_once(lane_limit: Option<u32>) -> usize {
     lane_limit.map_or(CLUSTERS_AT_ONCE, |n| n as usize).max(1)
+}
+
+/// The longest the first run since the core started waits for its cluster list: past it, what is
+/// known is measured (Zabbix may be down, or a named cluster gone).
+pub const LIST_WAIT_MAX_MS: i64 = 10 * 60_000;
+
+/// Whether that first run still waits: the list is not whole, and it has not waited too long.
+pub fn wait_for_list(partial: bool, since_ms: i64, now_ms: i64) -> bool {
+    partial && now_ms - since_ms < LIST_WAIT_MAX_MS
 }
 
 /// The clusters to read once more, and when.
@@ -780,6 +791,13 @@ mod tests {
         assert_eq!(retry_soon(true, &ids, 1_000), Some(RetrySoon { at: 1_000 + RETRY_AFTER_MS, ids: ids.clone() }));
         assert_eq!(retry_soon(false, &ids, 1_000), None, "cancelled, stopped, or not the timer's run");
         assert_eq!(retry_soon(true, &[], 1_000), None, "nothing failed");
+    }
+
+    #[test]
+    fn the_first_run_waits_for_the_cluster_list_but_not_for_ever() {
+        assert!(wait_for_list(true, 0, 0) && wait_for_list(true, 0, LIST_WAIT_MAX_MS - 1));
+        assert!(!wait_for_list(true, 0, LIST_WAIT_MAX_MS), "what is known is measured");
+        assert!(!wait_for_list(false, 0, 0), "the list is whole: at once");
     }
 
     #[test]

@@ -1939,10 +1939,16 @@ impl Core {
         if ids.is_empty() {
             return Err("no clusters are configured yet, so none can be called removed".into());
         }
-        if self.edition == Edition::Hosted && self.zbx_api().configured() && self.zbx_sync.read().last_ok.is_none() {
+        if self.zabbix_list_pending() {
             return Err("the Zabbix cluster list has not been read yet".into());
         }
         Ok(ids)
+    }
+
+    /// Zabbix is configured and its clusters have not been read since the core started: the
+    /// list of clusters is not whole yet.
+    fn zabbix_list_pending(&self) -> bool {
+        self.edition == Edition::Hosted && self.zbx_api().configured() && self.zbx_sync.read().last_ok.is_none()
     }
 
     /// The stores housekeeping tidies, for `housekeeping.rs`, which cannot see this struct's
@@ -5909,6 +5915,20 @@ impl Core {
         // Paused, or its automatic runs off (docs/JOBS.md): the timer does not start it.
         if self.jobs.held(crate::jobs::LOGDELAY_MEASURE).is_some() {
             return;
+        }
+        // The first run since the core started waits for the cluster list: Zabbix's clusters are
+        // read in the first seconds, and a run before that measured none of them and left them
+        // for the next interval.
+        let (first, named) = {
+            let s = self.delay_sink.read();
+            (s.state.last_run_at.is_none(), s.config.clusters.clone())
+        };
+        if first {
+            let partial = self.zabbix_list_pending() || named.iter().any(|id| self.spec_for(id).is_none());
+            let since = *self.delay_sink.write().state.list_wait_since.get_or_insert(now);
+            if delay_sink::wait_for_list(partial, since, now) {
+                return;
+            }
         }
         // A run somebody started by hand is still going: this tick leaves it be.
         self.run_delay_sink(crate::jobs::Trigger::Timer, delay_sink::MeasureScope::default()).await;
