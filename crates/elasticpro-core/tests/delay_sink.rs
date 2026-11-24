@@ -20,9 +20,14 @@ use support::{GaugedServer, TempDir, TestServer};
 /// A cluster that answers the delay search with two devices — one measurable, one whose
 /// event time is missing — and accepts a bulk.
 async fn cluster() -> TestServer {
-    TestServer::with(|hit| {
+    cluster_that(r#"{"took":3,"errors":false,"items":[{"index":{"status":201}}]}"#).await
+}
+
+/// The same, with its answer to a bulk.
+async fn cluster_that(bulk: &'static str) -> TestServer {
+    TestServer::with(move |hit| {
         if hit.path.starts_with("/_bulk") {
-            return (200, r#"{"took":3,"errors":false,"items":[{"index":{"status":201}}]}"#.into());
+            return (200, bulk.into());
         }
         (
             200,
@@ -199,6 +204,22 @@ async fn a_run_sends_one_search_and_one_bulk_per_cluster() {
 }
 
 #[tokio::test]
+async fn a_rejected_document_is_said_and_does_not_stop_the_others() {
+    let dir = TempDir::new("sink-rejected");
+    let srv = cluster_that(r#"{"took":3,"errors":true,"items":[{"index":{"status":201}},{"index":{"status":400,"error":{"reason":"mapper_parsing_exception"}}},{"index":{"status":201}},{"index":{"status":201}}]}"#).await;
+    let c = core(&dir, Edition::Hosted);
+    let s = admin(&c).await;
+    prime(&c, &s, &srv.url(), false).await;
+    assert_eq!(arm(&c, &s).await["ok"], json!(true));
+    let run = c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
+    assert_eq!((run["measured"].clone(), run["failed"].clone()), (json!(1), json!(1)), "one of the two may be the rejected one: {run}");
+    let said = run["error"].as_str().unwrap_or_default();
+    assert!(said.contains("1 documents rejected, the rest written: mapper_parsing_exception"), "{run}");
+    let get = c.handle(json!({ "type": "DELAY_SINK_GET", "session": &s })).await;
+    assert_eq!((get["state"]["lastOk"].clone(), get["state"]["consecutiveFailures"].clone()), (json!(false), json!(0)), "said, and no reason to measure less often: {get}");
+}
+
+#[tokio::test]
 async fn the_schedule_survives_a_restart_but_the_run_history_does_not() {
     let dir = TempDir::new("sink-restart");
     let srv = cluster().await;
@@ -292,7 +313,8 @@ async fn a_slow_cluster_and_a_failed_one_hold_up_no_other() {
     assert_eq!(run["failedClusters"], json!(["b-down"]), "{run}");
     // While the slow one was read, the others were: more than one at a time, never above the lane.
     assert!((2..=4).contains(&quick.peak()), "read together, at most 4 at once: {}", quick.peak());
-    assert_eq!(quick.hits().len(), 5, "each cluster asked once");
+    let of = |g: &GaugedServer, path: &str| g.hits().into_iter().filter(|h| h.path.contains(path)).collect::<Vec<_>>();
+    assert_eq!((of(&quick, "/_search").len(), of(&quick, "/_field_caps").len(), quick.hits().len()), (5, 5, 10), "each cluster asked once, and once for its mapping");
     // Every cluster reads the same window.
     let window = |b: &str| {
         let v: Value = serde_json::from_str(b).expect("a body");
@@ -308,6 +330,6 @@ async fn a_slow_cluster_and_a_failed_one_hold_up_no_other() {
         assert!(!found.is_empty(), "a window in {b}");
         found
     };
-    let first = window(&slow.hits()[0].body);
-    assert!(quick.hits().iter().all(|h| window(&h.body) == first), "one window for every cluster");
+    let first = window(&of(&slow, "/_search")[0].body);
+    assert!(of(&quick, "/_search").iter().all(|h| window(&h.body) == first), "one window for every cluster");
 }
