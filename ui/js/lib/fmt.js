@@ -86,12 +86,19 @@ const DT = new Intl.DateTimeFormat(undefined, {
   year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
 });
 export function dt(ts) { return ts ? DT.format(new Date(Number(ts))) : '–'; }
+/** This browser's zone at a time, as dtz says it ("GMT+5:30"); '' when it has no name. */
+const zoneName = (ts) => { const z = ZONE.formatToParts(new Date(Number(ts))).find((p) => p.type === 'timeZoneName'); return z ? ` ${z.value}` : ''; };
+const HM = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+/** The time alone with its zone ("14:02 GMT+5:30"); with its date (dtz) when that is not today. */
+export function hmz(ts, now = Date.now()) {
+  if (!ts) return '–';
+  return new Date(Number(ts)).toDateString() === new Date(now).toDateString() ? `${HM.format(new Date(Number(ts)))}${zoneName(ts)}` : dtz(ts);
+}
 const ZONE = new Intl.DateTimeFormat('en', { timeZoneName: 'short' });
 /** dt with its zone said ("… GMT+5:30"): for a time inside a sentence, where no column names the zone. */
 export function dtz(ts) {
   if (!ts) return '–';
-  const z = ZONE.formatToParts(new Date(Number(ts))).find((p) => p.type === 'timeZoneName');
-  return `${dt(ts)}${z ? ` ${z.value}` : ''}`;
+  return `${dt(ts)}${zoneName(ts)}`;
 }
 export function dateOnly(ts) { return ts ? new Date(Number(ts)).toISOString().slice(0, 10) : '–'; }
 

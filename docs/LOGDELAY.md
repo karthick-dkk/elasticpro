@@ -712,7 +712,11 @@ Log types are the logs' own text: text nodes only, and a real "(no log type)" is
   request); part delayed devices are in *Fetch delayed devices*, after the delayed ones. Logs has a
   `log_type` filter and column where the cluster has the field.
 * **The alert** `log-delay`: "… · 2 part delayed (log types: threat, audit)" beside the delayed devices,
-  which alone decide its level; part delayed devices on their own are a warning. The Overview card
+  which alone decide its level; part delayed devices on their own are a warning. It rests on the newest of
+  the browser's measurement (Live, Play; good 2 hours) and the server's own last run (`loadServerRuns`:
+  `LOGDELAY_SUMMARY {days: 1, maxDevices: 1}` at most every 5 minutes for a signed-in person, never a
+  display link; `byCluster` as sent, "as of last run 14:02 GMT+5:30", good until the next run is due and
+  the core's grace is over, never once it is `stale`). An older one never replaces a newer one. The Overview card
   says them too. The Live report (.xlsx) has a *Log types* sheet.
 * **Play** asks for no log types: its display links' search is unchanged and reads the newest document.
 

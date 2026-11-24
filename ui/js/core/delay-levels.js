@@ -197,7 +197,7 @@ export function logTypeFieldOf(clusterId) {
 export const fleetLevels = () => known.fleet;
 
 /** Forget what was read (a test, a sign-out). */
-export function forgetLevels() { known.byCluster.clear(); known.zones.clear(); known.types.clear(); known.fleet = null; known.at = 0; asking = null; }
+export function forgetLevels() { runs.byId.clear(); runs.askedAt = 0; runs.asking = null; known.byCluster.clear(); known.zones.clear(); known.types.clear(); known.fleet = null; known.at = 0; asking = null; }
 
 /**
  * Ask the core for every visible cluster's levels: LOGDELAY_SETTINGS_GET where the caller is an
@@ -211,7 +211,9 @@ export async function loadLevels({ send = bridge, maxAgeMs = 5 * 60000, force = 
     try {
       const a = await send({ type: 'LOGDELAY_SETTINGS_GET' });
       if (rememberLevels(a)) return true;
-      const b = await send({ type: 'LOGDELAY_SUMMARY', days: 1, maxDevices: 1 });
+      runs.askedAt = Date.now();
+      const b = await send(RUNS_MESSAGE);
+      rememberRuns(b);
       return rememberLevels(b);
     } catch (_) {
       return false;
@@ -220,4 +222,65 @@ export async function loadLevels({ send = bridge, maxAgeMs = 5 * 60000, force = 
     }
   })();
   return asking;
+}
+
+/* ----------------------------- the server's own last run ----------------------------- */
+
+/** The one message both the levels and the last runs are read from (any user, the clusters they see). */
+const RUNS_MESSAGE = Object.freeze({ type: 'LOGDELAY_SUMMARY', days: 1, maxDevices: 1 });
+const runs = { byId: new Map(), askedAt: 0, asking: null };
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * A cluster's last scheduled run as its `byCluster` row says it: `{at, summary, levels, stale,
+ * failed, goodUntil}`, or null when it was never measured or a count is missing (no claim).
+ * `summary` has the shape of log-delay.js `summarise` — the counts and the worst device as the core
+ * sent them; `failed`: the core says a newer run failed, so the figures are of the one before.
+ * `goodUntil`: when the next run is due and the core's grace is over (logdelay/state.rs
+ * `stale_after_ms`: the interval and half of it, 30 minutes at least); null: the interval is not known.
+ */
+export function serverRun(row, everyHours = null) {
+  const at = num(row && row.lastRunAt);
+  const delay = num(row && row.delay); const critical = num(row && row.critical); const devices = num(row && row.devices);
+  if (at === null || delay === null || critical === null || devices === null) return null;
+  const every = num(everyHours) === null || everyHours <= 0 ? null : everyHours * 3600000;
+  const part = num(row.partDelayed);
+  const w = row.worst && row.worst.device && num(row.worst.minutes) !== null
+    ? { device: row.worst.device, delayMinutes: row.worst.minutes, delayLogType: row.worst.logType || null, notMeasuredSince: row.worst.stale === true ? num(row.worst.at) : null } : null;
+  return { at, levels: levelsFrom(row.levels), stale: row.stale === true, failed: !!row.notMeasured,
+    goodUntil: every === null ? null : at + every + Math.max(every / 2, 30 * 60000),
+    summary: { devices, by: { DELAYED: delay, CRITICAL: critical, ...(part === null ? {} : { PART_DELAY: part }) }, worst: w, partLate: null, worstLogType: null } };
+}
+
+/** Keep the last runs an answer to RUNS_MESSAGE gives; a cluster it no longer names is forgotten. False: it gave none. */
+function rememberRuns(res) {
+  if (!res || res.ok === false || !Array.isArray(res.byCluster)) return false;
+  const every = num(res.everyHours) !== null ? res.everyHours : num(res.schedule && res.schedule.everyHours);
+  runs.byId = new Map(res.byCluster.filter((r) => r && r.id).map((r) => [String(r.id), serverRun(r, every)]).filter(([, r]) => r));
+  return true;
+}
+
+/** A cluster's last scheduled run (serverRun), or null: not read, or never measured. */
+export const serverRunOf = (clusterId) => runs.byId.get(String(clusterId)) || null;
+
+/**
+ * Read the last runs, at most once in `maxAgeMs` (as long as the levels are kept), answered or not.
+ * Resolves to true when they were read; never throws.
+ */
+export async function loadServerRuns({ send = bridge, maxAgeMs = 5 * 60000, now = Date.now() } = {}) {
+  if (runs.askedAt && now - runs.askedAt < maxAgeMs) return false;
+  if (runs.asking) return runs.asking;
+  runs.askedAt = now;
+  runs.asking = (async () => {
+    try {
+      const res = await send(RUNS_MESSAGE);
+      rememberLevels(res);
+      return rememberRuns(res);
+    } catch (_) {
+      return false;
+    } finally {
+      runs.asking = null;
+    }
+  })();
+  return runs.asking;
 }
