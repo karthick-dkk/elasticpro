@@ -417,17 +417,20 @@ function clusterFixItems(c) {
  * Devices tab on that filter. A figure the core did not give reads "—", never 0; can't-measure
  * devices are said under Silent (they have no figure either).
  */
-function tiles(t, b, scopeId, keyPrefix) {
+function tiles(t, b, scopeId, keyPrefix, unmeasured = false) {
+  if (unmeasured) { t = {}; }
+  const cnt = (v) => (unmeasured ? '—' : countText(v));
+  const note = (d) => (unmeasured ? 'not measured yet' : d);
   const tile = (k, filter, label, value, colour, detail) => h('button.ld-kpi.ld-kpi-btn', {
     type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
     onclick: () => openDevicesOn(filter, scopeId),
   }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail));
   return h(`div.ld-kpis.ld-5#${keyPrefix}-tiles`,
-    tile('below', 'ok', b.below, countText(t.onTime), C.ok, 'devices under the delay line'),
-    tile('delay', 'delay', b.mid, countText(t.delay), C.delay, 'delay'),
-    tile('critical', 'critical', b.high, countText(t.critical), C.crit, 'critical'),
-    tile('tz', 'tz', 'Other time zone', countText(t.otherTz), C.tz, 'not counted as late'),
-    tile('silent', 'silent', 'Silent', countText(t.silent), C.silent, finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
+    tile('below', 'ok', b.below, cnt(t.onTime), C.ok, note('devices under the delay line')),
+    tile('delay', 'delay', b.mid, cnt(t.delay), C.delay, note('delay')),
+    tile('critical', 'critical', b.high, cnt(t.critical), C.crit, note('critical')),
+    tile('tz', 'tz', 'Other time zone', cnt(t.otherTz), C.tz, note('not counted as late')),
+    tile('silent', 'silent', 'Silent', cnt(t.silent), C.silent, unmeasured ? 'not measured yet' : finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
 }
 
 /* ------------------------------------ charts ------------------------------------ */
@@ -824,12 +827,12 @@ function clusterView(id) {
   const rid = objId(res);
   const t = res.totals || {};
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
-  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl'));
+  const never = res.lastRunAt === null || res.lastRunAt === undefined;
+  const lr = res.lastRead || (res.counts && res.counts.lastRead);
+  const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl', never || (!lr && !(t.devices > 0))));
   const tzFilterNote = B.get('cl:tzfilter', `${rid}|${S.tz}`, () => (inView
     ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices. The tiles and the table count these devices; the charts are the core’s day totals for every zone.`)
     : null));
-  const never = res.lastRunAt === null || res.lastRunAt === undefined;
-  const lr = res.lastRead || (res.counts && res.counts.lastRead);
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
   const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
     h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
