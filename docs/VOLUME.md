@@ -424,7 +424,7 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   shards), the same text in the tables, the workbook, the CSV and the mail.
 - **Cards**: yesterday's basis; "Average per day · N days" = mean of the last N finished
   days (yesterday included); "This month so far" = Σ basis of the current month's
-  finished days, the rule of the page, the mail, the Monthly sheet and the hosts file (`days`,
+  finished days, the rule of the page, the Monthly table, the breakdown, the mail, the Monthly sheet and the hosts file (`days`,
   `daysMeasured`, `notFinal`, and today as of the last run in `todayValue`, beside it, never in it);
   "Event bytes · 30 days" = Σ eventBytes over the last 30
   finished days (`null` if none measured). The cards do not depend on the table's window:

@@ -490,10 +490,21 @@ impl Core {
         out
     }
 
-    fn month_rows(st: &ClusterState, s: &VolumeSettings, months: usize, current: &str) -> Vec<Value> {
-        let kept: Vec<_> = st.months.values().filter(|m| m.month.as_str() <= current).collect();
+    /// The local record's months, newest last. The current month is worked out again from its
+    /// **finished** days: the month so far is one rule everywhere (cards, mail, files, these
+    /// rows), and today is never in it.
+    fn month_rows(store: &Store, id: &str, st: &ClusterState, s: &VolumeSettings, months: usize, today: NaiveDate) -> Vec<Value> {
+        let current = month_key(today);
+        let kept: Vec<_> = st.months.values().filter(|m| m.month.as_str() <= current.as_str()).collect();
         let skip = kept.len().saturating_sub(months);
-        kept.into_iter().skip(skip).map(|m| derive::month_row(m, s.size_basis, current)).collect()
+        kept.into_iter().skip(skip).map(|m| {
+            if m.month != current {
+                return derive::month_row(m, s.size_basis, &current);
+            }
+            let mut days = store.read_month(id, &current).days;
+            days.remove(&day_key(today));
+            derive::month_row(&derive::month_summary(&current, &days), s.size_basis, &current)
+        }).collect()
     }
 
     /// The months the store's days fall in, each merged **per day** with the local record's
@@ -502,23 +513,26 @@ impl Core {
     /// Monthly agrees with Daily. A month with no local day is `source: "history"`; one with
     /// both says how many of its days came from the store (`historyDays`). A month on or before
     /// the day a bounded read-back stopped at is `incomplete` (unknown is not zero).
-    pub(crate) fn history_month_rows(store: &Store, id: &str, days: &[super::Day], s: &VolumeSettings, current: &str,
+    pub(crate) fn history_month_rows(store: &Store, id: &str, days: &[super::Day], s: &VolumeSettings, today: NaiveDate,
                                      incomplete_before: Option<NaiveDate>) -> Vec<Value> {
+        let current = month_key(today);
         let mut by_month: BTreeMap<String, BTreeMap<String, super::Day>> = BTreeMap::new();
         for d in days {
-            if let Some(date) = parse_day(&d.day) {
+            // Finished days only, as in `month_rows`.
+            if let Some(date) = parse_day(&d.day).filter(|x| *x < today) {
                 by_month.entry(month_key(date)).or_default().insert(d.day.clone(), d.clone());
             }
         }
-        by_month.into_iter().filter(|(m, _)| m.as_str() <= current).filter_map(|(m, mut merged)| {
-            let local = store.read_month(id, &m).days;
+        by_month.into_iter().filter_map(|(m, mut merged)| {
+            let mut local = store.read_month(id, &m).days;
+            local.remove(&day_key(today));
             let from_store = merged.keys().filter(|k| !local.contains_key(*k)).count();
             if from_store == 0 {
                 return None;
             }
             let all_store = local.is_empty();
             merged.extend(local);
-            let mut row = derive::month_row(&derive::month_summary(&m, &merged), s.size_basis, current);
+            let mut row = derive::month_row(&derive::month_summary(&m, &merged), s.size_basis, &current);
             if all_store {
                 row["source"] = json!("history");
             } else {
@@ -557,26 +571,24 @@ impl Core {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
         let today = schedule::utc_day(now_ms());
-        let current = month_key(today);
         let st = store.read_state(id);
         let read = match Core::monthly_missing(store, id, today, months).filter(|_| read_back) {
             Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, true).await,
             None => None,
         };
         let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.incomplete_before())))
-            .map(|(d, cut)| Core::history_month_rows(store, id, d, s, &current, cut)).unwrap_or_default();
-        let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), merged, months);
+            .map(|(d, cut)| Core::history_month_rows(store, id, d, s, today, cut)).unwrap_or_default();
+        let rows = Core::merge_month_rows(Core::month_rows(store, id, &st, s, 36, today), merged, months);
         json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
                 "avgPerMonth": derive::avg_per_month(&rows), "months": rows,
                 "history": read.as_ref().map(|r| r.json()) })
     }
 
-    /// Every cluster the caller sees, from `state.json` alone. On desktop each cluster's
+    /// Every cluster the caller sees, from `state.json` and the current month's file. On desktop each cluster's
     /// override comes from the message's `volume.clusters[id]`.
     async fn volume_monthly_all(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
-        let current = month_key(schedule::utc_day(now_ms()));
         let (raw, config_error) = match self.volume_config().await {
             Ok(raw) => (raw, None),
             Err(e) => (None, Some(e)),
@@ -604,11 +616,11 @@ impl Core {
             let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.incomplete_before())))) {
                 (Some((f, t)), Some((days, cut))) => {
                     let mine: Vec<super::Day> = days.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= *f && x <= *t)).cloned().collect();
-                    Core::history_month_rows(store, id, &mine, &r.settings, &current, cut)
+                    Core::history_month_rows(store, id, &mine, &r.settings, today, cut)
                 }
                 _ => vec![],
             };
-            let rows = Core::merge_month_rows(Core::month_rows(st, &r.settings, 36, &current), merged, months);
+            let rows = Core::merge_month_rows(Core::month_rows(store, id, st, &r.settings, 36, today), merged, months);
             out.push(json!({ "clusterId": id, "name": name, "basis": r.settings.size_basis, "months": rows }));
         }
         let mut reply = json!({ "ok": true, "clusters": out, "history": read.as_ref().map(|r| r.json()) });
@@ -1577,6 +1589,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
     use crate::volume::schedule::months_between;
     use crate::volume::{DAILY_COLUMNS, DAILY_HIDDEN};
 
@@ -1680,6 +1693,11 @@ mod tests {
             let store = Store::new(root.clone());
             collect_on(&store, "prod", &cat_45_days(today), today, 13);
             let kept = store.months("prod");
+            let st = ClusterState {
+                months: kept.iter().map(|m| (m.clone(), derive::month_summary(m, &store.read_month("prod", m).days))).collect(),
+                ..ClusterState::default()
+            };
+            let monthly = Core::month_rows(&store, "prod", &st, &VolumeSettings::default(), 36, today);
             let v = daily_view(&store, "prod", &VolumeSettings::default(), 30, 7, None, today);
             let one = daily_view(&store, "prod", &VolumeSettings::default(), 30, 7, Some("beta"), today);
             // keepMonths 1 keeps only the current month: on the 1st that is today alone.
@@ -1705,6 +1723,11 @@ mod tests {
             assert_eq!(v["cards"]["average"]["daysWithData"], 7);
             assert_eq!(v["cards"]["monthSoFar"]["month"], month_key(today));
             assert_eq!(v["cards"]["monthSoFar"]["value"].as_u64(), month_so_far, "{today}: this month's finished days; on the 1st there is none");
+            let last = monthly.last().unwrap();
+            assert_eq!(last["month"], month_key(today));
+            assert_eq!(last["daysWithData"].as_i64(), Some(today.day() as i64 - 1), "{today}: the Monthly row counts the finished days the card counts");
+            assert_eq!(last["priBytes"].as_u64(), month_so_far, "{today}: and the same size");
+            assert_eq!(last["finalDays"].as_i64(), Some(today.day() as i64 - 1));
             assert_eq!(v["sources"], json!(["acme", "beta"]));
             assert_eq!(one["days"].as_array().unwrap().len(), 30, "{today}: a source's rows too");
             assert_eq!(one["totals"]["priBytes"], 30 * 50);

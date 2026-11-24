@@ -253,7 +253,7 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     // Months, from state.json; the all-cluster view; a breakdown.
     let m = c.handle(json!({ "type": "VOLUME_MONTHLY", "clusterId": "prod" })).await;
     let days_in: u64 = m["months"].as_array().unwrap().iter().map(|r| r["daysWithData"].as_u64().unwrap()).sum();
-    assert_eq!(days_in, 4, "{m}");
+    assert_eq!(days_in, 3, "the finished days; today is in no month row: {m}");
     let kept: u64 = m["months"].as_array().unwrap().iter().map(|r| r["keptDays"].as_u64().unwrap()).sum();
     assert_eq!(kept, 1);
     let all = c.handle(json!({ "type": "VOLUME_MONTHLY_ALL" })).await;

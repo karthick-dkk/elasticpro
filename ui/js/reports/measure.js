@@ -16,7 +16,7 @@ import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { measureSize, MEASURE_PERIODS, shortDay, utcDay } from '../core/volume-daily.js';
 import { recordOf, recordEntry, recordState, runCollection, lastRunOf } from './record.js';
-import { amber, muted, loading } from './cells.js';
+import { amber, muted, loading, gbCell } from './cells.js';
 
 const ui = { period: 'last7', picked: null };
 let redraw = () => {};
@@ -98,9 +98,8 @@ function exportMeasure(clusters, p) {
   const rows = clusters.map((c) => {
     const r = recordOf(c.id);
     const m = r ? measureSize(r, p.days) : null;
-    const gb = (v) => (typeof v === 'number' ? Math.round((v / 1024 ** 3) * 100) / 100 : null);
-    return { cluster: c.name, period: p.label, index_size_per_day_gb: m ? gb(m.indexPerDay) : null,
-      event_logsize_per_day_gb: m ? gb(m.eventPerDay) : null, difference_gb: m ? gb(m.diff) : null,
+    return { cluster: c.name, period: p.label, index_size_per_day_gb: m ? gbCell(m.indexPerDay) : null,
+      event_logsize_per_day_gb: m ? gbCell(m.eventPerDay) : null, difference_gb: m ? gbCell(m.diff) : null,
       ratio: m && m.ratio !== null ? Math.round(m.ratio * 100) / 100 : null };
   });
   download(`reports-measure-size-${utcDay()}.csv`, toCsv(rows), 'text/csv');

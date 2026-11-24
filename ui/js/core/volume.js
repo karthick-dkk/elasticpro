@@ -1,4 +1,4 @@
-import { plural } from '../lib/fmt.js';
+import { plural, gbDigits } from '../lib/fmt.js';
 import { nodeRoles } from './cluster-detail.js';
 import { restorableIndices, spanText, repoListing, reposRead } from './snapshot-restorable.js';
 /**
@@ -505,7 +505,7 @@ export function spanDaysIso(fromDay, toDay) {
   return spanDays(Date.parse(`${fromDay}T00:00:00Z`), Date.parse(`${toDay}T00:00:00Z`));
 }
 
-export const gb = (v) => (v === null || v === undefined || !isFinite(v) ? '–' : `${v.toFixed(1)} GB`);
+export const gb = (v) => (gbDigits(v) === null ? '–' : `${gbDigits(v)} GB`);
 export const days = (v) => (v === null || v === undefined || !isFinite(v) ? '–' : `${Math.floor(v)} days`);
 export const yesNo = (v) => (v === null || v === undefined ? 'unknown' : v ? 'YES' : 'NO');
 
@@ -548,7 +548,7 @@ export const SHEET_COLUMNS = [
     help: 'Labels from the config file, for grouping and filtering. Nothing is calculated from them.' },
 
   { group: 'How much comes in', label: 'Log volume per day', unit: 'GB', kind: 'num',
-    get: (r) => round1(r.perDayGB), note: (r) => r.vol.basis,
+    get: (r) => gbDigits(r.perDayGB), note: (r) => r.vol.basis,
     help: 'How much comes in a day; what it was measured on is said beside it. On Reports: event_logsize, the mean of '
         + 'the last 7 finished days of the daily record. Sent to Zabbix: index sizes, the average of the heaviest days in '
         + 'the window, both set in the config (volumeTopDays of volumeWindowDays, 3 of 7 by default). Today is left out '
@@ -556,16 +556,16 @@ export const SHEET_COLUMNS = [
   { group: 'How much comes in', label: 'Log volume measured as', kind: 'text', get: (r) => r.vol.basis || null,
     help: 'What the daily figure is: event_logsize of the daily record, or index sizes.' },
   { group: 'How much comes in', label: 'Per day + buffer', unit: 'GB', kind: 'num',
-    get: (r) => round1(r.bufferedGB),
+    get: (r) => gbDigits(r.bufferedGB),
     note: (r) => `the daily figure plus ${headroomPct(r)}% headroom — what sizing is done against`,
     help: 'The daily figure plus the configured headroom (volumeHeadroomPercent, 30% by default). Every "needed" '
         + 'and "required" number on this row is this figure multiplied by a number of days.' },
 
-  { group: 'Disk on the cluster', label: 'Disk total', unit: 'GB', kind: 'num', get: (r) => round1(r.liveTotalGB),
+  { group: 'Disk on the cluster', label: 'Disk total', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.liveTotalGB),
     help: 'Total disk across the data nodes, as Elasticsearch reports it.' },
   { group: 'Disk on the cluster', label: 'Disk used', unit: '%', kind: 'num', get: (r) => (r.livePct === null ? null : round1(r.livePct)),
     help: 'How full that disk is now. The warning and critical thresholds come from the config.' },
-  { group: 'Disk on the cluster', label: 'Disk free', unit: 'GB', kind: 'num', get: (r) => round1(r.liveFreeGB),
+  { group: 'Disk on the cluster', label: 'Disk free', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.liveFreeGB),
     help: 'Disk not yet used. Not all of it is usable: Elasticsearch stops allocating shards at the high '
         + 'watermark, 90% full by default, so the cluster is in trouble before this reaches zero.' },
   { group: 'Disk on the cluster', label: 'Current live storage store upto', unit: 'days', kind: 'num',
@@ -587,15 +587,15 @@ export const SHEET_COLUMNS = [
       ? `config says ${r.liveRetention ? r.liveRetention.label : '?'}, ILM deletes after ${r.appliedIlm.deleteAfter}` : null),
     help: 'NO means the config and ILM disagree about how long to keep indices — one of the two is wrong, and the '
         + 'cluster is doing whatever ILM says.' },
-  { group: 'Indices kept on the cluster', label: 'Disk needed for the policy', unit: 'GB', kind: 'num', get: (r) => round1(r.requiredLiveGB),
+  { group: 'Indices kept on the cluster', label: 'Disk needed for the policy', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.requiredLiveGB),
     note: (r) => (r.liveRetention ? `(per day + ${headroomPct(r)}%) × ${r.liveRetention.days} days` : 'no retention policy set'),
     help: 'Log volume per day, plus the configured headroom, × the retention policy in days.' },
   { group: 'Indices kept on the cluster', label: 'Enough disk for the policy?', kind: 'bool', get: (r) => r.liveRetentionMet,
     note: (r) => (r.requiredLiveGB ? `needs ${gb(r.requiredLiveGB)}` : 'set liveRetention on the cluster'),
     help: 'Whether disk total covers what the retention policy needs. NO means the policy cannot be kept without more disk.' },
-  { group: 'Indices kept on the cluster', label: 'Disk needed for 30 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required30GB),
+  { group: 'Indices kept on the cluster', label: 'Disk needed for 30 days', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.required30GB),
     note: (r) => `(per day + ${headroomPct(r)}%) × 30 days`, help: 'Log volume per day, plus the configured headroom, × 30.' },
-  { group: 'Indices kept on the cluster', label: 'Disk needed for 90 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required90GB),
+  { group: 'Indices kept on the cluster', label: 'Disk needed for 90 days', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.required90GB),
     note: (r) => `(per day + ${headroomPct(r)}%) × 90 days`, help: 'Log volume per day, plus the configured headroom, × 90.' },
   { group: 'Indices kept on the cluster', label: 'Days of indices held now', unit: 'days', kind: 'num',
     get: (r) => r.vol.daysCovered || null,
@@ -610,25 +610,25 @@ export const SHEET_COLUMNS = [
   // Space: what there is, what is in it, what is needed. In that order, because that is
   // the order the question is asked in.
   { group: 'Backups (snapshots)', label: 'Backup space available', unit: 'GB', kind: 'num',
-    get: (r) => round1(r.backupCapacityGB),
+    get: (r) => gbDigits(r.backupCapacityGB),
     note: (r) => (r.backupCapacityGB === null ? 'set backupCapacity on the cluster, e.g. "2TB"' : r.backupCapacityLabel),
     help: 'The total size of the snapshot repository. Elasticsearch has no API for this — a repository is a mount '
         + 'point or a bucket, and only you know how big it is — so it comes from backupCapacity in the cluster '
         + 'config, written as "2TB", "500 GB" or a bare number of GB.' },
-  { group: 'Backups (snapshots)', label: 'Backup space used', unit: 'GB', kind: 'num', get: (r) => round1(r.repoGB),
+  { group: 'Backups (snapshots)', label: 'Backup space used', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.repoGB),
     note: (r) => (r.repoGB === null ? 'press Measure on the cluster card' : 'sum of every snapshot\'s incremental bytes'),
     help: 'What the repository holds now. Elasticsearch will not total this cheaply, so it is read on demand with '
         + 'the Measure button — one call per snapshot. Snapshots are incremental, so this is far less than the '
         + 'sum of the indices in them.' },
-  { group: 'Backups (snapshots)', label: 'Backup space free', unit: 'GB', kind: 'num', get: (r) => round1(r.backupFreeGB),
+  { group: 'Backups (snapshots)', label: 'Backup space free', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.backupFreeGB),
     note: (r) => (r.backupFreeGB === null ? 'needs backupCapacity in the config and a measured size' : 'available − used'),
     help: 'Backup space available − backup space used. Needs both the configured capacity and a measured size.' },
   { group: 'Backups (snapshots)', label: 'Backup space required for the policy', unit: 'GB', kind: 'num',
-    get: (r) => round1(r.requiredSnapshotGB),
+    get: (r) => gbDigits(r.requiredSnapshotGB),
     note: (r) => (r.snapshotRetention ? `(per day + ${headroomPct(r)}%) × ${r.snapshotRetention.days} days` : 'no backup retention policy set'),
     help: 'Log volume per day, plus the configured headroom, × the backup retention policy in days. An upper bound: snapshots are '
         + 'incremental, so the repository normally needs less.' },
-  { group: 'Backups (snapshots)', label: 'Backup space required for 365 days', unit: 'GB', kind: 'num', get: (r) => round1(r.required365GB),
+  { group: 'Backups (snapshots)', label: 'Backup space required for 365 days', unit: 'GB', kind: 'num', get: (r) => gbDigits(r.required365GB),
     note: (r) => `(per day + ${headroomPct(r)}%) × 365 days`,
     help: 'Log volume per day, plus the configured headroom, × 365 — a year of backups. An upper bound, for the same reason.' },
   { group: 'Backups (snapshots)', label: 'Enough backup space?', kind: 'bool', get: (r) => r.backupSpaceMet,

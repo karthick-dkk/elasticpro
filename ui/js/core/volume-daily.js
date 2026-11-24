@@ -239,17 +239,18 @@ export function lastMonths(n, now = Date.now()) {
 
 /**
  * The periods a breakdown can cover, as day ranges (UTC dates, inclusive). Calendar only:
- * which days, not what they hold.
+ * which days, not what they hold. Finished days: today is in none of them, so on the 1st the
+ * current month is not offered yet.
  */
 export function breakdownPeriods(now = Date.now(), previous = 12) {
   const day = (ms) => utcDay(ms);
   const DAY = 86400000;
   const today = day(now);
   const out = [
-    { id: 'month', label: 'Current month so far', from: `${today.slice(0, 7)}-01`, to: today },
+    { id: 'month', label: 'Current month so far', from: `${today.slice(0, 7)}-01`, to: day(now - DAY) },
     { id: 'yesterday', label: 'Yesterday', from: day(now - DAY), to: day(now - DAY) },
     { id: 'last7', label: 'Last 7 days', from: day(now - 7 * DAY), to: day(now - DAY) },
-  ];
+  ].filter((p) => p.from <= p.to);
   const d = new Date(now);
   for (let i = 1; i <= previous; i++) {
     const a = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1));

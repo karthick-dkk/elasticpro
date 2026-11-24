@@ -15,6 +15,20 @@ export function bytes(n, digits) {
   return `${v.toFixed(i === 0 ? 0 : d)} ${UNITS[i]}`;
 }
 
+/**
+ * A number of GB (1024³ bytes) as a figure, the one definition of its digits: one decimal from
+ * 100 GB, two from 1 GB, three significant digits below it, so a size that is there is never
+ * written as 0. Unknown stays null.
+ */
+export function gbDigits(g) {
+  g = toNum(g);
+  if (!isFinite(g)) return null;
+  const a = Math.abs(g);
+  return a >= 100 ? Math.round(g * 10) / 10 : a >= 1 ? Math.round(g * 100) / 100 : Number(g.toPrecision(3));
+}
+/** Bytes as that figure, for a file's GB column (null: an empty cell). */
+export const gbFigure = (n) => gbDigits(toNum(n) / 1024 ** 3);
+
 export function num(n) {
   n = toNum(n);
   if (!isFinite(n)) return '–';
