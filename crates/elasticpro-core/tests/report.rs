@@ -276,7 +276,7 @@ async fn a_job_collects_builds_mails_and_hands_back_the_file() {
     assert_eq!(d["mime"], "application/zip");
     let parts = unzip(d["base64"].as_str().unwrap());
     let csv = part(&parts, "daily.csv");
-    assert!(csv.starts_with("cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days\n"), "{csv}");
+    assert!(csv.starts_with("cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days,final,read_at_utc,note\n"), "{csv}");
     assert_eq!(csv.lines().count(), 4, "three days: {csv}");
     assert!(part(&parts, "breakdown.csv").contains("prod,tag,tag1,fw&<co>,"));
     assert!(part(&parts, "monthly.csv").starts_with("cluster,month,days_with_data,"));

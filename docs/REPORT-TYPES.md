@@ -45,14 +45,21 @@ Fresh every run: a re-run replaces, it never keeps the first figures it saw (the
   *indices deleted — from the daily record* with the record's docs and primary size for that
   day (`Day::sizes()`), so the month total is still the month. A day the record does not hold
   either says *not measured*.
-- A closed index: its row says *closed* and has no figures (not 0).
+- A closed index, or one Elasticsearch cannot read (red): its row says so and has no figures (not
+  0); the day's and the period's totals are of the others, and say "N of M indices not read".
+- **Some of a day's indices gone**: the day keeps the record's figures and says "N of M indices
+  deleted since".
 - A failed request (timeout, 401/403): the cluster's sheet says so in its first row and the
   mail summary names the cluster; the error body never lands in the file as data.
 
 **Workbook:** sheet *Totals* first — one block per cluster: Day, Indices, Documents, Primary
-size (bytes), Primary size (GB), then a **Month total** row. Then one sheet per cluster (name ≤
+size (bytes), Primary size (GB), Note, Read at, then a **Total <from> – <to>** row (the report's
+period, which need not be a month; the days it covers as "N of M"), and a note when indices without
+a date in their name are not in it. Then one sheet per cluster (name ≤
 31 chars, unique): Index, Day, Status, Documents, Primary size (bytes), Primary size (GB),
-sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024³.
+sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster (each with a `note` column).
+GB = 1024³, unrounded in the sheets (`build::gb_cell`, shared). An *About* sheet (`about.csv`) ends
+every file (docs/VOLUME.md "About").
 
 ## Volume by host (`hosts`)
 
@@ -61,8 +68,11 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
 - Runs **every day at 06:00** server local time (`UI_REPORT_HOSTS_AT`, default `06:00`) for
   **every cluster** (user decision: all clusters, not opt-in), for each day of the month so far
   that is not yet held (normally just yesterday; a cluster added mid-month gets its month).
-- A day is collected once, after it is over (UTC), and kept: never asked again unless someone
-  presses *Run now* with *Collect again*.
+- A day is collected after it is over (UTC). One read less than 24 hours after it ended
+  (`schedule::FINAL_AFTER_MS`) is **not final** — the view, the sheets and the CSV say "not final:
+  read <time>" — and is collected once more after that: at most one such day per cluster per run,
+  the oldest first. Then it is kept: never asked again unless someone presses *Run now* with
+  *Collect again*.
 - **The day** follows the Daily record's rule (`collect::day_query`: dated indices by name
   day, time-split ones by their time field's UTC day), so a host table's totals for a day equal
   Reports › Daily & monthly for that day — one definition. (The script bucketed by
@@ -71,7 +81,8 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
 - **Query:** per cluster per day a `composite` aggregation, sources
   `[ _index (terms), host (terms on the resolved sourceHost field, missing_bucket: true) ]`,
   `size` 1000, paged with `after_key`. Sub-aggs: `ev` sum of the resolved `eventSize` field,
-  `sub` sum of the resolved `subSize` field, `m_ev` missing on the eventSize field, and per
+  `sub` sum of the resolved `subSize` field, `m_ev` missing on the eventSize field (`m_sub` on the
+  other), and per
   metadata field `terms size 1` (the value most of the host's documents carry). Composite is
   exact and never meets `search.max_buckets` (the script's single query failed whole once it
   grew past it, and its `terms` sizes truncated silently).
@@ -90,7 +101,8 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
   cluster-day in memory). Kept `UI_REPORT_HOSTS_KEEP_MONTHS` months (default 3, 1–13), pruned
   with the volume prune. *As built:* gzip with one member per page, one JSON object per line —
   `{"header":{v, day, fields, resolved, startedAt}}`, the rows `{i, h, d, e, s, me, m}`
-  (index, host, docs, event bytes, forwarded bytes, docs missing event size, metadata in the
+  (index, host, docs, event bytes, forwarded bytes, docs missing event size — since 0.3.89 `ms`,
+  docs missing the forwarded size — metadata in the
   header's field order), then `{"end":{rows, pages, incomplete, notes, collectedAt}}`. Pruned
   after each cluster's hosts collection (which runs every day for every cluster) rather than
   inside the volume run, which has its own keep.
@@ -103,7 +115,8 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
   `nan`) takes the **first** non-missing ClientID of that cluster's rows in the period (rows in
   day, index order); a missing branch becomes `DC`. If no row has a ClientID, the Summary uses
   the cluster's name. One function (`fill_client_branch`) used by the workbook, the CSV and the
-  view; the stored rows keep what Elasticsearch said.
+  view; the stored rows keep what Elasticsearch said. A value filled this way is marked as filled
+  in the files and in the view.
 
 ### Workbook
 

@@ -24,6 +24,8 @@ pub enum Cell {
     Int(f64),
     /// A number shown with two decimals (GB, percentages).
     Dec(f64),
+    /// A number shown in full, however small: two decimals would show 2 MB as 0.00 GB.
+    Num(f64),
 }
 
 impl Cell {
@@ -126,9 +128,10 @@ fn cell_xml(c: &Cell, col: usize, row: usize) -> String {
     let r = cell_ref(col, row);
     match c {
         Cell::Empty => String::new(),
-        Cell::Int(v) | Cell::Dec(v) if !v.is_finite() => String::new(),
+        Cell::Int(v) | Cell::Dec(v) | Cell::Num(v) if !v.is_finite() => String::new(),
         Cell::Int(v) => format!(r#"<c r="{r}" s="{S_INT}"><v>{}</v></c>"#, num(*v)),
         Cell::Dec(v) => format!(r#"<c r="{r}" s="{S_DEC}"><v>{}</v></c>"#, num(*v)),
+        Cell::Num(v) => format!(r#"<c r="{r}"><v>{}</v></c>"#, num(*v)),
         Cell::Text(s) => format!(r#"<c r="{r}" t="inlineStr"><is><t xml:space="preserve">{}</t></is></c>"#, xml_text(s)),
         Cell::Head(s) => format!(r#"<c r="{r}" s="{S_HEAD}" t="inlineStr"><is><t xml:space="preserve">{}</t></is></c>"#, xml_text(s)),
     }
@@ -374,7 +377,7 @@ pub fn cols_widths(rows: &[Vec<Cell>]) -> Vec<usize> {
         for (i, c) in row.iter().enumerate() {
             let len = match c {
                 Cell::Text(s) | Cell::Head(s) => s.chars().count() + 2,
-                Cell::Int(v) | Cell::Dec(v) => num(*v).len() + 4,
+                Cell::Int(v) | Cell::Dec(v) | Cell::Num(v) => num(*v).len() + 4,
                 Cell::Empty => 0,
             };
             w[i] = w[i].max(len.min(60));

@@ -287,7 +287,7 @@ async fn a_hosts_job_pages_every_partition_builds_the_book_and_the_view_reads_it
     assert_eq!(pools_after, pools_before + 1, "the thread-pool check is not answered from a reading");
     let csv = c.handle(json!({ "type": "REPORT_DOWNLOAD", "id": again["id"] })).await;
     let parts = unzip(csv["base64"].as_str().unwrap());
-    assert!(part(&parts, "summary.csv").starts_with("cluster,client_id,branch,month,day,docs,event_bytes,sub_bytes,note\n"));
+    assert!(part(&parts, "summary.csv").starts_with("cluster,client_id,branch,month,day,docs,event_bytes,sub_bytes,note,docs_without_event_size,docs_without_sub_size\n"));
     assert!(part(&parts, "prod.csv").contains("host-00001"));
     let fresh = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d2, d1), "collectAgain": true })).await;
     assert_eq!(fresh["status"], "done");
@@ -479,7 +479,7 @@ async fn the_indices_report_lists_a_fresh_listing_by_day_and_names_a_cluster_it_
     let wb = part(&parts, "xl/workbook.xml");
     assert!(wb.contains(r#"name="Totals""#) && wb.contains(r#"name="Production""#) && wb.contains(r#"name="Lost""#), "{wb}");
     let totals = part(&parts, "xl/worksheets/sheet1.xml");
-    assert!(totals.contains("Month total") && totals.contains("not measured") && totals.contains("did not answer: HTTP 401"), "{totals}");
+    assert!(totals.contains(&format!("Total {} – {d1}", d1 - Duration::days(1))) && totals.contains("not measured") && totals.contains("did not answer: HTTP 401"), "{totals}");
     assert!(!totals.contains("secret"), "the error body never lands in the file");
     let prod = part(&parts, "xl/worksheets/sheet2.xml");
     assert!(prod.contains(&format!("logstash-linux-{}", dot(d1))) && prod.contains("No date in the name") && prod.contains("logstash-nodate"), "{prod}");
