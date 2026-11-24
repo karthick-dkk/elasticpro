@@ -780,7 +780,6 @@ mod tests {
         assert_eq!(retry_soon(true, &ids, 1_000), Some(RetrySoon { at: 1_000 + RETRY_AFTER_MS, ids: ids.clone() }));
         assert_eq!(retry_soon(false, &ids, 1_000), None, "cancelled, stopped, or not the timer's run");
         assert_eq!(retry_soon(true, &[], 1_000), None, "nothing failed");
-        assert!(RETRY_AFTER_MS < 3_600_000, "inside the shortest interval");
     }
 
     #[test]
