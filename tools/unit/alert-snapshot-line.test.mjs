@@ -28,7 +28,7 @@ test('the second line is written by the labelled formatter of the first', () => 
 });
 
 test('the CSV column is the same moment, ISO UTC', () => {
-  const row = { level: 'warning', cluster: { name: 'c', url: 'u' }, title: 't', detail: `snap-1 started ${dtz(at)}`, items: [], since: at, snapshot, state: 'open', notes: [], key: 'k', keys: ['k'] };
+  const row = { level: 'warning', cluster: { name: 'c', url: 'u' }, title: 't', detail: `snap-1 started ${dtz(at)}`, items: [], since: at + 60_000, snapshot, state: 'open', notes: [], key: 'k', keys: ['k'] };
   const csv = alertsCsv([row, { ...row, snapshot: { ...snapshot, at: null } }]);
   assert.equal(csv.split('2026-11-21T03:41:47.000Z').length - 1, 1, 'the first row\'s snapshot date');
   assert.equal(csv.split(dtz(at)).length - 1, 2, 'the detail of both rows');
