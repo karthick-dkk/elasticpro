@@ -680,6 +680,42 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
 `#/reports/log-delay[/…]` (the mail's link), `#/logs` (Live), `#/log-delay/watch` (Live) and `#/log-delay/fixes[/<cluster>]`
 (the Recommended fixes tab, gone in 0.3.62: Devices).
 
+### Log types on the page (0.3.90)
+
+Drawn only where the core says them (an older core, or a cluster whose mapping has no `log_type`: the
+page is as it was, and the cluster's board says "Not measured per log type: log_type is not in the
+mapping" — the figure is "—", never 0). Words and arithmetic: `ui/js/core/log-types.js`; the rule
+`delay-levels.js` (`stateFromTypes`, `figuresOfType`: the core's `State::of_types`, `device_by_types`).
+Log types are the logs' own text: text nodes only, and a real "(no log type)" is written “(no log type)”.
+
+* **Part delayed**: a yellow outline pill, drawn in the yellow let through, never red or solid yellow. A
+  sixth tile (Dashboard, cluster, Summary) with its devices and the log types late; its own arc, bar
+  part, filter chip and line in the percentages. Neither Delayed nor No delay.
+* **Lists**: a *Log types* column after the state ("1 of 3 late: threat", the rest in the title);
+  *Delay now* is the worst late log type's, named in its title (`delayLogType`); *Time late* with "part
+  late 2 h 10 min" beside it. CSVs: `log_types`, `log_types_measured`, `log_types_late`,
+  `late_log_types`, `delay_log_type`, `part_late_ms` (blank: not measured).
+* **A device** (`ui/js/logdelay/device-types.js`): a headline ("1 of 3 log types late: threat — the other
+  2 are on time"; with more log types than were read it says so), the graph with a line per log type
+  (six at most, worst first; a chip per log type draws or drops its line, the rest behind "+N"; light
+  green, blue, pink and orange lines, dashed from the fifth — a line's colour says which log type, never how bad),
+  every log type's delay at a measurement under the pointer and by the arrow keys ("threat 46 min ·
+  traffic 2 min"), starts and solves in the line's colour, the measurements before log types in grey.
+  *Log types of this device*: one row each, its *Open in logs* narrowed to that exact value
+  (`?log_type=`) or to the documents without one (`?no_log_type=1`). *Every delay* has a Log type
+  column: "whole device", "whole device, before log types were measured", or the log type. Measurements
+  not read (`seriesFromMs`), periods not all kept (`seriesPeriodsFromMs`) and log types not kept
+  (`logTypesNotKept`) are said. *Search by* has `log_type`.
+* **A cluster**: *By log type* — devices, late, above the critical line, no logs, worst delay; ten rows
+  until *Show all*.
+* **Live**: the same search carries the log types (`types` and `no_type` under each device; no second
+  request); part delayed devices are in *Fetch delayed devices*, after the delayed ones. Logs has a
+  `log_type` filter and column where the cluster has the field.
+* **The alert** `log-delay`: "… · 2 part delayed (log types: threat, audit)" beside the delayed devices,
+  which alone decide its level; part delayed devices on their own are a warning. The Overview card
+  says them too. The Live report (.xlsx) has a *Log types* sheet.
+* **Play** asks for no log types: its display links' search is unchanged and reads the newest document.
+
 ### Live (the merged Live Watch and Live logs)
 
 One tab, **Live** (`#/log-delay/live`), approved on the plan canvas: Dashboard · Summary · Devices ·
@@ -732,7 +768,7 @@ drawn on Live (Live's Fetch is the browser's).
   filter whose field the indices do not map (one `_field_caps`, on the first Search that needs it)
   is refused in words and nothing is searched. A value is one exact value (quoted), a pattern with
   `*`/`?`, or for the address an `a.b.c.d/n` range (`logFilterClause`). Then the documents over time
-  (a time axis) and the table Arrived · Event time · src_hostname · src_ip · tag1 · Delay · Message;
+  (a time axis) and the table Arrived · Event time · src_hostname · src_ip · tag1 · (log_type) · Delay · Message;
   a row opens the whole document. With All clusters chosen the card follows one cluster, picked in
   its Cluster select.
 
