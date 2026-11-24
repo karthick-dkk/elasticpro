@@ -802,7 +802,7 @@ function danglingHelp(c, x) {
     items: [{
       title: 'On a node\'s disk, not in the cluster',
       cause: 'A node holds this index\'s data, but the cluster state does not list it: it was deleted while the node was away, or the node came from another cluster.',
-      fix: 'Import it if its data is still wanted (it may be old or incomplete); delete it if not. Neither can be undone.',
+      fix: 'Import it if its data is still wanted (it may be old or incomplete); delete it if not. A delete cannot be undone.',
       actions: [inRest(c, 'POST', path, 'Prepare the import in REST', 'Opens the request in the REST console; nothing is sent until you run it'),
         inRest(c, 'DELETE', path, 'Prepare the delete in REST', 'Opens the request in the REST console; nothing is sent until you run it')],
     }] });
@@ -810,12 +810,13 @@ function danglingHelp(c, x) {
 
 /** The card's "i": what "not index data" can be, and where to look. */
 function diskHelp(c) {
-  const io = diskInfo.get(c.id);
+  // Asked when pressed: the button outlives a redraw that reads the same, and a ↻ may have changed the reason.
+  const problemOf = () => (diskInfo.get(c.id) || {}).problem || null;
   return infoButton({ id: c.name, head: 'disk in use that is not index data', label: `About the disk of ${c.name}`, title: 'What is counted, and where to look',
     items: () => [
-      { title: 'Not index data', cause: 'Disk in use minus the index data Elasticsearch has open: its translogs, the blocks the file system reserves, and other files on the same disk (logs, the operating system, dangling or orphaned shard directories).',
+      { title: 'Not index data', cause: 'Disk in use minus the index data Elasticsearch has open: its translogs, the blocks the file system reserves, and other files on the same disk (logs, the operating system, dangling or orphaned shard directories). Nodes that share one disk each count all of it.',
         fix: 'Elasticsearch cannot list other files. On the node, run du -xsh on the data path and the rest of that mount, and compare.' },
-      io && io.problem ? { title: 'Dangling indices not known', cause: io.problem.why, fix: io.problem.fix,
+      problemOf() ? { title: 'Dangling indices not known', cause: problemOf().why, fix: problemOf().fix,
         actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] }
         : { title: 'Dangling indices', cause: 'Index data on a node\'s disk that the cluster state does not list. Elasticsearch does not report their size; it is inside “Not index data”.', fix: null,
           actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] },
