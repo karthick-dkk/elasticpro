@@ -6,8 +6,11 @@
 //! | record | index | `_id` |
 //! |---|---|---|
 //! | measurement | `<prefix>-YYYY.MM` | `cluster\|device\|hour` (a rerun overwrites) |
-//! | period | `<prefix>-episodes-YYYY` | `cluster\|device\|started` (solving overwrites the open one); a log type's: `cluster\|device\|type:<name>\|started`, `cluster\|device\|no-type\|started` |
+//! | period | `<prefix>-episodes-YYYY` | `cluster\|device\|started` (solving overwrites the open one); a log type's: `cluster\|t\|<hash>` |
 //! | daily | `<prefix>-daily-YYYY` | `cluster\|day` (every run rewrites today) |
+//!
+//! An `_id` Elasticsearch would refuse (`ID_MAX`; it refuses the whole request, not the one
+//! document) is `cluster\|<kind>\|<hash>` instead (`hashed`).
 //!
 //! On the history store `<prefix>` is `<store prefix>-delay`; on a sink cluster it is the
 //! sink's `indexPrefix` (`elasticpro-log-delay`). Every document carries `record`, so a
@@ -15,6 +18,23 @@
 
 use super::state::{Daily, Episode, Row, RowType};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+/// The longest `_id` Elasticsearch takes, bytes.
+const ID_MAX: usize = 512;
+
+/// An `_id` of fixed length, whatever the names in it: the sha256 of its parts as a JSON array, so
+/// no name can be read as a part of another.
+fn hashed(cluster: &str, kind: &str, parts: Value) -> String {
+    let sha = |s: &str| hex::encode(Sha256::digest(s.as_bytes()));
+    let parts = sha(&parts.to_string());
+    if cluster.len() > ID_MAX / 2 { format!("{}|{kind}|{parts}", sha(cluster)) } else { format!("{cluster}|{kind}|{parts}") }
+}
+
+/// The id as it always was, unless Elasticsearch would not take it.
+fn fit(id: String, over: impl FnOnce() -> String) -> String {
+    if id.len() > ID_MAX { over() } else { id }
+}
 
 pub fn measurement_index(prefix: &str, year: i64, month: i64) -> String {
     format!("{prefix}-{year:04}.{month:02}")
@@ -72,7 +92,7 @@ fn type_doc(t: &RowType) -> Value {
 }
 
 pub fn measurement_id(cluster: &str, device: &str, bucket: &str) -> String {
-    format!("{cluster}|{device}|{bucket}")
+    fit(format!("{cluster}|{device}|{bucket}"), || hashed(cluster, "m", json!([device, "measurement", null, bucket])))
 }
 
 pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
@@ -102,10 +122,11 @@ pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
 }
 
 pub fn episode_id(cluster: &str, e: &Episode) -> String {
+    let parts = |kind: &str| json!([e.device, kind, e.log_type, e.started_ms]);
     match (&e.log_type, e.no_type) {
-        (Some(t), _) => format!("{cluster}|{}|type:{t}|{}", e.device, e.started_ms),
-        (None, true) => format!("{cluster}|{}|no-type|{}", e.device, e.started_ms),
-        (None, false) => format!("{cluster}|{}|{}", e.device, e.started_ms),
+        (Some(_), _) => hashed(cluster, "t", parts("type")),
+        (None, true) => hashed(cluster, "t", parts("no-type")),
+        (None, false) => fit(format!("{cluster}|{}|{}", e.device, e.started_ms), || hashed(cluster, "d", parts("device"))),
     }
 }
 
@@ -129,7 +150,7 @@ pub fn daily_doc(cluster: &str, cluster_name: &str, d: &Daily, written_ms: i64) 
 }
 
 pub fn daily_id(cluster: &str, day: &str) -> String {
-    format!("{cluster}|{day}")
+    fit(format!("{cluster}|{day}"), || hashed(cluster, "y", json!([day])))
 }
 
 /// One document of a bulk request, as NDJSON, added to `s`.
@@ -198,13 +219,39 @@ mod tests {
         let threat = Episode { log_type: Some("threat".into()), ..e.clone() };
         let none = Episode { no_type: true, ..e.clone() };
         let odd = Episode { log_type: Some("(no log type)".into()), ..e.clone() };
-        assert_eq!(episode_id("prod", &threat), "prod|fw|type:threat|1000");
-        assert_eq!(episode_id("prod", &none), "prod|fw|no-type|1000");
-        assert_eq!(episode_id("prod", &odd), "prod|fw|type:(no log type)|1000");
+        let ids: std::collections::BTreeSet<String> = [&e, &threat, &none, &odd].iter().map(|x| episode_id("prod", x)).collect();
+        assert_eq!(ids.len(), 4);
+        // Written by every later run, so it never changes.
+        assert_eq!(episode_id("prod", &threat), format!("prod|t|{}", hex::encode(Sha256::digest(br#"["fw","type","threat",1000]"#))));
         assert_eq!((episode_doc("prod", &threat, 9)["log_type"].clone(), episode_doc("prod", &none, 9)["no_type"].clone(), episode_doc("prod", &e, 9)["log_type"].clone()),
                    (json!("threat"), json!(true), Value::Null));
         assert_eq!(daily_id("prod", "2026-11-04"), "prod|2026-11-04");
         assert_eq!(measurement_id("prod", "fw", "2026-11-04T14:00:00Z"), "prod|fw|2026-11-04T14:00:00Z");
+    }
+
+    #[test]
+    fn no_name_makes_an_id_too_long_or_another_documents() {
+        let ep = |device: &str, log_type: Option<&str>, no_type: bool| Episode { device: device.into(), log_type: log_type.map(String::from), no_type, started_ms: 1_000, ..Episode::default() };
+        let id = |device: &str, log_type: Option<&str>, no_type: bool| episode_id("prod", &ep(device, log_type, no_type));
+        // Long names, of a device and of a log type, and of a cluster.
+        let long = "é".repeat(16_000);
+        let all = [id(&long, None, false), id(&long, Some("threat"), false), id("fw", Some(&long), false), id(&long, None, true),
+                   measurement_id("prod", &long, "2026-11-04T14:00:00Z"), daily_id(&long, "2026-11-04"), episode_id(&long, &ep("fw", None, true))];
+        assert!(all.iter().all(|i| i.len() <= ID_MAX), "{all:?}");
+        assert_eq!(all.iter().collect::<std::collections::BTreeSet<_>>().len(), all.len());
+        assert!(all[0].starts_with("prod|d|") && all[1].starts_with("prod|t|") && all[4].starts_with("prod|m|"));
+        assert_ne!(id(&long, None, false), id(&format!("{long}x"), None, false));
+        // The device's own ids are as they were in 0.3.89, up to the last byte Elasticsearch takes.
+        let edge = "d".repeat(ID_MAX - "prod||1000".len());
+        assert_eq!(id(&edge, None, false), format!("prod|{edge}|1000"));
+        assert_eq!(id(&format!("{edge}d"), None, false).len(), "prod|d|".len() + 64);
+        assert_eq!(id("a|b", None, false), "prod|a|b|1000");
+        // "|" in a name, and a log type with the text of another kind.
+        let mut seen = std::collections::BTreeSet::new();
+        for (d, t, none) in [("fw", None, false), ("fw", None, true), ("fw", Some("no-type"), false), ("fw", Some("null"), false), ("fw|no-type", None, false), ("fw|type:x", None, false),
+                             ("fw", Some("x"), false), ("fw", Some("x|y"), false), ("fw|x", Some("y"), false), ("fw", Some("type"), false), ("fw\",\"type", Some("x"), false), ("t", None, false)] {
+            assert!(seen.insert(id(d, t, none)), "{d} {t:?} {none}");
+        }
     }
 
     #[test]

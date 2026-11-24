@@ -13,6 +13,7 @@ use super::levels::LOG_TYPE_FIELD;
 use crate::delay_sink::{bucket_key, dotted, to_ms};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// The fields one cluster is measured by, resolved (`Core::logdelay_fields`): the device
@@ -87,7 +88,8 @@ pub struct Reading {
     /// Its log types, the most documents first. `None`: the field is off for this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types: Option<Vec<TypeReading>>,
-    /// It has more log types than were read (`TYPES_PER_DEVICE`).
+    /// It has more log types than were read (`TYPES_PER_DEVICE`); without `types`, none were
+    /// (`TYPES_PER_RUN`).
     #[serde(default)]
     pub types_truncated: bool,
 }
@@ -96,6 +98,23 @@ pub struct Reading {
 /// without a type that is 21 buckets a device, 10 500 a page (`search.max_buckets` is 65 535).
 pub const TYPES_PER_DEVICE: usize = 20;
 const TYPES_SHARD_SIZE: usize = 100;
+/// Log types read per cluster and run: from there on the devices are read without them, and it is
+/// said (`Reading::types_truncated` with no `types`). A page more at most.
+pub const TYPES_PER_RUN: usize = 150_000;
+/// The longest log type name kept as it is, bytes.
+pub const TYPE_NAME_MAX: usize = 256;
+const TYPE_NAME_CUT: usize = 200;
+
+/// A log type's name as it is kept everywhere: a longer one cut, with the hash of the whole, so two
+/// of them are never one and the page shows that it is cut.
+pub fn type_name(raw: &str) -> String {
+    if raw.len() <= TYPE_NAME_MAX {
+        return raw.to_string();
+    }
+    let at = (0..=TYPE_NAME_CUT).rev().find(|i| raw.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}…{}", &raw[..at], &hex::encode(Sha256::digest(raw.as_bytes()))[..8])
+}
+
 pub const PAGE_SIZE_TYPES: usize = 500;
 
 /// Devices one composite page asks for at first, and the least a page halves to when its
@@ -286,10 +305,10 @@ fn types_of(b: &Value, f: &Fields) -> (Option<Vec<TypeReading>>, bool) {
     };
     let mut truncated = b.pointer("/types/sum_other_doc_count").and_then(Value::as_u64).unwrap_or(0) > 0;
     for tb in b.pointer("/types/buckets").and_then(Value::as_array).into_iter().flatten() {
-        add(TypeReading { log_type: bucket_key(tb).filter(|k| !k.trim().is_empty()), ..type_reading(tb, f) });
+        add(TypeReading { log_type: bucket_key(tb).filter(|k| !k.trim().is_empty()).map(|k| type_name(&k)), ..type_reading(tb, f) });
     }
     if let Some(nb) = b.get("no_type").filter(|n| n.get("doc_count").and_then(Value::as_u64).unwrap_or(0) > 0) {
-        let named = nb.pointer("/latest/hits/hits/0/_source").and_then(|s| dotted(s, LOG_TYPE_FIELD)).and_then(scalar);
+        let named = nb.pointer("/latest/hits/hits/0/_source").and_then(|s| dotted(s, LOG_TYPE_FIELD)).and_then(scalar).map(|k| type_name(&k));
         truncated |= named.is_some();
         add(TypeReading { log_type: named, ..type_reading(nb, f) });
     }
@@ -418,6 +437,25 @@ mod tests {
         let off = page_body(&fields(), 1, 2, 10, None, &DeviceFilter::All);
         assert!(off.pointer("/aggs/devices/aggs/types").is_none() && off.pointer("/aggs/devices/aggs/no_type").is_none(), "off: the search of 0.3.89");
         assert!(!off.to_string().contains("log_type"));
+    }
+
+    #[test]
+    fn a_long_log_type_name_is_cut_and_stays_its_own() {
+        assert_eq!(type_name(&"a".repeat(TYPE_NAME_MAX)), "a".repeat(TYPE_NAME_MAX));
+        let (x, y) = ("é".repeat(5_000), format!("{}z", "é".repeat(5_000)));
+        assert!(type_name(&x).len() <= TYPE_NAME_MAX && type_name(&x).starts_with('é') && type_name(&x).contains('…'));
+        assert_ne!(type_name(&x), type_name(&y));
+        // Not on a character's edge: three-byte characters, 200 is not a multiple.
+        assert_eq!(type_name(&"…".repeat(100)).chars().count(), 66 + 1 + 8);
+        // By its bucket and by its document alike, and never the documents without one.
+        let f = Fields { log_type: Some("log_type".into()), ..fields() };
+        let latest = json!({ "hits": { "hits": [ { "_source": { "@timestamp": "2026-11-24T12:00:00Z", "event_created": "2026-11-24T11:59:00Z", "log_type": x } } ] } });
+        let res = json!({ "aggregations": { "devices": { "buckets": [
+            { "key": { "d": "fw" }, "doc_count": 9, "latest": latest, "types": { "buckets": [
+                { "key": x, "doc_count": 4, "latest": latest }, { "key": y, "doc_count": 2, "latest": latest } ] }, "no_type": { "doc_count": 3, "latest": latest } },
+        ] } } });
+        let r = readings(&res, &f);
+        assert_eq!(r[0].types.as_ref().unwrap().iter().map(|t| (t.log_type.clone(), t.docs)).collect::<Vec<_>>(), vec![(Some(type_name(&x)), 7), (Some(type_name(&y)), 2)]);
     }
 
     #[test]

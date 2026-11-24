@@ -100,7 +100,11 @@ the same on every cluster; no setting). Only the mapping decides `log_type` or `
 * **No document in the window** → that log type is `silent`, "no logs since 12:40": never on time,
   never a reason to call the device silent, and it solves nothing. Counted as not late.
 * **More than 20 log types in a device's window** (`types_truncated`): those not read are left as they
-  were and said (`types.truncated`). An index that maps the field otherwise counts here too.
+  were and said (`types.truncated`). An index that maps the field otherwise counts here too. After
+  150 000 log types of a cluster a run reads the rest of its devices without them (`TYPES_PER_RUN`):
+  their state is their newest document's, `types.truncated`, `logTypesUnreadDevices`.
+* **A name over 256 bytes** is its first 200, "…" and 8 hex of its sha256 (`measure::type_name`): never
+  another one's, never `(no log type)`.
 * **Periods.** A device's own period is open only while the whole device is late; when it becomes part
   delayed the period ends, unsolved ("only some of its log types are late"). Every series has periods
   of its own. Time part delayed is `partLateMs`, never in `lateMs`. A device's periods from before it
@@ -403,9 +407,13 @@ in memory, replaced when the run writes it; the pages never re-read the file. Da
 | record | index | `_id` | fields |
 |---|---|---|---|
 | `measurement` | `<prefix>-YYYY.MM` (as before) | `cluster\|device\|hour` — a rerun in the hour overwrites | `@timestamp` (hour bucket), `measured_at`, `cluster`, `device`, `docs`, `arrival_time`, `event_time`, `event_field`, `delay_minutes` (null = can't measure), `state`, `extras.{…}`; 0.3.90: `log_type` (the one its figures are of; null = its newest document's), `late_types[]`, `types[]` `{log_type, no_type?, state, delay_minutes, raw_gap_minutes, docs}` (null = not read by log types), `types_truncated` |
-| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `ended` / `ended_why` (ended unsolved), `last_measured`, `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras`; a log type's: `log_type` / `no_type`, `_id` `cluster\|device\|type:<name>\|started` or `…\|no-type\|…` |
+| `period` | `<prefix>-episodes-YYYY` | `cluster\|device\|started` — solving overwrites the open one | `@timestamp` (started), `cluster`, `device`, `started`, `solved` (null while open), `ended` / `ended_why` (ended unsolved), `last_measured`, `open`, `lasted_minutes`, `worst_minutes`, `worst_state`, `last_minutes`, `last_state`, `measurements`, `pattern`, `extras`; a log type's: `log_type` / `no_type`, `_id` `cluster\|t\|<sha256 of [device, kind, type, started]>` |
 | `daily` | `<prefix>-daily-YYYY` | `cluster\|day` — every run rewrites today; the first run of a new day rewrites yesterday complete | `@timestamp` (day), `day`, `cluster`, `clusterName`, `devices`, `measured`, `onTime`, `little`, `delayed`, `critical`, `clockAhead`, `silent`, `unmeasured`, `noDelay`, `lateBeforeSilent`, `startedCount`, `solvedCount`, `lateHours`, `medianMinutes`, `p95Minutes`, `complete`, `writtenAt` |
 
+* An `_id` over Elasticsearch's 512 bytes (a long device name) is `cluster\|d\|<sha256>` for a period,
+  `cluster\|m\|<sha256>` for a measurement; every other one is as it always was.
+* A document Elasticsearch rejects does not stop the others: the run says how many were and why the
+  first was, and its part is partial. A request it refuses stops the cluster's write.
 * Store template `<history prefix>-delay-template` on `<history prefix>-delay-*`, priority 210
   (above the general 200), mappings only, extras as keywords by dynamic template; created
   `create=true`, verified once per process (`history_ensure_template_for("logdelay")`).

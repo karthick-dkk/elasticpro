@@ -423,7 +423,7 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
         zone: super::extra_ci(&d.extras, "Zone").cloned(), tag1: super::extra_ci(&d.extras, "tag1").cloned(),
         in_last_run: in_last_run(d, c.tracker.last_run_ms),
         extras: d.extras.clone(), state_text: String::new(),
-        types: (c.tracker.has_log_types() && d.types_since_ms.is_some()).then(|| TypesRow::of(d)),
+        types: (c.tracker.has_log_types() && (d.types_since_ms.is_some() || d.types_truncated)).then(|| TypesRow::of(d)),
         part_late_ms: part_late_ms(d, c.tracker.stale_after(), r, now),
         delay_log_type: d.late_types().first().filter(|_| d.by_types).map(|s| s.type_label()),
     };
@@ -709,6 +709,7 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
         entry["logTypeField"] = json!(field);
         entry["logTypeWhy"] = json!(why);
         entry["logTypesNotKept"] = json!(c.tracker.types_not_kept);
+        entry["logTypesUnreadDevices"] = json!(c.tracker.types_unread);
         if let (Some(o), Some(s)) = (entry.as_object_mut(), shares.as_object()) {
             o.extend(s.clone());
         }
@@ -762,7 +763,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
         "timeZone": c.time_zone(now),
         "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
         "totals": totals, "notMeasured": not_measured,
-        "logTypeField": log_type_field, "logTypeWhy": log_type_why, "byLogType": by_log_type(std::iter::once(c)), "logTypesNotKept": c.tracker.types_not_kept,
+        "logTypeField": log_type_field, "logTypeWhy": log_type_why, "byLogType": by_log_type(std::iter::once(c)), "logTypesNotKept": c.tracker.types_not_kept, "logTypesUnreadDevices": c.tracker.types_unread,
         "started": eps.iter().filter(|e| e.started_ms >= r.from_ms && e.started_ms < r.to_ms).count(),
         "solved": eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= r.from_ms && s < r.to_ms)).count(),
         "medianNow": percentile(&mut nows, 0.5), "medianPrevious": percentile(&mut prev_medians, 0.5),
@@ -823,9 +824,15 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
         let state = d.type_state(s);
         let delay = s.last_minutes.filter(|_| s.state.measured());
         let last = Tracker::last_measured(s).or_else(|| points.iter().rev().find(|p| p.m.is_some() && !p.s.cant_measure()).map(|p| p.t));
-        let stale = s.state.measured() && (state.is_none() || now - s.last_run_ms > c.tracker.stale_after());
+        let quiet_at = s.recent.iter().next_back().map(|p| p.t);
+        let stale = match (s.state, state) {
+            (State::Silent, None) => quiet_at.is_some(),
+            (x, None) => x.measured(),
+            (x, _) => x.measured() && now - s.last_run_ms > c.tracker.stale_after(),
+        };
         let arrival = s.last_arrival_ms.or(last);
         let text = match (s.state, arrival, last) {
+            (State::Silent, ..) if stale => format!("no logs when last read {}, not read since", time::when(quiet_at.unwrap_or(now), now)),
             (State::Silent, Some(t), _) => format!("no logs since {}", time::when(t, now)),
             (State::Silent, None, _) => "no logs".into(),
             (x, _, Some(t)) if stale => format!("{} when last measured {}, not measured since", if x.late() { "late" } else { x.label() }, time::when(t, now)),
@@ -850,6 +857,8 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
 
 /// `seriesWhy`: the device was never read by its log types.
 pub const BEFORE_LOG_TYPES: &str = "before log types were measured";
+/// The same: every run had read `measure::TYPES_PER_RUN` before it came to the device.
+pub const PAST_LOG_TYPES: &str = "the cluster has more log types than a run reads";
 
 /// One device (Device board), with its finding when there is one.
 pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u64, finding: Option<&Finding>, older: &OlderTypes) -> Option<Value> {
@@ -919,7 +928,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     v["logTypeField"] = json!(field);
     v["logTypeWhy"] = json!(why);
     let series = series(c, name, d, older, r, now);
-    v["seriesWhy"] = json!(series.is_empty().then(|| why.unwrap_or(BEFORE_LOG_TYPES)));
+    v["seriesWhy"] = json!(series.is_empty().then(|| why.unwrap_or(if d.types_truncated { PAST_LOG_TYPES } else { BEFORE_LOG_TYPES })));
     v["series"] = json!(series);
     v["typesSinceMs"] = json!(d.types_since_ms);
     // Points older than the tracker keeps were read from here on only (`null`: all of them).

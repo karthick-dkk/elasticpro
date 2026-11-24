@@ -253,7 +253,7 @@ pub struct DeviceState {
     /// `last_run_ms` is the last run that had documents of it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<DeviceState>,
-    /// The first and the last run that read it by log types.
+    /// The first run that read it by log types, and the last that did or was to (`types_truncated`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types_since_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +317,9 @@ pub struct Tracker {
     /// Log types the last run read and had no room to keep (`TYPES_KEPT`, `SERIES_KEPT`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub types_not_kept: u32,
+    /// Devices the last run read without their log types (`measure::TYPES_PER_RUN`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub types_unread: u32,
 }
 
 /// A run that read nothing of the cluster.
@@ -645,9 +648,10 @@ impl DeviceState {
     }
 
     /// The state of one of its log types, as of the last run that read them: `None` when that run
-    /// did not read this one (it has more than were read).
+    /// did not read this one (it has more than were read), so that no logs is not known either.
     pub fn type_state(&self, s: &DeviceState) -> Option<State> {
-        (s.state == State::Silent || Some(s.last_run_ms) == self.types_run_ms).then_some(s.state)
+        let quiet = s.state == State::Silent && s.recent.iter().next_back().map(|p| p.t) >= self.types_run_ms;
+        (quiet || Some(s.last_run_ms) == self.types_run_ms).then_some(s.state)
     }
 
     /// Its late log types, the worst first.
@@ -877,6 +881,7 @@ impl Tracker {
             }
         };
         let cx = RunCx { run_ms, levels, offsets: &offsets, named: matches!(zone, LogTimeZone::Named(_)), cluster_offset: &cluster_offset };
+        self.types_unread = 0;
         let mut room = Room { left: SERIES_KEPT.saturating_sub(self.devices.values().map(|d| d.types.len()).sum()), not_kept: 0 };
         for r in readings {
             seen.insert(r.device.clone());
@@ -912,6 +917,10 @@ impl Tracker {
             }
             let mut j = d.judge(raw_of(&r), cluster_offset(r.event_ms), &cx);
             let ended = out.type_ended.len();
+            if r.types.is_none() && r.types_truncated {
+                // The run had read as many as it does: what its log types are now is not known.
+                (d.types_truncated, d.types_run_ms, self.types_unread) = (true, Some(run_ms), self.types_unread + 1);
+            }
             let types = r.types.map(|t| d.take_types(&r.device, t, !r.types_truncated, &mut room, &cx, &mut out));
             let typed = types.as_deref().and_then(|t| device_by_types(t, j.state));
             d.by_types = typed.is_some();
@@ -1718,6 +1727,15 @@ mod tests {
         at(&mut t, 2, vec![more]);
         let d = &t.devices["fw"];
         assert_eq!((of(&t, "c").state, d.type_state(of(&t, "c")), of(&t, "c").recent.len(), d.types_truncated), (State::NoDelay, None, 2, true));
+        // So is one that had none before: a run that did not read it does not say it has none.
+        let mut gone = rt("fw", NOW + 5 * H, &[("a", Some(1.0))]);
+        gone.types_truncated = true;
+        let mut u = Tracker::default();
+        fw(&mut u, 0, &[("a", Some(1.0)), ("b", Some(1.0))]);
+        fw(&mut u, 1, &[("a", Some(1.0))]);
+        assert_eq!(u.devices["fw"].type_state(of(&u, "b")), Some(State::Silent));
+        at(&mut u, 2, vec![gone]);
+        assert_eq!(u.devices["fw"].type_state(of(&u, "b")), None);
         // The device silent: every log type of it is.
         at(&mut t, 4, vec![]);
         let d = &t.devices["fw"];
@@ -1780,10 +1798,28 @@ mod tests {
         let d = &t.devices["fw"];
         assert_eq!((d.types.len(), d.types_truncated, t.types_not_kept, d.state, d.last_minutes), (TYPES_KEPT, true, 1, State::PartDelay, Some(95.0)));
         assert!(a.type_opened.is_empty(), "no period without a series to solve it");
+        // Their names, at their longest, in the series, the open and the ended periods of a cluster.
+        const { assert!((2 * SERIES_KEPT + TYPE_EPISODES_KEPT) * crate::logdelay::measure::TYPE_NAME_MAX <= 80 << 20) };
         // More ended periods than are kept: the oldest go, and from when is kept.
         t.type_episodes = (0..TYPE_EPISODES_KEPT as i64 + 2).map(|i| Episode { device: "x".into(), started_ms: NOW + i, solved_ms: Some(NOW + i), ..Episode::default() }).collect();
         t.prune(NOW + H);
         assert_eq!((t.type_episodes.len(), t.type_episodes_cut_ms), (TYPE_EPISODES_KEPT, Some(NOW + 1)));
+    }
+
+    #[test]
+    fn a_device_read_past_the_runs_log_types_has_its_own_state_and_it_is_said() {
+        let mut t = Tracker::default();
+        fw(&mut t, 0, &[("a", Some(1.0)), ("b", Some(95.0))]);
+        assert_eq!(t.devices["fw"].state, State::PartDelay);
+        let mut r = rt("fw", NOW + 2 * H, &[("a", Some(1.0))]);
+        (r.types, r.types_truncated) = (None, true);
+        let x = at(&mut t, 1, vec![r]);
+        let d = &t.devices["fw"];
+        assert_eq!((d.state, d.by_types, d.types_truncated, t.types_unread), (State::NoDelay, false, true, 1), "its newest document's, as before");
+        assert!(d.types.iter().all(|s| d.type_state(s).is_none()) && d.late_types().is_empty(), "not what they were");
+        assert!(of(&t, "b").open.is_some() && x.type_solved.is_empty() && x.rows[0].types.is_none() && x.rows[0].types_truncated);
+        fw(&mut t, 2, &[("a", Some(1.0)), ("b", Some(1.0))]);
+        assert_eq!((t.types_unread, t.devices["fw"].types_truncated), (0, false));
     }
 
     #[test]

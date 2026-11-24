@@ -6431,12 +6431,18 @@ impl Core {
                 continue;
             }
             let mut wrote_all = true;
+            let mut rejected: Option<(usize, String)> = None;
             for body in self.logdelay_bulk(id, &applied, &daily, &prefix, now) {
                 let wrote = if to_history {
                     self.history_delay_bulk(body).await
                 } else {
                     self.es_req(delay_sink::bulk_request(&cfg, body)).await
                 };
+                // Some documents refused: the rest are written, the next ones too, and it is said.
+                if let Some((n, why)) = delay_sink::bulk_rejected(&wrote) {
+                    rejected = Some(rejected.map_or((n, why), |(a, first)| (a + n, first)));
+                    continue;
+                }
                 if let Some(e) = delay_sink::bulk_failure(&wrote) {
                     failed += 1;
                     write_failed += 1;
@@ -6449,9 +6455,24 @@ impl Core {
                     break;
                 }
             }
-            if wrote_all {
-                measured += applied.rows.len();
-                done_part(applied.rows.len() as u64);
+            match rejected.filter(|_| wrote_all) {
+                Some((n, why)) => {
+                    let e = format!("{n} documents rejected, the rest written: {why}");
+                    if partly.is_none() {
+                        failed += 1;
+                        failed_ids.push(id.clone());
+                    }
+                    let written = applied.rows.len().saturating_sub(n);
+                    measured += written;
+                    ld_part(run, id, part_at, written as u64, Some((PartStatus::Partial, &e)));
+                    let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
+                    errors.push((place, SinkNote::write(Some(id), sink, e)));
+                }
+                None if wrote_all => {
+                    measured += applied.rows.len();
+                    done_part(applied.rows.len() as u64);
+                }
+                None => {}
             }
         }
         let at = |id: &String| targets.iter().position(|t| t == id);

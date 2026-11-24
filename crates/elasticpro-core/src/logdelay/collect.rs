@@ -142,6 +142,8 @@ impl Core {
         let allowance = crate::memory::budget().report_page_bytes();
         let mut out = Collected { log_type: self.logdelay_log_type(id, f, from_ms, to_ms).await, ..Collected::default() };
         let f = &Fields { log_type: out.log_type.field.clone(), ..f.clone() };
+        let without = &Fields { log_type: None, ..f.clone() };
+        let mut types_read = 0;
         let mut size = if f.log_type.is_some() { measure::PAGE_SIZE_TYPES } else { measure::PAGE_SIZE };
         let mut after: Option<Value> = None;
         let mut tries = 0u32;
@@ -156,6 +158,8 @@ impl Core {
                                          crate::delay_sink::CLUSTER_READ_MAX.as_secs() / 60, out.readings.len()));
                 break;
             }
+            let over = f.log_type.is_some() && types_read >= measure::TYPES_PER_RUN;
+            let f = if over { without } else { f };
             // One more than the cap leaves room for: a device beyond it says the list was cut.
             let ask = size.min(max - out.readings.len() + 1).max(1);
             let body = measure::page_body(f, from_ms, to_ms, ask, after.as_ref(), devices);
@@ -179,8 +183,10 @@ impl Core {
             } else {
                 let bytes = res.get("bytes").and_then(Value::as_u64).unwrap_or(0);
                 match measure::read_page(res.get("json").unwrap_or(&Value::Null), f, ask) {
-                    Ok(p) => {
+                    Ok(mut p) => {
                         tries = 0;
+                        types_read += p.readings.iter().filter_map(|r| r.types.as_ref()).map(Vec::len).sum::<usize>();
+                        p.readings.iter_mut().for_each(|r| r.types_truncated |= over);
                         out.pages += 1;
                         out.largest_page_bytes = out.largest_page_bytes.max(bytes);
                         if out.no_device.is_none() {

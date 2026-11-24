@@ -731,6 +731,9 @@ fn about(i: &Inputs<'_>, fleet: &Value) -> crate::report::about::About {
         if c.tracker.types_not_kept > 0 {
             a.notes.push(format!("{}: the last run read {} more log types than are kept; they count in their device's state, and have no row of their own", c.name, c.tracker.types_not_kept));
         }
+        if c.tracker.types_unread > 0 {
+            a.notes.push(format!("{}: {} devices were read without their log types, the last run's limit of {} log types was reached; their state is their newest document's", c.name, c.tracker.types_unread, crate::logdelay::measure::TYPES_PER_RUN));
+        }
     }
     a.warnings = warnings(fleet, i.now);
     a
