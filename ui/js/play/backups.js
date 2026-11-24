@@ -69,6 +69,7 @@ export function render(ctx) {
       h('td', c.name),
       h(`td${within === false ? '.red' : ''}`, g ? `${ago(endOf(g))} · ${clockText(endOf(g), ctx.tz, { seconds: false })}`
         : unknown(st === 'none' ? 'no repository' : st === 'read' ? 'none' : 'no data')),
+      // What can be restored up to: the cover days are those of restorable indices only (snapshot-restorable.js).
       h('td', g ? (g.coverTo ? g.coverTo : unknown(g.indexNames === null ? 'index names not listed' : '–',
         'The snapshot listing came from _cat/snapshots, which does not name the indices; the full listing (snapshots_full) does')) : unknown('–')),
       h('td.num', size));

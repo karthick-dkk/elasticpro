@@ -6,6 +6,7 @@
 
 import { pageSlice } from '../lib/pager.js';
 import { compareNullLast } from '../lib/sort-order.js';
+import { restorableIndices, restorableNote, cutText } from './snapshot-restorable.js';
 
 /** Rows per page the picker offers; the first is what the page opens with. */
 export const SNAPSHOT_PAGE_SIZES = [10, 25, 50, 100];
@@ -111,15 +112,25 @@ export function snapshotPage(snaps, { text = '', page = 0, perPage = SNAPSHOT_PA
  * inside as well as when it ran: the two are different questions, and a backup export
  * that only says when the job ran answers the wrong one. Unknown stays blank-and-said,
  * not a guessed date.
+ *
+ * The data columns count only what can be restored (core/snapshot-restorable.js).
+ * `data_days` is the span from data_from to data_to, both ends counted; `data_missing_days`
+ * how many days inside it the snapshot does not hold; `data_note` says what is not counted.
  */
-export function snapshotCsvRows(snaps) {
+export function snapshotCsvRows(snaps, listing = null) {
   const iso = (ms) => (ms ? new Date(Number(ms)).toISOString() : '');
-  return (snaps || []).map((s) => ({
-    snapshot: s.id, status: s.status, start: iso(s.start), end: iso(s.end),
-    duration: s.duration, indices: s.indices,
-    data_from: s.indexNames == null ? 'unknown' : (s.coverFrom || ''),
-    data_to: s.indexNames == null ? 'unknown' : (s.coverTo || ''),
-    data_days: s.indexNames == null ? '' : (s.coverDays || 0),
-    successful_shards: s.successful, failed_shards: s.failed, total_shards: s.total,
-  }));
+  const cut = listing ? cutText(listing) : '';
+  return (snaps || []).map((s) => {
+    const known = restorableIndices(s) !== null;
+    return {
+      snapshot: s.id, status: s.status, start: iso(s.start), end: iso(s.end),
+      duration: s.duration, indices: s.indices,
+      data_from: known ? (s.coverFrom || '') : 'unknown',
+      data_to: known ? (s.coverTo || '') : 'unknown',
+      data_days: known ? (s.coverDays || 0) : '',
+      data_missing_days: known ? (s.missingDays || 0) : '',
+      data_note: [restorableNote(s), cut ? `list: ${cut}` : ''].filter(Boolean).join('; '),
+      successful_shards: s.successful, failed_shards: s.failed, total_shards: s.total,
+    };
+  });
 }

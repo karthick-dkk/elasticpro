@@ -4,7 +4,8 @@
  * "It is in a snapshot" is not enough. A snapshot in state PARTIAL or FAILED may hold a
  * broken copy, and a snapshot that is still IN_PROGRESS has not finished writing it. Only
  * SUCCESS counts, and the newest successful snapshot is the one reported so the operator
- * knows how recent the copy is.
+ * knows how recent the copy is. What such a snapshot can give back is restorableIndices
+ * (core/snapshot-restorable.js), the one definition; a PARTIAL one is not enough to delete on.
  *
  * One listing per repository, with the index list attached to each snapshot — not one
  * call per snapshot, which on a repository with hundreds would take minutes.
@@ -18,10 +19,17 @@
  * fetchSnapshots) does this ask Elasticsearch itself.
  */
 
-import { client, state, ensureFullSnapshots } from './state.js';
+import { client, state, ensureFullSnapshots, snapshotRowsVerbose, totalsOf } from './state.js';
+import { restorableIndices, snapStatus, listingCut, repoListing, cutText, reposRead } from './snapshot-restorable.js';
 import { indexQuery } from './index-match.js';
 
 const SNAPSHOT_LIST_SIZE = 1000;
+
+/** A fresh listing with whether it is the whole repository (a page of 1000 may not be). */
+function listingOf(rows, j) {
+  const t = totalsOf(j);
+  return { rows, ...listingCut(rows.length, t.total === null && t.remaining === null && rows.length < SNAPSHOT_LIST_SIZE ? { whole: true } : t) };
+}
 
 /**
  * @returns {Promise<Map<string, {covered:boolean, best:object|null, all:Array, unverified:string[]}>>}
@@ -45,58 +53,44 @@ export async function verifyIndicesInSnapshots(cluster, names) {
   for (const n of names) holders.set(n, []);
   const unverified = [];
 
-  for (const repo of repos) {
-    const cached = d.snapshots && d.snapshots[repo];
-    let entries;
+  // A repository list nobody has read is not "no repository".
+  if (!reposRead(d)) unverified.push('the snapshot repositories have not been read');
 
-    if (Array.isArray(cached)) {
-      // fetchSnapshots' own shape: {id, status, indexNames, start, end, failed, ...}.
-      // It keeps only the snapshot-wide failed-shard COUNT, not which index a failure
-      // belonged to (the raw ES response's `failures[]` does, but that is not worth
-      // carrying through a cache every page reads). Treating any shard failure in the
-      // snapshot as disqualifying is the conservative reading: it can only turn a
-      // "covered" into a "blocked", never the other way, so reusing this listing never
-      // reports a copy as safe when the fresher, per-index check below would not have.
-      entries = cached.map((s) => ({
-        snapshot: s.id,
-        state: String(s.status || '').toUpperCase(),
-        start: s.start || 0,
-        end: s.end || 0,
-        indexNames: s.indexNames,   // null when this listing came from the _cat fallback
-        good: String(s.status || '').toUpperCase() === 'SUCCESS' && !(s.failed > 0),
-      }));
+  for (const repo of repos) {
+    const known = repoListing(d, (d.repos || []).find((r) => r.name === repo));
+    let rows = known.rows, cut = known;
+    if (rows) {
       // _cat/snapshots (fetchSnapshots' own fallback) does not name indices. A listing
       // built from it cannot say what any snapshot holds — unknown, not "not covered".
-      if (entries.some((e) => e.indexNames == null)) {
+      if (rows.some((s) => s.indexNames == null)) {
         unverified.push(`${repo}: the cached snapshot listing has no index names (it came `
           + 'from _cat, not the verbose listing) — coverage there is unknown');
       }
+    } else if (known.why !== 'not read yet') {
+      // Known to be unreadable (or switched off): said, not asked again.
+      unverified.push(`${repo}: ${known.why}`);
+      continue;
     } else {
       try {
         const j = await cl.snapshots(repo, SNAPSHOT_LIST_SIZE);
-        entries = (j.snapshots || []).map((s) => ({
-          snapshot: s.snapshot,
-          state: String(s.state || '').toUpperCase(),
-          start: s.start_time_in_millis || (s.start_time ? Date.parse(s.start_time) : 0),
-          end: s.end_time_in_millis || (s.end_time ? Date.parse(s.end_time) : 0),
-          indexNames: s.indices || [],
-          // A fresh fetch keeps the raw per-index failure list, so "good" is computed
-          // below, per index, with the same precision the original check had.
-          rawFailures: s.failures || [],
-        }));
+        rows = snapshotRowsVerbose(j, cluster.indexNameRegex);
+        cut = listingOf(rows, j);
       } catch (e) {
         unverified.push(`${repo}: ${e.message || e}`);
         continue;
       }
     }
+    if (cut.cut) unverified.push(`${repo}: only the ${cutText(cut)} snapshots were read`);
 
-    for (const s of entries) {
+    for (const s of rows) {
       if (s.indexNames == null) continue;   // can't say which indices this one holds
-      for (const idx of s.indexNames) {
-        if (!wanted.has(idx)) continue;
-        const good = 'good' in s ? s.good
-          : s.state === 'SUCCESS' && s.rawFailures.filter((f) => f.index === idx).length === 0;
-        holders.get(idx).push({ repo, snapshot: s.snapshot, state: s.state, start: s.start, end: s.end, good });
+      const state_ = snapStatus(s);
+      const held = s.indexNames.filter((idx) => wanted.has(idx));
+      if (!held.length) continue;
+      // A copy counts only when the whole snapshot succeeded AND had no failure on this index.
+      const safe = new Set(state_ === 'SUCCESS' ? restorableIndices(s) || [] : []);
+      for (const idx of held) {
+        holders.get(idx).push({ repo, snapshot: s.id, state: state_, start: s.start || 0, end: s.end || 0, good: safe.has(idx) });
       }
     }
   }
@@ -104,7 +98,6 @@ export async function verifyIndicesInSnapshots(cluster, names) {
   const out = new Map();
   for (const n of names) {
     const all = holders.get(n).sort((a, b) => b.start - a.start);
-    // A copy counts only when the whole snapshot succeeded AND had no failure on this index.
     const good = all.filter((s) => s.good);
     out.set(n, {
       covered: good.length > 0,
@@ -124,6 +117,7 @@ export function coverageLabel(v) {
   if (v.unverified.length && !v.all.length) return { text: 'could not verify', cls: 'yellow' };
   if (v.all.length) {
     const st = v.all[0].state;
+    if (v.unverified.length) return { text: `only seen in a ${st} snapshot, not all read`, cls: 'yellow' };
     return { text: `only in a ${st} snapshot`, cls: st === 'IN_PROGRESS' ? 'yellow' : 'red' };
   }
   if (!v.repos) return { text: 'no repository', cls: 'red' };
@@ -138,30 +132,39 @@ export function coverageLabel(v) {
  */
 export async function findIndexEverywhere(cluster, term, { max = 200, not = false } = {}) {
   const q = indexQuery(term, { not });
-  if (!q.active) return { live: [], snapshotted: [], unverified: [] };
+  // Whose answer this is travels with it: a page that has moved to another cluster drops it.
+  if (!q.active) return { clusterId: cluster.id, live: [], snapshotted: [], unverified: [], liveRead: state.indices.has(cluster.id), truncated: false };
 
   const live = (state.indices.get(cluster.id) || [])
     .filter((r) => q.test(r.index))
     .map((r) => ({ index: r.index, size: r.size, docs: r.docs, day: r.day, status: r.status, health: r.health }));
 
   const cl = client(cluster.id);
-  const repos = ((state.data.get(cluster.id) || {}).repos || []).map((r) => r.name);
+  const d = state.data.get(cluster.id) || {};
+  const repos = (d.repos || []).map((r) => r.name);
   const found = new Map();   // index -> { snapshots: [...] }
   const unverified = [];
+  let truncated = false;     // more than `max` names matched: the rest were not looked at
+  if (!reposRead(d)) unverified.push('the snapshot repositories have not been read');
   for (const repo of repos) {
     let list;
     // The listing is read like any page's (held by the gap and shared); the term is matched here.
-    try { list = (await cl.snapshots(repo, SNAPSHOT_LIST_SIZE)).snapshots || []; }
-    catch (e) { unverified.push(`${repo}: ${e.message || e}`); continue; }
-    for (const s of list) {
-      for (const idx of s.indices || []) {
+    try {
+      const j = await cl.snapshots(repo, SNAPSHOT_LIST_SIZE);
+      list = j.snapshots || [];
+      const cut = listingOf(list, j);
+      if (cut.cut) unverified.push(`${repo}: only the ${cutText(cut)} snapshots were read`);
+    } catch (e) { unverified.push(`${repo}: ${e.message || e}`); continue; }
+    for (const s of snapshotRowsVerbose({ snapshots: list }, cluster.indexNameRegex)) {
+      const ok = new Set(restorableIndices(s) || []);
+      for (const idx of s.indexNames) {
         if (!q.test(idx)) continue;
-        if (!found.has(idx)) found.set(idx, { index: idx, snapshots: [] });
-        found.get(idx).snapshots.push({
-          repo, snapshot: s.snapshot, state: String(s.state || '').toUpperCase(),
-          start: s.start_time_in_millis || (s.start_time ? Date.parse(s.start_time) : 0),
-        });
-        if (found.size >= max) break;
+        if (!found.has(idx)) {
+          if (found.size >= max) { truncated = true; continue; }
+          found.set(idx, { index: idx, snapshots: [] });
+        }
+        found.get(idx).snapshots.push({ repo, snapshot: s.id, state: snapStatus(s), start: s.start || 0,
+          good: snapStatus(s) === 'SUCCESS' && ok.has(idx) });
       }
     }
   }
@@ -170,7 +173,7 @@ export async function findIndexEverywhere(cluster, term, { max = 200, not = fals
     ...f,
     snapshots: f.snapshots.sort((a, b) => b.start - a.start),
     alsoLive: liveSet.has(f.index),
-    successful: f.snapshots.filter((s) => s.state === 'SUCCESS').length,
+    successful: f.snapshots.filter((s) => s.good).length,
   }));
-  return { live, snapshotted, unverified };
+  return { clusterId: cluster.id, live, snapshotted, unverified, truncated, max, liveRead: state.indices.has(cluster.id) };
 }

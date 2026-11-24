@@ -11,6 +11,7 @@ import { showCredentialDialog } from '../ui/credential-dialog.js';
 import { diagnoseCluster } from '../core/diagnose.js';
 import { configErrorText } from '../core/volume-daily.js';
 import { slmExempt, ulmLabel, ULM_WHY } from '../core/cluster-kind.js';
+import { reposRead, listingsKnown } from '../core/snapshot-restorable.js';
 import { trustCert, untrustCert, trustHostKey, untrustHostKey, tunnelSecret, tunnelReconnect } from '../core/es.js';
 import { STATUS } from '../lib/charts.js';
 import { usageLevel } from '../core/nodes-shards.js';
@@ -488,14 +489,25 @@ export function lastSnapshotOf(data) {
   return best;
 }
 
+/** Why "no snapshot" cannot be said of this cluster (a listing not read, or not readable), or ''. */
+export function noSnapshotWhy(d) {
+  if (!reposRead(d)) return 'The snapshot repositories have not been read';
+  const k = listingsKnown(d);
+  if (!k.unread.length) return '';
+  return `${k.unread.length} of ${k.total} repositories not read: ${k.unread.map((x) => `${x.name} ${x.why}`).join('; ')}`;
+}
+
 /**
  * The last snapshot, quiet when it is fine: a success inside the allowed window is plain text.
  * Failed, partial, or a success older than `staleHours` (the same window the alert uses,
  * state.js snapshotAlertsFor) is coloured text with a dot — red for failed and overdue,
  * amber for partial.
  */
-export function snapshotCell(s, staleHours) {
-  if (!s) return h('span.muted', 'none');
+export function snapshotCell(s, staleHours, d = null) {
+  if (!s) {
+    const why = d ? noSnapshotWhy(d) : '';
+    return why ? h('span.muted', { title: why }, 'not known') : h('span.muted', 'none');
+  }
   const st = String(s.status || '').toUpperCase();
   const stale = isFinite(staleHours) && staleHours > 0 && Date.now() - s.start > staleHours * 3600 * 1000;
   const word = st === 'SUCCESS' ? (stale ? 'overdue' : 'success') : (st || 'unknown').toLowerCase().replace('_', ' ');
@@ -518,7 +530,7 @@ export function snapshotCellFor(c, d, staleHours) {
   // Switched off for the cluster (Edit cluster › Collection): never asked — "off", and where.
   if (d && d.switchedOff && d.switchedOff.snapshots) return h('span.muted.snap-off', { title: `${offText('snapshots')}.` }, 'Off');
   const s = lastSnapshotOf(d || {});
-  if (!slmExempt(c)) return snapshotCell(s, staleHours);
+  if (!slmExempt(c)) return snapshotCell(s, staleHours, d || {});
   if (!s) return h('span.cl-ulm', { title: ULM_WHY }, ulmLabel(c));
   return snapshotCell(s, 0);
 }

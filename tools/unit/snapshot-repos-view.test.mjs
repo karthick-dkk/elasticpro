@@ -8,7 +8,7 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const { repoOverview, openRepo, recoverableRange } =
   await import(pathToFileURL(path.join(ROOT, 'ui/js/core/snapshot-evidence.js')).href);
 
-const snap = (id, from, to, extra = {}) => ({ id, start: 1, coverFrom: from, coverTo: to, indexNames: [], ...extra });
+const snap = (id, from, to, extra = {}) => ({ id, status: 'SUCCESS', start: 1, coverFrom: from, coverTo: to, indexNames: [], ...extra });
 const pols = [
   { id: 'daily', policy: { repository: 'a' } },
   { id: 'weekly', policy: { repository: 'b' } },

@@ -66,7 +66,19 @@ const SCOPES = [
   { id: 'snapshot', label: 'Snapshot', title: 'Only indices held in a snapshot repository' },
   { id: 'both', label: 'Live + Snapshot', title: 'Both at once — where does this index exist, anywhere' },
 ];
-const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set() };
+const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set(), clusterId: null };
+
+/**
+ * A search's answer belongs to the cluster it was asked of. On another cluster it is dropped:
+ * its Restore buttons would act on the cluster now on screen.
+ */
+export function evFor(c, e = ev) {
+  if (e.clusterId !== null && e.clusterId !== (c && c.id)) {
+    Object.assign(e, { result: null, error: null, running: false, clusterId: null });
+    e.picked.clear();
+  }
+  return e;
+}
 
 /** Back to an unfiltered list (what the toolbar's Clear does, and a hint from another page starts from). */
 function resetFilters() {
@@ -189,6 +201,7 @@ function docsPanel(c) {
 function drawPage() {
   const c = cluster();
   if (!c) return mount(host, empty('No cluster selected'));
+  evFor(c);
   // Documents: the whole page is theirs; the list waits underneath with its state intact.
   if (ui.view === 'docs' && ui.docs.target) return mount(host, docsPanel(c));
   // Summary: its own toolbar, with these tabs at its left.
@@ -522,13 +535,19 @@ function tableCard(c, rows, all) {
 
 /* ------------------------- live + snapshot search ------------------------- */
 
+let searches = 0;
 async function searchEverywhere(c) {
   const term = ui.text.trim();
   if (!term) return;
-  ev.running = true; ev.error = null; ev.term = ui.not ? `not ${term}` : term; ev.picked.clear(); draw();
-  try { ev.result = await findIndexEverywhere(c, term, { not: ui.not }); }
-  catch (e) { ev.error = e.message || String(e); ev.result = null; }
-  ev.running = false;
+  const asked = { clusterId: c.id, n: (searches += 1) };
+  ev.running = true; ev.error = null; ev.result = null; ev.clusterId = c.id; ev.term = ui.not ? `not ${term}` : term; ev.picked.clear(); draw();
+  let result = null, error = null;
+  try { result = await findIndexEverywhere(c, term, { not: ui.not }); }
+  catch (e) { error = e.message || String(e); }
+  // The page moved to another cluster, or asked again, while this ran: not this answer's place.
+  const now = cluster();
+  if (asked.n !== searches || ev.clusterId !== asked.clusterId || !now || now.id !== asked.clusterId) return;
+  ev.result = result; ev.error = error; ev.running = false;
   draw();
 }
 
@@ -544,6 +563,8 @@ function everywherePanel(c) {
   const both = r.snapshotted.filter((s) => s.alsoLive);
 
   const canRestore = (s) => !!restoreSourceOf(s);
+  // "In no snapshot" is said only of listings read whole, and of a search that was not cut.
+  const proven = !r.unverified.length && !r.truncated;
   const listed = [...gone, ...both].slice(0, 200);
   const pickable = listed.filter(canRestore);
   for (const k of [...ev.picked]) if (!pickable.some((s) => s.index === k)) ev.picked.delete(k);
@@ -558,7 +579,7 @@ function everywherePanel(c) {
       onchange: (e) => { if (e.target.checked) ev.picked.add(s.index); else ev.picked.delete(s.index); redraw(); },
     })),
     h('td.mono', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, s.index),
-    h('td', s.alsoLive ? pill('live + snapshot', 'green') : pill('snapshot only', 'yellow')),
+    h('td', s.alsoLive ? pill('live + snapshot', 'green') : r.liveRead === false ? pill('snapshot', 'grey') : pill('snapshot only', 'yellow')),
     h('td.num', String(s.snapshots.length)),
     h('td', s.successful ? pill(`${s.successful} successful`, 'green') : pill('none successful', 'red')),
     h('td.mono.muted', { style: { fontSize: '11px' } },
@@ -588,20 +609,26 @@ function everywherePanel(c) {
   const showLive = ev.scope !== 'snapshot';
   return card(
     `"${ev.term}" — ${ev.scope === 'snapshot' ? 'in snapshots' : ev.scope === 'live' ? 'live' : 'live and in snapshots'}`,
-    `${r.live.length} live · ${r.snapshotted.length} in snapshots · ${gone.length} only in snapshots`,
+    r.liveRead === false ? `live indices not read · ${r.snapshotted.length}${r.truncated ? ' or more' : ''} in snapshots`
+      : `${r.live.length} live · ${r.snapshotted.length}${r.truncated ? ' or more' : ''} in snapshots · ${gone.length} only in snapshots`,
     h('div', { style: { display: 'grid', gap: '8px' } },
       r.unverified.length
-        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `Could not read: ${r.unverified.join('; ')}`))
+        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `Not read in full: ${hideAddress(r.unverified.join('; '), c)}`))
+        : null,
+      r.truncated
+        ? h('div.banner.warn', { style: { margin: 0 } }, h('div', `More than ${r.max} names match in the snapshots: only ${r.max} were looked at. Narrow the search.`))
         : null,
       liveOnly.length && showLive
         ? h('div', { style: { fontSize: '12px' } },
-            h('b', `${liveOnly.length} live only`), h('span.muted', ' — on the cluster, in no snapshot: '),
+            h('b', proven ? `${liveOnly.length} live only` : `${liveOnly.length} live, not seen in a snapshot`),
+            h('span.muted', proven ? ' — on the cluster, in no snapshot: ' : ' — the snapshots were not all read, so they may be in one: '),
             h('span.mono', liveOnly.slice(0, 8).map((x) => x.index).join(', ')), liveOnly.length > 8 ? ` …+${liveOnly.length - 8}` : '')
         : null,
       r.snapshotted.length
         ? h('div', { style: { display: 'grid', gap: '8px' } }, restoreBar,
             table([{ label: selectAll, width: '28px' }, 'Index', 'Where', { label: 'Snapshots', num: true }, 'Good copies', 'Newest', ''],
               listed.map(snapRow)))
-        : empty(r.live.length ? 'Nothing matching is held in any snapshot.' : 'Nothing matching, live or in snapshots.')),
+        : empty(!proven ? 'Nothing matching in the snapshots that were read.'
+          : r.live.length || r.liveRead === false ? 'Nothing matching is held in any snapshot.' : 'Nothing matching, live or in snapshots.')),
     [h('button.btn.sm.ghost', { onclick: () => { ev.result = null; draw(); } }, 'Clear')]);
 }

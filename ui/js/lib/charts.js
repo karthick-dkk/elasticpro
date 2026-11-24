@@ -283,12 +283,12 @@ export function coverageStrip(days, opts = {}) {
   days.forEach((d, i) => {
     const cx = (i % perRow) * (cell + gap);
     const cy = Math.floor(i / perRow) * (cell + gap);
-    const fill = d.ok ? (d.partial ? STATUS.warning : STATUS.good) : 'var(--surface-3)';
+    const fill = d.notRead ? 'none' : d.ok ? (d.partial ? STATUS.warning : STATUS.good) : 'var(--surface-3)';
     s.append(svg('rect', {
       x: cx, y: cy, width: cell, height: cell, rx: 3,
-      style: { fill, stroke: d.ok ? 'none' : 'var(--border-strong)', strokeWidth: 1 },
+      style: { fill, stroke: d.ok ? 'none' : 'var(--border-strong)', strokeWidth: 1, strokeDasharray: d.notRead ? '2 2' : null },
       onmousemove: (e) => tooltip.show(h('div', h('b', d.date),
-        tipRow('Snapshots', num(d.count || 0)), d.detail ? tipRow('', d.detail) : null), e.clientX, e.clientY),
+        tipRow('Snapshots', d.notRead ? 'not read' : num(d.count || 0)), d.detail ? tipRow('', d.detail) : null), e.clientX, e.clientY),
       onmouseleave: () => tooltip.hide(),
     }));
   });
@@ -299,7 +299,8 @@ export function coverageStrip(days, opts = {}) {
     h('div.legend',
     h('span', h('i', { style: { background: STATUS.good } }), 'Covered'),
     h('span', h('i', { style: { background: STATUS.warning } }), 'Partial / failed'),
-    h('span', h('i', { style: { background: 'var(--surface-3)', border: '1px solid var(--border-strong)' } }), 'No snapshot')));
+    h('span', h('i', { style: { background: 'var(--surface-3)', border: '1px solid var(--border-strong)' } }), 'No snapshot'),
+    days.some((d) => d.notRead) ? h('span', h('i', { style: { background: 'none', border: '1px dashed var(--border-strong)' } }), 'Not read') : null));
   return el;
 }
 

@@ -245,7 +245,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.from]'
           value_type: CHAR
           trends: '0'
-          description: 'The earliest day of data held inside any snapshot, read from the dates in the index names it contains. This is not the date the snapshot ran.'
+          description: 'The earliest day of data that can be restored from any snapshot, read from the dates in the index names it contains. Failed and running snapshots, and indices with a failed shard, are not counted. This is not the date the snapshot ran.'
           tags:
             - tag: column
               value: '15'
@@ -259,7 +259,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.to]'
           value_type: CHAR
           trends: '0'
-          description: 'The latest day of data held inside any snapshot.'
+          description: 'The latest day of data that can be restored from any snapshot.'
           tags:
             - tag: column
               value: '16'

@@ -25,6 +25,7 @@ import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled, HEAP_HI
 // each one, and the clusters this app watches are the ones already under load.
 import { runBounded } from './fleet.js';
 import { spanDaysIso } from './volume.js';
+import { restorableIndices, failedIndexNames, LISTING_SIZE } from './snapshot-restorable.js';
 import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
 import { isStale } from '../lib/freshness.js';
@@ -545,7 +546,12 @@ export function buildClusterData(id, prev, raw) {
     out.repos = Object.entries(repos.value || {}).map(([name, r]) => ({
       name, type: r.type, settings: r.settings || {}, location: repoLocation(r.settings || {}),
     }));
-  } else out.repos = prev.repos || [];
+    out.reposRead = true;
+  } else {
+    // Not read is not "none": reposRead stays false until the list has been answered once.
+    out.repos = prev.repos || [];
+    out.reposRead = prev.reposRead === true;
+  }
 
   out.clusterSettings = clusterSettings && clusterSettings.ok ? clusterSettings.value : prev.clusterSettings || null;
   out.appliedIlm = appliedIlm(ilmPolicies, ilmOfIndices) || prev.appliedIlm || null;
@@ -772,16 +778,20 @@ export async function ensureFullSnapshots(id) {
 export function snapshotRowsVerbose(j, reSrc) {
   return ((j && j.snapshots) || []).map((s) => {
     const names = s.indices || [];
-    return {
+    const failed = (s.shards || {}).failed || 0;
+    const row = {
       id: s.snapshot, status: s.state,
-      start: s.start_time_in_millis, end: s.end_time_in_millis,
+      start: s.start_time_in_millis || (s.start_time ? Date.parse(s.start_time) : 0),
+      end: s.end_time_in_millis || (s.end_time ? Date.parse(s.end_time) : 0),
       duration: s.duration_in_millis,
       indices: names.length,
       indexNames: names,
-      ...coveredDays(names, reSrc),
-      successful: (s.shards || {}).successful || 0, failed: (s.shards || {}).failed || 0,
+      // Which indices lost a shard; null when the answer does not say (snapshot-restorable.js).
+      failedIndices: failedIndexNames(s.failures, failed),
+      successful: (s.shards || {}).successful || 0, failed,
       total: (s.shards || {}).total || 0,
     };
+    return { ...row, ...restorableDays(row, reSrc) };
   }).sort((a, b) => b.start - a.start);
 }
 
@@ -797,7 +807,8 @@ export function snapshotRowsCat(rows) {
     // _cat does not name the indices, so the covered range is unknown rather
     // than empty — the page says so instead of showing a misleading blank.
     indexNames: null,
-    coverFrom: null, coverTo: null, coverDays: 0, missingDays: 0,
+    failedIndices: null,
+    coverFrom: null, coverTo: null, coverDays: 0, missingDays: 0, days: [],
     successful: Number(r.successful_shards) || 0,
     failed: Number(r.failed_shards) || 0,
     total: Number(r.total_shards) || 0,
@@ -810,20 +821,26 @@ async function fetchSnapshotsDirect(id) {
   if (!cl || !d) return;
   const since = readingWindow(cl);
   d.snapshots = d.snapshots || {};
+  d.snapshotTotals = d.snapshotTotals || {};
   for (const repo of d.repos) {
     try {
       // The verbose listing is one call per repository and carries the index names,
       // which is what makes "which days of logs are actually in here" answerable.
       // _cat/snapshots is cheaper but returns only a count, so it is the fallback.
-      d.snapshots[repo.name] = snapshotRowsVerbose(await cl.snapshots(repo.name, 500), cl.c.indexNameRegex);
+      const j = await cl.snapshots(repo.name, LISTING_SIZE);
+      d.snapshots[repo.name] = snapshotRowsVerbose(j, cl.c.indexNameRegex);
+      d.snapshotTotals[repo.name] = totalsOf(j);
       repo.error = null;
     } catch (e) {
       try {
         d.snapshots[repo.name] = snapshotRowsCat(await cl.snapshotsCat(repo.name));
+        d.snapshotTotals[repo.name] = { whole: true };
         repo.error = null;
       } catch (e2) {
-        d.snapshots[repo.name] = [];
-        repo.error = e2.message;
+        // Not listed: absent, so every reader takes it as not known rather than as empty.
+        delete d.snapshots[repo.name];
+        delete d.snapshotTotals[repo.name];
+        repo.error = e2.message || 'the listing could not be read';
       }
     }
   }
@@ -831,6 +848,23 @@ async function fetchSnapshotsDirect(id) {
   stampFetch(id, 'data', Math.min(since(), fetchedAt(id, 'data') || Infinity));
   bus.emit('data', id);
 }
+
+/** What Elasticsearch said about how many snapshots there are, beside a verbose listing (7.14+). */
+export function totalsOf(a) {
+  const j = a && a.json ? a.json : a;
+  const n = (k) => { const v = [a && a[k], j && j[k]].find((x) => Number.isFinite(x)); return v === undefined ? null : v; };
+  return { total: n('total'), remaining: n('remaining') };
+}
+
+/** The days a snapshot row can give back: coveredDays over what is restorable, and those days. */
+export function restorableDays(row, reSrc) {
+  const { seen, ...cover } = daysIn(restorableIndices(row), reSrc);
+  return { ...cover, days: [...seen].sort() };
+}
+
+/** One string per calendar day: a fleet's listings name the same few hundred days many thousands of times. */
+const dayNames = new Map();
+function internDay(day) { const k = dayNames.get(day); if (k) return k; dayNames.set(day, day); return day; }
 
 /**
  * Which days of data a snapshot actually holds, read from the dates in its index names.
@@ -840,11 +874,17 @@ async function fetchSnapshotsDirect(id) {
  * far back the backup reaches.
  */
 export function coveredDays(names, reSrc) {
+  const { seen: _, ...cover } = daysIn(names, reSrc);
+  return cover;
+}
+
+function daysIn(names, reSrc) {
   let from = null, to = null, dated = 0;
   const seen = new Set();
   for (const n of names || []) {
-    const day = parseIndexName(n, reSrc).day;
-    if (!day) continue;
+    const parsed = parseIndexName(n, reSrc).day;
+    if (!parsed) continue;
+    const day = internDay(parsed);
     dated++;
     seen.add(day);
     if (from === null || day < from) from = day;
@@ -852,7 +892,7 @@ export function coveredDays(names, reSrc) {
   }
   const span = spanDaysIso(from, to);
   // Days inside the span that no index in the snapshot carries: a gap in what it holds.
-  return { coverFrom: from, coverTo: to, coverDays: span, datedIndices: dated, missingDays: span - seen.size };
+  return { coverFrom: from, coverTo: to, coverDays: span, datedIndices: dated, missingDays: span - seen.size, seen };
 }
 
 /**
@@ -1323,11 +1363,13 @@ function parseListing(entry, repo, reSrc) {
   if (!a) return null;
   const at = local(entry.fetchedAt);
   if (!a.ok) return { error: a.message || `HTTP ${a.status}`, at };
-  const rows = a.source === 'verbose' ? snapshotRowsVerbose(a.json, reSrc) : snapshotRowsCat(a.json);
-  return { rows, at, source: a.source === 'verbose' ? 'verbose' : 'cat' };
+  const verbose = a.source === 'verbose';
+  const rows = verbose ? snapshotRowsVerbose(a.json, reSrc) : snapshotRowsCat(a.json);
+  // _cat has no size limit: it is the whole list. The verbose one is the newest LISTING_SIZE.
+  return { rows, at, source: verbose ? 'verbose' : 'cat', totals: verbose ? totalsOf(a) : { whole: true } };
 }
 
-const COVERAGE = ['indexNames', 'coverFrom', 'coverTo', 'coverDays', 'datedIndices', 'missingDays'];
+const COVERAGE = ['indexNames', 'failedIndices', 'coverFrom', 'coverTo', 'coverDays', 'datedIndices', 'missingDays', 'days'];
 
 /**
  * One repository's rows from the two listings the core keeps: `snapshots` (_cat, every
@@ -1339,50 +1381,58 @@ const COVERAGE = ['indexNames', 'coverFrom', 'coverTo', 'coverDays', 'datedIndic
  * snapshot holds does not change. A row neither can name the indices of keeps
  * `indexNames: null`, which every reader treats as unknown, never as "holds nothing".
  *
- * @returns {{rows, at, source: 'cat'|'verbose'|'mixed'} | {error, at} | null} null = unknown.
+ * What can be restored follows the NEWER status: a snapshot read verbosely while it was
+ * running lends its names only, and its days are worked out again.
+ *
+ * @returns {{rows, at, source: 'cat'|'verbose'|'mixed', totals} | {error, at} | null} null = unknown.
  */
-export function mergeSnapshotListings(cat, full) {
+export function mergeSnapshotListings(cat, full, reSrc) {
   const good = [cat, full].filter((l) => l && l.rows);
   if (!good.length) {
     const bad = [cat, full].filter((l) => l && l.error).sort((a, b) => b.at - a.at)[0];
     return bad || null;
   }
-  let rows, at;
-  if (good.length === 1) ({ rows, at } = good[0]);
+  let rows, at, totals;
+  if (good.length === 1) ({ rows, at, totals } = good[0]);
   else {
     const [newer, other] = full.at >= cat.at ? [full, cat] : [cat, full];
     const byId = new Map(other.rows.map((r) => [r.id, r]));
-    at = newer.at;
+    ({ at, totals } = newer);
     rows = newer.rows.map((r) => {
       if (r.indexNames != null) return r;
       const o = byId.get(r.id);
       if (!o || o.indexNames == null) return r;
       const lent = {};
       for (const k of COVERAGE) lent[k] = o[k];
-      return { ...r, ...lent };
+      const row = { ...r, ...lent };
+      if (String(o.status || '').toUpperCase() === String(r.status || '').toUpperCase()) return row;
+      row.failedIndices = Number(r.failed) === 0 ? [] : null;
+      return { ...row, ...restorableDays(row, reSrc) };
     });
   }
   const named = rows.filter((r) => r.indexNames != null).length;
   const source = !rows.length ? good[good.length - 1].source
     : named === rows.length ? 'verbose' : named ? 'mixed' : 'cat';
-  return { rows, at, source };
+  return { rows, at, source, totals: totals || null };
 }
 
 /** d.snapshots from the two snapshot datasets, per repository in d.repos. */
 function applySnapshotEntries(d, cur, reSrc) {
   const cat = cur.datasets.snapshots, full = cur.datasets.snapshots_full;
-  const snaps = {}, source = {};
+  const snaps = {}, source = {}, totals = {};
   for (const repo of d.repos || []) {
-    const m = mergeSnapshotListings(listingOf(cat, repo.name, reSrc), listingOf(full, repo.name, reSrc));
-    // Not listed yet: left out, so it reads as unknown rather than as "no snapshots".
+    const m = mergeSnapshotListings(listingOf(cat, repo.name, reSrc), listingOf(full, repo.name, reSrc), reSrc);
+    // Not listed yet, or not readable: left out, so it reads as unknown rather than as "no snapshots".
     if (!m) continue;
-    if (m.error) { snaps[repo.name] = []; repo.error = m.error; continue; }
+    if (m.error) { repo.error = m.error; continue; }
     snaps[repo.name] = m.rows;
     source[repo.name] = m.source;
+    totals[repo.name] = m.totals;
     repo.error = null;
   }
   d.snapshots = snaps;
   d.snapshotsSource = source;
+  d.snapshotTotals = totals;
 }
 
 /** Per-dataset status, for the freshness lines: the entry minus its bodies, in our clock. */

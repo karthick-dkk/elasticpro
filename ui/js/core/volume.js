@@ -1,5 +1,6 @@
 import { plural } from '../lib/fmt.js';
 import { nodeRoles } from './cluster-detail.js';
+import { restorableIndices, spanText } from './snapshot-restorable.js';
 /**
  * Capacity arithmetic: how much a cluster ingests per day, and what that means for the
  * disk it has and the retention it promises.
@@ -303,6 +304,8 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null,
     snapshotDataFrom: snapWindow.dataFrom,
     snapshotDataTo: snapWindow.dataTo,
     snapshotDataDays: snapWindow.dataDays,
+    snapshotDataHeld: snapWindow.dataHeld,
+    snapshotsUnread: snapWindow.unread,
   };
 }
 
@@ -437,7 +440,8 @@ function slmRetention(data) {
 
 function snapshotWindow(data) {
   let from = null, to = null, count = 0;
-  let dataFrom = null, dataTo = null;
+  let dataFrom = null, dataTo = null, unread = 0, whole = true;
+  const held = new Set();
   for (const list of Object.values(data.snapshots || {})) {
     for (const s of list || []) {
       if (!s.start) continue;
@@ -447,7 +451,10 @@ function snapshotWindow(data) {
       // Two different questions. `start` is when the snapshot ran; coverFrom/coverTo are
       // the days of logs inside it, read from the dates in its index names. A snapshot
       // taken this morning can hold ninety days of data, so the second is the one that
-      // says how far back the backup actually reaches.
+      // says how far back the backup actually reaches. Only what can be restored counts
+      // (snapshot-restorable.js): the row's days are already those.
+      if (restorableIndices(s) === null) { unread++; continue; }
+      if (Array.isArray(s.days)) for (const d of s.days) held.add(d); else if (s.coverFrom) whole = false;
       if (s.coverFrom && (dataFrom === null || s.coverFrom < dataFrom)) dataFrom = s.coverFrom;
       if (s.coverTo && (dataTo === null || s.coverTo > dataTo)) dataTo = s.coverTo;
     }
@@ -458,6 +465,10 @@ function snapshotWindow(data) {
     days: spanDays(from, to),
     dataFrom, dataTo,
     dataDays: spanDaysIso(dataFrom, dataTo),
+    // How many of those days some snapshot holds (null when a row does not carry its days),
+    // and how many snapshots could not be read for their indices.
+    dataHeld: dataFrom && whole ? held.size : null,
+    unread,
   };
 }
 
@@ -637,18 +648,28 @@ export const SHEET_COLUMNS = [
   // restore from" really asks. Read from the dates in the index names, not from when
   // the snapshot ran.
   { group: 'Backups (snapshots)', label: 'Oldest index day backed up', kind: 'text', get: (r) => r.snapshotDataFrom,
-    note: (r) => (r.snapshotDataFrom ? 'earliest day of indices held in any snapshot'
-                                     : 'the repository listing did not name the indices'),
-    help: 'The earliest day of data held inside any snapshot, read from the dates in the index names it contains. '
+    note: (r) => (r.snapshotDataFrom ? 'earliest day of indices that can be restored from any snapshot'
+                                     : 'no snapshot with dated indices that can be restored was read'),
+    help: 'The earliest day of data that can be restored from any snapshot, read from the dates in the index names it '
+        + 'contains. Failed and running snapshots, and indices with a failed shard, are not counted. '
         + 'This is not the date the snapshot ran.' },
   { group: 'Backups (snapshots)', label: 'Newest index day backed up', kind: 'text', get: (r) => r.snapshotDataTo,
-    help: 'The latest day of data held inside any snapshot.' },
+    help: 'The latest day of data that can be restored from any snapshot.' },
   { group: 'Backups (snapshots)', label: 'Days of indices backed up', unit: 'days', kind: 'num',
     get: (r) => r.snapshotDataDays || null,
-    note: (r) => (r.snapshotDataFrom ? `${r.snapshotDataFrom} → ${r.snapshotDataTo}, from the index names inside`
-                                     : 'unknown — the indices in these snapshots are not named or not dated'),
-    help: 'The span between those two days — how far back a restore can actually reach. Blank, not zero, when the '
-        + 'repository listing does not name the indices.' },
+    note: (r) => (r.snapshotDataFrom
+      ? `${spanText(r.snapshotDataFrom, r.snapshotDataTo, r.snapshotDataDays, r.snapshotDataHeld === null ? 0 : r.snapshotDataDays - r.snapshotDataHeld)}`
+        + `${r.snapshotDataHeld === null ? ' (gaps not known)' : ''}${r.snapshotsUnread ? ` · ${plural(r.snapshotsUnread, 'snapshot')} not read in full` : ''}`
+      : 'unknown — the indices in these snapshots are not named, not dated or cannot be restored'),
+    help: 'The span between those two days, both counted — days inside it with no backup are not taken off (the note '
+        + 'says how many there are, and the next column counts the days held). Blank, not zero, when the repository listing does not name the indices.' },
+
+  { group: 'Backups (snapshots)', label: 'Index days backed up', unit: 'days', kind: 'num',
+    get: (r) => r.snapshotDataHeld,
+    note: (r) => (r.snapshotDataHeld === null ? 'not known' : `${r.snapshotDataHeld} of the ${r.snapshotDataDays} days in the span`
+      + (r.snapshotsUnread ? `; ${plural(r.snapshotsUnread, 'snapshot')} not read in full` : '')),
+    help: 'How many calendar days some snapshot can give back. Fewer than the span before it means there are gaps. '
+        + 'Blank when not known.' },
 
   // When the snapshots ran. A different thing entirely: a snapshot taken today can hold
   // a year of indices, so these two spans do not have to resemble each other.

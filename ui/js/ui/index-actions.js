@@ -101,7 +101,7 @@ export async function deleteIndices(cluster, names, { onChanged } = {}) {
       h('td.mono', { style: { fontSize: '12px', whiteSpace: 'nowrap' } }, n),
       h('td', pill(lbl.text, lbl.cls)),
       h('td.muted', { style: { fontSize: '11px' } },
-        safe ? `${v.best.repo} · ${new Date(v.best.end || v.best.start).toISOString().slice(0, 16).replace('T', ' ')}`
+        safe ? `${v.best.repo} · ${new Date(v.best.end || v.best.start).toISOString().slice(0, 16).replace('T', ' ')} UTC`
              : v && v.all.length ? `${v.all.length} snapshot(s), none successful for this index` : ''));
   };
 
@@ -115,14 +115,14 @@ export async function deleteIndices(cluster, names, { onChanged } = {}) {
       : null,
     unverified.length
       ? h('div.banner.warn', { style: { margin: 0 } },
-          h('div', h('div.ttl', `${unverified.length} repository/repositories could not be read`),
+          h('div', h('div.ttl', 'Not every repository was read in full'),
             h('div.mono', { style: { fontSize: '11px' } }, unverified.join('; ')),
             h('div', 'An index may be held there without this check seeing it. Treat "NOT in any snapshot" as "unknown" for those.')))
       : null,
     h('div', { style: { display: 'flex', gap: '10px', fontSize: '12.5px', alignItems: 'baseline', flexWrap: 'wrap' } },
       h('b', `${num(names.length)} index/indices`), total ? h('span.muted', `${bytes(total)} on disk`) : null,
       h('span', { style: { color: 'var(--good-ink)' } }, `${covered.length} in a snapshot`),
-      uncovered.length ? h('span', { style: { color: 'var(--critical-ink)', fontWeight: 640 } }, `${uncovered.length} with no snapshot`) : null),
+      uncovered.length ? h('span', { style: { color: 'var(--critical-ink)', fontWeight: 640 } }, `${uncovered.length} ${unverified.length ? 'not confirmed in a snapshot' : 'with no snapshot'}`) : null),
     h('div.tbl-wrap', { style: { maxHeight: 'min(60vh, 520px)', overflow: 'auto' } },
       h('table.tbl', h('thead', h('tr', h('th', 'Index'), h('th', 'Snapshot copy'), h('th', 'Newest good copy'))),
         h('tbody', ...names.map(rowFor)))),

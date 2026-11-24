@@ -34,7 +34,8 @@ import { unreachableReason } from '../core/alert-groups.js';
 import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf, NOT_KNOWN } from '../core/lifecycle-errors.js';
 import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
-import { repoOverview } from '../core/snapshot-evidence.js';
+import { repoOverview, spanTitle } from '../core/snapshot-evidence.js';
+import { repoListing, cutText, spanText, reposRead, noRepository } from '../core/snapshot-restorable.js';
 // Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
 import * as board from './cluster-overview.js';
 import { clustersSection, overviewHash, OVERVIEW, LIST } from '../core/cluster-overview.js';
@@ -1209,7 +1210,7 @@ function isWebUrl(u) {
  * Whether this cluster's repositories and SLM policies have been read (the Snapshots page asks the
  * same way). Under the fleet cache an unread list is empty: that is "not read yet", never "none".
  */
-const policiesRead = (id) => !fleetMode() || datasetFreshness(id, 'policies').ts > 0;
+const policiesRead = (id) => (!fleetMode() || datasetFreshness(id, 'policies').ts > 0) && reposRead(state.data.get(id));
 
 /** A short clock for a run: the time today, the date otherwise; the full stamp is in the tooltip. */
 function clock(ts) {
@@ -1439,7 +1440,7 @@ export function backupsCard(r) {
         onclick: (e) => { e.preventDefault(); setFocus('snapshots', { section: 'policies' }); navigateTo('snapshots', { view: 'summary' }, { cluster: c.id }); } }, 'Backups (SLM) ›')
     : 'Backups (SLM)';
   const head = h('div.cl-card-h', title, h(`span.pill.${v.pill.tone}.cl-card-pill`, v.pill.text));
-  const noRepo = policiesRead(c.id) && Array.isArray(d.repos) && !d.repos.length;
+  const noRepo = policiesRead(c.id) && noRepository(d);
   if (v.kind === 'unused') {
     const off = card4('slm', 'off', head,
       h('div.cl-big.muted', 'Not used'),
@@ -1536,7 +1537,7 @@ function repoSection(c, d) {
   const repos = d.repos || [];
   const snapshotsLink = pageLink('Snapshots', 'snapshots', { view: 'summary' }, c);
   // Nothing registered: one line, no table, no empty band (and not a fault: an unread list is not "none").
-  if (policiesRead(c.id) && Array.isArray(d.repos) && !repos.length) {
+  if (policiesRead(c.id) && noRepository(d)) {
     return h('div.cl-sec.cl-sec-bar', { 'data-section': 'repo' },
       h('span.cl-sec-chev', { 'aria-hidden': 'true' }, '▸'), h('b', 'Snapshot repositories'), h('span.muted.cl-sec-sub', 'None registered'),
       h('span.cl-sec-links', snapshotsLink, docLink(DOCS.repos, 'Register a repository')));
@@ -1547,11 +1548,11 @@ function repoSection(c, d) {
   const mayRestore = roleMayWrite() && !isSnapshotMode();
   const trs = repos.map((rp) => {
     // Switched off for this cluster, or not listed yet: the figures are not known, never 0.
-    const listed = d.snapshots && d.snapshots[rp.name];
+    const l = repoListing(d, rp);
     const snapsOff = !!(d.switchedOff && d.switchedOff.snapshots);
     const unlisted = snapsOff ? () => h('span.muted.snap-off', { title: `${offText('snapshots')}.` }, 'Off')
-      : listed ? null : () => h('span.muted', { title: 'The snapshots of this repository have not been read yet' }, '\u2013');
-    const snaps = unlisted ? [] : listed;
+      : l.rows ? null : () => h('span.muted', { title: `Snapshots ${l.why}` }, rp.error ? 'not known' : 'not read');
+    const snaps = unlisted ? [] : l.rows;
     const newest = snaps[0];
     const policies = slmForRepo(d.slm, rp.name);
     const size = repoSizeFromCache(rp.name, snaps, cache.map);
@@ -1564,13 +1565,14 @@ function repoSection(c, d) {
         ? h('div.cl-pols', ...policies.slice(0, 2).map((p) => h('span.mono', { title: `${p.pattern || ''}${p.lastSnapshot ? ` → ${p.lastSnapshot}` : ''}${p.lastAt ? `\nlast run ${dt(p.lastAt)}` : '\nnever run'}` }, p.id)),
             policies.length > 2 ? h('span.muted.cl-sub', `+${policies.length - 2} more`) : null)
         : h('span.muted', { title: 'No SLM policy writes to this repository' }, 'none')),
-      count: () => unlisted ? h('td.num', unlisted()) : h('td.num', { title: snaps.slice(0, 12).map((x) => x.id).join('\n') + (snaps.length > 12 ? `\n+${snaps.length - 12} more` : '') }, num(snaps.length)),
+      count: () => unlisted ? h('td.num', unlisted()) : h('td.num', { title: snaps.slice(0, 12).map((x) => x.id).join('\n') + (snaps.length > 12 ? `\n+${snaps.length - 12} more` : '') + (l.cut ? `\n${cutText(l)} read` : '') },
+        l.cut ? (l.total === null ? `${num(snaps.length)}+` : `${num(snaps.length)} of ${num(l.total)}`) : num(snaps.length)),
       // The days of log data inside the snapshots, read from the dates in their index names (not when they ran).
       // A listing that names no indices (_cat) cannot say: unknown, never "none".
       covered: () => h('td', unlisted ? unlisted() : span.from
-        ? h('span', { title: `${span.days} day(s) of dated indices${span.unknown ? ' — some snapshots not yet read in full' : ''}` }, `${span.from} → ${span.to}`)
+        ? h('span', { title: spanTitle(span, cutText(l)) }, spanText(span.from, span.to, span.days, span.missing), span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
         : span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices. The Snapshots page reads them in full.' }, 'unknown')
-        : h('span.muted', { title: 'No index in these snapshots carries a date in its name' }, '–')),
+        : h('span.muted', { title: snaps.length ? 'No index that can be restored from these snapshots carries a date in its name' : 'No snapshots' }, '–')),
       last: () => h('td', unlisted ? unlisted() : newest
         ? [statusPill(newest), ' ', h('span.muted', { title: `Snapshot ${newest.id} started ${dt(newest.start)}` }, `${clock(newest.start)} · ${ago(newest.start)}`)]
         : h('span.muted', 'none')),
