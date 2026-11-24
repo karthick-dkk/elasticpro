@@ -185,7 +185,7 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     let body: Value = serde_json::from_str(&search.body).unwrap();
     assert!(body["aggs"].get("ev").is_none(), "event_logsize is not mapped: no ev agg: {body}");
     assert_eq!(body["aggs"]["sub"], json!({ "sum": { "field": "sub_size" } }));
-    assert_eq!(body["aggs"]["f_tag"]["terms"], json!({ "field": "tag1", "size": 25 }));
+    assert_eq!(body["aggs"]["f_tag"]["terms"], json!({ "field": "tag1", "size": 25, "shard_size": 500 }));
 
     // Refresh now again, at once: too soon.
     let again = c.handle(json!({ "type": "VOLUME_RUN", "clusterIds": ["prod"] })).await;
@@ -225,7 +225,7 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     assert_eq!(daily["sources"], json!(["linux", "win-dc"]));
 
     // The cards and the change against the average (avgDays 3).
-    assert_eq!(daily["cards"]["yesterday"], json!({ "day": dash(d1), "value": 300, "changeVsAvgPct": 100.0 }),
+    assert_eq!(daily["cards"]["yesterday"], json!({ "day": dash(d1), "value": 300, "changeVsAvgPct": 100.0, "final": false }),
                "300 against the two days before it, (200 + 100) / 2");
     // The totals row: what the shown rows add up to, unmeasured event bytes still null.
     assert_eq!(daily["totals"]["eventBytes"], Value::Null, "{}", daily["totals"]);
