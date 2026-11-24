@@ -20,8 +20,9 @@
 //!   again (twice); after that the run keeps what it read and says the list is incomplete, so
 //!   nobody it did not read is turned silent (`Tracker::apply_run`, `complete: false`).
 
-use super::measure::{self, DeviceFilter, Fields, PageError, Reading};
+use super::measure::{self, DeviceFilter, Fields, LogTypeField, PageError, Reading};
 use crate::bridge::Core;
+use crate::http::EsRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -47,6 +48,8 @@ pub struct Collected {
     pub error: Option<String>,
     /// The largest page answer, bytes.
     pub largest_page_bytes: u64,
+    /// The log type field this run read by, or why it read none.
+    pub log_type: LogTypeField,
 }
 
 /// How one cluster's last run read its devices: kept with the tracker so every page and the
@@ -75,6 +78,10 @@ pub struct RunInfo {
     pub only: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The log type field it read by, or why none (docs/LOGDELAY.md "Log types"). `None`: a run
+    /// before 0.3.90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_type: Option<LogTypeField>,
 }
 
 impl RunInfo {
@@ -92,12 +99,38 @@ impl Collected {
         RunInfo {
             at, from, to, devices: self.readings.len() as u64, pages: self.pages, complete: self.complete && !filter.is_partial(), truncated: self.truncated,
             max_devices: self.truncated.then_some(max_devices), no_device: self.no_device, device: filter.one().map(String::from),
-            only: matches!(filter, DeviceFilter::Some(_)).then(|| "late".to_string()), error: self.error.clone(),
+            only: matches!(filter, DeviceFilter::Some(_)).then(|| "late".to_string()), error: self.error.clone(), log_type: Some(self.log_type.clone()),
         }
     }
 }
 
+/// The mapping's answer about one field is small and quick; a run does not wait long for it.
+const MAPPING_TIMEOUT_MS: u64 = 30_000;
+
 impl Core {
+    /// How the cluster's mapping has the log type field: one `_field_caps` per cluster and run,
+    /// over the indices with documents in the window (`index_filter`; a cluster too old for it is
+    /// asked about the whole pattern). Not answered: as the last run that was, else not known.
+    async fn logdelay_log_type(self: &Arc<Self>, id: &str, f: &Fields, from_ms: i64, to_ms: i64) -> LogTypeField {
+        let path = format!("/{}/_field_caps?fields={l},{l}.keyword&ignore_unavailable=true&allow_no_indices=true", f.pattern, l = super::levels::LOG_TYPE_FIELD);
+        let window = serde_json::json!({ "index_filter": { "range": { f.arrival.clone(): { "gte": from_ms, "lte": to_ms, "format": "epoch_millis" } } } });
+        let request = |body: Option<Value>| EsRequest {
+            cluster_id: id.to_string(), method: if body.is_some() { "POST" } else { "GET" }.into(), path: path.clone(), body: body.map(|b| b.to_string()),
+            timeout_ms: Some(MAPPING_TIMEOUT_MS), origin: Some("delay-sink".into()), class: crate::gate::Class::Background, ..EsRequest::default()
+        };
+        let mut res = self.es_req(request(Some(window))).await;
+        if res.get("status").and_then(Value::as_u64) == Some(400) {
+            res = self.es_req(request(None)).await;
+        }
+        let ok = res.get("ok").and_then(Value::as_bool) == Some(true);
+        let got = measure::log_type_field(if ok { res.get("json").unwrap_or(&Value::Null) } else { &Value::Null });
+        if got.why.as_deref() != Some(measure::MAPPING_NOT_READ) {
+            return got;
+        }
+        let known = self.logdelay_store().and_then(|st| st.read_tracker(id).last_read.as_ref().and_then(|r| r.log_type.clone()));
+        known.filter(|k| k.field.is_some()).unwrap_or(got)
+    }
+
     /// Every device of cluster `id` with a document in `[from_ms, to_ms]` (or the one device,
     /// or the named devices, of `devices`), at most `max_devices`, page by page. `on_page` is
     /// told how many devices are read so far after every page (the run's progress). Stops
@@ -107,8 +140,9 @@ impl Core {
                                          mut on_page: impl FnMut(usize)) -> Collected {
         let max = max_devices.clamp(1, measure::MAX_DEVICES_PER_RUN) as usize;
         let allowance = crate::memory::budget().report_page_bytes();
-        let mut out = Collected::default();
-        let mut size = measure::PAGE_SIZE;
+        let mut out = Collected { log_type: self.logdelay_log_type(id, f, from_ms, to_ms).await, ..Collected::default() };
+        let f = &Fields { log_type: out.log_type.field.clone(), ..f.clone() };
+        let mut size = if f.log_type.is_some() { measure::PAGE_SIZE_TYPES } else { measure::PAGE_SIZE };
         let mut after: Option<Value> = None;
         let mut tries = 0u32;
         let begun = std::time::Instant::now();

@@ -27,6 +27,7 @@ pub mod docs;
 pub mod fixes;
 pub mod levels;
 pub mod measure;
+pub mod points;
 pub mod report;
 pub mod state;
 pub mod store;
@@ -183,6 +184,8 @@ pub fn thresholds_in_config(raw: &Value) -> BTreeMap<String, Value> {
 
 /// The largest device list one answer carries.
 pub const MAX_DEVICES: usize = 5_000;
+/// Day files read for one device's page.
+const OLDER_BYTES: u64 = 1 << 30;
 /// Documents in one bulk request of a run's mirror.
 pub const BULK_DOCS: usize = 5_000;
 
@@ -233,7 +236,7 @@ impl Core {
                 }
             }
         }
-        Fields { pattern: shape.pattern.unwrap_or_else(|| "logstash-*".into()), device, arrival, event_time, extras: s.extras_for(id) }
+        Fields { pattern: shape.pattern.unwrap_or_else(|| "logstash-*".into()), device, arrival, event_time, extras: s.extras_for(id), log_type: None }
     }
 
     /// The cluster's `logTimeZone` setting: the config entry's (a config-file cluster) or the
@@ -290,24 +293,25 @@ impl Core {
             t.last_read = Some(read);
             t.last_failed = None;
         }
-        st.write_tracker(cluster, &t)?;
         let day = time::local_date(run_ms);
         let key = time::local_day_key(run_ms);
         let (from, to) = time::day_bounds(day);
         let daily = state::daily(&t, &key, from, to, run_ms);
-        st.put_daily(cluster, &daily, run_ms)?;
         // Yesterday's totals are written once more by the first run of a new day, so the day
         // ends complete (a period solved at 23:50 by a 00:10 run lands on the right day).
-        if let Some(y) = day.pred_opt() {
+        let yesterday = day.pred_opt().and_then(|y| {
             let ykey = y.format("%Y-%m-%d").to_string();
-            if st.read_daily(cluster).get(&ykey).is_some_and(|d| !d.complete) {
-                let (yf, yt) = time::day_bounds(y);
-                st.put_daily(cluster, &state::daily(&t, &ykey, yf, yt, run_ms), run_ms)?;
-            }
+            let (yf, yt) = time::day_bounds(y);
+            st.read_daily(cluster).get(&ykey).is_some_and(|d| !d.complete).then(|| state::daily(&t, &ykey, yf, yt, run_ms))
+        });
+        // Written first, and not copied: it holds every series' points.
+        st.put_tracker(cluster, t)?;
+        st.put_daily(cluster, &daily, run_ms)?;
+        if let Some(d) = yesterday {
+            st.put_daily(cluster, &d, run_ms)?;
         }
         let (_, _, bucket) = crate::delay_sink::month_and_hour_bucket(run_ms);
-        let lines: Vec<Value> = applied.rows.iter().map(|r| docs::measurement_doc(cluster, r, &bucket, run_ms)).collect();
-        st.append_measurements(cluster, &key, &lines)?;
+        st.append_measurements(cluster, &key, applied.rows.iter().map(|r| docs::measurement_doc(cluster, r, &bucket, run_ms)))?;
         st.prune(run_ms);
         Ok((applied, daily))
     }
@@ -321,7 +325,7 @@ impl Core {
             return;
         }
         t.last_failed = Some(state::FailedRun { at, error: error.chars().take(300).collect() });
-        if let Err(e) = st.write_tracker(cluster, &t) {
+        if let Err(e) = st.put_tracker(cluster, t) {
             tracing::warn!(cluster = %cluster, error = %e, "log delay: the failed run could not be kept");
         }
     }
@@ -331,15 +335,27 @@ impl Core {
     /// of tens.
     pub(crate) fn logdelay_bulk(&self, cluster: &str, applied: &Applied, daily: &Daily, prefix: &str, run_ms: i64) -> Vec<String> {
         let (y, m, bucket) = crate::delay_sink::month_and_hour_bucket(run_ms);
-        let mut items: Vec<(String, String, Value)> = applied.rows.iter()
-            .map(|r| (docs::measurement_index(prefix, y, m), docs::measurement_id(cluster, &r.device, &bucket), docs::measurement_doc(cluster, r, &bucket, run_ms)))
-            .collect();
-        for e in applied.opened.iter().chain(applied.continued.iter()).chain(applied.solved.iter()).chain(applied.ended.iter()) {
-            let (ey, _, _) = crate::delay_sink::month_and_hour_bucket(e.started_ms);
-            items.push((docs::episodes_index(prefix, ey), docs::episode_id(cluster, e), docs::episode_doc(cluster, e, run_ms)));
+        let (mut out, mut n) = (vec![], 0);
+        // Written as they are made, so a large run's documents are held as text once.
+        let mut add = |index: String, id: String, doc: Value| {
+            if n % BULK_DOCS == 0 {
+                out.push(String::new());
+            }
+            n += 1;
+            if let Some(s) = out.last_mut() {
+                docs::bulk_line(s, &index, &id, &doc);
+            }
+        };
+        for r in &applied.rows {
+            add(docs::measurement_index(prefix, y, m), docs::measurement_id(cluster, &r.device, &bucket), docs::measurement_doc(cluster, r, &bucket, run_ms));
         }
-        items.push((docs::daily_index(prefix, y), docs::daily_id(cluster, &daily.day), docs::daily_doc(cluster, &self.cluster_name(cluster), daily, run_ms)));
-        items.chunks(BULK_DOCS).map(docs::bulk).collect()
+        let periods = [&applied.opened, &applied.continued, &applied.solved, &applied.ended, &applied.type_opened, &applied.type_continued, &applied.type_solved, &applied.type_ended];
+        for e in periods.into_iter().flatten() {
+            let (ey, _, _) = crate::delay_sink::month_and_hour_bucket(e.started_ms);
+            add(docs::episodes_index(prefix, ey), docs::episode_id(cluster, e), docs::episode_doc(cluster, e, run_ms));
+        }
+        add(docs::daily_index(prefix, y), docs::daily_id(cluster, &daily.day), docs::daily_doc(cluster, &self.cluster_name(cluster), daily, run_ms));
+        out
     }
 
     /// What the fleet cache holds about a cluster, for the fixes. Unknown stays unknown.
@@ -524,7 +540,8 @@ impl Core {
                 let fr = Range::last_days(now, 7);
                 let findings = self.logdelay_findings(&[id.to_string()], &fr, now, every);
                 let found = fixes::per_device(&findings).remove(&(id.to_string(), dev.to_string()));
-                let Some(mut v) = summary::device(c, dev, &r, now, every, found.as_ref()) else {
+                let older = self.logdelay_older_types(c, dev, &r, now).await;
+                let Some(mut v) = summary::device(c, dev, &r, now, every, found.as_ref(), &older) else {
                     return bad("not_found", format!("no device {dev:?} measured on {id:?} (the store keeps 90 days; a device not seen for a week is forgotten)"));
                 };
                 // The "Delay by cluster" panel: every visible cluster's late devices per day,
@@ -599,6 +616,25 @@ impl Core {
             }
             _ => bad("bad_message", format!("Unknown message type {t:?}")),
         }
+    }
+
+    /// A device's log types over the part of the range the tracker no longer holds, from the day
+    /// files; read off the async thread, the newest days first up to `OLDER_BYTES`.
+    async fn logdelay_older_types(&self, c: &ClusterInput, dev: &str, r: &Range, now: i64) -> summary::OlderTypes {
+        let since = c.tracker.devices.get(dev).and_then(|d| d.types_since_ms);
+        let (Some(since), Some(st)) = (since, self.logdelay_store()) else { return summary::OlderTypes::default() };
+        let (from, to) = (r.from_ms.max(since), r.to_ms.min(now - state::TYPE_RECENT_MS));
+        if from >= to {
+            return summary::OlderTypes::default();
+        }
+        let (id, dev) = (c.id.clone(), dev.to_string());
+        let read = tokio::task::spawn_blocking(move || {
+            let (lines, cut) = st.read_newest(&id, &dev, &time::local_day_key(from), &time::local_day_key(to), OLDER_BYTES);
+            let mut out = summary::OlderTypes::of(&lines);
+            out.from_ms = cut.and_then(|d| time::parse_day(&d)).map(|d| time::day_bounds(d).0);
+            out
+        });
+        read.await.unwrap_or_default()
     }
 
     /// The recommended fixes as the last run matched them (`findings.json`, the last 7 days),
@@ -686,7 +722,7 @@ impl Core {
             "settings": shown, "resolved": resolved,
             "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched["clusters"],
                           "maxDevices": cfg.max_devices, "state": self.delay_sink_state_for(caller), "blocked": self.delay_sink_blocked_for(caller) },
-            "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
+            "builtinStore": { "keepDays": 90, "typeDays": state::TYPE_RECENT_MS / 86_400_000, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,
             "timeZones": { "toleranceMinutes": tz::TOLERANCE_MINUTES, "majorityPercent": tz::MAJORITY_PERCENT, "steadyRuns": tz::STEADY_RUNS,
                            "server": crate::volume::schedule::server_zone().0 },
@@ -700,6 +736,7 @@ pub fn fixes_rules() -> Value {
     json!([
         { "pattern": "Many devices late in the same windows, across forwarders", "step": "elasticsearch", "readFrom": "delay periods + the cluster's write rejections, disk watermark, snapshot times", "recommendation": "Move the snapshot or batch job; add indexing capacity; free disk" },
         { "pattern": "Late devices share one fwd_tag or Zone; others there on time", "step": "forwarder", "readFrom": "delay periods grouped by fwd_tag and Zone", "recommendation": "Check that forwarder's queue, buffer and link" },
+        { "pattern": "Only one log type late on these devices, their other log types on time", "step": "log_type", "readFrom": "each log type's delay beside the device's other log types", "recommendation": "Check that log type's own path: its forwarder input and its parser, not the device or the network" },
         { "pattern": "Late devices share one parser_tag", "step": "parser", "readFrom": "delay periods grouped by parser_tag", "recommendation": "Tune that pipeline's filters; give it its own workers" },
         { "pattern": "Device's gap is a steady time-zone offset different from its cluster's (+08:00 on an IST cluster)", "step": "device_time_zone", "readFrom": "the raw gap against every real UTC offset, run after run", "recommendation": "Set the device's time zone, or the parser's date filter time zone (Logstash date { timezone => \"…\" })" },
         { "pattern": "Most devices share one offset and the cluster has no zone set", "step": "cluster", "readFrom": "the offsets of all measured devices over the last 3 runs", "recommendation": "Check the devices' clocks and the parser's date filter; the zone is taken from the majority once 60 % agree" },

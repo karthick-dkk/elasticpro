@@ -6262,7 +6262,7 @@ impl Core {
                 // This cluster's part of the run's details (docs/JOBS.md "Run details").
                 let part_at = crate::fleet::now_ms();
                 // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
-                // stored at this moment (late = delay or critical by the cluster's own levels, on the
+                // stored at this moment (late = delay, critical or part delayed by the cluster's own levels, on the
                 // corrected delay — levels.rs is the one definition), or every one.
                 let (filter, expected) = match (&scope.device, scope.devices) {
                     (Some(d), _) => (crate::logdelay::measure::DeviceFilter::One(d.clone()), Some(1u64)),
@@ -6270,10 +6270,12 @@ impl Core {
                         let t = self.logdelay_store().map(|st| st.read_tracker(id));
                         let known = t.as_ref().map(|t| t.devices.len()).unwrap_or(0);
                         let late: Vec<String> = t.as_ref().map(|t| t.devices.iter()
-                            .filter(|(_, d)| d.state.late())
+                            .filter(|(_, d)| d.state.late() || d.state == crate::logdelay::levels::State::PartDelay)
                             .map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                        let part = t.as_ref().map_or(0, |t| t.devices.values().filter(|d| d.state == crate::logdelay::levels::State::PartDelay).count());
+                        let part = if part > 0 { format!(", {part} of them part delayed") } else { String::new() };
                         if late.is_empty() {
-                            scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
+                            scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed, critical or part delayed) at the start, so nothing was read; \
                                                        Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
                             if let Some(r) = run { r.progress(0, 0); }
                             ld_part(run, id, part_at, 0, None);
@@ -6282,10 +6284,10 @@ impl Core {
                         }
                         if late.len() > LATE_FILTER_MAX {
                             // More late devices than one query's terms filter should carry: the whole cluster.
-                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known}{part}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
                             (crate::logdelay::measure::DeviceFilter::All, Some(known as u64))
                         } else {
-                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start)", self.cluster_name(id), late.len()));
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start{part})", self.cluster_name(id), late.len()));
                             let n = late.len() as u64;
                             (crate::logdelay::measure::DeviceFilter::Some(late), Some(n))
                         }
