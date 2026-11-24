@@ -8471,6 +8471,14 @@ await settleFor(300);
         `log delay: Measure again sent ${JSON.stringify(mr)}`);
       await waitFor(() => !doc.querySelector('.ld-fetch') || doc.querySelector('.ld-fetch').dataset.phase !== 'running', 'log delay: the Measure again run did not end', 9000);
       jobPolls = 0;
+      // Its own board: five tiles with no figure, never 0, each with the button and the period it reads.
+      location.hash = `#/log-delay/cluster/${encodeURIComponent(neverId)}`;
+      await waitFor(() => ldView() === 'cluster' && view().querySelectorAll('.ld-kpi .ld-measure').length === 5, 'log delay: a never-measured cluster\'s tiles have no Measure again button');
+      ok([...view().querySelectorAll('.ld-kpi')].every((k) => k.querySelector('b').textContent === '—' && /not measured yet/.test(k.textContent)
+        && /^Measure now · last 2 h \(\d\d:\d\d–\d\d:\d\d\)$/.test(k.querySelector('.ld-measure').title)),
+        `log delay: a never-measured cluster's tiles read ${[...view().querySelectorAll('.ld-kpi')].map((k) => `${k.textContent} [${(k.querySelector('.ld-measure') || {}).title}]`).join(' | ')}`);
+      location.hash = '#/log-delay';
+      await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: back from the never-measured cluster, the fleet did not draw');
     }
     press(g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] td a`));
     await waitFor(() => ldView() === 'cluster' && g('ld-cluster-devices'), 'log delay: the cluster link did not open the cluster');
