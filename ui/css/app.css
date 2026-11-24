@@ -1038,12 +1038,13 @@ a.arow-cluster:hover { text-decoration: underline; }
 .ns-nodes .use-bar { min-width: 0; gap: 4px; }
 .ns-nodes .use-bar > .bar-mini { flex: 1 1 44px; min-width: 22px; max-width: 72px; }
 .ns-nodes .use-num { min-width: 28px; font-size: 11.5px; }
-/* Disk & dangling indices: index data blue, the rest of what is in use orange, free is the track. */
-.ns-diskbar { display: flex; height: 8px; width: 100%; min-width: 60px; max-width: 160px; border-radius: 4px; overflow: hidden; background: var(--border); }
-.ns-diskbar > i { display: block; height: 100%; }
-.ns-diskbar > .idx { background: var(--chart-info); }
-.ns-diskbar > .rest { background: var(--series-2); }
-.ns-nodes .ns-path { max-width: 220px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+/* Disk & dangling indices: one ring and its legend, the dangling indices beside them. */
+.ns-disk { display: flex; gap: 10px 22px; align-items: center; flex-wrap: wrap; }
+.ns-disk-legend { display: grid; gap: 4px; font-size: 12px; }
+.ns-disk-legend > div { display: grid; grid-template-columns: 10px 96px 72px auto; gap: 8px; align-items: center; }
+.ns-disk-legend i { width: 10px; height: 10px; border-radius: 2px; border: 1px solid var(--border); }
+.ns-disk-legend b { text-align: right; font-variant-numeric: tabular-nums; }
+.ns-disk-dangling { flex: 1 1 420px; min-width: 0; }
 .ns-dangling { font-size: 12px; min-height: 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; overflow-wrap: anywhere; }
 .ns-nodes .use-bar > .muted { font-size: 11px; }
 /* The icon-only buttons of the Shards toolbar. */

@@ -418,20 +418,18 @@ await go('shards');
   ok(!doc.querySelector('.stat'), 'shards: the stat tiles are still here');
   ok(!/Indices hold|Unaccounted/.test(doc.getElementById('view').textContent), 'shards: the storage accounting is still on this page (it belongs to the Clusters overview)');
 
-  // Disk & dangling indices: read on opening one cluster; the fixture has one dangling index, on
-  // node-3, and node-3 is named, not its id. With more clusters it is not asked, and says so.
+  // Disk & dangling indices: one ring over the cluster, its three figures, and the dangling indices.
   {
     const dc = () => [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Disk & dangling indices');
     const { bytes: fmtBytes } = await load('lib/fmt.js');
     ok(!!dc(), 'shards: no disk card');
-    await waitFor(() => /1 found/.test(dc().textContent) && /\/var\/lib\/elasticsearch/.test(dc().textContent), `shards: the disk card did not read the dangling list and the details (${dc() && dc().textContent.slice(0, 300)})`);
-    const [dt, nt] = dc().querySelectorAll('table.tbl');
-    ok(/logstash-old-2025\.01\.02/.test(dt.textContent) && /2025-01-02/.test(dt.textContent) && /node-3/.test(dt.textContent), `shards: the dangling table reads ${dt.textContent}`);
-    const n1 = [...nt.querySelectorAll('tbody tr')].find((tr) => /^node-1/.test(tr.textContent));
-    // node-1: 91 GB used, 86 GB indices: 5 GB not indices = 1 translog + 1 reserved + 3 other.
-    ok([...n1.children].slice(2, 7).map((td) => td.textContent).join(' ') === [86e9, 5e9, 1e9, 1e9, 3e9].map((v) => fmtBytes(v)).join(' '), `shards: node-1's disk row reads ${[...n1.children].map((td) => td.textContent).join(' | ')}`);
-    ok(/All 3 nodes/.test(nt.textContent), 'shards: the disk table has no total');
-    press(dt.querySelector('button.ld-ibtn'));
+    await waitFor(() => /1 found/.test(dc().textContent), `shards: the dangling list was not read (${dc() && dc().textContent.slice(0, 300)})`);
+    ok(dc().querySelectorAll('.ring-gauge').length === 1 && dc().querySelectorAll('.ring-gauge circle').length === 4, 'shards: the disk is not one ring of three parts');
+    // The fixture: 300 GB, 167 in use, 154 of it index data.
+    ok([...dc().querySelectorAll('.ns-disk-legend b')].map((b) => b.textContent).join(' ') === [154e9, 13e9, 133e9].map((v) => fmtBytes(v)).join(' ')
+      && dc().querySelector('.ring-centre').textContent === '56%', `shards: the disk reads ${dc().textContent.slice(0, 200)}`);
+    ok(dc().querySelectorAll('table.tbl').length === 1 && /logstash-old-2025\.01\.02/.test(dc().textContent) && /2025-01-02/.test(dc().textContent), `shards: the dangling table reads ${dc().textContent}`);
+    press(dc().querySelector('table.tbl button.ld-ibtn'));
     ok(/Prepare the import in REST/.test((doc.querySelector('.ld-fixpop') || {}).textContent || ''), 'shards: a dangling index has no fix');
     press(doc.querySelector('.ld-fixpop-x'));
   }

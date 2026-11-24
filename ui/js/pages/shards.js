@@ -23,11 +23,11 @@ import { toast, rowMenu } from '../ui/menu.js';
 import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writesAllowed, roleMayWrite, onWritesChange } from '../core/writes.js';
-import { splitGauge, STATUS } from '../lib/charts.js';
+import { splitGauge, ringGauge, STATUS } from '../lib/charts.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortNodeId,
          unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING,
-         diskSplit, diskTotals, diskDetails, sharedHosts, danglingAnswer, danglingProblem } from '../core/nodes-shards.js';
+         diskUse, danglingAnswer, danglingProblem } from '../core/nodes-shards.js';
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
 import { withFreshReads } from '../core/es.js';
@@ -240,33 +240,26 @@ async function loadAllocation(c, force = false) {
 }
 
 /**
- * The dangling indices (`GET /_dangling`) and what the disk holds besides index data
- * (`_nodes/stats/indices,fs/translog`), per cluster: read when the page opens on one or two
+ * The dangling indices (`GET /_dangling`), per cluster: read when the page opens on one or two
  * clusters, kept ten minutes, and on the card's refresh. Not read with All clusters (a call per
- * cluster); the card's refresh reads the one it is pressed on. The two answers stand alone: the
- * one that failed is "not known" with its reason, the other is shown.
+ * cluster); the card's refresh reads the one it is pressed on. A read that failed is "not known"
+ * with its reason.
  */
 const DISK_INFO_MAX_AGE_MS = 10 * 60 * 1000;
-const diskInfo = new Map();   // cluster id → { at, inflight, problem, detail: Map|null, detailError }
+const diskInfo = new Map();   // cluster id → { at, inflight, problem }
 async function loadDiskInfo(c, force = false) {
   const cl = client(c.id);
-  const e = diskInfo.get(c.id) || { at: 0, inflight: false, problem: null, detail: null, detailError: null };
+  const e = diskInfo.get(c.id) || { at: 0, inflight: false, problem: null };
   if (!cl || e.inflight || (!force && Date.now() - e.at < DISK_INFO_MAX_AGE_MS)) return;
   diskInfo.set(c.id, { ...e, inflight: true });
   if (force) draw();
-  const ask = (fn) => (force ? withFreshReads(fn) : fn());
-  const settle = (p) => p.then((v) => ({ v }), (err) => ({ err }));
-  const [dang, det] = await Promise.all([settle(ask(() => cl.danglingIndices())), settle(ask(() => cl.diskDetail()))]);
-  const answer = dang.err ? null : danglingAnswer(dang.v);
+  let answer = null, problem = null;
+  try {
+    answer = danglingAnswer(await (force ? withFreshReads(() => cl.danglingIndices()) : cl.danglingIndices()));
+    if (!answer) problem = danglingProblem(0, 'the answer to GET /_dangling is not a list of dangling indices');
+  } catch (err) { problem = danglingProblem(err.res && err.res.status, err.message || String(err)); }
   setDangling(c.id, answer ? { ...answer, at: Date.now() } : null);
-  diskInfo.set(c.id, {
-    at: Date.now(), inflight: false,
-    problem: answer ? null
-      : dang.err ? danglingProblem(dang.err.res && dang.err.res.status, dang.err.message || String(dang.err))
-      : danglingProblem(0, 'the answer to GET /_dangling is not a list of dangling indices'),
-    detail: det.err ? null : diskDetails(det.v),
-    detailError: det.err ? det.err.message || String(det.err) : null,
-  });
+  diskInfo.set(c.id, { at: Date.now(), inflight: false, problem });
   draw();
 }
 
@@ -746,65 +739,32 @@ function pressureCard(c) {
 
 /* ------------------------------- disk and dangling ------------------------------- */
 
-/** Nodes listed in the disk card at first: the ones with the most that is not index data. */
-const DISK_ROWS = 5;
-let diskAll = false;
-
-const size = (v) => (v === null ? h('span.muted', { title: 'Not reported' }, '–') : bytes(v));
-
-/** One node's disk as one bar: index data, what else is in use, and the free rest. */
-function splitBar(s) {
-  if (!s.total || s.indices === null || s.notIndices === null) return h('span.muted', '–');
-  const pct = (v) => `${Math.min(100, (v / s.total) * 100)}%`;
-  const text = `index data ${bytes(s.indices)} · not index data ${bytes(s.notIndices)}${s.free === null ? '' : ` · free ${bytes(s.free)}`} · of ${bytes(s.total)}`;
-  return h('div.ns-diskbar', { title: text, role: 'img', 'aria-label': text },
-    h('i.idx', { style: { width: pct(s.indices) } }), h('i.rest', { style: { width: pct(s.notIndices) } }));
-}
-
 /**
- * What each node's disk is used by (core/nodes-shards.js diskSplit), and whether the cluster has
- * dangling indices: two questions asked together, because a dangling index is disk in use that no
- * index in the list accounts for.
+ * The cluster's disk as one ring (core/nodes-shards.js diskUse): index data, what is in use but is
+ * not index data, and free, the share in use in its middle; and whether there are dangling indices,
+ * which are part of "not index data".
  */
 function diskCard(c, d) {
-  const rows = (d.disk && d.disk.nodes) || [];
   const io = diskInfo.get(c.id) || null;
-  const detail = io && io.detail;
-  const split = rows.map((r) => ({ r, det: detail ? detail.get(r.node) || null : null }))
-    .map((x) => ({ ...x, s: diskSplit(x.r, x.det) }))
-    .sort((a, b) => (b.s.notIndices ?? -1) - (a.s.notIndices ?? -1));
-  const t = diskTotals(split.map((x) => x.s));
-  const sub = !rows.length ? `${c.name} · _cat/allocation not read`
-    : t.notIndices === null ? `${c.name} · disk in use besides index data: not known`
-    : `${c.name} · ${bytes(t.notIndices)} of the ${bytes(t.used)} in use is not index data`;
-
-  const cells = (s) => [h('td.num', size(s.indices)), h('td.num', h('b', size(s.notIndices))), h('td.num', size(s.translog)),
-    h('td.num', size(s.reserved)), h('td.num', size(s.other)), h('td.num', size(s.free)), h('td.num', size(s.total))];
-  const pathCell = (det) => (det && det.paths.length
-    ? h('td.mono.ns-path', { title: det.paths.map((p) => `${p.path}${p.mount ? ` · mount ${p.mount}` : ''}`).join('\n') }, det.paths.map((p) => p.path).join(', '))
-    : h('td.muted', '–'));
-  const shownRows = diskAll ? split : split.slice(0, DISK_ROWS);
-  const trs = shownRows.map(({ r, det, s }) => h('tr', h('td', h('span.ns-name', { title: r.node }, r.node)), h('td', splitBar(s)), ...cells(s), pathCell(det)));
-  if (split.length > 1) trs.push(h('tr.ns-total', h('td', h('b', `All ${num(split.length)} nodes`)), h('td', splitBar(t)), ...cells(t), h('td')));
-
-  const shared = sharedHosts(rows);
-  return focusable(snug(card('Disk & dangling indices', sub, h('div',
-    danglingBody(c, io),
-    rows.length ? h('div.ns-nodes', table(['Node', 'Disk',
-      { label: 'Indices', num: true, title: 'Index data Elasticsearch has open on the node (_cat/allocation disk.indices)' },
-      { label: 'Not indices', num: true, title: 'In use on the disk and not index data: disk.used - disk.indices' },
-      { label: 'Translog', num: true, title: 'Part of it: Elasticsearch transaction logs (_nodes/stats)' },
-      { label: 'Reserved', num: true, title: 'Part of it: blocks the file system keeps back (free - available). Elasticsearch counts them as used' },
-      { label: 'Other files', num: true, title: 'The rest of it: logs, the operating system, dangling or orphaned shard directories, anything else on that disk' },
-      { label: 'Free', num: true }, { label: 'Size', num: true }, 'Data path'], trs))
-      : h('div.muted', { style: { fontSize: '11.5px' } }, 'No disk figures: _cat/allocation was not read — unknown, not zero.'),
-    split.length > DISK_ROWS
-      ? h('button.btn.sm.slow-more', { type: 'button', onclick: () => { diskAll = !diskAll; draw(); } }, diskAll ? `Show the ${DISK_ROWS} with the most` : `Show all ${num(split.length)} nodes`)
-      : null,
-    rows.length && !detail ? h('div.ns-note', io && io.detailError ? `Translog, reserved and other files not known: ${io.detailError}`
-      : io && io.inflight ? 'Reading translog, reserved and data paths…' : 'Translog, reserved and other files not read — press ↻') : null,
-    shared.length ? h('div.ns-note', `Same host: ${shared.map((g) => g.join(', ')).join(' · ')}. If these nodes share a disk, each one's “not indices” holds the others' index data.`) : null),
-    [diskHelp(c), refreshButton(() => loadDiskInfo(c, true), { title: `ask ${c.name} for its dangling indices and disk details`, busy: !!(io && io.inflight) })])), 'disk');
+  const u = diskUse(d.disk && d.disk.nodes);
+  const pct = (v) => (u.total && v !== null ? `${((v / u.total) * 100).toFixed(1)} %` : '');
+  const known = u.total && u.used !== null && u.free !== null;
+  const parts = [
+    { label: 'Index data', value: u.indices, color: 'var(--chart-info)' },
+    { label: 'Not index data', value: u.notIndices, color: 'var(--series-2)' },
+    { label: 'Free', value: u.free, color: 'var(--surface-3)' },
+  ];
+  const drawn = known && u.notIndices !== null ? parts : [];
+  const sub = known ? `${c.name} · ${bytes(u.used)} of ${bytes(u.total)} in use` : `${c.name} · disk use not known`;
+  return focusable(snug(card('Disk & dangling indices', sub,
+    h('div.ns-disk',
+      ringGauge(drawn, { total: u.total || 0, size: 92, stroke: 16, centre: known ? `${Math.round((u.used / u.total) * 100)}%` : '–',
+        label: parts.map((p) => `${p.label} ${p.value === null ? 'not known' : bytes(p.value)}`).join(', ') }),
+      h('div.ns-disk-legend', ...parts.map((p) => h('div',
+        h('i', { style: { background: p.color } }), h('span', p.label),
+        h('b', p.value === null ? '–' : bytes(p.value)), h('span.muted', pct(p.value))))),
+      h('div.ns-disk-dangling', danglingBody(c, io))),
+    [diskHelp(c), refreshButton(() => loadDiskInfo(c, true), { title: `ask ${c.name} for its dangling indices`, busy: !!(io && io.inflight) })])), 'disk');
 }
 
 /** The dangling line: none, the list, or why it is not known. */
@@ -819,15 +779,17 @@ function danglingBody(c, io) {
   const asked = `${dang.answered === null ? '' : `${num(dang.answered)} node${dang.answered === 1 ? '' : 's'} answered · `}checked ${ago(dang.at)}`;
   const missing = dang.failed ? h('b', { style: { color: 'var(--warning-ink)' } }, ` · ${num(dang.failed)} node${dang.failed === 1 ? '' : 's'} did not answer, so there may be more`) : null;
   if (!dang.indices.length) return line(h('b', dang.failed ? 'none found' : 'none'), missing, h('span.muted', ` · ${asked}`));
-  // /_dangling names nodes by their whole id, which _cat/nodes cuts short; the disk details carry it.
-  const names = new Map([...((io && io.detail) || [])].map(([name, x]) => [x.id, name]));
+  // /_dangling gives a node's whole id, _cat/nodes its first characters: a name is shown only when
+  // exactly one node's id begins it.
+  const nodes = (state.data.get(c.id) || {}).nodes || [];
+  const nameOf = (id) => { const m = nodes.filter((n) => n.id && String(id).startsWith(n.id)); return m.length === 1 ? m[0].name : id; };
   return h('div',
     line(h('b', { style: { color: 'var(--critical-ink)' } }, `${num(dang.indices.length)} found`), missing, h('span.muted', ` · ${asked} · Elasticsearch does not report their size`)),
     h('div.ns-nodes', table(['Index', 'UUID', 'Created', 'On node', ''], dang.indices.map((x) => h('tr',
       h('td', h('span.ns-name', { title: x.index_name }, x.index_name)),
       h('td.mono.muted.id', x.index_uuid),
       h('td.muted', x.creation_date_millis ? new Date(Number(x.creation_date_millis)).toISOString().slice(0, 10) : '–'),
-      h('td', (x.node_ids || []).map((id) => names.get(id) || id).join(', ') || '–'),
+      h('td', (x.node_ids || []).map(nameOf).join(', ') || '–'),
       h('td', danglingHelp(c, x)))))));
 }
 
@@ -851,11 +813,11 @@ function diskHelp(c) {
   const io = diskInfo.get(c.id);
   return infoButton({ id: c.name, head: 'disk in use that is not index data', label: `About the disk of ${c.name}`, title: 'What is counted, and where to look',
     items: () => [
-      { title: 'Not indices', cause: 'Disk in use minus the index data Elasticsearch has open: its translogs, the blocks the file system reserves, and other files on the same disk (logs, the operating system, dangling or orphaned shard directories).',
+      { title: 'Not index data', cause: 'Disk in use minus the index data Elasticsearch has open: its translogs, the blocks the file system reserves, and other files on the same disk (logs, the operating system, dangling or orphaned shard directories).',
         fix: 'Elasticsearch cannot list other files. On the node, run du -xsh on the data path and the rest of that mount, and compare.' },
       io && io.problem ? { title: 'Dangling indices not known', cause: io.problem.why, fix: io.problem.fix,
         actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] }
-        : { title: 'Dangling indices', cause: 'Index data on a node\'s disk that the cluster state does not list. Their size is inside “Other files”.', fix: null,
+        : { title: 'Dangling indices', cause: 'Index data on a node\'s disk that the cluster state does not list. Elasticsearch does not report their size; it is inside “Not index data”.', fix: null,
           actions: [inRest(c, 'GET', '/_dangling', 'Open GET /_dangling in REST', 'Opens the request in the REST console')] },
     ] });
 }

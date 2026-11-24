@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const { shardSplit, isHiddenIndex, wantsHidden, visibleShards, USAGE_THRESHOLDS, usageLevel, loadPercent, coresByNode,
-  diskSplit, diskTotals, diskDetails, sharedHosts, danglingAnswer, danglingProblem } =
+  diskUse, danglingAnswer, danglingProblem } =
   await import(pathToFileURL(path.join(ROOT, 'ui/js/core/nodes-shards.js')).href);
 
 const rows = [
@@ -152,34 +152,23 @@ test('shortNodeId is the first eight characters', () => {
   assert.equal(shortNodeId(null), '');
 });
 
-/* The disk's split (staging's own figures): used 41.5 GB, indices 83.6 MB, and 3 GB of the used is reserved blocks. */
-const ROW = { node: 'a', host: '10.0.0.1', 'disk.indices': '87669888', 'disk.used': '41538945024', 'disk.avail': '22684168192', 'disk.total': '64223113216' };
-const STATS = { nodes: { x: { name: 'a', indices: { translog: { size_in_bytes: 2805 } },
-  fs: { total: { free_in_bytes: 25643880448, available_in_bytes: 22683533312 }, data: [{ path: '/data', mount: '/ (overlay)' }] } } } };
+/* Staging's own figures: 41.5 GB used, of which 83.6 MB is index data. */
+const ROW = { node: 'a', 'disk.indices': '87669888', 'disk.used': '41538945024', 'disk.avail': '22684168192', 'disk.total': '64223113216' };
 
-test('what is not index data is used minus indices, and its parts add up to it', () => {
-  const s = diskSplit(ROW, diskDetails(STATS).get('a'));
-  assert.equal(s.notIndices, 41538945024 - 87669888);
-  assert.equal(s.reserved, 25643880448 - 22683533312);
-  assert.equal(s.translog + s.reserved + s.other, s.notIndices);
-  assert.equal(diskDetails(STATS).get('a').id, 'x');
-  assert.deepEqual(diskDetails(STATS).get('a').paths, [{ path: '/data', mount: '/ (overlay)' }]);
+test('what is not index data is used minus indices, summed over the nodes', () => {
+  assert.equal(diskUse([ROW]).notIndices, 41538945024 - 87669888);
+  const two = diskUse([ROW, ROW]);
+  assert.deepEqual([two.total, two.used, two.free], [2 * 64223113216, 2 * 41538945024, 2 * 22684168192]);
+  assert.equal(two.indices + two.notIndices + two.free, two.total, 'the ring adds up to the disk');
 });
 
-test('an unreported figure is unknown, never zero, and makes the total unknown', () => {
-  const s = diskSplit({ ...ROW, 'disk.indices': '' });
-  assert.deepEqual([s.indices, s.notIndices, s.other], [null, null, null]);
-  assert.equal(diskSplit(ROW).other, null, 'no node stats: the parts are not known');
-  assert.equal(diskSplit({ ...ROW, 'disk.used': '1' }).notIndices, null, 'a minus figure is not a measurement');
-  const t = diskTotals([diskSplit(ROW), s]);
-  assert.equal(t.notIndices, null);
-  assert.equal(t.used, 2 * 41538945024);
-  assert.equal(diskTotals([]).used, null);
-  assert.equal(diskDetails(null).size, 0);
-});
-
-test('nodes on one host are named together', () => {
-  assert.deepEqual(sharedHosts([ROW, { node: 'b', host: '10.0.0.1' }, { node: 'c', host: '10.0.0.2' }, { node: 'd' }]), [['a', 'b']]);
+test('a figure one node did not report is unknown, never zero', () => {
+  const u = diskUse([ROW, { ...ROW, 'disk.indices': '' }]);
+  assert.deepEqual([u.indices, u.notIndices], [null, null]);
+  assert.equal(u.used, 2 * 41538945024);
+  assert.equal(diskUse([{ ...ROW, 'disk.used': '1' }]).notIndices, null, 'a minus figure is not a measurement');
+  assert.equal(diskUse([]).total, null);
+  assert.equal(diskUse(null).total, null);
 });
 
 test('no dangling indices is only said of a list', () => {

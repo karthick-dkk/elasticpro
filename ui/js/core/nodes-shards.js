@@ -206,67 +206,18 @@ export function staleIndices(liveRetention, indices, now = Date.now()) {
 const byteCount = (v) => (v === null || v === undefined || v === '' || !isFinite(Number(v)) ? null : Number(v));
 
 /**
- * What a node's disk is used by, from its `_cat/allocation` row and, when it was read, its
- * `_nodes/stats/indices,fs` entry (diskDetails below).
- *
- *   indices     the shard data Elasticsearch has open on the node (`disk.indices`)
- *   notIndices  everything else in use: used - indices
- *   translog, reserved, other   what that is made of: Elasticsearch's own transaction logs, the
- *               blocks the file system keeps back (free - available; `disk.used` counts them as
- *               used), and the rest: logs, the operating system, dangling or orphaned shard
- *               directories, anything else on that disk.
- *
- * A part that cannot be worked out is null. A negative remainder is null too: the two readings
- * are not of the same instant, and a minus figure is not a measurement.
+ * What the cluster's disk is used by, over its nodes (`_cat/allocation` rows): the index data
+ * Elasticsearch has open (`disk.indices`), what else is in use (used - indices: translogs, blocks
+ * the file system reserves, logs, the operating system, dangling shard data), and what is free.
+ * A figure one node did not report is null for the whole cluster, and so is a negative remainder.
  */
-export function diskSplit(row, detail = null) {
-  const total = byteCount(row && row['disk.total']);
-  const used = byteCount(row && row['disk.used']);
-  const free = byteCount(row && row['disk.avail']);
-  const indices = byteCount(row && row['disk.indices']);
-  const notIndices = used !== null && indices !== null && used >= indices ? used - indices : null;
-  const translog = detail ? detail.translog : null;
-  const reserved = detail ? detail.reserved : null;
-  const rest = notIndices !== null && translog !== null && reserved !== null ? notIndices - translog - reserved : null;
-  return { total, used, free, indices, notIndices, translog, reserved, other: rest !== null && rest >= 0 ? rest : null };
-}
-
-/** The same, for all the nodes: a figure is known only when every node reported it. */
-export function diskTotals(splits) {
-  const out = {};
-  for (const k of ['total', 'used', 'free', 'indices', 'notIndices', 'translog', 'reserved', 'other']) {
-    out[k] = splits.length && splits.every((s) => s[k] !== null) ? splits.reduce((n, s) => n + s[k], 0) : null;
-  }
-  return out;
-}
-
-/** `_nodes/stats/indices,fs/translog` by node name: its whole id, translog bytes, reserved bytes, data paths. */
-export function diskDetails(ans) {
-  const nodes = ans && ans.nodes && typeof ans.nodes === 'object' ? Object.entries(ans.nodes) : [];
-  const out = new Map();
-  for (const [id, n] of nodes) {
-    if (!n || !n.name) continue;
-    const fs = n.fs || {}, t = fs.total || {};
-    const free = byteCount(t.free_in_bytes), avail = byteCount(t.available_in_bytes);
-    out.set(n.name, {
-      id,
-      translog: byteCount(n.indices && n.indices.translog && n.indices.translog.size_in_bytes),
-      reserved: free !== null && avail !== null && free >= avail ? free - avail : null,
-      paths: (Array.isArray(fs.data) ? fs.data : []).filter((p) => p && p.path).map((p) => ({ path: p.path, mount: p.mount || '' })),
-    });
-  }
-  return out;
-}
-
-/** Groups of nodes on one host: they may share a disk, and then each counts the others' data as not its own. */
-export function sharedHosts(rows) {
-  const by = new Map();
-  for (const r of rows || []) {
-    const host = r && (r.host || r.ip);
-    if (!host) continue;
-    by.set(host, [...(by.get(host) || []), r.node]);
-  }
-  return [...by.values()].filter((g) => g.length > 1);
+export function diskUse(rows) {
+  const sum = (k) => {
+    const v = (rows || []).map((r) => byteCount(r && r[k]));
+    return v.length && v.every((x) => x !== null) ? v.reduce((n, x) => n + x, 0) : null;
+  };
+  const total = sum('disk.total'), used = sum('disk.used'), free = sum('disk.avail'), indices = sum('disk.indices');
+  return { total, used, free, indices, notIndices: used !== null && indices !== null && used >= indices ? used - indices : null };
 }
 
 /**
