@@ -31,7 +31,9 @@ with the level (`Health::set_checks`), so it moves within a minute and PING cost
    sync (last result), Mail (last send result), History store (armed / last write). A part
    that cannot report says *not known*, never green.
 2. **Memory** — core and worker: resident memory against the container limit (bar with %),
-   peak in the last 24 h, OOM kills since the container started (cgroup `memory.events`), and
+   peak in the last 24 h, OOM kills since the container started (cgroup `memory.events`; a kill that
+   ended the container went with its counter, so `restarts24h` counts new containers — the CPU time
+   went down — and the check says the reason is not known here), and
    the core's budget split from `memory.rs` (cache, in flight, read cache, reports share: used
    of budget). No limit → *no limit*.
 3. **CPU** — core and worker: CPU % over the last minute (cgroup `cpu.stat` usage), and time
@@ -181,7 +183,7 @@ optional on read, so a worker and core a release apart agree as far as they can.
 WorkerStatus = { schema: 1, role: "worker", version, pid, startedAt, heartbeatAt,   // ms
                  memory: MemoryFigures, cpu: CpuFigures, gate: GateFigures|null,
                  jobs: [JobLine], queued, collection: [CollectionLine] }
-MemoryFigures = { rssBytes, rssSource, limitBytes, limitSource, usedPct, peakBytes24h, hwmBytes, oomKills, oomKills24h }
+MemoryFigures = { rssBytes, rssSource, limitBytes, limitSource, usedPct, peakBytes24h, hwmBytes, oomKills, oomKills24h, restarts24h }
 CpuFigures    = { readable, pct1m, limitCpus, pctOfLimit, throttledPct5m, nrPeriods, nrThrottled, throttledUsec }
 GateFigures   = { label: "worker", slotsInUse, slots, perCluster, perJump, backgroundReserve,
                   classes: [{class, running, waiting, granted5m, waitP95Ms, overloaded5m, queueTimeout5m, overloaded1h, queueTimeout1h}],

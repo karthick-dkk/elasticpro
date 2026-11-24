@@ -395,6 +395,34 @@ async fn admins_only_no_secret_in_the_clear_wrong_password_refused_preview_write
     }
 }
 
+/// A config file that cannot be read: the copy is kept, its run says failed and why, and it
+/// rotates out none of the copies that hold the config.
+#[tokio::test]
+async fn a_backup_without_a_readable_config_is_not_completed() {
+    let _turn = TURN.lock().await;
+    let dir = TempDir::new("backup-noconfig");
+    let (c, cfg_path) = hosted(&dir, &config());
+    let s = admin(&c).await;
+    send(&c, &s, json!({ "type": "BACKUP_SCHEDULE_SET", "schedule": { "keep": 1, "sections": ["clusters", "trust"] } })).await;
+    let at = |t: &str| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M").unwrap();
+    let good = c.backup_tick_at(at("2026-11-05 02:00")).await.expect("due").expect("ok");
+    std::fs::write(&cfg_path, "{ not a config").unwrap();
+    let short = c.backup_tick_at(at("2026-11-06 02:00")).await.expect("due").expect("kept");
+    let st = send(&c, &s, json!({ "type": "BACKUP_STATUS" })).await;
+    let last = &st["schedule"]["last"];
+    assert_eq!((last["ok"].clone(), last["name"].clone()), (json!(false), json!(short)), "{st}");
+    assert!(last["message"].as_str().unwrap().starts_with("not complete: config file: the config does not parse"), "{st}");
+    assert!(dir.join("backups").join(&good).exists(), "the good copy stays");
+    let runs = send(&c, &s, json!({ "type": "JOBS_LIST", "jobId": "settings.backup" })).await;
+    let run = &runs["runs"][0];
+    assert_eq!(run["status"], json!("failed"), "{runs}");
+    // A section that takes nothing from the config file is whole without it.
+    send(&c, &s, json!({ "type": "BACKUP_SCHEDULE_SET", "schedule": { "keep": 5, "sections": ["play"] } })).await;
+    c.backup_tick_at(at("2026-11-07 02:00")).await.expect("due").expect("kept");
+    let st = send(&c, &s, json!({ "type": "BACKUP_STATUS" })).await;
+    assert_eq!(st["schedule"]["last"]["ok"], json!(true), "{st}");
+}
+
 #[tokio::test]
 async fn the_timer_runs_once_a_day_keeps_the_last_n_and_seals_under_the_server_key() {
     let _turn = TURN.lock().await;

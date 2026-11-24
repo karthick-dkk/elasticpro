@@ -72,7 +72,9 @@ from any peer.) A proxy of your own that talks to the core directly needs its ad
 `ELASTICPRO_TRUSTED_PROXIES`; one in front of nginx needs nothing.
 
 The Accounts page reads the last 1000 events, held in memory since the server started;
-the file is the complete record.
+the file is the complete record. `ACTIVITY_LIST` says what it covers: `covers {held, max,
+since (ms, when the server started), rolledOut, oldest (once events rolled out), notInFile}` — an
+empty list is "none since then", never "none".
 
 ## Forwarding
 

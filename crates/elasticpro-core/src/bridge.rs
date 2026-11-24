@@ -1495,7 +1495,8 @@ impl Core {
                 let limit = msg.get("limit").and_then(Value::as_u64).unwrap_or(300).clamp(1, crate::activity::RING as u64) as usize;
                 let user = msg.get("user").and_then(Value::as_str);
                 let failed = msg.get("failedOnly").and_then(Value::as_bool).unwrap_or(false);
-                json!({ "ok": true, "events": self.activity.list(limit, user, failed), "file": self.activity.path() })
+                json!({ "ok": true, "events": self.activity.list(limit, user, failed), "file": self.activity.path(),
+                        "covers": self.activity.coverage() })
             }
             "LOGIN" => self.login(&msg),
             "SSO_EXCHANGE" => self.sso_exchange(&msg),
