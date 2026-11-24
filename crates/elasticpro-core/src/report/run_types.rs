@@ -931,9 +931,15 @@ impl Core {
                 let ended = |d: &NaiveDate| (*d + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX);
                 missing.retain(|d| ended(d) + margin_ms as i64 <= now);
             }
-            // One held day is settled by the day's first run only, not by each of its tries.
-            if self.reports.hosts_attempts.lock().get(&id).is_none_or(|(day, _, _)| *day != local_day) {
-                missing.extend(self.hosts_refresh(&id, &Self::hosts_refresh_days(today), now));
+            // One held day is settled by a run: the newest by the day's first, the oldest by its
+            // second (the days held from before 0.3.89), none by its third.
+            let tries = self.reports.hosts_attempts.lock().get(&id).filter(|(day, _, _)| *day == local_day).map_or(0, |(_, n, _)| *n);
+            let mut settle = Self::hosts_refresh_days(today);
+            if tries == 1 {
+                settle.reverse();
+            }
+            if tries < 2 {
+                missing.extend(self.hosts_refresh(&id, &settle, now));
             }
             missing.sort();
             if missing.is_empty() {

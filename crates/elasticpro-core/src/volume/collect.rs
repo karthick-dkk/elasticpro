@@ -622,10 +622,17 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
             continue;
         }
         day.gone_indices = 0;
-        day.unreadable_indices = g.map_or(0, |g| g.unreadable);
-        day.sized_whole = g.is_some_and(|g| g.unreadable == 0);
+        // An index of a final day that went before its size was ever read: what is left is not
+        // the day's size.
+        let lost = if day.is_final && !day.sized_whole && day.unreadable_indices > 0 {
+            recorded.saturating_sub(g.map_or(0, |g| g.indices))
+        } else {
+            0
+        };
+        day.unreadable_indices = g.map_or(0, |g| g.unreadable) + lost;
+        day.sized_whole = g.is_some() && day.unreadable_indices == 0;
         day.totals_at = now_ms;
-        day.indices = g.map_or(0, |g| g.indices) + day.unmeasured_size_indices;
+        day.indices = g.map_or(0, |g| g.indices) + lost + day.unmeasured_size_indices;
         day.pri_bytes = g.map(|g| g.pri_bytes);
         day.total_bytes = g.map(|g| g.total_bytes);
         // Sizes come from _cat every run; what the search measured per source stays until
@@ -1171,6 +1178,9 @@ mod tests {
         x.pri_bytes = Some(1000);
         apply_totals(&mut old, "2026-10", &shut, &Split::None, 10);
         assert_eq!((old["2026-10-20"].sizes(), old["2026-10-20"].unreadable_indices), ((None, None), 1), "closed means not measured");
+        apply_totals(&mut old, "2026-10", &fewer, &Split::None, 11);
+        let x = &old["2026-10-20"];
+        assert_eq!((x.sizes(), x.indices, x.sized_whole), ((None, None), 2, false), "deleted before its size was ever read: the other index is not the day");
         // All there again: read again.
         apply_totals(&mut days, "2026-10", &l, &Split::None, 11);
         assert_eq!((days["2026-10-20"].gone_indices, days["2026-10-20"].totals_at), (0, 11));

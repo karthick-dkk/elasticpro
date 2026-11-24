@@ -492,12 +492,14 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                     Cell::head("Critical"), Cell::head("Other time zone"), Cell::head("No delay, previous period"), Cell::head("Silent"), Cell::head("Worst device"), Cell::head("Worst (min)"),
                     Cell::head("Can't measure"), Cell::head("Levels (min)"), Cell::head("Last read")]);
         for c in fleet["byCluster"].as_array().into_iter().flatten() {
-            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), Cell::text(time_zone_text(&c["timeZone"])), int(&c["devices"]), int(&c["lateNow"]), int(&c["newToday"]),
-                        Cell::text(match c["noDelayText"].as_str() { Some(s) => format!("{} · {s}", n(&c["noDelay"]) as i64), None => format!("no percentage: {}", c["notMeasured"].as_str().unwrap_or("no device")) }), int(&c["delay"]), int(&c["critical"]),
-                        if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { int(&c["otherTz"]) },
-                        Cell::text(pct(&c["belowPctPrevious"])), int(&c["silent"]),
+            // A cluster whose last run measured nothing has no counts: 0 would read as none.
+            let known = |v: &Value| if c["notMeasured"].is_string() { Cell::text("not known") } else { int(v) };
+            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), Cell::text(time_zone_text(&c["timeZone"])), int(&c["devices"]), known(&c["lateNow"]), known(&c["newToday"]),
+                        Cell::text(match c["noDelayText"].as_str() { Some(s) => format!("{} · {s}", n(&c["noDelay"]) as i64), None => format!("no percentage: {}", c["notMeasured"].as_str().unwrap_or("no device")) }), known(&c["delay"]), known(&c["critical"]),
+                        if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { known(&c["otherTz"]) },
+                        Cell::text(pct(&c["belowPctPrevious"])), known(&c["silent"]),
                         Cell::text(c["worst"]["device"].as_str().unwrap_or("—")), c["worst"]["minutes"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty),
-                        int(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now))]);
+                        known(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now))]);
         }
         r.push(vec![Cell::Empty]);
         r.push(vec![Cell::text(TZ_NOTE)]);
