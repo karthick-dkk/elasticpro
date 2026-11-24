@@ -61,8 +61,8 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
   open period (unknown solves nothing). Start/solve times are the run's time: as exact as the
   interval.
 * **An open period counts up to the device's last measurement**, not to now, once more than one
-  interval or the silence limit, whichever is smaller, has passed since it (`state::stale_after_ms`,
-  the one rule): `lastMeasuredMs`, `measuredUntilMs`, `stale: true`, and the state text is "late when
+  interval or the silence limit, whichever is smaller, has passed since it, and half of that again
+  (30 minutes at least) for the next run to be read and written (`state::stale_after_ms`, the one rule): `lastMeasuredMs`, `measuredUntilMs`, `stale: true`, and the state text is "late when
   last measured 10:05, not measured since", never "still late". A period that ends without being
   solved says why (`ended`, `endedWhy`): the device was forgotten (it lasted to its last measurement,
   0.3.89), or its time zone changed.

@@ -90,10 +90,11 @@ impl ClusterData {
         }).collect()
     }
 
-    /// One row per month the period touches (`derive::month_row`), over the period's own **final**
-    /// days only: not the rest of the month, never today, nothing that may still grow. `label`
-    /// says the dates (`2026-11 (1–23)`), `days` how many there are and `daysMeasured` how many of
-    /// them each figure was measured on.
+    /// One row per month the period touches (`derive::month_row`), over the period's own
+    /// **finished** days: not the rest of the month, never today. `label` says the dates
+    /// (`2026-11 (1–23)`), `days` how many there are, `daysMeasured` how many of them each figure
+    /// was measured on and `notFinal` how many of those may still grow — the rule of the page, the
+    /// mail and the hosts file (docs/VOLUME.md "Month so far").
     pub fn month_rows(&self, p: &Period, basis: SizeBasis, today: NaiveDate) -> Vec<Value> {
         let (first, last) = (p.from_date(), p.to_date().min(today - Duration::days(1)));
         let current = month_key(today);
@@ -105,7 +106,7 @@ impl ClusterData {
                 return None;
             }
             let days: BTreeMap<String, Day> = self.days.iter()
-                .filter(|d| d.is_final && parse_day(&d.day).is_some_and(|x| x >= from && x <= to))
+                .filter(|d| parse_day(&d.day).is_some_and(|x| x >= from && x <= to))
                 .map(|d| (d.day.clone(), d.clone())).collect();
             let mut row = derive::month_row(&derive::month_summary(&m, &days), basis, &current);
             row["label"] = json!(if (from, to) == (start, end) { m.clone() }
@@ -114,6 +115,7 @@ impl ClusterData {
             row["from"] = json!(day_key(from));
             row["to"] = json!(day_key(to));
             row["days"] = json!((to - from).num_days() + 1);
+            row["notFinal"] = json!(days.values().filter(|d| !d.is_final && read_figure(d)).count());
             Some(row)
         }).collect()
     }
@@ -142,9 +144,14 @@ impl ClusterData {
         }
     }
 
-    /// One `derive::breakdown` per field, over the period.
-    pub fn breakdowns(&self, p: &Period) -> Vec<(&'static str, Value)> {
-        let days: Vec<&Day> = self.in_period(p).collect();
+    /// The period's finished days: today is still running.
+    fn finished_days(p: &Period, today: NaiveDate) -> usize {
+        Self::period_days(p, today).into_iter().filter(|d| *d < today).count()
+    }
+
+    /// One `derive::breakdown` per field, over the period's finished days.
+    pub fn breakdowns(&self, p: &Period, today: NaiveDate) -> Vec<(&'static str, Value)> {
+        let days: Vec<&Day> = self.in_period(p).filter(|d| parse_day(&d.day).is_some_and(|x| x < today)).collect();
         FIELD_KEYS.iter().map(|k| (*k, derive::breakdown(&days, k, derive::BREAKDOWN_TOP_DEFAULT))).collect()
     }
 
@@ -157,6 +164,11 @@ impl ClusterData {
             _ => self.settings.extra.name.clone(),
         }
     }
+}
+
+/// The day carries something a search counted.
+fn read_figure(d: &Day) -> bool {
+    d.docs.is_some() || d.event_bytes.is_some()
 }
 
 /// Why a day of the period has no figure.
@@ -172,7 +184,7 @@ fn days_list(days: &[String]) -> String {
 /// What every volume file says about its figures.
 pub const VOLUME_NOTES: [&str; 4] = [
     about::FINAL_RULE,
-    "Monthly rows count the final days of the period only, never today; Days measured says how many of them each figure was measured on.",
+    "Monthly rows and breakdowns count the period's finished days, never today; Days measured says how many of them each figure was measured on, and how many are not final.",
     "Primary size est. shares out each day's measured primary size by documents: an estimate.",
     "GB is 1024 x 1024 x 1024 bytes.",
 ];
@@ -217,10 +229,14 @@ fn days_measured_text(r: &Value) -> String {
     let of = r["days"].as_i64().unwrap_or(0);
     let n = |k: &str| m[k].as_u64().unwrap_or(0);
     let (docs, ev, size) = (n("docs"), n("eventBytes"), n("size"));
+    let open = match r["notFinal"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        n => format!("; {n} not final"),
+    };
     if docs == ev && ev == size {
-        return format!("{docs} of {of} days");
+        return format!("{docs} of {of} days{open}");
     }
-    format!("documents {docs}, event bytes {ev}, size {size} of {of} days")
+    format!("documents {docs}, event bytes {ev}, size {size} of {of} days{open}")
 }
 
 /* ------------------------------------------ cells ------------------------------------------ */
@@ -375,9 +391,9 @@ fn monthly_sheet(data: &ClusterData, p: &Period, layouts: &Value, today: NaiveDa
 }
 
 fn breakdown_sheet(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Vec<Cell>> {
-    let days = ClusterData::period_days(p, today).len();
+    let days = ClusterData::finished_days(p, today);
     let mut rows: Vec<Vec<Cell>> = vec![];
-    for (key, b) in data.breakdowns(p) {
+    for (key, b) in data.breakdowns(p, today) {
         if !rows.is_empty() {
             rows.push(vec![]);
         }
@@ -471,7 +487,7 @@ pub const DAILY_CSV: &[&str] = &["cluster", "day", "indices", "docs", "primary_b
     "event_bytes_measured", "sub_bytes", "change_vs_avg_pct", "avg_days", "final", "read_at_utc", "note"];
 pub const MONTHLY_CSV: &[&str] = &["cluster", "month", "days_with_data", "primary_bytes", "avg_primary_bytes_per_day",
     "peak_day", "peak_primary_bytes", "docs", "event_bytes", "from_kept_record_days", "period_from", "period_to", "days_in_period",
-    "docs_days_measured", "event_bytes_days_measured", "primary_bytes_days_measured"];
+    "docs_days_measured", "event_bytes_days_measured", "primary_bytes_days_measured", "days_not_final"];
 pub const BREAKDOWN_CSV: &[&str] = &["cluster", "field", "field_resolved", "value", "period_from", "period_to", "docs",
     "event_bytes", "primary_bytes_estimated", "share_pct", "days_seen", "note"];
 
@@ -497,11 +513,12 @@ pub fn csv_files(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Entry>
             csv_num(&r["avgPriPerDay"]), csv_num(&r["peakPrimary"]["day"]), csv_num(&r["peakPrimary"]["bytes"]), csv_num(&r["docs"]),
             csv_num(&r["eventBytes"]), csv_num(&r["keptDays"]), csv_num(&r["from"]), csv_num(&r["to"]), csv_num(&r["days"]),
             csv_num(&r["daysMeasured"]["docs"]), csv_num(&r["daysMeasured"]["eventBytes"]), csv_num(&r["daysMeasured"]["size"]),
+            csv_num(&r["notFinal"]),
         ]));
     }
     let mut breakdown = vec![head(BREAKDOWN_CSV)];
-    let in_period = ClusterData::period_days(p, today).len();
-    for (key, b) in data.breakdowns(p) {
+    let in_period = ClusterData::finished_days(p, today);
+    for (key, b) in data.breakdowns(p, today) {
         let error = b["error"].as_str().map(|e| format!("{NOT_MEASURED}: {e}"));
         let note = derive::breakdown_notes(&b, in_period).join("; ");
         if let Some(e) = error {
@@ -589,13 +606,13 @@ pub fn mail_summary(store: &Store, id: &str, name: &str, s: &VolumeSettings, tod
 fn month_so_far_text(m: &Value) -> String {
     let (days, measured) = (m["days"].as_i64().unwrap_or(0), m["daysMeasured"].as_i64().unwrap_or(0));
     let today = m["todayValue"].as_u64().map(|v| (human_bytes(Some(v)), m["asOf"].as_i64().map(about::utc).unwrap_or_else(|| about::NOT_READ.into())));
-    match today {
-        Some((v, at)) if days == 0 => format!("{v} (today only, read {at})"),
-        _ if measured == 0 => format!("{NOT_MEASURED} (0 of {days} finished days measured{})",
-                                      today.map(|(v, at)| format!("; today {v}, read {at}")).unwrap_or_default()),
-        Some((_, at)) => format!("{} ({measured} of {days} finished days measured, and today, read {at})", human_bytes(m["value"].as_u64())),
-        None => format!("{} ({measured} of {days} finished days measured)", human_bytes(m["value"].as_u64())),
-    }
+    let so_far = today.map(|(v, at)| format!("; today so far {v}, read {at}, is not in it")).unwrap_or_default();
+    let open = match m["notFinal"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        n => format!(", {n} not final"),
+    };
+    let value = if measured == 0 { NOT_MEASURED.into() } else { human_bytes(m["value"].as_u64()) };
+    format!("{value} ({measured} of {days} finished days measured{open}{so_far})")
 }
 
 #[cfg(test)]
@@ -624,9 +641,9 @@ mod tests {
         ClusterData { id: "prod/eu".into(), name: "Production EU with a very long name".into(), settings: VolumeSettings::default(), days, warnings: vec![] }
     }
 
-    /// 1 to 23 November, 14 of them final, today (the 24th) still open: an auditor's month.
+    /// 1 to 23 November, 14 of them recorded, today (the 24th) still open: an auditor's month.
     #[test]
-    fn a_month_row_counts_the_periods_final_days_and_says_how_many() {
+    fn a_month_row_counts_the_periods_finished_days_and_says_how_many() {
         let mut d = data();
         d.days = (1..=14).map(|n| day(&format!("2026-11-{n:02}"), 100, Some(10), (n <= 9).then_some(5))).collect();
         d.days.push(Day { is_final: false, ..day("2026-11-24", 9_000_000, Some(9_000_000), Some(9_000_000)) });
@@ -639,6 +656,14 @@ mod tests {
                    "never today");
         assert_eq!(days_measured_text(r), "documents 14, event bytes 9, size 14 of 23 days");
         assert_eq!(r["peakDay"]["day"], "2026-11-01");
+        // Yesterday read before it was 24 h over: counted, and said.
+        d.days[13].is_final = false;
+        let r2 = &d.month_rows(&p, SizeBasis::EventSize, today)[0];
+        assert_eq!((r2["docs"].as_u64(), days_measured_text(r2).as_str()), (Some(140), "documents 14, event bytes 9, size 14 of 23 days; 1 not final"));
+        let b = &d.breakdowns(&p, today)[0].1;
+        assert_eq!((b["totals"]["docs"].as_u64(), b["notFinalDays"].as_u64()), (Some(140), Some(1)), "a breakdown never counts today");
+        assert!(derive::breakdown_notes(b, ClusterData::finished_days(&p, today)).contains(&"1 of the days not final".to_string()));
+        d.days[13].is_final = true;
         // A period inside the month is that period, not the month.
         let p: Period = serde_json::from_value(json!({ "from": "2026-11-10", "to": "2026-11-12", "label": "x" })).unwrap();
         let r = &d.month_rows(&p, SizeBasis::EventSize, today)[0];
@@ -692,8 +717,9 @@ mod tests {
         let m = |v: Value| month_so_far_text(&v);
         assert_eq!(m(json!({ "value": 1024, "days": 23, "daysMeasured": 9, "todayValue": null })), "1.00 KB (9 of 23 finished days measured)");
         assert_eq!(m(json!({ "value": null, "days": 23, "daysMeasured": 0, "todayValue": null })), "not measured (0 of 23 finished days measured)");
-        assert!(m(json!({ "value": 1024, "days": 23, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 23 finished days measured; today 1.00 KB, read 1970"));
-        assert!(m(json!({ "value": 1024, "days": 0, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("1.00 KB (today only, read 1970"));
+        assert!(m(json!({ "value": 1024, "days": 23, "daysMeasured": 9, "notFinal": 1, "todayValue": 7, "asOf": 1 })).starts_with("1.00 KB (9 of 23 finished days measured, 1 not final; today so far 7 B, read 1970"));
+        assert!(m(json!({ "value": null, "days": 23, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 23 finished days measured; today 1.00 KB, read 1970"));
+        assert!(m(json!({ "value": null, "days": 0, "daysMeasured": 0, "todayValue": 1024, "asOf": 1 })).starts_with("not measured (0 of 0 finished days measured; today so far 1.00 KB, read 1970"));
     }
 
     fn period() -> Period {

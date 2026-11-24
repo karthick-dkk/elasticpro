@@ -610,7 +610,11 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
         day.live = true;
         let recorded = day.indices.saturating_sub(day.unmeasured_size_indices);
         let readable = g.map_or(0, |g| g.indices - g.unreadable);
-        if day.is_final && day.pri_bytes.is_some() && day.unreadable_indices == 0 && readable < recorded {
+        // Sizes of before 0.3.89 may lack indices that were closed then: kept only when what is
+        // missing now is gone, not merely closed.
+        let closed_now = g.is_some_and(|g| g.unreadable > 0);
+        let kept = day.sized_whole || !closed_now;
+        if day.is_final && day.pri_bytes.is_some_and(|b| b > 0) && day.unreadable_indices == 0 && kept && readable < recorded {
             if day.gone_indices != recorded - readable {
                 day.gone_indices = recorded - readable;
                 changed = true;
@@ -619,6 +623,7 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
         }
         day.gone_indices = 0;
         day.unreadable_indices = g.map_or(0, |g| g.unreadable);
+        day.sized_whole = g.is_some_and(|g| g.unreadable == 0);
         day.totals_at = now_ms;
         day.indices = g.map_or(0, |g| g.indices) + day.unmeasured_size_indices;
         day.pri_bytes = g.map(|g| g.pri_bytes);
@@ -1158,6 +1163,14 @@ mod tests {
             { "index": "logstash-win-dc-2026.10.20", "status": "close", "pri.store.size": null, "store.size": null }]), &legacy());
         apply_totals(&mut days, "2026-10", &shut, &Split::None, 10);
         assert_eq!((days["2026-10-20"].sizes(), days["2026-10-20"].gone_indices), ((Some(1500), Some(3000)), 1));
+        // A record of before 0.3.89 summed a closed index as 0 bytes: it is not the whole day's.
+        let mut old = days.clone();
+        let x = old.get_mut("2026-10-20").unwrap();
+        (x.sized_whole, x.gone_indices, x.pri_bytes, x.total_bytes) = (false, 0, Some(0), Some(0));
+        assert_eq!(x.sizes(), (None, None), "an index takes some bytes: 0 was never measured");
+        x.pri_bytes = Some(1000);
+        apply_totals(&mut old, "2026-10", &shut, &Split::None, 10);
+        assert_eq!((old["2026-10-20"].sizes(), old["2026-10-20"].unreadable_indices), ((None, None), 1), "closed means not measured");
         // All there again: read again.
         apply_totals(&mut days, "2026-10", &l, &Split::None, 11);
         assert_eq!((days["2026-10-20"].gone_indices, days["2026-10-20"].totals_at), (0, 11));

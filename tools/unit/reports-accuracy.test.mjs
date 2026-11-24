@@ -137,6 +137,13 @@ test('volume by host: a filled value is marked, an event size nobody had is not 
   assert.equal(r.totals.eventBytes, null);
 });
 
+test('volume by host: a day read too soon says not final; an older core says nothing about it', () => {
+  const r = T.hostsOf({ ok: true, days: [{ day: 'a', held: true, final: false, readAt: 5 }, { day: 'b', held: true, final: true }, { day: 'c', held: true }, { day: 'd', held: false, final: false }],
+    rows: [{ day: 'a', final: false, readAt: 5 }, { day: 'b', final: true }, { day: 'c' }] });
+  assert.deepEqual(r.notFinalDays.map((d) => d.day), ['a'], 'a day not held is not collected, not "not final"');
+  assert.deepEqual(r.rows.map((x) => x.notFinal), [true, false, false]);
+});
+
 test('sizes per tag1 value are called estimated; a short average says so in the file', () => {
   assert.equal(S.TAG_ESTIMATE, 'estimated by document share');
   assert.equal(S.tagColumnName('tag1', 'fw'), 'tag1=fw_bytes_estimated');

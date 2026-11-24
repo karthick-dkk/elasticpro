@@ -43,6 +43,14 @@ fn late_colour(late: f64, critical: f64) -> &'static str {
     if critical > 0.0 { RED } else if late > 0.0 { YELLOW } else { GREEN }
 }
 
+/// A cluster's late devices; "not known" when its last run measured nothing — 0 would read as none late.
+fn late_text(c: &Value) -> String {
+    if c["notMeasured"].is_string() {
+        return "not known".into();
+    }
+    format!("{} ({} critical)", n(&c["lateNow"]) as i64, n(&c["critical"]) as i64)
+}
+
 /// The two lines in words, as the clusters have them: their minutes when every cluster has the
 /// same, else that each has its own.
 pub struct Lines {
@@ -697,8 +705,10 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:12px 0 6px\">Summary · {}</div>", esc(&format!("{} cluster{}", i.clusters.len(), if i.clusters.len() == 1 { "" } else { "s" }))));
         h.push_str("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"6\"><tr>");
         h.push_str(&tile(format!("{}", n(&t["devices"]) as i64), "devices", &format!("{} measured", n(&t["measured"]) as i64), BLUE));
-        h.push_str(&tile(pct(&t["pctNoDelay"]), "no delay", &format!("{} devices", n(&t["noDelay"]) as i64), GREEN));
-        h.push_str(&tile(pct(&t["pctLate"]), "late", &format!("{} devices · {} delayed ({}) · {} critical ({})", n(&t["late"]) as i64, n(&t["delay"]) as i64, ln.band, n(&t["critical"]) as i64, ln.over), late_colour(n(&t["late"]), n(&t["critical"]))));
+        // No cluster measured: no percentage, and no colour that reads as good.
+        let none = !t["pctNoDelay"].is_number();
+        h.push_str(&tile(pct(&t["pctNoDelay"]), "no delay", &format!("{} devices", n(&t["noDelay"]) as i64), if none { GREY } else { GREEN }));
+        h.push_str(&tile(pct(&t["pctLate"]), "late", &format!("{} devices · {} delayed ({}) · {} critical ({})", n(&t["late"]) as i64, n(&t["delay"]) as i64, ln.band, n(&t["critical"]) as i64, ln.over), if none { GREY } else { late_colour(n(&t["late"]), n(&t["critical"])) }));
         h.push_str(&tile(format!("{}", n(&t["silent"]) as i64), "silent", "no logs for the silence limit", GREY));
         h.push_str("</tr></table>");
         h.push_str(&format!("<div style=\"font-size:13px;margin:6px 0 0\">{}</div>", esc(&no_delay_line(t))));
@@ -713,9 +723,9 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">By cluster</div><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Cluster</th><th style=\"{th}\">No delay</th><th style=\"{th}\">Late</th><th style=\"{th}\">Last read</th></tr>"));
         for c in &by_cluster {
             let unread = c["notMeasured"].is_string() || c["stale"] == true;
-            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{} ({} critical)</td><td style=\"{td}{}\">{}</td></tr>",
+            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{}</td><td style=\"{td}{}\">{}</td></tr>",
                 esc(c["name"].as_str().unwrap_or("")), esc(c["noDelayText"].as_str().unwrap_or("no percentage")),
-                if unread { GREY } else { late_colour(n(&c["lateNow"]), n(&c["critical"])) }, n(&c["lateNow"]) as i64, n(&c["critical"]) as i64,
+                if unread { GREY } else { late_colour(n(&c["lateNow"]), n(&c["critical"])) }, late_text(c),
                 if unread { format!(";background:{GREY}") } else { String::new() }, esc(&read_text(c, i.now))));
         }
         h.push_str("</table>");
@@ -842,8 +852,8 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         n(&t["silent"]) as i64, n(&t["cantMeasure"]) as i64, no_delay_line(t)));
     s.push_str("By cluster\n");
     for c in fleet["byCluster"].as_array().into_iter().flatten() {
-        s.push_str(&format!("  {} · {} · late {} ({} critical) · {}\n", c["name"].as_str().unwrap_or(""), c["noDelayText"].as_str().unwrap_or("no percentage"),
-            n(&c["lateNow"]) as i64, n(&c["critical"]) as i64, read_text(c, i.now)));
+        s.push_str(&format!("  {} · {} · late {} · {}\n", c["name"].as_str().unwrap_or(""), c["noDelayText"].as_str().unwrap_or("no percentage"),
+            late_text(c), read_text(c, i.now)));
     }
     let y = &fleet["yesterday"];
     if fleet["devicesInRange"].as_u64() == Some(0) {

@@ -204,6 +204,8 @@ export function hostsOf(res) {
   const days = asList(res && res.days).map((d) => ({
     day: d.day, held: !!d.held, incomplete: !!d.incomplete, rows: num(d.rows),
     notes: asList(d.notes), failed: d.failed ? String(d.failed) : null, collecting: !!d.collecting,
+    // False only when the core says so: an older one says nothing about it.
+    notFinal: !!d.held && d.final === false, readAt: num(d.readAt),
   }));
   const fill = (res && res.fill) || {};
   return {
@@ -213,14 +215,17 @@ export function hostsOf(res) {
       eventMissingDocs: num(r.eventMissingDocs),
       clientId: r.clientId ?? null, branch: r.branch ?? null,
       // Set by the core on a value it filled in: not in the logs.
-      clientIdFilled: r.clientIdFilled === true, branchFilled: r.branchFilled === true, incomplete: !!r.incomplete,
+      clientIdFilled: r.clientIdFilled === true, branchFilled: r.branchFilled === true, incomplete: !!r.incomplete, notFinal: r.final === false, readAt: num(r.readAt),
+      subMissingDocs: num(r.subMissingDocs),
       meta: r.meta && typeof r.meta === 'object' ? r.meta : {},
     })),
     total: num(res && res.total) ?? 0,
-    totals: { docs: num(t.docs), eventBytes: eventOf(t), subBytes: num(t.subBytes), eventMissingDocs: num(t.eventMissingDocs) },
+    totals: { docs: num(t.docs), eventBytes: eventOf(t), subBytes: num(t.subBytes), eventMissingDocs: num(t.eventMissingDocs),
+      subMissingDocs: num(t.subMissingDocs), subNotCountedDocs: num(t.subNotCountedDocs) },
     // The core sends both; an answer with only `days` still flags its incomplete days.
     incompleteDays: res && Array.isArray(res.incompleteDays) ? res.incompleteDays : days.filter((d) => d.incomplete).map((d) => d.day),
     failedDays: days.filter((d) => !d.held && d.failed),
+    notFinalDays: days.filter((d) => d.notFinal),
     collectingDays: days.filter((d) => !d.held && d.collecting),
     days,
     fill: { clientId: fill.clientId ?? null, branchDefault: fill.branchDefault ?? null },

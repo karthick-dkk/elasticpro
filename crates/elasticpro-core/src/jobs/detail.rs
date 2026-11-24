@@ -82,10 +82,14 @@ static SECRET_FIELD: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// `https://***@host`), the value after `Basic` / `Bearer` / `ApiKey`, and the value of an
 /// `Authorization`, API key, password, secret or token field; then cut to `LINE_MAX_CHARS`.
 pub fn redact(text: &str) -> String {
+    cut(&scrub(text), LINE_MAX_CHARS)
+}
+
+/// `redact` without the cut: for a file's About, whose warnings list days.
+pub fn scrub(text: &str) -> String {
     let s = URL_USERINFO.replace_all(text, "${1}***@");
     let s = AUTH_SCHEME.replace_all(&s, "${1} ***");
-    let s = SECRET_FIELD.replace_all(&s, "${1}${2}***");
-    cut(&s, LINE_MAX_CHARS)
+    SECRET_FIELD.replace_all(&s, "${1}${2}***").into_owned()
 }
 
 static AUTH_STATUS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\b(401|403)\b").expect("a fixed pattern"));

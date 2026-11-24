@@ -432,9 +432,11 @@ impl Core {
             if refreshing {
                 let names: HashSet<String> = all.iter().map(|(n, _)| n.clone()).collect();
                 let (d2, k2) = (dir.clone(), k.clone());
-                if !self.report_cpu(move || d2.held_within(&k2, &names)).await.unwrap_or(false) {
+                // A closed index is in the listing and answers a wildcard search with nothing.
+                let whole = listing.split_closed() == 0 && listing.days.get(&d).is_none_or(|g| g.open == g.indices && g.unreadable == 0);
+                if !whole || !self.report_cpu(move || d2.held_within(&k2, &names)).await.unwrap_or(false) {
                     self.reports.hosts_settled.lock().insert((id.clone(), k.clone()));
-                    tracing::info!(cluster = %id, day = %k, "volume by host: not read again, some of its indices are gone; the collected day stays, not final");
+                    tracing::info!(cluster = %id, day = %k, "volume by host: not read again, some of its indices are gone or closed; the collected day stays, not final");
                     continue;
                 }
             }
@@ -670,8 +672,22 @@ impl Core {
                 }
                 let end = DayEnd { rows: w.cp.rows(), pages: w.cp.pages(), incomplete: w.cp.incomplete, notes, collected_at: now };
                 let (d2, c2) = (dir.clone(), w.cp.clone());
-                match self.report_cpu(move || d2.complete(&c2, &end)).await {
-                    Ok(Ok(())) => out.days_collected += 1,
+                // A day read once more (never one the operator asked to collect again) does not
+                // replace a held file that has more rows: that file is the fuller evidence.
+                let again = opts.again;
+                let done = self.report_cpu(move || {
+                    if !again && d2.held_rows(&c2.day).is_some_and(|held| held > end.rows) {
+                        d2.abandon(&c2);
+                        return Ok(false);
+                    }
+                    d2.complete(&c2, &end).map(|()| true)
+                }).await;
+                match done {
+                    Ok(Ok(true)) => out.days_collected += 1,
+                    Ok(Ok(false)) => {
+                        self.reports.hosts_settled.lock().insert((id.clone(), day_key(w.date)));
+                        tracing::warn!(cluster = %id, day = %day_key(w.date), "volume by host: read again with fewer rows than the collected day holds; the collected day stays, not final");
+                    }
                     Ok(Err(e)) | Err(e) => out.failed_days.push((day_key(w.date), e)),
                 }
             } else if pk != usize::MAX && !w.cp.parts[pk].done {
@@ -915,7 +931,10 @@ impl Core {
                 let ended = |d: &NaiveDate| (*d + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc().timestamp_millis()).unwrap_or(i64::MAX);
                 missing.retain(|d| ended(d) + margin_ms as i64 <= now);
             }
-            missing.extend(self.hosts_refresh(&id, &Self::hosts_refresh_days(today), now));
+            // One held day is settled by the day's first run only, not by each of its tries.
+            if self.reports.hosts_attempts.lock().get(&id).is_none_or(|(day, _, _)| *day != local_day) {
+                missing.extend(self.hosts_refresh(&id, &Self::hosts_refresh_days(today), now));
+            }
             missing.sort();
             if missing.is_empty() {
                 self.reports.hosts_quiet.lock().remove(&id);

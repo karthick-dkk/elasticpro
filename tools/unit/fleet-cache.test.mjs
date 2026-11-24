@@ -287,6 +287,15 @@ test('a repository listing that answered with an HTTP error is "could not be rea
   assert.ok(alerts().some((a) => a.key === 'c1:repo:daily:unreadable'));
 });
 
+test('a listing that answered 200 with the repository\'s error is "could not be read", not empty', () => {
+  const cs = fullCluster();
+  cs.datasets.snapshots = entry({ byRepo: { daily: { ...ans({ snapshots: [], responses: [] }, { source: 'verbose' }), repoError: 'repository_exception: could not read data' } } });
+  applyFleetEntry('c1', cs);
+  const d = state.data.get('c1');
+  assert.equal(d.snapshots.daily, undefined);
+  assert.match(d.repos[0].error, /could not read data/);
+});
+
 test('indices and shards entries land where the pages read them', () => {
   const cs = { datasets: {
     indices: entry({ indices: ans([{ index: 'logs-a', health: 'green', status: 'open', 'store.size': '100', pri: '1', rep: '1' }]) }),

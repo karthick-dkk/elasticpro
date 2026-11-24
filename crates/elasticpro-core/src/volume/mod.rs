@@ -169,6 +169,10 @@ pub struct Day {
     /// longer size: the figures are the recorded ones.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub gone_indices: u64,
+    /// The sizes are of every index dated on the day. A record of before 0.3.89 does not say so:
+    /// a closed index was 0 bytes in its sum.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sized_whole: bool,
     /// Documents that carry no event size / sub size: in no sum. `None`: not counted (before
     /// 0.3.89, or the field did not resolve).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,8 +206,10 @@ impl SourceTotals {
     }
 }
 
+/// An index always takes some bytes on disk: a day "of 0 bytes" is a record of before 0.3.89
+/// whose indices were all closed.
 fn whole(pri: Option<u64>, total: Option<u64>, unmeasured: u64) -> (Option<u64>, Option<u64>) {
-    if unmeasured > 0 {
+    if unmeasured > 0 || (pri == Some(0) && total == Some(0)) {
         (None, None)
     } else {
         (pri, total)

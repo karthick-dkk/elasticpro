@@ -625,6 +625,19 @@ impl HostsDir {
         Ok(())
     }
 
+    /// Rows the held day's file says it has; `None`: not held, or not whole.
+    pub fn held_rows(&self, day: &str) -> Option<u64> {
+        self.read(day)?.finish().map(|e| e.rows)
+    }
+
+    /// Drop what was collected for a day whose held file stays: its `.part` files and checkpoint.
+    pub fn abandon(&self, cp: &Checkpoint) {
+        for k in 0..cp.parts.len() {
+            let _ = std::fs::remove_file(self.part_path(&cp.day, k));
+        }
+        let _ = std::fs::remove_file(self.checkpoint_path(&cp.day));
+    }
+
     /// A day with nothing to ask (no index counts on it): its file, at once.
     pub fn write_empty(&self, header: DayHeader, notes: Vec<String>, now: i64) -> Result<(), String> {
         let cp = self.begin(header, vec![], PAGE_SIZE_MAX, now)?;
@@ -1646,6 +1659,21 @@ mod tests {
         // Pruned with everything of the day.
         assert_eq!(d.prune(parse_day("2026-11-02").unwrap()), 1);
         assert!(!d.held("2026-11-01") && d.checkpoint("2026-11-02").is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_day_read_again_with_fewer_rows_keeps_the_held_file() {
+        let root = std::env::temp_dir().join(format!("ep-hosts-fewer-{}-{}", std::process::id(), rand::random::<u32>()));
+        let d = HostsDir::new(&root, "prod");
+        let mut cp = d.begin(header("2026-11-01"), vec![vec!["i".into()]], 1000, 1).unwrap();
+        d.append(&mut cp, 0, &[row("i", Some("a"), 1, None, None), row("i", Some("b"), 1, None, None)], None, true, 1).unwrap();
+        d.complete(&cp, &DayEnd { rows: cp.rows(), pages: 1, incomplete: false, notes: vec![], collected_at: 2 }).unwrap();
+        assert_eq!((d.held_rows("2026-11-01"), d.held_rows("2026-11-02")), (Some(2), None));
+        let mut again = d.begin(header("2026-11-01"), vec![vec!["i".into()]], 1000, 3).unwrap();
+        d.append(&mut again, 0, &[], None, true, 3).unwrap();
+        d.abandon(&again);
+        assert!(d.checkpoint("2026-11-01").is_none() && d.held_rows("2026-11-01") == Some(2));
         std::fs::remove_dir_all(root).ok();
     }
 
