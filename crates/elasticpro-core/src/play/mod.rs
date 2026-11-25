@@ -91,10 +91,10 @@ struct OpenTimes {
 
 impl OpenTimes {
     /// How many are kept of `cluster`, counted as they are attributed (one id may begin another).
-    fn kept_for(&self, cluster: &String, known: &[String]) -> usize {
+    fn kept_for(&self, cluster: &str, known: &[String]) -> usize {
         let prefix = format!("{cluster}:");
         self.keys.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix))
-            .filter(|(k, _)| crate::silences::cluster_of("alert", k, known) == Some(cluster)).count()
+            .filter(|(k, _)| crate::silences::cluster_of("alert", k, known).is_some_and(|c| c == cluster)).count()
     }
 }
 
