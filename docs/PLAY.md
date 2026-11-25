@@ -110,9 +110,13 @@ be read says "no data" / "not measured", never 0.
    30–60, > 60 min, worst device; "Top 10 devices
    by delay" (device, cluster, delay, last event, peak 24 h, status); "Top 10 clusters by
    delay" (delay, devices > 30 min).
-5. **Backups**: backed up in 26 h (x of y), older than 26 h, **snapshot failures · 24 h**
-   (each FAILED / PARTIAL snapshot: cluster, time, what), and per cluster: last good snapshot,
-   holds data up to, backup size. ULM clusters with SLM not used read "ULM · s3 <bucket>".
+5. **Backups**: a donut of the clusters by backup state, each cluster in one group: last run
+   failed or partial, late (no good snapshot in 26 h), no repository set up, not read, ULM, good.
+   A cluster is *not read* when its missing good snapshot may be in a repository that could not
+   be read. Good and failed clusters per day, 14 days. Per cluster (problems first, 14 a page):
+   the last 14 days (`availability()`, the days the Snapshots page draws; striped = none listed:
+   no run, or removed by retention), age of the last good backup against the 26 h line, data
+   inside up to, backup size. ULM clusters with SLM not used read "ULM · s3 <bucket>".
 6. **Volume and capacity**: yesterday (all clusters) vs the 7 days before it, average per day, month so
    far, shortest disk runway; per cluster yesterday / 7-day avg / change; days of disk left
    (total size). From the 0.3.45 record (`VOLUME_MONTHLY_ALL` / `VOLUME_DAILY`).

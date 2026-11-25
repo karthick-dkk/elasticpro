@@ -20,6 +20,7 @@ const url = (p) => pathToFileURL(path.join(ROOT, p)).href;
 const A = await import(url('ui/js/play/api.js'));
 const K = await import(url('ui/js/core/cluster-kind.js'));
 const S = await import(url('ui/js/play/snapshots.js'));
+const P = await import(url('ui/js/play/parts.js'));
 const M = await import(url('ui/js/play/measure.js'));
 
 test('PLAY_STATE: the documented shape is read, and an empty reply is the defaults', () => {
@@ -107,6 +108,47 @@ test('snapshot filters: last good, failures in a window, unknown is not "none"',
   assert.equal(S.backedUpWithin({ repos: [{ name: 'r' }], snapshots: {} }, 1, now), null, 'a listing not read is unknown');
   assert.equal(S.listingState(null), 'unknown');
   assert.equal(S.listingState({ repos: [], reachable: true }), 'none');
+});
+
+test('backup state: each cluster in one group, and a guess is never a group', () => {
+  const H = 3600000, now = Date.parse('2026-11-25T12:00:00Z'), stale = 26 * H;
+  const row = (id, status, hoursAgo, extra = {}) => ({ id, status, start: now - hoursAgo * H - 60000, end: now - hoursAgo * H, ...extra });
+  const d = (rows, over = {}) => ({ repos: [{ name: 'r' }], reachable: true, snapshots: { r: rows }, snapshotTotals: { r: { whole: true } }, ...over });
+  const st = (x) => S.backupState(x, stale, now).state;
+  assert.equal(st(d([row('a', 'SUCCESS', 2)])), 'good');
+  assert.equal(st(d([row('a', 'SUCCESS', 30)])), 'late');
+  assert.equal(st(d([row('b', 'FAILED', 1), row('a', 'SUCCESS', 2)])), 'failed', 'the newest finished run failed');
+  assert.equal(st(d([row('c', 'IN_PROGRESS', 0), row('a', 'SUCCESS', 2)])), 'good', 'a run in progress is not a result');
+  assert.equal(S.backupState(d([row('b', 'PARTIAL', 1)]), stale, now).why, 'partial');
+  assert.equal(S.backupState(d([]), stale, now).why, 'no good snapshot');
+  assert.equal(st({ repos: [], reachable: true }), 'norepo');
+  assert.equal(st({ repos: [], reposRead: false, reachable: true }), 'unread', 'an empty list nobody read is not "no repository"');
+  assert.equal(st({ repos: [{ name: 'r' }], reachable: false, snapshots: { r: [row('a', 'SUCCESS', 2)] } }), 'unread');
+  assert.equal(st(null), 'unread');
+  const two = d([row('a', 'SUCCESS', 40)], { repos: [{ name: 'r' }, { name: 'x', error: 'missing' }] });
+  assert.equal(st(two), 'unread', 'the newer good one may be in the repository that could not be read');
+  assert.equal(S.backupState(two, stale, now).why, '1 of 2 repositories not read');
+});
+
+test('backup days: good in any repository is good; not read is never drawn as missed', () => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  const on = (day, status) => ({ id: day, status, start: Date.parse(`${day}T01:00:00Z`), end: Date.parse(`${day}T02:00:00Z`) });
+  const d = { repos: [{ name: 'a' }, { name: 'b' }], reachable: true, snapshots: {
+    a: [on('2026-11-24', 'FAILED'), on('2026-11-23', 'FAILED')], b: [on('2026-11-24', 'SUCCESS')] },
+  snapshotTotals: { a: { whole: true }, b: { whole: true } } };
+  const days = S.backupDays(d, { days: 4, tz: 'UTC', now });
+  assert.deepEqual(days.map((x) => x.state), ['none', 'bad', 'ok', 'today']);
+  const part = S.backupDays({ ...d, repos: [{ name: 'a' }, { name: 'z' }] }, { days: 4, tz: 'UTC', now });
+  assert.deepEqual(part.map((x) => x.state), ['notread', 'notread', 'notread', 'today']);
+  assert.equal(S.backupDays({ repos: [], reachable: true }), null);
+});
+
+test('a list longer than the screen is shown page by page, each page the same time', () => {
+  assert.deepEqual(P.pageAt(0, 32, 14, 24000), { index: 0, pages: 3, from: 0, to: 14 });
+  assert.deepEqual(P.pageAt(8000, 32, 14, 24000), { index: 1, pages: 3, from: 14, to: 28 });
+  assert.deepEqual(P.pageAt(16000, 32, 14, 24000), { index: 2, pages: 3, from: 28, to: 32 });
+  assert.equal(P.pageAt(7000, 32, 14, 9000).index, 1, 'at least 6 s each');
+  assert.deepEqual(P.pageAt(99000, 3, 14, 20000), { index: 0, pages: 1, from: 0, to: 3 });
 });
 
 test('a shared delay record carries each device’s peak over 24 h', () => {
