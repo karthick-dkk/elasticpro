@@ -114,13 +114,13 @@ try {
   await page.goto(`${BASE}/#/play?display=${encodeURIComponent(secret)}`);
   const wall = await page.waitForFunction(() => {
     const t = document.querySelector('.pl-title');
-    return t && t.textContent === 'Fleet' && document.querySelectorAll('.pl-tile[data-cluster]').length > 0;
+    return t && t.textContent === 'Fleet' && document.querySelectorAll('.pl-ft[data-cluster]').length > 0;
   }, null, { timeout: 90000 }).then(() => true).catch(() => false);
   ok(wall, 'the Fleet wall drew, with a tile per cluster', wall ? '' : (await page.evaluate(() => document.body.innerText.slice(0, 300))));
   const seen = await page.evaluate(() => ({
     hash: location.hash, cookie: document.cookie, play: document.documentElement.classList.contains('play'),
-    tiles: document.querySelectorAll('.pl-tile[data-cluster]').length,
-    cluster: (document.querySelector('.pl-tile[data-cluster]') || { dataset: {} }).dataset.cluster || '',
+    tiles: document.querySelectorAll('.pl-ft[data-cluster]').length,
+    cluster: (document.querySelector('.pl-ft[data-cluster]') || { dataset: {} }).dataset.cluster || '',
     scrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     scrollY: document.documentElement.scrollHeight > document.documentElement.clientHeight,
     exit: !!document.querySelector('.pl-exit'),

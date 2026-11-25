@@ -210,11 +210,11 @@ pub fn guest_may_read(path: &str) -> bool {
 /// the shell's startup no-ops (BADGE, OPEN_APP, ENABLE_NET_ERRORS), and ZABBIX_CLUSTERS — the
 /// credential-free list of the clusters that are Zabbix hosts, without which a wall could
 /// not name them; and CLUSTER_META_GET, each cluster's type and ULM, without which the wall
-/// would raise "no snapshot" for a ULM cluster that takes none (docs/PLAY.md, Spotlight and
-/// Backups).
+/// would raise "no snapshot" for a ULM cluster that takes none (docs/PLAY.md, Fleet and
+/// Backups); and LOGDELAY_BOARD, the late devices as counts per cluster (no device is named).
 pub const PLAY_READS: &[&str] = &[
     "FLEET_STATE", "CLUSTER_DATASET", "EVENTS_TICKET", "REFRESH",
-    "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_MONTHLY_ALL",
+    "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_MONTHLY_ALL", "LOGDELAY_BOARD",
     "SILENCE_LIST", "ACK_LIST", "PLAY_STATE", "PLAY_ZOOM_SET", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
     "PING", "CONFIG_VIEW", "ES", "ZABBIX_CLUSTERS", "CLUSTER_META_GET",
     "WHOAMI", "LOGOUT", "BADGE", "OPEN_APP", "ENABLE_NET_ERRORS",
@@ -639,7 +639,7 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // measurement a user runs by hand, read back from the store on the clusters they see, so a
         // user's; the levels, fields and silence limit decide what "late" means fleet-wide, so an
         // admin's (a limited admin may read them; SET is refused in the handler).
-        "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_LOGTYPE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES" => Some(Role::User),
+        "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_LOGTYPE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES" | "LOGDELAY_BOARD" => Some(Role::User),
         "LOGDELAY_SETTINGS_GET" | "LOGDELAY_SETTINGS_SET" => Some(Role::Admin),
         // The history store: where the core writes unattended, with a credential it keeps.
         // Reading its settings, testing, arming and copying are an admin's (a limited admin may

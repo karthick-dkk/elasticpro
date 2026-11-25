@@ -26,19 +26,15 @@ export function burnShift(now) {
   return { x, y };
 }
 
-/**
- * How long a slide stays: `dwellSec`, except the spotlight, which stays `perClusterSec` per
- * cluster in it.
- */
-export function dwellMs(slideId, { dwellSec = 20, slideDwell = {}, perClusterSec = 13, spotlightCount = 0 } = {}) {
-  if (slideId === 'spotlight' && spotlightCount > 0) return perClusterSec * spotlightCount * 1000;
+/** How long a slide stays: its own time when one is set for it, else the display's. */
+export function dwellMs(slideId, { dwellSec = 20, slideDwell = {} } = {}) {
   return (slideDwell[slideId] || dwellSec) * 1000;
 }
 
 /**
  * The next slide to show from `from`, stepping `dir`, over `order`. A slide `isEmpty` says
- * has nothing is skipped — except Alerts, which always shows ("All clear"). When every
- * slide is empty, Alerts; when there is no Alerts in the order either, `from` stays.
+ * has nothing is skipped — except Fleet, which always has something to say. When every slide
+ * is empty, Fleet; when there is no Fleet in the order either, `from` stays.
  */
 export function nextSlide(order, from, dir, isEmpty) {
   const n = order.length;
@@ -46,9 +42,9 @@ export function nextSlide(order, from, dir, isEmpty) {
   const step = dir < 0 ? -1 : 1;
   for (let k = 1; k <= n; k++) {
     const i = (((from + step * k) % n) + n) % n;
-    if (order[i] === 'alerts' || !isEmpty(order[i])) return i;
+    if (order[i] === 'fleet' || !isEmpty(order[i])) return i;
   }
-  const a = order.indexOf('alerts');
+  const a = order.indexOf('fleet');
   return a >= 0 ? a : Math.max(0, Math.min(from, n - 1));
 }
 
@@ -58,7 +54,7 @@ export function nextSlide(order, from, dir, isEmpty) {
  */
 export function createEngine({ order, now = 0, isEmpty = () => false, dwellFor = () => 20000 }) {
   const st = { order: [...order], index: 0, startedAt: now, paused: false, pausedAt: 0 };
-  if (st.order.length && st.order[0] !== 'alerts' && isEmpty(st.order[0])) st.index = nextSlide(st.order, 0, 1, isEmpty);
+  if (st.order.length && st.order[0] !== 'fleet' && isEmpty(st.order[0])) st.index = nextSlide(st.order, 0, 1, isEmpty);
   const go = (i, t) => { st.index = i; st.startedAt = t; if (st.paused) st.pausedAt = t; };
   return {
     get current() { return st.order[st.index]; },
@@ -86,7 +82,7 @@ export function createEngine({ order, now = 0, isEmpty = () => false, dwellFor =
     tick(t) {
       if (st.paused || !st.order.length) return false;
       const cur = st.order[st.index];
-      if ((cur !== 'alerts' && isEmpty(cur)) || this.elapsed(t) >= dwellFor(cur)) {
+      if ((cur !== 'fleet' && isEmpty(cur)) || this.elapsed(t) >= dwellFor(cur)) {
         go(nextSlide(st.order, st.index, 1, isEmpty), t);
         return true;
       }
@@ -131,43 +127,10 @@ export function takeover(prev, { open = [], held = [], acked = () => false, now,
 }
 
 /**
- * Spotlight membership, per display. `reasons` is clusterId → [why…] for every cluster with
- * a critical problem now. A cluster joins when it has one and leaves `leaveAfterMs` after its
- * last one cleared. Returns a new Map clusterId → {since, lastBad, why:[…]}.
- */
-export function spotlightMembers(prev, reasons, now, leaveAfterMs) {
-  const out = new Map();
-  const cur = reasons instanceof Map ? reasons : new Map(Object.entries(reasons || {}));
-  for (const [id, why] of cur) {
-    if (!why || !why.length) continue;
-    const p = prev && prev.get(id);
-    out.set(id, { since: p ? p.since : now, lastBad: now, why: [...why] });
-  }
-  for (const [id, p] of prev || []) {
-    if (out.has(id)) continue;
-    if (now - p.lastBad < leaveAfterMs) out.set(id, { ...p, why: p.why, clearing: true });
-  }
-  return out;
-}
-
-/**
  * "As of" for a figure: fresh, stale (older than its stale time — two refreshes) or none
  * (no answer at all). `staleAfterMs` defaults to twice `refreshMs`.
  */
 export function staleness(asOf, now, { refreshMs = 60000, staleAfterMs = 0 } = {}) {
   if (!asOf) return 'none';
   return now - asOf > (staleAfterMs || 2 * refreshMs) ? 'stale' : 'fresh';
-}
-
-/** Which spotlight cluster is on and which chart window, from the time on the slide. */
-export const CHART_WINDOWS = Object.freeze([{ days: 7, ms: 3000 }, { days: 15, ms: 5000 }, { days: 30, ms: 5000 }]);
-export function spotlightPhase(elapsedMs, count, perClusterMs) {
-  const n = Math.max(1, count);
-  const per = Math.max(1000, perClusterMs);
-  const idx = Math.floor(elapsedMs / per) % n;
-  const cycle = CHART_WINDOWS.reduce((s, w) => s + w.ms, 0);
-  let t = (elapsedMs % per) % cycle;
-  let w = 0;
-  while (w < CHART_WINDOWS.length - 1 && t >= CHART_WINDOWS[w].ms) { t -= CHART_WINDOWS[w].ms; w++; }
-  return { index: idx, days: CHART_WINDOWS[w].days };
 }

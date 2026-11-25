@@ -127,11 +127,10 @@ test('a password file needs its host, in deploy.sh and in the core alike', () =>
 });
 
 test('the Play keys are the same list in the core, deploy.sh, config.txt.example and play::settings', () => {
-  // docs/PLAY.md "Play settings" names ten UI_PLAY_* keys; play/settings.rs KEYS is what
+  // docs/PLAY.md "Play settings" names the UI_PLAY_* keys; play/settings.rs KEYS is what
   // PLAY_CONFIG_GET reports as managed, so a key missing there would lock nothing visibly.
   const PLAY = ['UI_PLAY_ENABLED', 'UI_PLAY_DELAY_YELLOW_MIN', 'UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_NODE_EXPECTED',
-    'UI_PLAY_NODE_BLINK', 'UI_PLAY_NODE_CHECK_SECONDS', 'UI_PLAY_SPOTLIGHT_WHEN', 'UI_PLAY_SPOTLIGHT_LEAVE_MIN',
-    'UI_PLAY_SPOTLIGHT_SECONDS', 'UI_PLAY_EXCLUDE'];
+    'UI_PLAY_NODE_CHECK_SECONDS', 'UI_PLAY_EXCLUDE'];
   const core = coreRules();
   const sh = deployRules();
   const ex = read('deploy/config.txt.example');

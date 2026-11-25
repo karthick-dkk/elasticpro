@@ -52,7 +52,7 @@ const POLLS: &[&str] = &[
     // is not recorded a second time when it went through.
     "HOUSEKEEPING_GET", "HOUSEKEEPING_RUN",
     // A Play wall asks for its state each minute, and reads (and offers) the shared measurements.
-    "PLAY_STATE", "ACK_LIST", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
+    "PLAY_STATE", "ACK_LIST", "PLAY_SHARE_GET", "PLAY_SHARE_PUT", "LOGDELAY_BOARD",
     // Opening Planning reads the templates.
     "PLAN_TEMPLATES_GET",
     // The Request Centre's ElasticPro health tab reads it every 5 s while open (a read).

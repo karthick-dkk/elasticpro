@@ -1,6 +1,6 @@
 /**
  * The High level (approved 2026-11-01): critical > high > warning, everywhere a level is
- * sorted, counted, filtered, coloured, sent to Zabbix or blinked on Play.
+ * sorted, counted, filtered, coloured, sent to Zabbix or shown on Play.
  *
  *   critical  unchanged — red health, a node left, disk past the high watermark, not answering
  *   high      log delay over 60 min, JVM heap over 85 %, an SLM policy whose last run failed
@@ -31,10 +31,6 @@ const st = await import(url('ui/js/core/state.js'));
 const acks = await import(url('ui/js/core/acks.js'));
 const { DEFAULTS } = await import(url('ui/js/core/config.js'));
 const St = await import(url('ui/js/play/status.js'));
-const Al = await import(url('ui/js/play/alerts.js'));
-const Sp = await import(url('ui/js/play/spotlight.js'));
-const Ld = await import(url('ui/js/play/logdelay.js'));
-const V = await import(url('ui/js/play/volume.js'));
 // The core's shipped levels as LOGDELAY_SETTINGS_GET reports them (test data; the UI keeps none).
 const DEFAULT_THRESHOLDS = { noDelayUnder: 15, delayFrom: 30, criticalOver: 60 };
 
@@ -232,53 +228,34 @@ const data = (status, nodes) => ({ reachable: true, updatedAt: 1, health: { stat
 const open = (level, family, title) => ({ level, family, title, items: [], since: 1 });
 const easy = [node('a', 10, 100), node('b', 12, 100)];
 
-test('Play status: a High cluster is orange and says "High"; rank critical > high > warning', () => {
-  const hi = St.clusterStatus(cluster, data('green', easy), { open: [open('high', 'slm-fail', 'Last SLM run failed')] });
-  assert.equal(hi.tone, 'orange');
-  assert.equal(hi.word, 'High');
-  assert.equal(hi.line, 'High · Last SLM run failed');
-  const warn = St.clusterStatus(cluster, data('green', easy), { open: [open('warning', 'ilm', 'ILM')] });
-  const crit = St.clusterStatus(cluster, data('green', easy), { open: [open('critical', 'capacity', 'Disk capacity changed')] });
-  const red = St.clusterStatus(cluster, data('red', easy), { open: [open('high', 'heap', 'heap')] });
-  assert.equal(warn.tone, 'yellow');
-  assert.equal(crit.tone, 'red');
-  assert.equal(red.tone, 'red', 'red health outranks a High alert');
+test('Play status: the level is the worst open or acknowledged Critical or High alert; a warning is not a problem', () => {
+  const al = (level, family, title, state) => ({ ...open(level, family, title), key: `c1:${family}`, state });
+  const hi = St.clusterStatus(cluster, data('green', easy), { alerts: [al('high', 'slm-fail', 'Last SLM run failed', 'open')] });
+  assert.equal(hi.level, 'high');
+  assert.equal(hi.problems[0].what, 'Last SLM run failed');
+  const warn = St.clusterStatus(cluster, data('green', easy), { alerts: [al('warning', 'ilm', 'ILM', 'open')] });
+  assert.equal(warn.level, null);
+  const crit = St.clusterStatus(cluster, data('green', easy), { alerts: [al('high', 'heap', 'h', 'open'), al('critical', 'capacity', 'Disk capacity changed', 'acked')] });
+  assert.equal(crit.level, 'critical', 'an acknowledged problem is still a problem');
+  assert.equal(crit.problems.length, 2);
+  const red = St.clusterStatus(cluster, data('red', easy), {});
+  assert.equal(red.level, 'critical', 'red health with no alert (its rule is off) is still critical');
+  assert.equal(St.clusterStatus(cluster, data('red', easy), { alerts: [al('critical', 'health', 'Cluster health red', 'open')] }).problems.length, 1, 'said once');
   assert.ok(crit.rank > hi.rank && hi.rank > warn.rank);
-  // Tone first: a green-health cluster with one High alert sorts above a yellow-health cluster
-  // with nothing open, and above one with no data.
-  const yellowQuiet = St.clusterStatus(cluster, data('yellow', easy), { open: [] });
+  const yellowQuiet = St.clusterStatus(cluster, data('yellow', easy), {});
   const noData = St.clusterStatus(cluster, null, {});
-  const warnMany = St.clusterStatus(cluster, data('yellow', easy), { open: Array.from({ length: 40 }, (_, i) => open('warning', 'ilm', `w${i}`)) });
-  assert.ok(hi.rank > yellowQuiet.rank, 'High on green outranks yellow health');
-  assert.ok(hi.rank > warnMany.rank, 'no number of warnings lifts a yellow tile above a High one');
-  assert.ok(yellowQuiet.rank > noData.rank && noData.rank > St.clusterStatus(cluster, data('green', easy), { open: [] }).rank, 'yellow > no data > green');
-  assert.equal(St.worstAlert([open('warning', 'ilm', 'w'), open('high', 'heap', 'h'), open('warning', 'x', 'x')]).title, 'h');
+  const warnMany = St.clusterStatus(cluster, data('yellow', easy), { alerts: Array.from({ length: 40 }, (_, i) => al('warning', `w${i}`, `w${i}`, 'open')) });
+  assert.ok(hi.rank > yellowQuiet.rank && hi.rank > warnMany.rank, 'no number of warnings lifts a cluster over a High one');
+  assert.ok(yellowQuiet.rank > noData.rank && noData.rank > St.clusterStatus(cluster, data('green', easy), {}).rank, 'yellow > no data > green');
 });
 
-test('Play blinks: critical → blink-crit, High → blink-high, a node that left wins', () => {
-  const crit = { tone: 'red' }, high = { tone: 'orange' }, warn = { tone: 'yellow' };
-  assert.equal(St.tileBlink(crit, false), 'blink-crit');
-  assert.equal(St.tileBlink(high, false), 'blink-high');
-  assert.equal(St.tileBlink(warn, false), '');
-  assert.equal(St.tileBlink(crit, true), 'pl-blink');
-  assert.equal(St.tileBlink(high, true), 'pl-blink');
-  // The node table: one definition of a node's critical disk — the high watermark.
-  const f = St.fullestOf(data('green', [node('a', 91, 100), node('b', 20, 100)]));
-  assert.equal(St.nodeDiskCritical(91, f), true);
-  assert.equal(St.nodeDiskCritical(f.high - 0.1, f), false);
-  assert.equal(St.nodeDiskCritical(NaN, f), false);
-  assert.equal(Sp.nodeRowBlink(true), '.blink-crit');
-  assert.equal(Sp.nodeRowBlink(false), '');
-  // Log delay: red is classify's CRITICAL, strictly over the red line.
-  assert.equal(Ld.delayRowBlink(61, DEFAULT_THRESHOLDS), '.blink-crit');
-  assert.equal(Ld.delayRowBlink(60, DEFAULT_THRESHOLDS), '');
-  assert.equal(Ld.delayRowBlink(null, DEFAULT_THRESHOLDS), '', 'unmeasured is not red');
-  // Volume: days of disk left under the slide's red line.
-  assert.equal(V.runwayTone(V.RUNWAY_RED_DAYS - 1), 'red');
-  assert.equal(V.runwayBlink(V.RUNWAY_RED_DAYS - 1), '.blink-crit');
-  assert.equal(V.runwayBlink(V.RUNWAY_RED_DAYS), '');
-  assert.equal(V.runwayTone(20), 'yellow');
-  assert.equal(V.runwayBlink(null), '');
+test('Play: nothing blinks, and the colours are the light ones', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  const from = css.indexOf('/* Play */'), to = css.indexOf('/* Reports › Planning');
+  const play = css.slice(from, to);
+  assert.ok(from > 0 && to > from);
+  assert.ok(!/blink|@keyframes|animation:/.test(play), 'no animation in Play');
+  for (const [k, v] of [['green', '#a5e8bb'], ['yellow', '#ffecb0'], ['red', '#ffd24d'], ['orange', '#9fd0ff'], ['blue', '#9fd0ff']]) assert.match(play, new RegExp(`--tv-${k}: ${v}`));
 });
 
 test('heap colour: a cell over the High line is orange, the alert\'s colour, and its tooltip says the line', async () => {
@@ -290,40 +267,5 @@ test('heap colour: a cell over the High line is orange, the alert\'s colour, and
   assert.match(O.HEAP_TITLE, /over 85 %/);
   const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
   assert.match(css, /\.cl-mini i\.over \{ background: var\(--high\); \}/);
-  assert.match(css, /\.pl-bar i\.orange \{ background: var\(--tv-orange\); \}/);
-});
-
-test('Play CSS: the blink rates, colour-only keyframes, and a steady highlight for reduced motion', () => {
-  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
-  assert.match(css, /\.pl-tile\.blink-crit\s*\{\s*animation:\s*pl-blink-crit 1\.2s/);
-  assert.match(css, /\.pl-tile\.blink-high\s*\{\s*animation:\s*pl-blink-high 2\.4s/);
-  assert.match(css, /tr\.blink-crit > td, \.pl-root td\.blink-crit \{ animation: pl-blink-cell 1\.2s/);
-  for (const k of ['pl-blink-crit', 'pl-blink-high', 'pl-blink-cell']) {
-    const body = css.slice(css.indexOf(`@keyframes ${k}`), css.indexOf('}\n}', css.indexOf(`@keyframes ${k}`)));
-    assert.ok(body.length > 0, `${k} keyframes`);
-    assert.ok(!/width|height|margin|padding|transform|top|left/.test(body.replace(/background/g, '')), `${k} animates colour only`);
-  }
-  const reduce = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('\n');
-  for (const sel of ['.pl-tile.blink-crit', '.pl-tile.blink-high', '.pl-blink', 'tr.blink-crit > td']) {
-    assert.ok(reduce.includes(sel), `${sel} is held still under prefers-reduced-motion`);
-  }
-  assert.match(reduce, /animation: none/);
-  assert.match(css, /--tv-orange:\s*#ff8c42/);
-  assert.match(css, /\.pl-arow\.high \{/);
-  assert.match(css, /\.pl-nodes td\.pl-node \{ border-left: \.3em solid transparent; \}/, 'every node row keeps the bar, so columns stay put');
-});
-
-test('Play Alerts slide: HIGH rows, ordered between critical and warning; Open now counts High', () => {
-  const list = [merged('a:ilm', 'warning'), merged('a:slm-fail', 'high'), merged('b:disk', 'critical')];
-  const ctx = {
-    now: 10, tz: null, merged: list, clusters: [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }],
-    acked: () => null, openSince: (m) => m.since, takeover: null, sharedAcks: false, heldBy: new Map(), afterMount: () => {},
-  };
-  const el = Al.render(ctx);
-  const rows = [...el.querySelectorAll('.pl-arow')];
-  assert.deepEqual(rows.map((r) => r.querySelector('.pl-sev').textContent), ['CRIT', 'HIGH', 'WARN']);
-  assert.ok(rows[1].classList.contains('high'));
-  const kpis = Object.fromEntries([...el.querySelectorAll('.pl-aside .pl-kpi')].map((k) => [k.querySelector('.pl-k').textContent, k]));
-  assert.deepEqual(['Critical', 'High', 'Warning', 'Acknowledged'].map((k) => kpis[k] && kpis[k].querySelector('.pl-v').textContent), ['1', '1', '1', '0']);
-  assert.ok(kpis.High.classList.contains('orange'));
+  assert.match(css, /\.pl-bar i\.orange \{ background: var\(--pl-orange\)/);
 });

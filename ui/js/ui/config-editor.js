@@ -1148,9 +1148,10 @@ export function defaultsFields() {
       f('Refresh every (s)', 'refreshIntervalSec', text('ce-ri', d.refreshIntervalSec, { mono: true }))),
     grid(
       f('Disk warn %', 'diskWarnPercent', text('ce-dw', d.diskWarnPercent, { mono: true })),
-      f('Disk critical %', 'diskCritPercent', text('ce-dc', d.diskCritPercent, { mono: true })),
-      f('Snapshot stale (h)', 'snapshotStaleHours', text('ce-ss', d.snapshotStaleHours, { mono: true }))),
+      f('Disk high %', 'diskHighPercent', text('ce-dh', d.diskHighPercent, { mono: true })),
+      f('Disk critical %', 'diskCritPercent', text('ce-dc', d.diskCritPercent, { mono: true }))),
     grid(
+      f('Snapshot stale (h)', 'snapshotStaleHours', text('ce-ss', d.snapshotStaleHours, { mono: true })),
       f('Log index pattern', 'logIndexPattern', text('ce-lp', d.logIndexPattern, { mono: true })),
       f('Time field', 'timeField', text('ce-tf', d.timeField, { mono: true })),
       f('Certificates', 'tls', select('ce-dtls', d.tls || 'auto', [['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — accept any, on every cluster']]),
@@ -1176,11 +1177,13 @@ export async function saveDefaultsForm() {
   if (!r) return { ok: false, message: 'No config loaded' };
   const managed = managedDefaults();
   const n = (id, min, max) => { const v = Number(val(id)); return Number.isFinite(v) && v >= min && v <= max ? v : null; };
-  const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
-  const needed = { refreshIntervalSec: ri, diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to };
+  const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dh = n('ce-dh', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
+  const needed = { refreshIntervalSec: ri, diskWarnPercent: dw, diskHighPercent: dh, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to };
   if (Object.entries(needed).some(([k, v]) => v == null && !(k in managed))) return { ok: false, message: 'Check the numeric fields.' };
+  const disk = [['diskWarnPercent', dw], ['diskHighPercent', dh], ['diskCritPercent', dc]].map(([k, v]) => Number(k in managed ? state.defaults[k] : v));
+  if (disk[0] > disk[1] || disk[1] > disk[2]) return { ok: false, message: 'Disk levels go up: warn, then high, then critical.' };
   const next = { readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
-    diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
+    diskWarnPercent: dw, diskHighPercent: dh, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
     logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),
     liveRedraw: val('ce-lr'), defaultScope: val('ce-ds') };
   for (const k of Object.keys(managed)) delete next[k];

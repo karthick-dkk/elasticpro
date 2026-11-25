@@ -1,16 +1,45 @@
-/** The pieces every Play slide is built from: a figure tile, a pill, a list that fits. */
+/** The pieces every Play slide is built from: a donut, words for times, a list that fits. */
 
 import { h } from '../lib/dom.js';
 
-/** A big figure: label over value, an optional line under it. `tone` colours the value. */
-export function kpi(label, value, sub, tone = '') {
-  return h(`div.pl-kpi${tone ? `.${tone}` : ''}`, h('div.pl-k', label), h('div.pl-v', value), sub ? h('div.pl-s', sub) : null);
-}
-
-export const pillEl = (text, tone = 'grey') => h(`span.pl-pill.${tone}`, text);
-
 /** "not measured" / "no data": unknown, said in words and set apart, never a 0. */
 export const unknown = (text = 'no data', title = '') => h('span.pl-unk', { title: title || null }, text);
+
+/**
+ * A donut with its legend: `parts` = [{ n, label, tone }] (tone: red orange yellow green part grey
+ * blue). A part of 0 keeps its legend line, dimmed, and takes no arc. The words carry the
+ * meaning, the colour only helps; the drawing says the same figures to a screen reader.
+ */
+export function donut(parts, { total, label, size = '' } = {}) {
+  const sum = parts.reduce((a, p) => a + p.n, 0);
+  let at = 0;
+  const gap = parts.filter((p) => p.n > 0).length > 1 ? 0.5 : 0;
+  const stops = [];
+  for (const p of parts) {
+    if (!(p.n > 0)) continue;
+    const to = at + (p.n / sum) * 100;
+    stops.push(`var(--pl-${p.tone}) ${at.toFixed(2)}% ${Math.max(at, to - gap).toFixed(2)}%`);
+    if (gap) stops.push(`var(--tv-panel) ${Math.max(at, to - gap).toFixed(2)}% ${to.toFixed(2)}%`);
+    at = to;
+  }
+  const said = `${total} ${label}: ${parts.filter((p) => p.n > 0).map((p) => `${p.n} ${p.label}`).join(', ') || 'none'}`;
+  return h('div.pl-dwrap',
+    h(`div.pl-donut${size ? `.${size}` : ''}`, { role: 'img', 'aria-label': said,
+      style: { background: stops.length ? `conic-gradient(${stops.join(', ')})` : 'var(--tv-panel-2)' } },
+    h('div.pl-dhole', h('b', String(total)), h('span', label))),
+    h('div.pl-legend', ...parts.map((p) => h(`div.pl-lg${p.n > 0 ? '' : '.zero'}`, h(`i.${p.tone}`), h('b', String(p.n)), h('span', p.label)))));
+}
+
+/**
+ * Which part of a list that is longer than the screen is shown: every page gets the same share
+ * of the slide's time, at least 6 s. `elapsed` is the time the slide has been on.
+ */
+export function pageAt(elapsed, total, per, dwell) {
+  const pages = Math.max(1, Math.ceil(total / per));
+  const each = Math.max(6000, Math.floor(dwell / pages));
+  const index = Math.floor(Math.max(0, elapsed) / each) % pages;
+  return { index, pages, from: index * per, to: Math.min(total, (index + 1) * per) };
+}
 
 /** Minutes of delay as an operator reads them: "12 min", "1 h 05", "2.3 d". */
 export function minutes(m) {
@@ -40,13 +69,13 @@ export function zoneName(tz) {
   } catch (_) { return tz; }
 }
 
-/** "3 h 12 m" for how long something has been open. */
+/** "2 min", "3 h 12 min", "1 d 3 h": how long something has been open. */
 export function openFor(ms) {
   if (!isFinite(ms) || ms < 0) return '–';
   const m = Math.floor(ms / 60000);
-  if (m < 60) return `${m} m`;
+  if (m < 60) return `${m} min`;
   const hrs = Math.floor(m / 60);
-  if (hrs < 48) return `${hrs} h ${String(m % 60).padStart(2, '0')} m`;
+  if (hrs < 24) return `${hrs} h ${m % 60} min`;
   return `${Math.floor(hrs / 24)} d ${hrs % 24} h`;
 }
 

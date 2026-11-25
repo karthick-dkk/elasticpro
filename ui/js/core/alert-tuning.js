@@ -27,20 +27,36 @@
  * badge and the top bar all said "open" while counting acknowledged ones.
  */
 
-import { countLevels, worstLevel } from './alert-levels.js';
+import { LEVELS, countLevels, worstLevel, levelRank } from './alert-levels.js';
 import { heapOverHigh, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from './alert-rules.js';
 
 /** Points below a threshold before a raised disk alert clears. */
 export const DISK_HYSTERESIS = 2;
 
 /**
- * The disk rule's level for `pct`, given the level it was raised at last time (`prev`:
- * 'critical' | 'warning' | null). Pure, so the flapping case is testable.
+ * The three disk lines, percent of a node's disk: Warning, High and Critical from (85 / 90 / 95
+ * unless the settings say otherwise). The one definition: the Alerts page, the mail and Play's
+ * Fleet page all read it. Lines out of order (a Warning kept at 92 from before there was a High
+ * line of 90) leave no room for High: it is not used, rather than raised below Warning.
  */
-export function diskLevel(pct, prev, warn, crit, band = DISK_HYSTERESIS) {
+export function diskLines(defaults = {}) {
+  const line = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+  const warning = line(defaults.diskWarnPercent), critical = line(defaults.diskCritPercent), high = line(defaults.diskHighPercent);
+  return { warning, high: high < warning || high > critical ? NaN : high, critical };
+}
+
+/**
+ * The disk level of a node at `pct` against `lines` (diskLines), given the level it was raised
+ * at last time (`prev`, or null): a level is held until the disk falls `band` points below its
+ * line. Null below them all, or when the disk is not known. Pure, so the flapping case is testable.
+ */
+export function diskLevel(pct, prev, lines, band = DISK_HYSTERESIS) {
   if (!Number.isFinite(pct)) return null;
-  if (pct >= crit || (prev === 'critical' && pct >= crit - band)) return 'critical';
-  if (pct >= warn || (prev && pct >= warn - band)) return 'warning';
+  for (const level of LEVELS) {
+    const line = lines[level];
+    if (!Number.isFinite(line)) continue;
+    if (pct >= line || (prev && levelRank(prev) >= levelRank(level) && pct >= line - band)) return level;
+  }
   return null;
 }
 
@@ -105,7 +121,7 @@ export function tuneAlerts(list, ctx = {}) {
     if (bal && disk && (bal.balanceCauses || []).some((c) => c === 'flood' || c === 'high')) {
       drop.add(disk);
       bal.level = worstLevel(bal.level, disk.level);
-      bal.detail = `${bal.detail}  Cluster average ${disk.diskPercent != null ? `${disk.diskPercent.toFixed(1)}%` : 'above its threshold'}.`;
+      if (Number.isFinite(disk.diskAverage)) bal.detail = `${bal.detail}  Cluster average ${disk.diskAverage.toFixed(1)}%.`;
     }
     // 2. unassigned shards: the health row says it
     if (bal && fam('health').length && (bal.balanceCauses || []).length && bal.balanceCauses.every((c) => c === 'unassigned')) drop.add(bal);

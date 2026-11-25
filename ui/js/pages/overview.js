@@ -1603,7 +1603,7 @@ function repoSection(c, d) {
 
 /**
  * Where a node's CPU, heap and disk turn amber ('low') and red ('high'). One definition: the node
- * table here and Play's spotlight colour the same reading the same way.
+ * table here and the Clusters row colour the same reading the same way.
  */
 export const NODE_LOAD_LEVELS = { cpu: { warn: 80, crit: 90 }, heap: { warn: 75, crit: 90 }, disk: { warn: 85, crit: 90 } };
 export function nodeLoadLevel(p, which) {

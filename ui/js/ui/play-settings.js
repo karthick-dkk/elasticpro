@@ -16,7 +16,7 @@ import { MANAGED_NOTE } from '../core/managed.js';
 import { navigateTo } from '../core/intent.js';
 import { fullscreen } from '../core/fullscreen.js';
 import {
-  NO_PLAY, SLIDES, DWELL, ZOOMS, EXPIRES, SPOTLIGHT_WHEN, playConfigGet, playConfigSet, playLinkList, playLinkCreate, playLinkRevoke,
+  NO_PLAY, SLIDES, DWELL, ZOOMS, EXPIRES, playConfigGet, playConfigSet, playLinkList, playLinkCreate, playLinkRevoke,
   playLinkSet, lockedFields, linkPayload, scopeText, slidesText, displaySettings, moveSlide, settingsPayload, watchRules, watchProblems, FLEET_KEYS,
   watchPayload, excludeAdd, replacePayload,
 } from '../core/play-config.js';
@@ -173,7 +173,7 @@ function editDisplay(l) {
     mount(list, ...slides.map((s, i) => h('div.pl-cfg-slide',
       h('label.pl-check', h('input', { type: 'checkbox', id: `pl-show-${s.id}`, checked: s.show,
         onchange: (e) => { s.show = e.target.checked; } }), SLIDES.find((x) => x.id === s.id).label),
-      s.id === 'fleet' ? h('span.muted.pl-slide-note', 'every cluster, in the Fleet wall order below') : null,
+      s.id === 'fleet' ? h('span.muted.pl-slide-note', 'problems first, the others in the Fleet order below') : null,
       h('span.muted', 'stays'),
       Object.assign(sel(`pl-dwell-${s.id}`, s.dwellSec, [...new Set([...DWELL, s.dwellSec])].map((n) => [n, `${n} s`])),
         { onchange: (e) => { s.dwellSec = Number(e.target.value); } }),
@@ -183,13 +183,12 @@ function editDisplay(l) {
   draw();
   const body = h('div.pl-form',
     h('div', { style: { fontWeight: 620, fontSize: '12.5px' } }, 'Slides, in order'), list,
-    h('div.field', 'Fleet wall order', h('div.pl-order',
+    h('div.field', 'Fleet order', h('div.pl-order',
       ...[0, 1, 2].map((i) => sel(`pl-order-${i}`, d.fleetOrder[i] || 'none',
         [...(i ? [['none', '(none)']] : []), ...FLEET_KEYS.map(([k, t]) => [k, `${['1st', '2nd', '3rd'][i]}: ${t}`])]))),
       h('span.muted', { style: { fontSize: '11px' } }, 'Largest first for each; the cluster name breaks a tie.')),
     h('div.pl-grid',
-      field('A critical alert', sel('pl-critical', d.criticalTakesScreen ? 'takes' : 'bar', [['takes', 'Takes the screen, held 5 min'], ['bar', 'Red bar only']])),
-      field('Cluster spotlight', sel('pl-spot', d.spotlightAll ? 'every' : 'critical', [['critical', 'Clusters with a critical problem (automatic)'], ['every', 'Every cluster, by name']])),
+      field('A critical alert', sel('pl-critical', d.criticalTakesScreen ? 'takes' : 'bar', [['takes', 'Brings Fleet to the screen, held 5 min'], ['bar', 'Is shown on Fleet only']])),
       field('Theme', sel('pl-theme', d.theme, [['dark', 'Dark'], ['light', 'Light']])),
       field('Sound on a new critical alert', sel('pl-sound', d.sound, [['off', 'Off'], ['chime', 'Short chime']])),
       field('Zoom', sel('pl-zoom', d.zoom === null ? 'keep' : d.zoom, ZOOMS.map(([z, t]) => [z === null ? 'keep' : z, t])))));
@@ -200,7 +199,7 @@ function editDisplay(l) {
         const zoom = val('pl-zoom');
         const next = settingsPayload({
           slides: slides.map((s) => ({ ...s, dwellSec: Number(val(`pl-dwell-${s.id}`)) || s.dwellSec, show: checked(`pl-show-${s.id}`) })),
-          criticalTakesScreen: val('pl-critical') === 'takes', spotlightAll: val('pl-spot') === 'every',
+          criticalTakesScreen: val('pl-critical') === 'takes',
           theme: val('pl-theme'), sound: val('pl-sound'), zoom: zoom === 'keep' ? null : Number(zoom),
           fleetOrder: [0, 1, 2].map((i) => val(`pl-order-${i}`)).filter((k) => k !== 'none'),
         });
@@ -230,29 +229,13 @@ function watchCard() {
   const num = (id, path, v, lo) => lockIt(path, h('input.mono', { id, type: 'number', min: lo, step: 1, value: String(v), style: { width: '80px' } }));
   const mark = (path) => ([].concat(path).some((p) => lk.has(p)) ? h('span.muted.pl-managed', MANAGED_NOTE) : null);
   const row = (label, path, ...inputs) => h('div.pl-row', h('span.pl-label', label), ...inputs, mark(path));
-  const tick = (path, on) => (id) => {
-    const c = checkbox(`pl-when-${id}`, SPOTLIGHT_WHEN.find((x) => x.id === id).label, on.includes(id));
-    c.querySelector('input').disabled = !admin || lk.has(path);
-    if (lk.has(path)) c.title = MANAGED_NOTE;
-    return c;
-  };
-  const whenOf = tick('spotlight.when', w.spotlight.when);
   const body = h('div.pl-watch',
     row('Delay colours', ['delayYellowFromMin', 'delayRedAboveMin'],
-      h('span', 'green below'), num('pl-yellow', 'delayYellowFromMin', w.delayYellowFromMin, 1),
-      h('span', 'min, yellow up to'), num('pl-red', 'delayRedAboveMin', w.delayRedAboveMin, 2), h('span', 'min, red over')),
+      h('span', 'on time below'), num('pl-yellow', 'delayYellowFromMin', w.delayYellowFromMin, 1),
+      h('span', 'min, late up to'), num('pl-red', 'delayRedAboveMin', w.delayRedAboveMin, 2), h('span', 'min, critical over')),
     h('div.pl-sub', 'A node leaves a cluster'),
     row('Nodes it should have', 'nodeExpected', lockIt('nodeExpected', sel('pl-expected', w.nodeExpected, [['seen24h', 'Seen in the last 24 h'], ['pinned', 'Pinned (a list I keep)']]))),
-    row('Its tile', 'nodeBlink', lockIt('nodeBlink', sel('pl-blink', w.nodeBlink, [['untilBack', 'Blinks every 3 s until the node is back'], ['untilAck', 'Blinks until acknowledged'], ['off', 'Red, no blinking']]))),
     row('Checked every', 'nodeCheckSec', lockIt('nodeCheckSec', sel('pl-check', w.nodeCheckSec, [...new Set([60, 30, 180, w.nodeCheckSec])].map((n) => [n, `${n} s`])))),
-    h('div.pl-sub', 'Cluster spotlight: who is in it'),
-    h('div.pl-whens', ...SPOTLIGHT_WHEN.map((x) => whenOf(x.id)), mark('spotlight.when')),
-    row('Each cluster shows for', 'spotlight.perClusterSec', lockIt('spotlight.perClusterSec', sel('pl-persec', w.spotlight.perClusterSec,
-      [...new Set([13, 10, 20, 30, w.spotlight.perClusterSec])].map((n) => [n, `${n} s${n === 13 ? ' (default)' : ''}`])))),
-    row('Leaves the spotlight', 'spotlight.leaveAfterMin', lockIt('spotlight.leaveAfterMin', sel('pl-leave', w.spotlight.leaveAfterMin,
-      [...new Set([10, 1, 30, w.spotlight.leaveAfterMin])].map((n) => [n, n === 10 ? '10 min after its last critical problem clears' : `${n} min after`])))),
-    row('Nobody in it', 'whenEmpty', lockIt('whenEmpty', sel('pl-empty', w.spotlight.whenEmpty,
-      [['skip', 'Skip the slide'], ['allHealthy', 'Show "All clusters healthy"'], ['everyCluster', 'Every cluster in turn']]))),
     pl.note ? note(pl.note.text, pl.note.cls) : null);
   const el = card('Watch rules (server side, every display)', admin ? 'one set for all · changes wait for the save bar' : 'one set for all', body);
   // Config-Management's save bar saves this card (saveWatch, below); it has no Save of its own.
@@ -264,12 +247,8 @@ function watchCard() {
 function readWatch() {
   const n = (id) => Number(val(id));
   return {
-    delayYellowFromMin: n('pl-yellow'), delayRedAboveMin: n('pl-red'), nodeExpected: val('pl-expected'), nodeBlink: val('pl-blink'),
+    delayYellowFromMin: n('pl-yellow'), delayRedAboveMin: n('pl-red'), nodeExpected: val('pl-expected'),
     nodeCheckSec: n('pl-check'),
-    spotlight: {
-      when: SPOTLIGHT_WHEN.filter((x) => checked(`pl-when-${x.id}`)).map((x) => x.id),
-      perClusterSec: n('pl-persec'), leaveAfterMin: n('pl-leave'), whenEmpty: val('pl-empty'),
-    },
   };
 }
 

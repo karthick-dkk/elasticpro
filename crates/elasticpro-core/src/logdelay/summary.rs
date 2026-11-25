@@ -557,13 +557,36 @@ pub struct AtMeasurement {
 /// reading inside the window. `None` when no device's delay was measured there — no run, or every
 /// device silent — and nothing earlier is carried into it (the old heat map did, so rows repeated).
 pub fn measured_late(trackers: &[&Tracker], from: i64, to: i64) -> Option<AtMeasurement> {
-    let mut seen = false;
-    let mut at = AtMeasurement { late: 0, critical: 0, part: 0 };
-    for t in trackers {
-        for d in t.devices.values() {
-            // Points are chronological: skip the ones after the window, take the first inside it.
-            let Some(p) = d.recent.iter().rev().skip_while(|p| p.t >= to).take_while(|p| p.t >= from).next() else { continue };
-            seen = seen || d.recent.iter().rev().skip_while(|p| p.t >= to).take_while(|p| p.t >= from).any(|p| p.m.is_some() && !p.s.cant_measure());
+    measured_late_each(trackers, &[(from, to)]).pop().flatten()
+}
+
+/// `measured_late` of several windows (oldest first, none overlapping), in one pass over each
+/// device's points.
+pub fn measured_late_each(trackers: &[&Tracker], windows: &[(i64, i64)]) -> Vec<Option<AtMeasurement>> {
+    let mut out = vec![(false, AtMeasurement { late: 0, critical: 0, part: 0 }); windows.len()];
+    let Some(first) = windows.first().map(|w| w.0) else { return vec![] };
+    for d in trackers.iter().flat_map(|t| t.devices.values()) {
+        // Points are chronological: newest first, the first one met in a window is its last.
+        let (mut w, mut counted) = (windows.len(), None);
+        for p in d.recent.iter().rev() {
+            if p.t < first {
+                break;
+            }
+            while w > 0 && windows[w - 1].0 > p.t {
+                w -= 1;
+            }
+            if w == 0 {
+                break;
+            }
+            if p.t >= windows[w - 1].1 {
+                continue;
+            }
+            let (seen, at) = &mut out[w - 1];
+            *seen = *seen || p.m.is_some() && !p.s.cant_measure();
+            if counted == Some(w) {
+                continue;
+            }
+            counted = Some(w);
             match p.s {
                 State::Delay => at.late += 1,
                 State::Critical => { at.late += 1; at.critical += 1 }
@@ -572,7 +595,56 @@ pub fn measured_late(trackers: &[&Tracker], from: i64, to: i64) -> Option<AtMeas
             }
         }
     }
-    seen.then_some(at)
+    out.into_iter().map(|(seen, at)| seen.then_some(at)).collect()
+}
+
+/// Days the half-day board goes back at most: the tracker keeps 31 days of points.
+pub const BOARD_DAYS_MAX: i64 = 14;
+
+/// The half-day board (`LOGDELAY_BOARD`, Play's Log delay slide): the devices of each cluster now,
+/// today's new and solved delays, and the devices late in each 12 hours of the last `days` local
+/// days. Counts only, no device. A window that is over holds the devices late at its last
+/// measurement (`measured_late`); the one still running holds the devices late now, so it is the
+/// same figure as the devices-now counts. `null`: not measured there — nothing is carried into it.
+pub fn board(clusters: &[ClusterInput], days: i64, now: i64) -> Value {
+    let r = Range::last_days(now, days.clamp(1, BOARD_DAYS_MAX));
+    let mut halves: Vec<(i64, i64)> = vec![];
+    let mut d = r.from;
+    while d <= r.to {
+        halves.extend(time::windows(d, 12).into_iter().filter(|(from, _)| *from <= now));
+        let Some(next) = d.succ_opt() else { break };
+        d = next;
+    }
+    let (t0, t1) = time::day_bounds(time::local_date(now));
+    let today = |ms: i64| ms >= t0 && ms < t1;
+    let mut rows = vec![];
+    for c in clusters {
+        let t = &c.tracker;
+        let state = match t.last_run_ms {
+            None => "never",
+            Some(_) if t.not_measured(now).is_some() => "failed",
+            Some(last) if now - last > t.stale_after() => "old",
+            Some(_) => "ok",
+        };
+        let n = totals(c);
+        let mut late: Vec<Option<u64>> = measured_late_each(&[t.as_ref()], &halves).into_iter().map(|a| a.map(|a| a.late as u64)).collect();
+        if let (Some(last), Some((_, to))) = (late.last_mut(), halves.last()) {
+            if now < *to {
+                *last = (state == "ok").then(|| n.late());
+            }
+        }
+        let eps = t.all_episodes(now);
+        rows.push(json!({
+            "id": c.id, "name": c.name, "state": state, "lastRunAt": t.last_run_ms, "levels": c.levels,
+            "devices": n.devices, "onTime": n.on_time, "partDelayed": n.part_delayed, "delay": n.delay, "critical": n.critical, "late": n.late(),
+            "silent": n.silent, "cantMeasure": n.cant_measure, "otherTz": n.other_tz,
+            "newToday": eps.iter().filter(|e| today(e.started_ms)).count(),
+            "solvedToday": eps.iter().filter(|e| e.solved_ms.is_some_and(today)).count(),
+            "windows": late,
+        }));
+    }
+    let windows: Vec<Value> = halves.iter().map(|(from, to)| json!({ "from": from, "to": to, "complete": now >= *to })).collect();
+    json!({ "now": now, "days": r.day_keys().len(), "windows": windows, "clusters": rows })
 }
 
 /// The same window yesterday as the cluster's last run (the window holding `last_run − 1 day`),
@@ -1199,6 +1271,44 @@ mod tests {
         assert_eq!(f["devices"][0]["tzOffsetMinutes"], Value::Null);
         assert!(!f["days"].as_array().unwrap().is_empty(), "{}", f["days"]);
         assert_eq!(f["windows"].as_array().unwrap().iter().map(|w| w["stillLate"].as_u64().unwrap()).max(), Some(1));
+    }
+
+    #[test]
+    fn the_board_counts_each_half_day_by_its_own_measurement_and_ends_with_the_devices_late_now() {
+        let today = time::local_date(chrono::Utc::now().timestamp_millis());
+        let (t0, _) = time::day_bounds(today);
+        let y0 = time::day_bounds(today.pred_opt().unwrap()).0;
+        let now = t0 + 13 * H;
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        // Yesterday: nothing before noon; after it fw-1 and fw-2 late, fw-2 on time again by 23:00.
+        t.apply(y0 + 13 * H, vec![reading("fw-1", Some(45.0), y0 + 13 * H, "a"), reading("fw-2", Some(70.0), y0 + 13 * H, "a")], &l, 48 * H);
+        t.apply(y0 + 23 * H, vec![reading("fw-1", Some(45.0), y0 + 23 * H, "a"), reading("fw-2", Some(2.0), y0 + 23 * H, "a")], &l, 48 * H);
+        // Today: fw-1 solved at 11:00, fw-3 newly late at 12:30.
+        t.apply(t0 + 11 * H, vec![reading("fw-1", Some(1.0), t0 + 11 * H, "a"), reading("fw-2", Some(2.0), t0 + 11 * H, "a")], &l, 48 * H);
+        let last = t0 + 12 * H + H / 2;
+        t.apply(last, vec![reading("fw-1", Some(1.0), last, "a"), reading("fw-2", Some(2.0), last, "a"), reading("fw-3", Some(90.0), last, "a")], &l, 48 * H);
+        let input = |id: &str, t: Tracker| ClusterInput { id: id.into(), name: id.into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: Levels::default(), zone: LogTimeZone::Detect, tz_hints: vec![] };
+        // Another cluster measured only yesterday afternoon: old today, in no window of today.
+        let mut old = Tracker::default();
+        old.apply(y0 + 14 * H, vec![reading("sw-1", Some(50.0), y0 + 14 * H, "b")], &l, 2 * H);
+        let v = board(&[input("p", t.clone()), input("q", old), input("r", Tracker::default())], 2, now);
+        assert_eq!(v["windows"].as_array().unwrap().iter().map(|w| (w["from"].clone(), w["complete"].clone())).collect::<Vec<_>>(),
+                   [(json!(y0), json!(true)), (json!(y0 + 12 * H), json!(true)), (json!(t0), json!(true)), (json!(t0 + 12 * H), json!(false))]);
+        let (p, q, r) = (&v["clusters"][0], &v["clusters"][1], &v["clusters"][2]);
+        assert_eq!((p["state"].clone(), p["late"].clone(), p["windows"].clone()), (json!("ok"), json!(1), json!([null, 1, 0, 1])));
+        assert_eq!((p["newToday"].clone(), p["solvedToday"].clone(), p["onTime"].clone()), (json!(1), json!(1), json!(2)));
+        assert_eq!((q["state"].clone(), q["windows"].clone()), (json!("old"), json!([null, 1, null, null])), "its late device is of yesterday, not now");
+        assert_eq!((r["state"].clone(), r["windows"].clone()), (json!("never"), json!([null, null, null, null])));
+        assert!(!v.to_string().contains("fw-1") && !v.to_string().contains("sw-1"), "a wall display's answer names no device");
+        // The one definition: each finished window is measured_late's figure.
+        let w = time::windows(today.pred_opt().unwrap(), 12)[1];
+        assert_eq!(measured_late(&[&t], w.0, w.1).map(|a| (a.late, a.critical)), Some((1, 0)));
+        // The last run did not reach the cluster: no figure now, the finished windows stay.
+        let mut failed = t.clone();
+        failed.last_failed = Some(crate::logdelay::state::FailedRun { at: last + 60_000, error: "timeout".into() });
+        let v = board(&[input("p", failed)], 2, now);
+        assert_eq!((v["clusters"][0]["state"].clone(), v["clusters"][0]["windows"].clone()), (json!("failed"), json!([null, 1, 0, null])));
     }
 
     #[test]

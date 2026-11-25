@@ -479,7 +479,8 @@ repeats another or by saying more about one:
 | Many field-volume spikes on a cluster | one row per field/term | one row with the count |
 | A reading older than its dataset allows | shown as current | same level, detail says how old |
 
-Rules: disk has hysteresis (raised at the threshold, cleared 2 points below); a snapshot
+Rules: the disk alert is on the fullest data node, Warning 85, High 90, Critical 95 % (one definition,
+`diskLevel`: alerts, mail, Play), with hysteresis (raised at a line, lowered 2 points below it); a snapshot
 repository is critical when two or more runs in a row failed with at least one `FAILED`
 (one bad night or `PARTIAL`-only runs are a warning); a master re-election is critical
 only while the cluster is not green.
@@ -491,9 +492,9 @@ counts, filters or colours by level reads it there:
 
 | Level | Colour | Rules |
 |---|---|---|
-| **Critical** | red | cluster not answering; health red; disk over the critical threshold / a node past its high watermark (and the flood-stage balance row); disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
-| **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`) |
-| **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, shard data not in the index list, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
+| **Critical** | red | cluster not answering; health red; a data node's disk at 95 % or more (`diskCritPercent`), a node past the flood stage; disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
+| **High** | orange (`--high`; on Play light blue, with the word) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`); a data node's disk at 90 % or more (`diskHighPercent`, 0.3.94), a node past its high watermark |
+| **Warning** | yellow | everything else: health yellow, a data node's disk at 85 % or more (`diskWarnPercent`), disk balance, shard data not in the index list, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
 
 Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
 High; `heap` is new, High. An automation rule can be set to raise at any of the three. The
@@ -506,8 +507,8 @@ High; `heap` is new, High. An automation rule can be set to raise at any of the 
   reader, not by colour alone; the browser-extension badge likewise. Acknowledged, silenced
   and held alerts are counted nowhere, whatever their level.
 - **Notifications.** A new High is announced like a warning (a yellow bell entry and toast).
-  What is critical-only stays so: an error-coloured notification, Play's takeover and chime,
-  the spotlight's "critical alert" reason. The bell's own count is of unread notices and keeps
+  What is critical-only stays so: an error-coloured notification, Play's takeover and chime.
+  The bell's own count is of unread notices and keeps
   its colour.
 - **Zabbix.** The ElasticPro alerts template (modules 2.1.16) has two triggers per rule,
   `^critical: ` at priority HIGH and `^warning: ` at WARNING, and no High one. A High alert is
@@ -520,9 +521,8 @@ High; `heap` is new, High. An automation rule can be set to raise at any of the 
   valuemap; once that template is pinned, `ZABBIX_LEVEL.high` in `core/zabbix-alerts.js`
   becomes `{ value: 3, word: 'high' }` and the generator (`tools/zabbix-alert-template.mjs`)
   writes the new trigger.
-- **Play.** A High cluster's tile is orange, says "High" and blinks orange every 2.4 s; the
-  Alerts slide shows HIGH rows between CRIT and WARN and counts High under Open now (see
-  docs/PLAY.md, "Blinks"). A failed SLM run and logs over 60 min late are High, so they no
+- **Play.** Fleet shows Critical and High problems, each with its word and colour (docs/PLAY.md
+  "Slides"); nothing blinks. A failed SLM run and logs over 60 min late are High, so they no
   longer take over the Play screen: only critical does.
 
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
@@ -558,7 +558,7 @@ has been down.
   indefinitely, so the limit is ours. A field-volume spike has no reading time this page can
   vouch for and is not evaluated for a down cluster.
 - **Counted nowhere:** not the bell or its notifications, the tab title, the top bar, the
-  Alerts summary or footer counts, the Clusters column, Play's counts, takeover or spotlight.
+  Alerts summary or footer counts, the Clusters column, Play's counts or takeover.
 - **Acknowledging** a held alert is allowed (Ack on its row). The record is the alert's own
   `<cluster>:<rule>` key — shared on the server when hosted — so it covers the alert when the
   cluster answers and it is current again; it changes no count while the cluster is down.
@@ -1413,7 +1413,7 @@ and the secret is shown once, in `PLAY_LINK_CREATE`'s reply. The TV opens
 the session into the same HttpOnly / Secure / SameSite=Strict cookie a sign-in gets (and takes it
 out of the reply). That session's caller is `display:<name>`, role user, **`play_only`**: it may
 send only `PLAY_READS` (`auth.rs`) — FLEET_STATE, CLUSTER_DATASET, EVENTS_TICKET, REFRESH,
-VOLUME_DAILY / MONTHLY / MONTHLY_ALL, SILENCE_LIST, ACK_LIST, PLAY_STATE, PLAY_ZOOM_SET,
+VOLUME_DAILY / MONTHLY / MONTHLY_ALL, LOGDELAY_BOARD, SILENCE_LIST, ACK_LIST, PLAY_STATE, PLAY_ZOOM_SET,
 PLAY_SHARE_GET / PUT (`delay` only), PING, CONFIG_VIEW, ZABBIX_CLUSTERS, CLUSTER_META_GET (type and ULM), WHOAMI, LOGOUT, the
 shell's startup no-ops, and `ES` only as the log-delay measurement itself (`auth::play_es_shape`):
 the cluster's own `logIndexPattern` (a cluster with none: one plain pattern, no comma, nothing
@@ -1433,11 +1433,11 @@ unused for a day is ended by housekeeping, like a Zabbix frame's.
 | `PLAY_LINK_CREATE {name, clusters: "all"\|{group}\|[ids], allowFrom?: [cidr], expires?: "permanent"\|days, settings?}` | admin | `{ok, link: {id, name, url, clusters, allowFrom, expires, expiresAt, createdAt, createdBy, …}, secret}` — `url` is `<ELASTICPRO_PUBLIC_URL or the browser's origin>/#/play?display=<secret>`, shown once. Default expiry: permanent. |
 | `PLAY_LINK_LIST` | admin | `{ok, enabled, links: [{id, name, clusters, allowFrom, expires: "permanent"\|{at}, expiresAt, expired, createdAt, createdBy, lastSeen: {at, from}\|null, sessions, settings}]}` — never a secret or a usable URL. |
 | `PLAY_LINK_REVOKE {id}` | admin | `{ok, id, sessionsEnded}`; its sessions end at once. |
-| `PLAY_LINK_SET {id, settings}` | admin | The display's settings, merged: `{slides: [{id, show, dwellSec}] (ordered; fleet, alerts, spotlight, delay, backups, volume), criticalTakesScreen, spotlightAll, theme: dark\|light, sound: off\|chime, zoom: null\|0.8…1.5, fleetOrder: 1–3 of critical, logDelay, volume, disk, alerts, name}` (`zoom: null`: the TV keeps its own). → `{ok, id, settings}`. |
+| `PLAY_LINK_SET {id, settings}` | admin | The display's settings, merged: `{slides: [{id, show, dwellSec}] (ordered; fleet, delay, backups, volume), criticalTakesScreen, theme: dark\|light, sound: off\|chime, zoom: null\|0.8…1.5, fleetOrder: 1–3 of critical, logDelay, volume, disk, alerts, name}` (`zoom: null`: the TV keeps its own). → `{ok, id, settings}`. |
 | `PLAY_EXCHANGE {secret}` | none | `{ok, caller, display: {id, name}, cookie: true}`; `bad_credentials` for an unknown, revoked or expired link, `forbidden` from an address `allowFrom` does not name, `disabled` / `unsupported`. |
 | `PLAY_CONFIG_GET` | user | `{ok, watch, exclude: [{clusterId, reason, by, at, managed?}], defaultDisplay, managed: [UI_PLAY_* keys], managedFields: {"watch.x": key}, linksEnabled, options}`; an admin also gets `displays`, `links`, `groups` (the Zabbix user groups the clusters carry). |
 | `PLAY_CONFIG_SET {settings}` | admin | One of `{watch: {...}}` (merged; a locked field with another value: `kind: "managed"`), `{exclude: {add: {clusterId, reason}}}` / `{exclude: {remove: clusterId}}` (a reason is required; `by`/`at` stamped by the server), `{defaultDisplay}`, `{displays: {<linkId>: {...}}}`. Answers as `PLAY_CONFIG_GET`. Audited. |
-| `PLAY_STATE {open?: [alertKey]}` | user, play_only | `{ok, settings: {watch, display}, zoom, excluded: [ids], nodes: {clusterId: {expected, present, left: [{node, since}], asOf, answering}}, openSince: {alertKey: at}, now}`. `open` is this display's open alerts; each keeps its first time per display (`<data>/play/open-since.json`). |
+| `PLAY_STATE {open?: ["alertKey\|level"], sure?: [the same]}` | user, play_only | `{ok, settings: {watch, display}, zoom, excluded: [ids], nodes: {clusterId: {expected, present, left: [{node, since}], asOf, answering}}, openSince: {"alertKey\|level": at}, now}`. `open` is this display's open Critical and High problems (acknowledged and silenced ones too), `sure` those it would have seen earlier; the server keeps when each opened, one record for all displays (`<data>/play/open-since.json`); a time it does not know is left out, and a problem nobody sees open for 3 min is closed. |
 | `PLAY_ZOOM_SET {zoom}` | play_only | A display link's TV saving its − / +: `{ok, zoom, fixed}`. A fixed `zoom` in the display's settings wins. |
 | `PLAY_NODE_FORGET {clusterId, node}` | operator | `{ok}`; the node is no longer expected (and unpinned). Audited. |
 | `PLAY_SHARE_PUT {kind: "delay"\|"repoSize", clusterId, measuredAt, data}` | user (play_only: `delay`) | `{ok, kept}` — `kept: false` when a newer one is held. Delay data is a list of device records or `{devices: [...]}`, at most 2,000 and 1 MB; a repository size an object up to 64 KB. Kept 48 h on disk (`<data>/play/share/<kind>/`). |

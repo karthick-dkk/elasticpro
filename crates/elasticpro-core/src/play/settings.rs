@@ -14,16 +14,11 @@ use std::collections::BTreeMap;
 
 pub const FILE: &str = "play.json";
 
-/// What can put a cluster in the spotlight. The first six are on by default.
-pub const SPOTLIGHT_WHEN: &[&str] = &["red", "nodeLeft", "slmFailed", "storage", "unreachable", "criticalAlert", "ilmError", "yellow"];
-const SPOTLIGHT_DEFAULT: &[&str] = &["red", "nodeLeft", "slmFailed", "storage", "unreachable", "criticalAlert"];
 /// The slides, in their default order.
-pub const SLIDES: &[&str] = &["fleet", "alerts", "spotlight", "delay", "backups", "volume"];
+pub const SLIDES: &[&str] = &["fleet", "delay", "backups", "volume"];
 /// The zoom steps the top bar offers.
 pub const ZOOMS: &[f64] = &[0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
 pub const NODE_EXPECTED: &[&str] = &["seen24h", "pinned"];
-pub const NODE_BLINK: &[&str] = &["untilBack", "untilAck", "off"];
-pub const WHEN_EMPTY: &[&str] = &["skip", "allHealthy", "everyCluster"];
 pub const THEMES: &[&str] = &["dark", "light"];
 pub const SOUNDS: &[&str] = &["off", "chime"];
 /// What the fleet wall can be ordered by (docs/PLAY.md "Fleet wall order").
@@ -33,29 +28,8 @@ const FLEET_ORDER_DEFAULT: &[&str] = &["critical", "logDelay", "volume"];
 /// The config.txt keys of Play, in config.txt.example's order.
 pub const KEYS: &[&str] = &[
     "UI_PLAY_ENABLED", "UI_PLAY_DELAY_YELLOW_MIN", "UI_PLAY_DELAY_RED_MIN", "UI_PLAY_NODE_EXPECTED",
-    "UI_PLAY_NODE_BLINK", "UI_PLAY_NODE_CHECK_SECONDS", "UI_PLAY_SPOTLIGHT_WHEN", "UI_PLAY_SPOTLIGHT_LEAVE_MIN",
-    "UI_PLAY_SPOTLIGHT_SECONDS", "UI_PLAY_EXCLUDE",
+    "UI_PLAY_NODE_CHECK_SECONDS", "UI_PLAY_EXCLUDE",
 ];
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub struct Spotlight {
-    pub when: Vec<String>,
-    pub per_cluster_sec: u32,
-    pub leave_after_min: u32,
-    pub when_empty: String,
-}
-
-impl Default for Spotlight {
-    fn default() -> Self {
-        Spotlight {
-            when: SPOTLIGHT_DEFAULT.iter().map(|s| s.to_string()).collect(),
-            per_cluster_sec: 13,
-            leave_after_min: 10,
-            when_empty: "skip".into(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -63,9 +37,7 @@ pub struct Watch {
     pub delay_yellow_from_min: u32,
     pub delay_red_above_min: u32,
     pub node_expected: String,
-    pub node_blink: String,
     pub node_check_sec: u32,
-    pub spotlight: Spotlight,
     /// With `nodeExpected: "pinned"`: the node names each cluster is expected to have. A
     /// cluster with no list here falls back to the names seen in the last 24 h.
     pub pinned: BTreeMap<String, Vec<String>>,
@@ -77,9 +49,7 @@ impl Default for Watch {
             delay_yellow_from_min: 30,
             delay_red_above_min: 60,
             node_expected: "seen24h".into(),
-            node_blink: "untilBack".into(),
             node_check_sec: 60,
-            spotlight: Spotlight::default(),
             pinned: BTreeMap::new(),
         }
     }
@@ -128,8 +98,6 @@ fn twenty() -> u32 {
 pub struct Display {
     pub slides: Vec<Slide>,
     pub critical_takes_screen: bool,
-    /// The spotlight shows every cluster in turn, not only those with a critical problem.
-    pub spotlight_all: bool,
     pub theme: String,
     pub sound: String,
     /// Fixed by the administrator; `None`: the TV keeps what was last set on it (`PLAY_ZOOM_SET`).
@@ -143,7 +111,6 @@ impl Default for Display {
         Display {
             slides: SLIDES.iter().map(|s| Slide { id: s.to_string(), show: true, dwell_sec: 20 }).collect(),
             critical_takes_screen: true,
-            spotlight_all: false,
             theme: "dark".into(),
             sound: "off".into(),
             zoom: None,
@@ -228,14 +195,7 @@ impl PlaySettings {
             return Err("watch.delayRedAboveMin must not be below watch.delayYellowFromMin".into());
         }
         one_of("watch.nodeExpected", &w.node_expected, NODE_EXPECTED)?;
-        one_of("watch.nodeBlink", &w.node_blink, NODE_BLINK)?;
         range("watch.nodeCheckSec", w.node_check_sec, 10, 3600)?;
-        for s in &w.spotlight.when {
-            one_of("watch.spotlight.when", s, SPOTLIGHT_WHEN)?;
-        }
-        range("watch.spotlight.perClusterSec", w.spotlight.per_cluster_sec, 5, 120)?;
-        range("watch.spotlight.leaveAfterMin", w.spotlight.leave_after_min, 1, 1440)?;
-        one_of("watch.spotlight.whenEmpty", &w.spotlight.when_empty, WHEN_EMPTY)?;
         if w.pinned.len() > 1000 || w.pinned.values().any(|v| v.len() > 1000 || v.iter().any(|n| n.trim().is_empty() || n.len() > 256)) {
             return Err("watch.pinned: per cluster, a list of node names".into());
         }
@@ -263,11 +223,18 @@ impl PlaySettings {
         Ok(())
     }
 
+    fn read(text: &str) -> Result<PlaySettings, String> {
+        let mut v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        drop_retired(&mut v);
+        let s: PlaySettings = serde_json::from_value(v).map_err(|e| e.to_string())?;
+        s.validate().map(|_| s)
+    }
+
     /// Read the file: anything unreadable or invalid is the defaults (and said so in the log).
     pub fn load(path: Option<&std::path::Path>) -> PlaySettings {
         let Some(p) = path else { return PlaySettings::default() };
         let Ok(text) = std::fs::read_to_string(p) else { return PlaySettings::default() };
-        match serde_json::from_str::<PlaySettings>(&text).map_err(|e| e.to_string()).and_then(|s| s.validate().map(|_| s)) {
+        match PlaySettings::read(&text) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(file = %p.display(), error = %e, "Play settings could not be read; the defaults apply");
@@ -302,11 +269,7 @@ pub const MANAGED: &[(&str, &str)] = &[
     ("UI_PLAY_DELAY_YELLOW_MIN", "/watch/delayYellowFromMin"),
     ("UI_PLAY_DELAY_RED_MIN", "/watch/delayRedAboveMin"),
     ("UI_PLAY_NODE_EXPECTED", "/watch/nodeExpected"),
-    ("UI_PLAY_NODE_BLINK", "/watch/nodeBlink"),
     ("UI_PLAY_NODE_CHECK_SECONDS", "/watch/nodeCheckSec"),
-    ("UI_PLAY_SPOTLIGHT_WHEN", "/watch/spotlight/when"),
-    ("UI_PLAY_SPOTLIGHT_LEAVE_MIN", "/watch/spotlight/leaveAfterMin"),
-    ("UI_PLAY_SPOTLIGHT_SECONDS", "/watch/spotlight/perClusterSec"),
 ];
 
 /// The reason an exclusion from config.txt carries.
@@ -315,26 +278,6 @@ pub const CONFIG_REASON: &str = "set in config.txt";
 /// A comma list, trimmed, empties dropped.
 pub fn comma_list(v: &str) -> Vec<String> {
     v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
-}
-
-/// `UI_PLAY_SPOTLIGHT_WHEN`: a comma list of `SPOTLIGHT_WHEN` names (any case), or `none`.
-pub fn spotlight_when_problem(v: &str) -> Option<String> {
-    if v.trim().eq_ignore_ascii_case("none") {
-        return None;
-    }
-    let list = comma_list(v);
-    if list.is_empty() {
-        return Some("names nothing (use none for an empty list)".into());
-    }
-    list.iter().find(|x| !SPOTLIGHT_WHEN.iter().any(|o| o.eq_ignore_ascii_case(x)))
-        .map(|bad| format!("{bad:?} is not one of {}", SPOTLIGHT_WHEN.join(", ")))
-}
-
-fn spotlight_when(v: &str) -> Vec<String> {
-    if v.trim().eq_ignore_ascii_case("none") {
-        return vec![];
-    }
-    comma_list(v).iter().filter_map(|x| SPOTLIGHT_WHEN.iter().find(|o| o.eq_ignore_ascii_case(x)).map(|o| o.to_string())).collect()
 }
 
 /// The config.txt exclusions.
@@ -358,11 +301,7 @@ pub fn resolve(stored: &PlaySettings, managed: &Settings) -> (PlaySettings, Vec<
             "UI_PLAY_DELAY_YELLOW_MIN" => if let Some(n) = int(key) { w.delay_yellow_from_min = n },
             "UI_PLAY_DELAY_RED_MIN" => if let Some(n) = int(key) { w.delay_red_above_min = n },
             "UI_PLAY_NODE_EXPECTED" => w.node_expected = managed.text(key).unwrap_or_default().to_string(),
-            "UI_PLAY_NODE_BLINK" => w.node_blink = managed.text(key).unwrap_or_default().to_string(),
             "UI_PLAY_NODE_CHECK_SECONDS" => if let Some(n) = int(key) { w.node_check_sec = n },
-            "UI_PLAY_SPOTLIGHT_WHEN" => w.spotlight.when = spotlight_when(managed.text(key).unwrap_or_default()),
-            "UI_PLAY_SPOTLIGHT_LEAVE_MIN" => if let Some(n) = int(key) { w.spotlight.leave_after_min = n },
-            "UI_PLAY_SPOTLIGHT_SECONDS" => if let Some(n) = int(key) { w.spotlight.per_cluster_sec = n },
             _ => continue,
         }
         locked.push(*ptr);
@@ -399,6 +338,37 @@ pub fn managed_fields(locked: &[&str]) -> Value {
     Value::Object(m)
 }
 
+/// The slides Play had until 0.3.93 (docs/PLAY.md, "Retired in 0.3.94").
+const RETIRED_SLIDES: &[&str] = &["alerts", "spotlight"];
+
+/// What Play no longer keeps, taken out of a saved file or a page's change (an older page still
+/// sends it): the Alerts and Cluster spotlight slides, the spotlight's rules and the node blink.
+/// A display that showed nothing else shows every slide there is.
+pub fn drop_retired(v: &mut Value) {
+    if let Some(w) = v.get_mut("watch").and_then(Value::as_object_mut) {
+        w.remove("spotlight");
+        w.remove("nodeBlink");
+    }
+    if let Some(d) = v.get_mut("defaultDisplay") {
+        drop_retired_display(d);
+    }
+    if let Some(all) = v.get_mut("displays").and_then(Value::as_object_mut) {
+        all.values_mut().for_each(drop_retired_display);
+    }
+}
+
+/// [`drop_retired`] for one display's settings.
+pub fn drop_retired_display(d: &mut Value) {
+    let Some(m) = d.as_object_mut() else { return };
+    m.remove("spotlightAll");
+    let Some(slides) = m.get_mut("slides").and_then(Value::as_array_mut) else { return };
+    let before = slides.len();
+    slides.retain(|s| !s.get("id").and_then(Value::as_str).is_some_and(|id| RETIRED_SLIDES.contains(&id)));
+    if slides.len() != before && !slides.iter().any(|s| s.get("show").and_then(Value::as_bool).unwrap_or(true)) {
+        *slides = SLIDES.iter().map(|id| json!({ "id": id, "show": true, "dwellSec": 20 })).collect();
+    }
+}
+
 /// Merge `patch` into `base`: objects field by field, anything else replaced.
 pub fn merge(base: &mut Value, patch: &Value) {
     match (base, patch) {
@@ -432,6 +402,8 @@ pub fn apply_change(current: &PlaySettings, patch: &Value, managed: &Settings, b
     if let Some(k) = pm.keys().find(|k| !matches!(k.as_str(), "watch" | "exclude" | "defaultDisplay" | "displays")) {
         return Err(format!("settings: {k:?} is not something Play keeps (watch, exclude, defaultDisplay, displays)"));
     }
+    let mut patch = patch.clone();
+    drop_retired(&mut patch);
     let (effective, locked) = resolve(current, managed);
     let effective_v = serde_json::to_value(&effective).map_err(|e| e.to_string())?;
     for ptr in &locked {
@@ -446,7 +418,6 @@ pub fn apply_change(current: &PlaySettings, patch: &Value, managed: &Settings, b
     let from_txt = managed_excludes(managed);
     let is_txt = |id: &str| from_txt.iter().any(|m| m.cluster_id == id);
     let mut v = serde_json::to_value(current).map_err(|e| e.to_string())?;
-    let mut patch = patch.clone();
     let mut exclude = current.exclude.clone();
     if let Some(ex) = patch.as_object_mut().and_then(|m| m.remove("exclude")) {
         match &ex {
@@ -519,11 +490,10 @@ mod tests {
         assert_eq!(v["watch"]["delayYellowFromMin"], json!(30));
         assert_eq!(v["watch"]["delayRedAboveMin"], json!(60));
         assert_eq!(v["watch"]["nodeExpected"], json!("seen24h"));
-        assert_eq!(v["watch"]["nodeBlink"], json!("untilBack"));
         assert_eq!(v["watch"]["nodeCheckSec"], json!(60));
-        assert_eq!(v["watch"]["spotlight"]["when"], json!(["red", "nodeLeft", "slmFailed", "storage", "unreachable", "criticalAlert"]));
-        assert_eq!(v["watch"]["spotlight"]["perClusterSec"], json!(13));
-        assert_eq!(v["watch"]["spotlight"]["leaveAfterMin"], json!(10));
+        assert!(v["watch"].get("spotlight").is_none() && v["watch"].get("nodeBlink").is_none());
+        let ids: Vec<&str> = v["defaultDisplay"]["slides"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, SLIDES);
         assert_eq!(v["defaultDisplay"]["slides"][0], json!({ "id": "fleet", "show": true, "dwellSec": 20 }));
         assert_eq!(v["defaultDisplay"]["criticalTakesScreen"], json!(true));
         assert_eq!(v["defaultDisplay"]["zoom"], Value::Null);
@@ -577,8 +547,6 @@ mod tests {
         for bad in [
             json!({ "watch": { "delayYellowFromMin": 0 } }),
             json!({ "watch": { "delayYellowFromMin": 90 } }),
-            json!({ "watch": { "nodeBlink": "always" } }),
-            json!({ "watch": { "spotlight": { "when": ["red", "purple"] } } }),
             json!({ "defaultDisplay": { "zoom": 3 } }),
             json!({ "defaultDisplay": { "sound": "loud" } }),
             json!({ "defaultDisplay": { "slides": [{ "id": "fleet" }, { "id": "fleet" }] } }),
@@ -592,18 +560,18 @@ mod tests {
 
     #[test]
     fn config_txt_locks_its_fields_and_adds_its_exclusions() {
-        let txt = Settings::parse("UI_PLAY_DELAY_YELLOW_MIN=20\nUI_PLAY_NODE_BLINK=off\nUI_PLAY_SPOTLIGHT_WHEN=red, yellow\nUI_PLAY_EXCLUDE=c9, c8\n");
-        assert!(txt.warnings().is_empty(), "{:?}", txt.warnings());
+        let txt = Settings::parse("UI_PLAY_DELAY_YELLOW_MIN=20\nUI_PLAY_NODE_EXPECTED=pinned\nUI_PLAY_NODE_BLINK=off\nUI_PLAY_SPOTLIGHT_WHEN=red, yellow\nUI_PLAY_EXCLUDE=c9, c8\n");
+        assert_eq!(txt.warnings().len(), 2, "a retired key that is set is named: {:?}", txt.warnings());
+        assert!(txt.warnings().iter().all(|w| w.contains("no longer used")), "{:?}", txt.warnings());
         let mut stored = PlaySettings::default();
         stored.exclude.push(Exclude { cluster_id: "c1".into(), reason: "lab".into(), by: "kd".into(), at: 3, managed: false });
         let (s, locked) = resolve(&stored, &txt);
         assert_eq!(s.watch.delay_yellow_from_min, 20);
-        assert_eq!(s.watch.node_blink, "off");
-        assert_eq!(s.watch.spotlight.when, vec!["red", "yellow"]);
+        assert_eq!(s.watch.node_expected, "pinned");
         assert_eq!(s.excluded(), vec!["c9", "c8", "c1"], "config.txt's, then the page's");
         assert!(s.exclude[0].managed && s.exclude[0].reason == CONFIG_REASON && !s.exclude[2].managed);
-        assert_eq!(managed_keys(&txt), vec!["UI_PLAY_DELAY_YELLOW_MIN", "UI_PLAY_NODE_BLINK", "UI_PLAY_SPOTLIGHT_WHEN", "UI_PLAY_EXCLUDE"]);
-        assert_eq!(managed_fields(&locked)["watch.nodeBlink"], json!("UI_PLAY_NODE_BLINK"));
+        assert_eq!(managed_keys(&txt), vec!["UI_PLAY_DELAY_YELLOW_MIN", "UI_PLAY_NODE_EXPECTED", "UI_PLAY_EXCLUDE"]);
+        assert_eq!(managed_fields(&locked)["watch.nodeExpected"], json!("UI_PLAY_NODE_EXPECTED"));
         // A locked field with another value is refused; with config.txt's own value it passes.
         let e = apply_change(&stored, &json!({ "watch": { "delayYellowFromMin": 45 } }), &txt, "kd", 1).unwrap_err();
         assert!(e.contains("managed by config.txt"), "{e}");
@@ -618,11 +586,26 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_when_from_config_txt() {
-        assert_eq!(spotlight_when_problem("Red, NODELEFT"), None);
-        assert_eq!(spotlight_when_problem("none"), None);
-        assert!(spotlight_when_problem("red, purple").is_some());
-        assert!(spotlight_when_problem(" , ").is_some());
-        assert_eq!(spotlight_when("Red, NODELEFT"), vec!["red", "nodeLeft"]);
+    fn a_file_from_before_the_slides_went_still_reads() {
+        let old = r#"{"watch":{"delayYellowFromMin":25,"nodeBlink":"untilAck","spotlight":{"when":["red"],"perClusterSec":13,"leaveAfterMin":10,"whenEmpty":"skip"}},
+            "exclude":[{"clusterId":"c1","reason":"lab","by":"kd","at":3}],
+            "displays":{"l1":{"slides":[{"id":"alerts","show":true,"dwellSec":30},{"id":"volume","show":true,"dwellSec":40},{"id":"spotlight","show":true,"dwellSec":20}],"spotlightAll":true,"zoom":1.25},
+                        "l2":{"slides":[{"id":"alerts","show":true,"dwellSec":30},{"id":"fleet","show":false,"dwellSec":20}]}},
+            "defaultDisplay":{"spotlightAll":false,"theme":"dark"}}"#;
+        let s = PlaySettings::read(old).expect("everything else in the file is kept");
+        assert_eq!(s.watch.delay_yellow_from_min, 25);
+        assert_eq!(s.excluded(), vec!["c1"]);
+        assert_eq!(s.displays["l1"].slides, vec![Slide { id: "volume".into(), show: true, dwell_sec: 40 }]);
+        assert_eq!(s.displays["l1"].zoom, Some(1.25));
+        // It showed only Alerts: it shows every slide there is, rather than nothing.
+        assert_eq!(s.displays["l2"].slides.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), SLIDES);
+        assert!(s.displays["l2"].slides.iter().all(|x| x.show));
+        // An older page's change: what is gone is left out, the rest is saved.
+        let next = apply_change(&s, &json!({ "watch": { "nodeBlink": "off", "nodeCheckSec": 30, "spotlight": { "when": [] } },
+            "defaultDisplay": { "spotlightAll": true, "slides": [{ "id": "alerts" }, { "id": "fleet" }] } }), &Settings::default(), "kd", 1).unwrap();
+        assert_eq!(next.watch.node_check_sec, 30);
+        assert_eq!(next.default_display.slides.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["fleet"]);
+        // Anything else unknown is still refused.
+        assert!(PlaySettings::read(r#"{"watch":{"surprise":1}}"#).is_err());
     }
 }

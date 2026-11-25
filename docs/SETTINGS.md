@@ -98,7 +98,7 @@ managed keys, under the names of `DEFAULTS` in `ui/js/core/config.js`:
 
 ```json
 "managedDefaults": { "readOnly": false, "autoRefresh": true, "refreshIntervalSec": 60,
-  "requestTimeoutMs": 15000, "diskWarnPercent": 80, "diskCritPercent": 90, "snapshotStaleHours": 26,
+  "requestTimeoutMs": 15000, "diskWarnPercent": 85, "diskHighPercent": 90, "diskCritPercent": 95, "snapshotStaleHours": 26,
   "logIndexPattern": "logstash-*", "timeField": "@timestamp", "tls": "auto",
   "liveRedraw": "pending", "defaultScope": "all", "tableRowsPerPage": 50, "maxLogRows": 200,
   "volumeIndexFormat": "logstash-*-YYYY.MM.DD", "volumeTag": "tag1, labels.tag1", "volumeForwarder": "fwdtag",

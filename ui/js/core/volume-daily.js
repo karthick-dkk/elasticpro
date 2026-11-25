@@ -176,7 +176,7 @@ export const dayBasis = (d, basis) => (typeof d.basis === 'number' ? d.basis : (
 /**
  * Days to plot, oldest first: only today is left out (it is still filling up and would read
  * as a drop). A past day the core could not finish is plotted when it has a figure. One
- * definition for Indices › Summary and Play's spotlight chart.
+ * definition for Indices › Summary.
  */
 export function finishedDays(reply, today = utcDay()) {
   const basis = basisOf(reply && reply.settings);

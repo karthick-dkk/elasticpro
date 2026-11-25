@@ -49,7 +49,7 @@ test('the window is two minutes', () => assert.equal(notify.BURST_WINDOW_MS, 2 *
 
 test('three alerts on one cluster in one pass are one notification listing each', () => {
   setData({ ...Object.fromEntries(clusters.map((c) => [c.id, data()])),
-    c1: data({ health: { status: 'yellow', unassigned_shards: 4 }, disk: { percent: 92, nodes: [] }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': {} } }) });
+    c1: data({ health: { status: 'yellow', unassigned_shards: 4 }, disk: { percent: 96, nodes: [] }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': {} } }) });
   const fresh = run(T0 + MIN);
   assert.equal(fresh.length, 3);
   assert.equal(said.length, 1, 'one notification, not three');

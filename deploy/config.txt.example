@@ -200,8 +200,10 @@ UI_AUTO_REFRESH=
 UI_REFRESH_SECONDS=
 # Elasticsearch request timeout, ms (1000-600000).
 UI_REQUEST_TIMEOUT_MS=
-# Disk used, percent, that turns yellow / red.
+# Disk used on a cluster's fullest data node, percent: Warning from (default 85), High from
+# (90), Critical from (95). The same in Play, on the Alerts page and in the mail.
 UI_DISK_WARN_PERCENT=
+UI_DISK_HIGH_PERCENT=
 UI_DISK_CRIT_PERCENT=
 # Hours after which the last snapshot counts as stale.
 UI_SNAPSHOT_STALE_HOURS=
@@ -353,17 +355,8 @@ UI_PLAY_DELAY_RED_MIN=
 # Which nodes a cluster is expected to have: seen24h (every name seen in the last 24 h,
 # the default) or pinned (the list kept on Config > Play).
 UI_PLAY_NODE_EXPECTED=
-# A cluster with a node that left blinks: untilBack (default), untilAck or off.
-UI_PLAY_NODE_BLINK=
 # How often a wall looks for nodes that left, 10-3600 seconds (default 60).
 UI_PLAY_NODE_CHECK_SECONDS=
-# What puts a cluster in the spotlight, comma-separated: red, nodeLeft, slmFailed, storage,
-# unreachable, criticalAlert, ilmError, yellow (default: the first six), or none.
-UI_PLAY_SPOTLIGHT_WHEN=
-# Minutes a cluster stays in the spotlight after its last problem clears (default 10), and
-# seconds each cluster in it is shown, 5-120 (default 13).
-UI_PLAY_SPOTLIGHT_LEAVE_MIN=
-UI_PLAY_SPOTLIGHT_SECONDS=
 # Clusters left off every wall (comma-separated cluster ids). Shown on Config > Play with the
 # reason "set in config.txt"; the rest of ElasticPro still shows them.
 UI_PLAY_EXCLUDE=

@@ -6029,7 +6029,7 @@ consolePanels: {
   const node = (name, used) => ({ node: name, 'disk.used': String(used), 'disk.total': '100', 'disk.avail': String(100 - used), shards: '10' });
   const healthy = () => ({ reachable: true, health: { status: 'green', unassigned_shards: 0 }, slm: [], repos: [], snapshots: {} });
   const fleet = () => ({
-    a: { ...healthy(), health: { status: 'yellow', unassigned_shards: 4 },
+    a: { ...healthy(), health: { status: 'red', unassigned_shards: 4 },
          disk: { percent: 91, nodes: [node('es-hot-1', 89), node('es-hot-2', 88), node('es-hot-3', 86)] },
          ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': { failed_step: 'rollover' }, 'logstash-2': { failed_step: 'rollover' } } },
     k: { reachable: false },
@@ -6037,7 +6037,7 @@ consolePanels: {
     q: healthy(),
   });
   const names = { a: 'atlas-prod', k: 'kestrel-dc', b: 'bravo-ci', q: 'quiet-lab' };
-  st.state.defaults = { ...DEFAULTS, diskWarnPercent: 85, diskCritPercent: 90 };
+  st.state.defaults = { ...DEFAULTS, diskWarnPercent: 85, diskHighPercent: 90, diskCritPercent: 95 };
   // An automation that raised an alert on kestrel-dc while it was up: an alert raised before the
   // cluster went down, which is what the Alerts page holds behind the Unreachable line.
   st.state.config = { clusters: Object.entries(names).map(([id, name]) => ({ id, name, url: `http://${id}.example:9200`, enabled: true })),
@@ -7161,7 +7161,7 @@ if (viaFleet) {
   // What the core's PLAY_LINK_LIST says of a link: never a URL or a secret.
   let links = [{ id: 'l1', name: 'NOC wall', clusters: 'all', allowFrom: ['10.1.0.0/16'], expires: 'permanent', expiresAt: null, expired: false,
     createdAt: Date.now() - 86400000, createdBy: 'Admin', lastSeen: { at: Date.now() - 120000, from: '10.1.2.3' }, sessions: 1,
-    settings: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }], criticalTakesScreen: true, spotlightAll: false, theme: 'dark', sound: 'off', zoom: 1.25 } }];
+    settings: { slides: [{ id: 'delay', show: true, dwellSec: 30 }], criticalTakesScreen: true, theme: 'dark', sound: 'off', zoom: 1.25 } }];
   let made = 0;
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
@@ -7220,7 +7220,7 @@ if (viaFleet) {
     ok(order.join(',') === 'PLAY_LINK_REVOKE,PLAY_LINK_CREATE', `play: replace sent ${order.join(', ')}`);
     const again = sent.find((m) => m.type === 'PLAY_LINK_CREATE');
     ok(!!again && again.name === 'NOC wall' && again.clusters === 'all' && again.expires === 'permanent' && (again.allowFrom || []).join() === '10.1.0.0/16'
-      && again.settings && again.settings.zoom === 1.25 && again.settings.slides[0].id === 'alerts' && again.settings.slides[0].dwellSec === 30,
+      && again.settings && again.settings.zoom === 1.25 && again.settings.slides[0].id === 'delay' && again.settings.slides[0].dwellSec === 30,
       `play: the replacement link is not the old one's twin: ${JSON.stringify(again)}`);
     ok((doc.getElementById('pl-url') || {}).value === 'https://noc.example/#/play?display=SECRET1', 'play: the replacement URL is not shown');
     ok(/will not be shown again/.test((modalEl() || {}).textContent || ''), 'play: no one-time note on the replacement');
@@ -7231,8 +7231,8 @@ if (viaFleet) {
     // Fleet wall order: the row is there with the default, and saving sends what was chosen.
     sent.length = 0;
     ok(await pressIn(view(), /^Edit$/), 'play: no Edit on a display row');
-    ok(/Fleet wall order/.test(modalEl().textContent) && /breaks a tie/.test(modalEl().textContent), 'play: no Fleet wall order row');
-    ok(/every cluster, in the Fleet wall order below/.test(modalEl().textContent), 'play: the Fleet wall slide has no order note');
+    ok(/Fleet order/.test(modalEl().textContent) && /breaks a tie/.test(modalEl().textContent), 'play: no Fleet order row');
+    ok(/problems first, the others in the Fleet order below/.test(modalEl().textContent) && !/spotlight|blink/i.test(modalEl().textContent), 'play: the Fleet slide has no order note, or a taken-out choice is back');
     ok([0, 1, 2].map((i) => doc.getElementById(`pl-order-${i}`).value).join() === 'critical,logDelay,volume', 'play: the order does not start at the default');
     type('pl-order-0', 'disk'); type('pl-order-1', 'name'); type('pl-order-2', 'none');
     await pressIn(modalEl(), /^Save$/); await settleFor(300);
@@ -7293,23 +7293,21 @@ if (viaFleet) {
     ok(/managed by config\.txt/.test(panel('Watch rules (server side, every display)').textContent), 'play: a locked field does not say why');
     ok(!doc.getElementById('pl-yellow').disabled, 'play: an unmanaged field is locked');
     type('pl-yellow', '20');
-    doc.getElementById('pl-when-yellow').checked = true;
+    ok(!/spotlight|blink/i.test(panel('Watch rules (server side, every display)').textContent), 'play: a taken-out watch rule is back');
     sent.length = 0;
     ok(!doc.getElementById('pl-watch-save'), 'play: the watch rules have a Save of their own beside the save bar');
     await saveViaBar(500);
     const ws0 = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
     const ws = ws0 && ws0.settings;
     ok(!!ws && ws.watch && ws.watch.delayYellowFromMin === 20 && !('delayRedAboveMin' in ws.watch), `play: watch save sent ${JSON.stringify(ws0)}`);
-    ok(!!ws && ws.watch.nodeBlink === 'untilBack' && ws.watch.nodeCheckSec === 60 && ws.watch.spotlight.perClusterSec === 13
-      && ws.watch.spotlight.leaveAfterMin === 10 && ws.watch.spotlight.whenEmpty === 'skip'
-      && ws.watch.spotlight.when.includes('yellow') && ws.watch.spotlight.when.includes('red'), `play: watch payload is ${JSON.stringify(ws && ws.watch)}`);
+    ok(!!ws && ws.watch.nodeCheckSec === 60 && !('nodeBlink' in ws.watch) && !('spotlight' in ws.watch), `play: watch payload is ${JSON.stringify(ws && ws.watch)}`);
     await settleFor(400);
     const keptW = (await core({ type: 'PLAY_CONFIG_GET' })).watch || {};
-    ok(keptW.delayYellowFromMin === 20 && keptW.delayRedAboveMin === 60 && (keptW.spotlight || {}).when.includes('yellow'),
+    ok(keptW.delayYellowFromMin === 20 && keptW.delayRedAboveMin === 60 && !('spotlight' in keptW) && !('nodeBlink' in keptW),
       `play: the core did not keep the watch rules as saved: ${JSON.stringify(keptW)}`);
     ok(/Saved/.test(panel('Watch rules (server side, every display)').textContent), 'play: the save is not confirmed');
     // Put the core back as it was for the wall below: the shipped watch rules, nothing excluded.
-    await core({ type: 'PLAY_CONFIG_SET', settings: { watch: { delayYellowFromMin: 30, spotlight: { when: ['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert'] } } } });
+    await core({ type: 'PLAY_CONFIG_SET', settings: { watch: { delayYellowFromMin: 30 } } });
     await core({ type: 'PLAY_CONFIG_SET', settings: { exclude: { remove: cid } } });
   } finally {
     globalThis.fetch = realFetch;
@@ -7325,7 +7323,8 @@ if (viaFleet) {
 // (play/measure.js shareData), and PLAY_STATE / PLAY_SHARE_GET are the core's answers. Stubbed,
 // and only these: a node gone from a cluster (laid over the real PLAY_STATE: the mock cluster's
 // node list never changes between two polls, so the core's node history never sees one leave);
-// VOLUME_DAILY (a fresh data dir has no daily record yet); ACK_LIST, answered with a notes-only
+// VOLUME_DAILY (a fresh data dir has no daily record yet) and LOGDELAY_BOARD (no scheduled
+// measurement has run on it); ACK_LIST, answered with a notes-only
 // record of the kind a hosted core keeps, to prove the wall does not read presence as an
 // acknowledgement (this portable bridge keeps acknowledgements in the browser, acks.js). Then the
 // same page against "Unknown message type", which is what an older core says.
@@ -7370,6 +7369,17 @@ if (viaFleet) {
       if (t === 'ACK_LIST') return stubReply({ ok: true, acks: play.notesOnly || {} });
       return realFetch(input, init);
     }
+    if (t === 'LOGDELAY_BOARD') {
+      sent.push(body);
+      if (play.older) return stubReply(older);
+      const H12 = 12 * 3600000; const t0 = new Date().setHours(0, 0, 0, 0) - 6 * 86400000;
+      const windows = Array.from({ length: 14 }, (_, i) => ({ from: t0 + i * H12, to: t0 + (i + 1) * H12, complete: i < 13 }));
+      return stubReply({ ok: true, now: Date.now(), days: 7, scheduled: true, windows, clusters: [
+        { id: shown.id, name: shown.name, state: 'ok', lastRunAt: Date.now() - 60000, levels: { noDelayUnder: 30, delayFrom: 30, criticalOver: 60 }, devices: 40, onTime: 30, partDelayed: 3,
+          delay: 4, critical: 2, late: 6, silent: 1, cantMeasure: 0, otherTz: 0, newToday: 5, solvedToday: 9, windows: windows.map((_, i) => (i === 3 ? null : i === 13 ? 6 : 10 + i)) },
+        // Answered by mistake: the excluded cluster is in no figure of the wall.
+        { id: hidden.id, name: hidden.name, state: 'ok', lastRunAt: Date.now() - 60000, levels: null, devices: 900, onTime: 0, partDelayed: 0, delay: 0, critical: 900, late: 900, silent: 0, cantMeasure: 0, otherTz: 0, newToday: 900, solvedToday: 0, windows: windows.map(() => 900) }] });
+    }
     if (t === 'VOLUME_DAILY') {
       sent.push(body);
       const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
@@ -7393,19 +7403,21 @@ if (viaFleet) {
     await settleFor(5500);     // the shared delay record is read a few seconds after opening
     ok(doc.documentElement.classList.contains('play'), 'play: html.play is not set (the chrome would show)');
     ok(!!root(), 'play: the wall did not draw');
-    ok(titleText() === 'Fleet', `play: opens on "${titleText()}", not the fleet wall`);
+    ok(titleText() === 'Fleet', `play: opens on "${titleText()}", not Fleet`);
     ok(sent.some((m) => m.type === 'PLAY_STATE'), 'play: PLAY_STATE was not asked');
     ok(sent.some((m) => m.type === 'PLAY_SHARE_GET' && m.kind === 'delay'), 'play: the shared delay record was not asked');
     // exclusion: left out of every slide
-    const tiles = [...doc.querySelectorAll('.pl-tile[data-cluster]')];
+    const tiles = [...doc.querySelectorAll('.pl-ft[data-cluster]')];
     ok(tiles.length === list.length - 1, `play: ${tiles.length} tiles for ${list.length} clusters with one excluded`);
     ok(!tiles.some((t) => t.dataset.cluster === hidden.id), 'play: the excluded cluster has a tile');
-    // node left: blinks
+    // a node that left is a High problem with its time, large, and nothing blinks
     const mine = tiles.find((t) => t.dataset.cluster === shown.id);
-    ok(mine && mine.classList.contains('pl-blink'), 'play: a cluster with a node that left does not blink');
-    ok(/node left on node-2|node-2/.test(viewText()), 'play: the node that left is not named');
-    // the shared delay record: three devices — two at 30–60 min (55, 42), one under 30
-    ok(/2 at 30–60 min/.test(viewText()) && /0 over 60 min/.test(viewText()), `play: delayed devices from the shared record are not on the strip: ${viewText().slice(0, 300)}`);
+    ok(mine && mine.classList.contains('big') && /Node node-2 left the cluster/.test(mine.textContent) && /· 2 min/.test(mine.textContent), `play: the node that left, or since when, is not on its card (${mine && mine.textContent})`);
+    ok(!doc.querySelector('[class*="blink"]'), 'play: something blinks');
+    // the devices are the record's, the excluded cluster in none of them
+    const lgF = [...doc.querySelectorAll('.pl-fleet .pl-lg')].map((x) => x.textContent);
+    ok(lgF.includes('33On time') && lgF.includes('6Late, 30 min or more') && lgF.includes('1Silent or can’t measure'), `play: Fleet's devices are not the record's (${lgF.join(' · ')})`);
+    ok(new RegExp(`1 of ${list.length - 1} clusters`).test(viewText()), 'play: Fleet does not say how many clusters the devices cover');
     // keys: → turns, Space pauses, + / − zoom
     const seen = new Set([titleText()]);
     for (let i = 0; i < 6; i++) {
@@ -7414,16 +7426,41 @@ if (viaFleet) {
       ok(!/could not be drawn/.test(viewText()), `play: slide "${titleText()}" could not be drawn: ${viewText().slice(0, 200)}`);
       ok(!excludedNamed(), `play: slide "${titleText()}" names the excluded cluster`);
     }
-    for (const t of ['Fleet', 'Alerts', 'Log delay', 'Backups', 'Volume and capacity']) ok(seen.has(t), `play: → never reached "${t}" (saw ${[...seen].join(', ')})`);
+    for (const t of ['Fleet', 'Log delay', 'Backups', 'Volume and capacity']) ok(seen.has(t), `play: → never reached "${t}" (saw ${[...seen].join(', ')})`);
     // Bounded: a slide skipped as empty would otherwise turn forever.
     for (let i = 0; i < 14 && titleText() !== 'Log delay'; i++) { key('ArrowRight'); await settleFor(100); }
-    ok(/fw-edge-01/.test(viewText()) && /55 min/.test(viewText()) && /1 h 20/.test(viewText()), 'play: Log delay does not list the worst device with its 24 h peak');
+    {
+      const txt = viewText();
+      const asked = sent.find((m) => m.type === 'LOGDELAY_BOARD');
+      ok(asked && asked.days === 7 && !asked.clusterIds.includes(hidden.id), `play: the log delay record was not asked for this display's clusters (${JSON.stringify(asked)})`);
+      const vals = [...doc.querySelectorAll('.pl-ldgraph .val')].map((x) => x.textContent);
+      ok(vals.length === 13 && vals[0] === '10' && vals[12] === '6' && doc.querySelectorAll('.pl-ldgraph polyline').length === 2,
+        `play: Log delay's graph is not the record's 12-hour counts with a gap where nothing was measured (${vals.join(' ')})`);
+      ok(/not measured/.test(doc.querySelector('.pl-ldgraph').textContent) && /12:00–now/.test(txt) && /12:00–24:00/.test(txt), 'play: the graph does not name its periods, or the one not measured');
+      const lg = [...doc.querySelectorAll('.pl-logdelay .pl-lg')].map((x) => x.textContent);
+      ok(lg.includes('33On time') && lg.includes('430–60 min late') && lg.includes('2Over 60 min late'), `play: the devices now are not the record's, part delayed on time (${lg.join(' · ')})`);
+      const td = doc.querySelector('.pl-ldtoday').textContent;
+      ok(/5 new/.test(td) && /9 solved/.test(td) && /6 late now/.test(td)
+        && ![...doc.querySelectorAll('.pl-logdelay *')].some((x) => !x.children.length && /900/.test(x.textContent)), `play: today's new, solved and late now are wrong (${td})`);
+      ok(!/fw-edge/.test(txt), 'play: Log delay names a single device');
+      // A cluster the record has not: "not read", in no count.
+      const others = [...doc.querySelectorAll('.pl-ldrow[data-cluster]')].filter((r) => r.dataset.cluster !== shown.id);
+      ok(others.length === list.length - 2 && others.every((r) => /not read/.test(r.textContent)), 'play: a cluster with no record is not said to be not read');
+    }
     for (let i = 0; i < 14 && titleText() !== 'Backups'; i++) { key('ArrowRight'); await settleFor(100); }
     ok(/5\.00 GB/.test(viewText()), 'play: Backups does not show the shared backup size');
     ok(/not measured/.test(viewText()) || list.length - 1 === 1, 'play: a cluster with no shared size should read "not measured"');
     for (let i = 0; i < 14 && titleText() !== 'Volume and capacity'; i++) { key('ArrowRight'); await settleFor(100); }
     ok(sent.some((m) => m.type === 'VOLUME_DAILY' && m.days === 30 && m.avgDays === 7), 'play: the volume record was not asked (30 days, 7-day average)');
-    ok(/Yesterday · all clusters/.test(viewText()) && /\+12\.0 %/.test(viewText()), 'play: Volume does not show yesterday against the 7-day average');
+    {
+      // Yesterday's 14.1 GB on every cluster shown, against 14.2 GB the day before; today in no bar.
+      const n = list.length - 1;
+      ok(doc.querySelectorAll('.pl-vb').length === 14 && !doc.querySelector('.pl-vb.none'), 'play: Volume does not draw 14 finished days');
+      ok(/−0\.7 % on the day before/.test(viewText()), `play: Volume's change is not yesterday against the day before: ${doc.querySelector('.pl-vdays .pl-ph').textContent}`);
+      ok(doc.querySelectorAll('.pl-vcr').length === Math.min(7, n) && /−95\.4 MB/.test(viewText()), 'play: the top cluster changes are not the record’s');
+      ok(/^last finished day /.test(doc.querySelector('.pl-fetched').textContent), 'play: Volume does not say its last finished day');
+      ok(!/until full/i.test(viewText()), 'play: a "days until full" guess is back');
+    }
     key('ArrowLeft'); await settleFor(150);
     ok(titleText() === 'Backups', `play: ← went to "${titleText()}"`);
     key(' '); await settleFor(150);
@@ -7449,16 +7486,19 @@ if (viaFleet) {
     st.bus.emit('data', shown.id);
     await settleFor(2300);
     const dbg = pPlay._debug();
-    ok(dbg.take && dbg.take.active && root().classList.contains('takeover') && titleText() === 'Alerts',
+    ok(dbg.take && dbg.take.active && root().classList.contains('takeover') && titleText() === 'Fleet',
       `play: a new critical alert did not take the screen (title "${titleText()}", active ${JSON.stringify(dbg.take && dbg.take.active)})`);
     const hot = dbg.take && dbg.take.active && dbg.take.active.key;
-    ok(hot && !!doc.querySelector(`.pl-arow.hot[data-key="${hot}"]`), 'play: the alert that took the screen is not at the top');
+    const first = doc.querySelector('.pl-ft.big');
+    ok(hot && first && first.classList.contains('hot') && first.dataset.cluster === shown.id && /Cluster health red/.test(first.querySelector('.pl-ftw').textContent)
+      && /4 shards have no node/.test(first.textContent), `play: the problem that took the screen is not first on Fleet (${first && first.textContent})`);
     // The open alerts go to the core with PLAY_STATE, so "open for" survives a reload.
     sent.length = 0;
     await pPlay._poll(); await settleFor(200);
     const asked = sent.find((m) => m.type === 'PLAY_STATE');
-    ok(asked && Array.isArray(asked.open) && asked.open.includes(hot), `play: PLAY_STATE did not carry the open alert keys: ${JSON.stringify(asked)}`);
-    ok(Number(pPlay._debug().ps.openSince[hot]) > 0, 'play: the core did not keep when the alert was first open');
+    ok(asked && Array.isArray(asked.open) && asked.open.includes(`${hot}|critical`), `play: PLAY_STATE did not carry the open alert keys: ${JSON.stringify(asked)}`);
+    // This core has watched for seconds only: when the problem began is not known, and that is said.
+    ok(!(`${hot}|critical` in pPlay._debug().ps.openSince) && /since: not known/.test(doc.querySelector('.pl-ft.big .pl-lvl').textContent), 'play: a time nobody knows is given as one');
     // A record kept only for its notes (acked: false) is not an acknowledgement.
     play.notesOnly = { [hot]: { by: 'qa', at: Date.now(), note: 'looking', record: { acked: false, ackedBy: '', ackedAt: 0, notes: [{ text: 'looking', by: 'qa', ts: Date.now() }] } } };
     // Not awaited: the record is in acks.js's cache at once; the shim's IndexedDB never says it is written.
@@ -7473,8 +7513,8 @@ if (viaFleet) {
     st.bus.emit('data', shown.id);
     await settleFor(300);
 
-    // High (2026-11-01): a node over 85 % heap is a HIGH row on the Alerts slide, counted under
-    // Open now, and never takes the screen; on the wall the node-left blink still wins its tile.
+    // High (2026-11-01): a node over 85 % heap is a High problem on Fleet, counted under the open
+    // alerts, and never takes the screen.
     {
       const was = st.state.data.get(shown.id);
       const nodes = (was.nodes && was.nodes.length ? was.nodes : [{ name: 'node-1' }]).map((n, i) => (i === 0 ? { ...n, 'heap.percent': '93' } : n));
@@ -7482,16 +7522,11 @@ if (viaFleet) {
       st.invalidateAlerts(); st.bus.emit('data', shown.id);
       await settleFor(1500);
       ok(!pPlay._debug().take.active, 'play: a High alert took the screen (only critical does)');
-      for (let i = 0; i < 14 && titleText() !== 'Alerts'; i++) { key('ArrowRight'); await settleFor(120); }
-      const hi = [...doc.querySelectorAll('.pl-arow.high')];
-      ok(hi.length >= 1 && hi.every((r) => r.querySelector('.pl-sev').textContent === 'HIGH') && hi.some((r) => /JVM heap/.test(r.textContent)),
-        `play: the Alerts slide has no HIGH row for the heap alert (${hi.length} high rows)`);
-      const kv = [...doc.querySelectorAll('.pl-aside .pl-kpi')].find((k) => k.querySelector('.pl-k').textContent === 'High');
-      ok(kv && Number(kv.querySelector('.pl-v').textContent) >= 1, `play: Open now does not count High (${kv && kv.textContent})`);
       for (let i = 0; i < 14 && titleText() !== 'Fleet'; i++) { key('ArrowRight'); await settleFor(120); }
-      const t = doc.querySelector(`.pl-tile[data-cluster="${shown.id}"]`);
-      ok(t && t.classList.contains('pl-blink') && !t.classList.contains('blink-high') && !t.classList.contains('blink-crit'),
-        `play: the node-left blink does not win over High on its tile (${t && t.className})`);
+      const card = doc.querySelector(`.pl-ft[data-cluster="${shown.id}"]`);
+      ok(card && card.classList.contains('high') && /heap/i.test(card.innerHTML), `play: the heap alert is not among its cluster's problems on Fleet (${card && card.innerHTML.slice(0, 400)})`);
+      const hiN = [...doc.querySelectorAll('.pl-ftop .pl-panel')][1].querySelectorAll('.pl-lg b')[1];
+      ok(hiN && Number(hiN.textContent) >= 1, `play: Fleet's open alerts do not count High (${hiN && hiN.textContent})`);
       st.state.data.set(shown.id, was);
       st.invalidateAlerts(); st.bus.emit('data', shown.id);
       await settleFor(300);
@@ -7511,7 +7546,7 @@ if (viaFleet) {
     await go('overview'); await go('play'); await settleFor(2500);
     ok(!!root() && titleText() === 'Fleet', 'play: against an older core the wall did not draw');
     ok(/older server/.test(doc.querySelector('.pl-hchips').textContent), 'play: an older core is not said to be one');
-    ok(doc.querySelectorAll('.pl-tile[data-cluster]').length === list.length, 'play: an older core has no exclusions, so every cluster has a tile');
+    ok(doc.querySelectorAll('.pl-ft[data-cluster]').length === list.length, 'play: an older core has no exclusions, so every cluster has a tile');
     for (let i = 0; i < 6; i++) { key('ArrowRight'); await settleFor(120); ok(!/could not be drawn/.test(viewText()), `play (older core): "${titleText()}" could not be drawn`); }
 
     // Escape leaves for a person, and every timer and listener goes with it

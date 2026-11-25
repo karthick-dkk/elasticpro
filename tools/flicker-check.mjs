@@ -118,7 +118,7 @@ const PAGES = [
   { id: 'requests/health', search: null, hover: ['#view .hl-chip', '#view [data-check] td', '#view .hl-page details summary'] },
   { id: 'accounts', search: '#view input[aria-label="Filter by user"]', hover: ['#view tbody tr', '#view .btn'] },
   { id: 'settings', search: null, hover: ['#view tbody tr', '#view .subnav button', '#view .pill'] },
-  { id: 'play', search: null, hover: ['.pl-slide .pl-tile, .pl-slide .pl-arow', '.pl-head'] },
+  { id: 'play', search: null, hover: ['.pl-slide .pl-ft', '.pl-head'] },
 ].filter((p) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(p.id));
 
 /** Pages whose pointer figures must be zero (the redraws fixed in 0.3.54); others are reported. */

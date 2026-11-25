@@ -35,9 +35,6 @@ export const LEVEL_TONE = { critical: 'red', high: 'orange', warning: 'yellow' }
 /** The short class the Alerts page styles a level by (.apill.crit / .high / .warn). */
 export const LEVEL_CLASS = { critical: 'crit', high: 'high', warning: 'warn' };
 
-/** How a level is said on a wall (Play's Alerts slide). */
-export const LEVEL_SHORT = { critical: 'CRIT', high: 'HIGH', warning: 'WARN' };
-
 /**
  * The one count of alerts by level: `{ total, critical, high, warning }`. Whatever is not
  * critical or high is a warning, so the three always add up to the total.

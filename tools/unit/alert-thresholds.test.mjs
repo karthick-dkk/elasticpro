@@ -28,9 +28,9 @@ test('a threshold at the default stays unset; one changed is written', () => {
 
 test('a stored threshold is kept when untouched, and changed when changed — even back to the default', () => {
   const stored = { thresholds: { [keys[0]]: 70 } };
-  const same = A.nextRuleSettings(stored, disk, { on: true, typed: typedAt([70, defaults[keys[1]]]) }, defaults);
+  const same = A.nextRuleSettings(stored, disk, { on: true, typed: typedAt([70, ...keys.slice(1).map((k) => defaults[k])]) }, defaults);
   assert.deepEqual(same, { thresholds: { [keys[0]]: 70 } });
-  const back = A.nextRuleSettings(stored, disk, { on: true, typed: typedAt([defaults[keys[0]], defaults[keys[1]]]) }, defaults);
+  const back = A.nextRuleSettings(stored, disk, { on: true, typed: typedAt(keys.map((k) => defaults[k])) }, defaults);
   assert.deepEqual(back, { thresholds: { [keys[0]]: defaults[keys[0]] } });
 });
 

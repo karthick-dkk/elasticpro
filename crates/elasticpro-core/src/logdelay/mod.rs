@@ -509,6 +509,15 @@ impl Core {
                 v["schedule"] = self.logdelay_schedule_line(caller);
                 v
             }
+            "LOGDELAY_BOARD" => {
+                let only = Self::logdelay_ids(msg);
+                let inputs = self.logdelay_inputs(caller, only.as_deref()).await;
+                let days = msg.get("days").and_then(Value::as_i64).unwrap_or(7);
+                let mut v = summary::board(&inputs, days, now);
+                v["ok"] = json!(true);
+                v["scheduled"] = json!(self.delay_sink_config().enabled);
+                v
+            }
             "LOGDELAY_CLUSTER" => {
                 let Some(id) = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "clusterId is required") };
                 let r = match Self::logdelay_range(msg, now, 30) { Ok(r) => r, Err(e) => return bad("bad_request", e) };

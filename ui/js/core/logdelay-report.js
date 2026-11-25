@@ -109,6 +109,8 @@ const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefin
 const ids = (o) => (Array.isArray(o.clusterIds) && o.clusterIds.length ? { clusterIds: o.clusterIds } : {});
 
 export const ldSummary = (o = {}) => send({ type: 'LOGDELAY_SUMMARY', ...pick(o, ['from', 'to', 'days', 'maxDevices']), ...ids(o) }, o.signal);
+/** The half-day board (0.3.94): counts per cluster, no device. */
+export const ldBoard = (o = {}) => send({ type: 'LOGDELAY_BOARD', ...pick(o, ['days']), ...ids(o) }, o.signal);
 export const ldCluster = (o) => send({ type: 'LOGDELAY_CLUSTER', clusterId: o.clusterId, ...pick(o, ['from', 'to', 'days']) }, o.signal);
 export const ldDevice = (o) => send({ type: 'LOGDELAY_DEVICE', clusterId: o.clusterId, device: o.device, ...pick(o, ['from', 'to', 'days']) }, o.signal);
 /** One log type over its devices (0.3.92): `logType`, or `noType` for the documents without the field. */
