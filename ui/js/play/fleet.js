@@ -154,7 +154,8 @@ const track = (p, tone, line) => h('span.pl-trk', h(`i.${tone}`, { style: { widt
   Number.isFinite(line) ? h('u', { style: { left: `${line}%` } }) : null);
 
 function pill(ctx, p) {
-  return h(`span.pl-lvl.${p.level}`, `${LEVEL_WORD[p.level]} · ${sinceText(ctx, p)}`);
+  const text = `${LEVEL_WORD[p.level]} · ${sinceText(ctx, p)}`;
+  return h(`span.pl-lvl.${p.level}`, { title: text }, text);
 }
 const ackText = (p) => (p.acked && p.alert ? `Acknowledged${p.alert.ackedBy ? ` by ${p.alert.ackedBy}` : ''}.` : '');
 const whyText = (p) => [p.why, ackText(p)].filter(Boolean).join(/[.…]$/.test(p.why) ? ' ' : '. ');
