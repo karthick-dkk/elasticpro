@@ -90,9 +90,11 @@ struct OpenTimes {
 }
 
 impl OpenTimes {
-    fn kept_for(&self, cluster: &str) -> usize {
+    /// How many are kept of `cluster`, counted as they are attributed (one id may begin another).
+    fn kept_for(&self, cluster: &String, known: &[String]) -> usize {
         let prefix = format!("{cluster}:");
-        self.keys.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix)).count()
+        self.keys.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix))
+            .filter(|(k, _)| crate::silences::cluster_of("alert", k, known) == Some(cluster)).count()
     }
 }
 
@@ -122,7 +124,9 @@ impl OpenSince {
     /// `clusters` only. A report is taken at its word: whoever has a display link to a cluster
     /// can say a problem of it opened earlier than it did (docs/PLAY.md "Since when").
     fn update(&self, open: Option<&[String]>, sure: &HashSet<String>, clusters: &[String], known: &[String], now: u64) -> BTreeMap<String, u64> {
-        let of = |k: &str| crate::silences::cluster_of("alert", k, known).filter(|c| clusters.contains(c)).cloned();
+        // `cluster_of` trims: a key with space around it would be counted nowhere, so it is not taken.
+        let of = |k: &str| Some(k).filter(|k| k.trim() == *k)
+            .and_then(|k| crate::silences::cluster_of("alert", k, known)).filter(|c| clusters.contains(c)).cloned();
         let mut st = self.state.lock();
         if let Some(open) = open {
             let mut changed = false;
@@ -134,7 +138,7 @@ impl OpenSince {
                         changed = true;
                     }
                     e.seen = now;
-                } else if st.kept_for(&c) < OPEN_KEYS_PER_CLUSTER {
+                } else if st.kept_for(&c, known) < OPEN_KEYS_PER_CLUSTER {
                     let settled = st.watched.get(&c)
                         .is_some_and(|w| now.saturating_sub(w.last) <= WATCH_GAP_MS && now.saturating_sub(w.since) >= WATCH_SETTLE_MS);
                     st.keys.insert(k.clone(), Opened { at: now, seen: now, known: settled && sure.contains(k) });
@@ -789,6 +793,9 @@ mod open_since_tests {
         let many: Vec<String> = (0..OPEN_KEYS_PER_CLUSTER + 50).map(|i| format!("c1:user:{i}")).collect();
         o.update(Some(&many), &set(&[]), &ids(&["c1"]), &all, t0);
         assert_eq!(o.state.lock().keys.len(), OPEN_KEYS_PER_CLUSTER);
+        let padded: Vec<String> = (0..50).map(|i| format!(" c1:user:p{i}")).collect();
+        o.update(Some(&padded), &set(&[]), &ids(&["c1"]), &all, t0);
+        assert_eq!(o.state.lock().keys.len(), OPEN_KEYS_PER_CLUSTER, "a space in front does not get past it");
         o.update(Some(&ids(&["c2:disk"])), &set(&[]), &ids(&["c2"]), &all, t0 + MIN);
         assert!(o.state.lock().keys.contains_key("c2:disk"), "c1's are not in c2's way");
         o.update(Some(&ids(&["c2:disk"])), &set(&[]), &ids(&["c2"]), &all, t0 + 11 * MIN);
