@@ -215,6 +215,7 @@ impl Core {
         let mut out = Collected { log_type: self.logdelay_log_type(id, f, from_ms, to_ms).await, ..Collected::default() };
         let f = &Fields { log_type: out.log_type.field.clone(), ..f.clone() };
         let without = &Fields { log_type: None, ..f.clone() };
+        let mut fields = f;
         let on = f.log_type.is_some() && !devices.is_partial();
         let start = self.logdelay_store().filter(|_| on).and_then(|st| st.read_tracker(id).last_read.as_ref().and_then(|r| r.types_after.clone()));
         let mut walk = Walk::new(start, if f.log_type.is_some() { measure::TYPES_PER_RUN } else { usize::MAX });
@@ -233,7 +234,7 @@ impl Core {
                 break;
             }
             let by_types = walk.by_types();
-            let f = if by_types { f } else { without };
+            let f = if by_types { fields } else { without };
             // One more than the cap leaves room for: a device beyond it says the list was cut.
             let ask = size.min(max - out.readings.len() + 1).max(1);
             let body = measure::page_body(f, from_ms, to_ms, ask, after.as_ref(), devices);
@@ -253,8 +254,9 @@ impl Core {
                     if size > measure::PAGE_SIZE_MIN {
                         size = measure::PAGE_SIZE_MIN;
                     } else {
-                        walk.limit = 0;
-                        out.log_type = LogTypeField { field: None, why: Some(format!("the cluster refused the search by log types: {why}")) };
+                        // From the first page, as on a cluster without the field: one rule for all its devices.
+                        out = Collected { log_type: LogTypeField { field: None, why: Some(format!("the cluster refused the search by log types: {why}")) }, ..Collected::default() };
+                        (fields, walk, after, size, tries) = (without, Walk::new(None, usize::MAX), None, measure::PAGE_SIZE, 0);
                     }
                     continue;
                 }

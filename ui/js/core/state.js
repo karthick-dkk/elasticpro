@@ -1993,7 +1993,7 @@ function delayReading(clusterId, now) {
   const over = !!run && (run.stale || now >= (run.goodUntil === null ? run.at + ours : run.goodUntil));
   // Play measures a device by its newest document only: on a cluster measured by log types that cannot
   // tell part delayed from late or on time, so it does not replace a run of the server's that does.
-  const coarse = !!run && run.typed && !over && !!mine && !mine.summary.logTypes;
+  const coarse = !!run && run.typed && !run.failed && !over && !!mine && !mine.summary.logTypes;
   if (run && (!mine || run.at > mine.at || coarse)) {
     if (over) return null;
     return { summary: run.summary, at: run.at, server: true, levels: run.levels, failed: run.failed };

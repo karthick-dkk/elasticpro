@@ -326,17 +326,25 @@ fn files_mb(dir: &TempDir) -> (f64, f64) {
 async fn a_search_refused_for_its_log_types_is_read_without_them() {
     let dir = TempDir::new("logdelay-types-refused");
     let asked = Arc::new(AtomicUsize::new(0));
-    let n = asked.clone();
+    let (n, refuses) = (asked.clone(), Arc::new(AtomicUsize::new(0)));
+    let refuse = refuses.clone();
     let srv = TestServer::with(move |hit| {
         if hit.path.contains("/_field_caps") {
             return (200, json!({ "indices": ["logstash-1"], "fields": { "log_type": { "keyword": { "type": "keyword", "aggregatable": true, "searchable": true } } } }).to_string());
         }
         if hit.path.contains("/_search") {
+            if hit.body.contains("\"no_type\"") && refuse.load(Ordering::SeqCst) == 0 {
+                let now = chrono::Utc::now();
+                let hit = |m: i64, t: &str| json!({ "hits": { "hits": [{ "_source": { "@timestamp": now.to_rfc3339(), "event_created": (now - chrono::Duration::minutes(m)).to_rfc3339(), "log_type": t } }] } });
+                let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": hit(2, "a"), "types": { "sum_other_doc_count": 0, "buckets": [
+                    { "key": "a", "doc_count": 5, "latest": hit(2, "a") }, { "key": "b", "doc_count": 4, "latest": hit(3, "b") } ] }, "no_type": { "doc_count": 0, "latest": { "hits": { "hits": [] } } } }]);
+                return (200, json!({ "took": 1, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": { "buckets": b } } }).to_string());
+            }
             if hit.body.contains("\"no_type\"") {
                 n.fetch_add(1, Ordering::SeqCst);
                 return (503, json!({ "error": { "type": "search_phase_execution_exception", "reason": "", "caused_by": { "type": "too_many_buckets_exception", "reason": "Trying to create too many buckets" } }, "status": 503 }).to_string());
             }
-            let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": { "hits": { "hits": [{ "_source": { "@timestamp": "2026-11-24T12:00:00Z", "event_created": "2026-11-24T11:15:00Z" } }] } } }]);
+            let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": { "hits": { "hits": [{ "_source": { "@timestamp": chrono::Utc::now().to_rfc3339(), "event_created": (chrono::Utc::now() - chrono::Duration::minutes(95)).to_rfc3339() } }] } } }]);
             return (200, json!({ "took": 1, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": { "buckets": b } } }).to_string());
         }
         (200, r#"{"cluster_name":"c","status":"green"}"#.into())
@@ -344,11 +352,18 @@ async fn a_search_refused_for_its_log_types_is_read_without_them() {
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     let s = admin(&c).await;
     c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "name": "Production", "url": srv.url() }] })).await;
+    // First by log types, on time; then refused, the device over 60 minutes late: it is said late, not kept on time.
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    assert_eq!((sum["byCluster"][0]["critical"].clone(), sum["byCluster"][0]["logTypes"]["total"].clone()), (json!(0), json!(2)), "{}", sum["byCluster"][0]);
+    refuses.store(1, Ordering::SeqCst);
     let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
     assert_eq!(asked.load(Ordering::SeqCst), 2, "once, and once with smaller pages");
     let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
     let row = &sum["byCluster"][0];
+    assert_eq!((row["critical"].clone(), row["typesUnread"].clone()), (json!(1), json!(0)), "{row}");
     assert!(row["logTypes"].is_null() && row["logTypeField"].is_null() && row["logTypeWhy"].as_str().unwrap_or("").contains("refused the search by log types"), "{row}");
 }
 
