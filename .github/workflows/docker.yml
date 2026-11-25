@@ -53,13 +53,16 @@ jobs:
         run: |
           set -euo pipefail
           tree=$(git rev-parse 'HEAD^{tree}')
+          # Resolved to a digest once, here: what is tagged below is what was looked at, whatever
+          # the name points to by then.
+          digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> /dev/null | jq -r .digest || true; }
           found=
           for day in $(date -u +%Y%m%d) $(date -u -d yesterday +%Y%m%d); do
-            ref="${PREBUILT}:${tree}-${day}"
-            if docker buildx imagetools inspect "$ref-amd64" > /dev/null 2>&1 \
-              && docker buildx imagetools inspect "$ref-arm64" > /dev/null 2>&1; then
-              found="$ref"; break
-            fi
+            amd=$(digest "${PREBUILT}:${tree}-${day}-amd64")
+            arm=$(digest "${PREBUILT}:${tree}-${day}-arm64")
+            case "$amd $arm" in
+              sha256:*' 'sha256:*) found="${PREBUILT}@${amd} ${PREBUILT}@${arm}"; break ;;
+            esac
           done
           echo "prebuilt=$found" >> "$GITHUB_OUTPUT"
           echo "prebuilt: ${found:-none, building here}"
@@ -311,7 +314,7 @@ jobs:
 
           if [ -n "$FOUND" ]; then
             # shellcheck disable=SC2086
-            docker buildx imagetools create $tags "$FOUND-amd64" "$FOUND-arm64"
+            docker buildx imagetools create $tags $FOUND
             exit 0
           fi
           cd /tmp/digests

@@ -103,7 +103,7 @@ jobs:
           until curl -sf http://127.0.0.1:9299/_cluster/health >/dev/null; do sleep 1; done
 
           ELASTICPRO_DATA_DIR=$(mktemp -d) ./target/debug/elasticpro-bridge ui 8765 & bridge=$!
-          trap 'kill $mock $bridge' EXIT
+          trap 'kill $mock $bridge 2>/dev/null || true' EXIT
           until curl -sf -X POST http://127.0.0.1:8765/bridge \
             -H 'content-type: application/json' -d '{"type":"PING"}' >/dev/null; do sleep 1; done
 

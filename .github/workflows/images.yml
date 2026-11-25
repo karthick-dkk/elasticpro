@@ -17,7 +17,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   plan:
@@ -48,6 +47,10 @@ jobs:
     if: needs.plan.outputs.release == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # Only this job writes, and only the checkout's own Dockerfile runs in it.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
