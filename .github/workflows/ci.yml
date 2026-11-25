@@ -52,7 +52,7 @@ jobs:
   # job run side by side and CI ends with the slower of core and render. Each builds the
   # dev bridge from the same cache (about 40 s), which is cheaper than waiting.
   ui-contract:
-    name: ui — syntax, unit & hosted contract
+    name: ui — syntax, unit, render & hosted contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,13 +95,27 @@ jobs:
       - name: hosted-mode contract
         run: tools/hosted-check.sh
 
+      # Here rather than before the behaviour check: that one is the longest step in CI, and
+      # this job ends minutes before it.
+      - name: render every page
+        run: |
+          node tools/mock-es.mjs 9299 & mock=$!
+          until curl -sf http://127.0.0.1:9299/_cluster/health >/dev/null; do sleep 1; done
+
+          ELASTICPRO_DATA_DIR=$(mktemp -d) ./target/debug/elasticpro-bridge ui 8765 & bridge=$!
+          trap 'kill $mock $bridge' EXIT
+          until curl -sf -X POST http://127.0.0.1:8765/bridge \
+            -H 'content-type: application/json' -d '{"type":"PING"}' >/dev/null; do sleep 1; done
+
+          node tools/render-check.mjs --config tools/render-fixture.json
+
       # deploy.sh --upgrade brings in a release's compose file only when the installed one is
       # as some release shipped it. Dry runs against a release mirror on disk: nothing pulled.
       - name: deploy.sh compose upgrade
         run: tools/compose-upgrade-check.sh
 
   ui:
-    name: ui — render & behaviour
+    name: ui — behaviour
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -117,7 +131,7 @@ jobs:
       - name: build the dev bridge
         run: cargo build -p elasticpro-core --features bridge --bin elasticpro-bridge
 
-      - name: render every page, then drive the ones with behaviour
+      - name: drive the pages with behaviour
         run: |
           node tools/mock-es.mjs 9299 &
           until curl -sf http://127.0.0.1:9299/_cluster/health >/dev/null; do sleep 1; done
@@ -126,16 +140,10 @@ jobs:
           until curl -sf -X POST http://127.0.0.1:8765/bridge \
             -H 'content-type: application/json' -d '{"type":"PING"}' >/dev/null; do sleep 1; done
 
-          node tools/render-check.mjs --config tools/render-fixture.json
-
           # Drawing a page is not using it. A view behind a select that nothing selects,
           # an export nothing clicks, a panel whose folded state is decided on the second
           # render — all of those draw perfectly and are all still wrong, and two shipped
           # bugs came out of exactly that gap. So this presses things.
-          #
-          # Same step as the render check rather than the next one: both need the mock
-          # cluster and the bridge, and a background process surviving from one step into
-          # another is not something to build a check on.
           node tools/behaviour-check.mjs --config tools/render-fixture.json
 
   # The Linux deployment is a Dockerfile and a compose stack, and nothing else in CI
