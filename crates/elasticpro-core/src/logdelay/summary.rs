@@ -8,7 +8,7 @@
 use super::fixes::Finding;
 use super::levels::{Levels, State, LOG_TYPE_FIELD, NO_LOG_TYPE};
 use super::measure::MAPPING_NOT_READ;
-use super::state::{late_in, measured_spans, percentile, Daily, DeviceState, Episode, LogTypes, Point, Tracker, TYPE_RECENT_MS};
+use super::state::{joined, late_in, late_kept, measured_spans, percentile, Daily, DeviceState, Episode, LogTypes, Point, Tracker, TYPE_RECENT_MS};
 use super::time;
 use super::tz::{self, LogTimeZone};
 use chrono::NaiveDate;
@@ -292,6 +292,9 @@ pub struct DeviceRow {
     pub solved: u64,
     /// Time inside open periods within the range, ms.
     pub late_ms: i64,
+    /// A delay in it is older than the measurements kept: that part is from its start to its end.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub late_about: bool,
     pub last_started: Option<i64>,
     pub last_solved: Option<i64>,
     /// Why the last period ended when it was not solved.
@@ -409,6 +412,8 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
     let measured = d.state.measured();
     // Late time, part late time and the percentages are of the time it was measured.
     let spans = if mine.is_empty() && d.types_since_ms.is_none() { vec![] } else { measured_spans(d.recent.iter(), c.tracker.stale_after(), r.from_ms, r.to_ms, now) };
+    let kept_from = d.recent.iter().next().map(|p| p.t);
+    let late: Vec<(i64, bool)> = mine.iter().map(|e| late_kept(e, &spans, kept_from, r.from_ms, r.to_ms, now)).collect();
     let mut row = DeviceRow {
         device: name.to_string(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
         now_minutes: if measured { d.last_minutes } else { None },
@@ -418,7 +423,7 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
         own_zone: d.home.filter(|h| !h.same_as_cluster()).map(|h| h.zone),
         median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
         episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
-        late_ms: if mine.is_empty() { 0 } else { mine.iter().map(|e| late_in(e, &spans, now)).sum() },
+        late_ms: late.iter().map(|(ms, _)| ms).sum(), late_about: late.iter().any(|(_, about)| *about),
         last_started: last.map(|e| e.started_ms), last_solved: last.and_then(|e| e.solved_ms),
         late_since: d.open.as_ref().map(|e| e.started_ms),
         last_ended_why: last.and_then(|e| e.ended_why.clone()),
@@ -835,6 +840,8 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
         let all: Vec<Point> = older.points.get(&s.log_type).into_iter().flatten().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).collect();
         let spans = measured_spans(all.iter().copied(), c.tracker.stale_after(), i64::MIN, i64::MAX, now);
         let in_spans: Vec<(i64, i64, State)> = spans.iter().map(|(a, b, x)| ((*a).max(r.from_ms), (*b).min(r.to_ms), *x)).filter(|(a, b, _)| b > a).collect();
+        let first = all.first().map_or(i64::MAX, |p| p.t);
+        let late: Vec<(i64, bool)> = mine.iter().map(|e| late_kept(e, &in_spans, Some(first), r.from_ms, r.to_ms, now)).collect();
         let state = d.type_state(s);
         let delay = s.last_minutes.filter(|_| s.state.measured());
         let last = Tracker::last_measured(s).or_else(|| points.iter().rev().find(|p| p.m.is_some() && !p.s.cant_measure()).map(|p| p.t));
@@ -858,9 +865,9 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
             "logType": s.type_name(), "noType": s.no_type, "state": s.state, "stateText": text,
             "delayMinutes": delay, "rawGap": s.last_raw_minutes.filter(|_| s.state.measured()), "eventField": s.event_field,
             "lastArrival": s.last_arrival_ms, "lastEvent": s.last_event_ms, "docs": s.docs,
-            "episodes": mine.iter().map(|e| { let mut v = period_json(e, now); v["measuredMs"] = json!(late_in(e, &spans, now)); v }).collect::<Vec<_>>(),
+            "episodes": mine.iter().map(|e| { let mut v = period_json(e, now); v["measuredMs"] = json!((e.started_ms >= first).then(|| late_in(e, &spans, now))); v }).collect::<Vec<_>>(),
             "points": points.iter().map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect::<Vec<_>>(),
-            "lateMs": mine.iter().map(|e| late_in(e, &in_spans, now)).sum::<i64>(),
+            "lateMs": late.iter().map(|(ms, _)| ms).sum::<i64>(), "lateAbout": late.iter().any(|(_, about)| *about),
             "lastMeasuredMs": last, "stale": stale,
         })));
     }
@@ -903,6 +910,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     let spans = measured_spans(d.recent.iter(), c.tracker.stale_after(), r.from_ms, r.to_ms, now);
     let measured_ms: i64 = spans.iter().map(|(a, b, _)| b - a).sum();
     let late_measured: i64 = eps.iter().map(|e| late_in(e, &spans, now)).sum();
+    let kept_from = d.recent.iter().next().map_or(i64::MAX, |p| p.t);
     // A period is as long as from its start to its end; how much of that was measured is said beside it.
     let all_spans = measured_spans(d.recent.iter(), c.tracker.stale_after(), i64::MIN, i64::MAX, now);
     let mut v = json!({
@@ -918,15 +926,19 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
         "periods": eps.iter().map(|e| {
             let mut v = period_json(e, now);
             v["beforeLogTypes"] = json!(d.types_since_ms.is_some_and(|t| e.started_ms < t));
-            v["measuredMs"] = json!(late_in(e, &all_spans, now));
-            v["spans"] = json!(spans.iter().map(|(a, b, _)| ((*a).max(e.started_ms), (*b).min(e.end_ms(now)))).filter(|(a, b)| b > a).map(|(a, b)| json!([a, b])).collect::<Vec<_>>());
+            // Older than the points kept: how much of it was measured is not known, and that part is
+            // drawn whole, as `late_kept` counts it.
+            let known = e.started_ms >= kept_from;
+            v["measuredMs"] = json!(known.then(|| late_in(e, &all_spans, now)));
+            let older = (e.started_ms.max(r.from_ms), e.end_ms(now).min(kept_from).min(r.to_ms));
+            v["spans"] = json!(joined(std::iter::once(older).chain(spans.iter().map(|(a, b, _)| ((*a).max(e.started_ms), (*b).min(e.end_ms(now)))))));
             v
         }).collect::<Vec<_>>(),
         "silences": silences,
         "insights": {
             "peak": peak.map(|(t, m)| json!({ "minutes": m, "at": t })),
             "average": average.map(|a| json!({ "minutes": a, "measurements": measured.len() })),
-            "longest": longest.map(|e| json!({ "lastedMs": e.lasted_ms(now), "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "endedWhy": e.ended_why, "measuredMs": late_in(e, &all_spans, now) })),
+            "longest": longest.map(|e| json!({ "lastedMs": e.lasted_ms(now), "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "endedWhy": e.ended_why, "measuredMs": (e.started_ms >= kept_from).then(|| late_in(e, &all_spans, now)) })),
             "solvedIn": solve_avg.map(|ms| json!({ "averageMs": ms, "solved": solved.len() })),
             "lateMostOften": most,
         },
@@ -940,6 +952,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     v["measuredUntilMs"] = json!(row.measured_until_ms);
     v["stale"] = json!(row.stale);
     v["stateText"] = json!(row.state_text);
+    v["lateAbout"] = json!(row.late_about);
     v["staleAfterMs"] = json!(c.tracker.stale_after());
     v["types"] = json!(row.types);
     v["typesUnread"] = json!(row.types_unread);

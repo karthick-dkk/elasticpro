@@ -913,7 +913,7 @@ function clusterView(id) {
     return h('div.ld-note.ld-focus#ld-focus-window',
       `Opened at ${fw.label || 'a window'} from Late devices over the day: `,
       h('b', v === null ? 'not measured' : `${countText(v)} device${v === 1 ? '' : 's'} ${fw.mode === 'critical' ? b.high.toLowerCase() : b.late}`),
-      v === null ? ' — no run in that window.' : ' at that window’s measurement.', ' ',
+      v === null ? ' — no run, or no logs from any device, in that window.' : ' at that window’s measurement.', ' ',
       h('button.linkish', { type: 'button', 'aria-label': 'Dismiss', onclick: () => { S.focusWin = null; repaint(); } }, '×'));
   });
 
@@ -981,7 +981,7 @@ function exportDevicesCsv(rows, res) {
     late_since: finite(r.lateSince) ? new Date(r.lateSince).toISOString() : '', docs_per_day: finite(r.docsPerDay) ? r.docsPerDay : '',
     event_field: r.eventField || '',
     fix: r.fix ? `${stepLabel(r.fix)}: ${r.fix.fix || r.fix.why || ''}` : '',
-    note: cut,
+    note: cut, late_ms_about: r.lateAbout ? 'yes' : '',
   }));
   download(`log-delay-devices-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(out));
 }

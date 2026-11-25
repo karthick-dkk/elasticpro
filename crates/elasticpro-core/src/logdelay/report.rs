@@ -495,7 +495,7 @@ fn column_cell(c: &str, r: &DeviceRow, now: i64) -> Cell {
         "median" => opt_min(r.median_minutes),
         "max" => opt_min(r.max_minutes),
         "episodes" => Cell::Int(r.episodes as f64),
-        "lateTime" => Cell::text(time::duration(r.late_ms)),
+        "lateTime" => Cell::text(format!("{}{}", if r.late_about { "about " } else { "" }, time::duration(r.late_ms))),
         "docsPerDay" => match (r.docs_per_day, r.docs_counted, r.docs_counted_hours) {
             (Some(d), _, _) => Cell::Int(d as f64),
             (None, Some(d), Some(h)) => Cell::text(format!("{d} in {h} h measured")),

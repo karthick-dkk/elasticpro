@@ -1181,7 +1181,28 @@ pub fn measured_spans(points: impl Iterator<Item = Point>, stale_after: i64, fro
 
 /// How much of a delay period was measured: the time late, and nothing nobody measured.
 pub fn late_in(e: &Episode, spans: &[(i64, i64, State)], now: i64) -> i64 {
-    spans.iter().map(|(a, b, _)| e.overlap_ms(*a, *b, now)).sum()
+    let first = spans.partition_point(|(_, b, _)| *b <= e.started_ms);
+    let end = e.end_ms(now);
+    spans[first..].iter().take_while(|(a, _, _)| *a < end).map(|(a, b, _)| e.overlap_ms(*a, *b, now)).sum()
+}
+
+/// `late_in`, for a period that may be older than the points kept (`kept_from`: the oldest of them):
+/// what is before them is counted from start to end, and `true` says so.
+pub fn late_kept(e: &Episode, spans: &[(i64, i64, State)], kept_from: Option<i64>, from: i64, to: i64, now: i64) -> (i64, bool) {
+    let before = e.overlap_ms(from, to.min(kept_from.unwrap_or(i64::MAX)), now);
+    (late_in(e, spans, now) + before, before > 0)
+}
+
+/// Stretches that touch, as one.
+pub fn joined(spans: impl Iterator<Item = (i64, i64)>) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = vec![];
+    for (a, b) in spans.filter(|(a, b)| b > a) {
+        match out.last_mut() {
+            Some(last) if last.1 >= a => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
 }
 
 /// The totals of `[from, to)` (one local day) from the tracker's memory. `now` is the run's
@@ -1277,6 +1298,13 @@ mod tests {
         t.silent_after_ms = Some(2 * h);
         let e = t.devices["fw"].open.clone().unwrap();
         assert_eq!((e.lasted_ms(8 * h), daily(&t, "d", 0, 24 * h, 8 * h).late_hours), (8 * h, 2.5), "open from 0 to 8, measured 2 h 30");
+        // Older than the points kept: from its start to its end there, and said to be about.
+        let spans = vec![(5 * h, 6 * h, State::Critical)];
+        assert_eq!(late_kept(&e, &spans, Some(5 * h), 0, 24 * h, 8 * h), (6 * h, true));
+        assert_eq!(late_kept(&e, &spans, Some(0), 0, 24 * h, 8 * h), (h, false));
+        assert_eq!(late_kept(&e, &spans, Some(5 * h), 5 * h, 24 * h, 8 * h), (h, false), "nothing of the range is older");
+        assert_eq!(late_kept(&e, &[], None, 0, 24 * h, 8 * h), (8 * h, true), "no point is kept");
+        assert_eq!(joined([(0, h), (h, 2 * h), (3 * h, 3 * h), (4 * h, 5 * h)].into_iter()), vec![(0, 2 * h), (4 * h, 5 * h)]);
     }
 
     #[test]

@@ -566,7 +566,7 @@ percentile or average.
 `nowMinutes: null` with `state: silent|unmeasured` — show "—" / "can't measure". *Last delay:
 started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still late", or "not solved ·
 last measured 14:00" when the device is `stale`; `silentSince` = "no logs since"). *Time late* =
-`lateMs`: only the stretches measured (`state::measured_spans`: from a measurement to the next reading, at most `stale_after_ms`), with how long it was measured. A period's `lastedMs` is from its start to its end; `measuredMs` is how much of it was measured, `spans` those stretches in the range. *Logs a day* = `docsPerDay` (`null` = fewer than 24 hours
+`lateMs`: only the stretches measured (`state::measured_spans`: from a measurement to the next reading, at most `stale_after_ms` of today's schedule), with how long it was measured; `lateAbout: true` where a delay is older than the points kept (that part from start to end, the period's `measuredMs` is `null`). A period's `lastedMs` is from its start to its end; `measuredMs` is how much of it was measured, `spans` those stretches in the range. *Logs a day* = `docsPerDay` (`null` = fewer than 24 hours
 counted: the page gives the count and the hours instead). The event time column is headed by the
 field the cluster's event time is read from (`fields.eventTime`, a device's `eventField` when the
 core names it).

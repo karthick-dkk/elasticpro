@@ -18,7 +18,7 @@ import {
   LINES_MAX, LINE_DASHES, lineColour, lineSlots, toggleLine, seriesGraph, typeKey, typeLabel, seriesLate, seriesNow, seriesStateText, delaysAt, delaysAtText, lastEpisode,
 } from '../core/log-types.js';
 import { fromZonedInput } from '../core/log-range.js';
-import { statePill, stateRank } from './rows.js';
+import { LATE_ABOUT, statePill, stateRank } from './rows.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const GRAPH_H = 220;
@@ -175,7 +175,7 @@ export function typesTableCard(res, { clusterId, device, sort }) {
       h('td.mono', whenText(s.lastArrival, now, { seconds: true }).replace(/^today /, '')),
       h('td.num', { title: 'its documents in the last measurement’s window' }, countText(s.docs)),
       h('td.num', Array.isArray(s.episodes) ? countText(s.episodes.length) : muted()),
-      h('td.num', durationText(s.lateMs)),
+      h('td.num', { title: s.lateAbout ? LATE_ABOUT : null }, s.lateAbout ? 'about ' : '', durationText(s.lateMs)),
       h('td', lastText(s)),
       h('td.ld-acts', h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href }, title: `${device} · ${typeLabel(s)}: its logs (Log Delay › Live)`, onclick: () => { location.hash = href; } }, 'Open in logs')));
   };
