@@ -116,9 +116,13 @@ impl Store {
     pub fn read_tracker(&self, cluster: &str) -> Arc<Tracker> {
         let path = self.cluster_dir(cluster).join("tracker.json");
         let now = stamp(&path);
-        if let Some((at, t)) = cache().lock().get(&path) {
-            if *at == now {
-                return t.clone();
+        {
+            let mut kept = cache().lock();
+            match kept.get(&path) {
+                Some((at, t)) if *at == now => return t.clone(),
+                // The old copy goes before the file is parsed again: never two of a large one.
+                Some(_) => drop(kept.remove(&path)),
+                None => {}
             }
         }
         let t: Arc<Tracker> = Arc::new(read_json(&path).unwrap_or_default());

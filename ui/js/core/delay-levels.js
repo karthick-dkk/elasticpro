@@ -81,6 +81,9 @@ export const isPart = (state) => state === 'part_delay';
 /** On time in totals = no_delay, little. Silent, unmeasured and clock ahead are neither (they are in No delay, logdelay-report.js noDelayOf). */
 export const isOnTime = (state) => state === 'no_delay' || state === 'little';
 
+/** One log type of a browser measurement was measured: it has a delay, and not a clock ahead. */
+export const typeRead = (t, state) => !!t && typeof t.delayMinutes === 'number' && Number.isFinite(t.delayMinutes) && state !== 'clock_ahead';
+
 /** A log type whose delay was measured: not silent, not can't measure (a clock ahead is that too). */
 const typeMeasured = (s) => s !== 'silent' && s !== 'unmeasured' && s !== 'clock_ahead' && s !== 'unknown';
 
@@ -247,7 +250,7 @@ export function serverRun(row, everyHours = null) {
   const part = num(row.partDelayed);
   const w = row.worst && row.worst.device && num(row.worst.minutes) !== null
     ? { device: row.worst.device, delayMinutes: row.worst.minutes, delayLogType: row.worst.logType || null, notMeasuredSince: row.worst.stale === true ? num(row.worst.at) : null } : null;
-  return { at, levels: levelsFrom(row.levels), stale: row.stale === true, failed: !!row.notMeasured,
+  return { at, levels: levelsFrom(row.levels), stale: row.stale === true, failed: !!row.notMeasured, typed: !!row.logTypes,
     goodUntil: every === null ? null : at + every + Math.max(every / 2, 30 * 60000),
     summary: { devices, by: { DELAYED: delay, CRITICAL: critical, ...(part === null ? {} : { PART_DELAY: part }) }, worst: w, partLate: null, worstLogType: null } };
 }

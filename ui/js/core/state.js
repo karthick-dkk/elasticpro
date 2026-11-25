@@ -1983,15 +1983,19 @@ export function delaySummaryFor(clusterId) { return delaySummaries.get(clusterId
  * What the log-delay alert rests on: the newest of the browser's measurement and the server's last
  * run (delay-levels.js serverRunOf) — an older one never replaces it, even once the newest is too
  * old to say anything. `{summary, at, server, levels, failed}`, or null: nothing measured, or the
- * newest is out of date. A measurement of ours is good DELAY_ALERT_HOURS; a run of the server's until the next
+ * newest is out of date. A server run by log types stands over a newer measurement without them. A measurement of ours is good DELAY_ALERT_HOURS; a run of the server's until the next
  * one is due and the core's grace is over, and not once the core itself calls it stale.
  */
 function delayReading(clusterId, now) {
   const mine = delaySummaries.get(clusterId);
   const run = state.mode === 'snapshot' ? null : serverRunOf(clusterId);
   const ours = DELAY_ALERT_HOURS * 3600 * 1000;
-  if (run && (!mine || run.at > mine.at)) {
-    if (run.stale || now >= (run.goodUntil === null ? run.at + ours : run.goodUntil)) return null;
+  const over = !!run && (run.stale || now >= (run.goodUntil === null ? run.at + ours : run.goodUntil));
+  // Play measures a device by its newest document only: on a cluster measured by log types that cannot
+  // tell part delayed from late or on time, so it does not replace a run of the server's that does.
+  const coarse = !!run && run.typed && !over && !!mine && !mine.summary.logTypes;
+  if (run && (!mine || run.at > mine.at || coarse)) {
+    if (over) return null;
     return { summary: run.summary, at: run.at, server: true, levels: run.levels, failed: run.failed };
   }
   return mine && now - mine.at < ours ? { summary: mine.summary, at: mine.at, server: false, levels: levelsOf(clusterId), failed: false } : null;

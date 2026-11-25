@@ -21,7 +21,7 @@
 
 import { bridge } from './transport.js';
 import { pct } from '../lib/fmt.js';
-import { STATE_LABEL, isLate, isPart, levelState, deviceReading } from './delay-levels.js';
+import { STATE_LABEL, isLate, isPart, levelState, deviceReading, typeRead } from './delay-levels.js';
 import { parseHash } from '../reports/route.js';
 import { zonedParts } from './log-range.js';
 
@@ -548,6 +548,10 @@ export function noDelaySplit(nd, { counts = false } = {}) {
 export const noDelayOfText = (nd) => (nd && nd.of ? `of ${countText(nd.of.clusters)} of ${countText(nd.of.ofClusters)} clusters` : '');
 
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
+/** A device row's state in a file or a heading: as the core words it when it was not measured, or not by its log types, in the last run; else the state. */
+export const rowStateText = (r) => (r && (r.typesUnread || r.stale) && r.stateText ? r.stateText : stateText(r && r.state));
+/** Its log types were not read in the last run (over the limit) and it is not known late: never drawn as on time. */
+export const typesNotRead = (r) => !!(r && r.typesUnread) && !isLate(r.state) && r.state !== 'part_delay' && r.state !== 'silent';
 export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
 /**
@@ -594,7 +598,7 @@ export const partLateText = (row) => (row && finite(row.partLateMs) && row.partL
 /** A browser measurement's log types as a device row's `types`: `{total, measured, late, lateNames, truncated}`. */
 function typesSummary(rec, levels) {
   const late = rec.types.filter((t) => isLate(levelState(t.delayMinutes, levels)));
-  return { total: rec.types.length, measured: rec.types.filter((t) => finite(t.delayMinutes) && levelState(t.delayMinutes, levels) !== 'clock_ahead').length, late: late.length, lateNames: late.map((t) => t.label), truncated: !!rec.typesTruncated };
+  return { total: rec.types.length, measured: rec.types.filter((t) => typeRead(t, levelState(t.delayMinutes, levels))).length, late: late.length, lateNames: late.map((t) => t.label), truncated: !!rec.typesTruncated };
 }
 
 /* ------------------------------ tables: order, filter ------------------------------ */

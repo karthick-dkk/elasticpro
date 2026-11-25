@@ -301,6 +301,7 @@ fn pct(v: &Value) -> String {
 /// Its log types in words, for a row: `1 of 3 log types late: threat`; not read by log types: that.
 fn types_text(r: &DeviceRow) -> String {
     match &r.types {
+        _ if r.types_unread.is_some() => "not read in the last run".into(),
         None => "not read by log types".into(),
         Some(t) if t.late > 0 => t.text(),
         Some(t) => format!("none of {}{} log types late", t.total, if t.truncated { "+" } else { "" }),

@@ -42,6 +42,9 @@ pub struct LogTypeField {
     pub why: Option<String>,
 }
 
+/// The kinds of field one `terms` aggregation reads together.
+const KEYWORD_KINDS: [&str; 3] = ["keyword", "constant_keyword", "wildcard"];
+
 /// `LogTypeField::why`: nothing said how the field is mapped.
 pub const MAPPING_NOT_READ: &str = "mapping not read";
 
@@ -53,6 +56,11 @@ pub fn log_type_field(fc: &Value) -> LogTypeField {
         return LogTypeField { field: None, why: Some(MAPPING_NOT_READ.into()) };
     }
     let row = crate::volume::collect::resolve_row(fc, "logType", &[LOG_TYPE_FIELD.to_string()], false);
+    // Indices that map it as different kinds of field cannot be grouped in one search.
+    let kinds: Vec<&str> = row.kind.as_deref().unwrap_or_default().split(',').collect();
+    if kinds.len() > 1 && kinds.iter().any(|k| !KEYWORD_KINDS.contains(k)) {
+        return LogTypeField { field: None, why: Some(format!("{LOG_TYPE_FIELD} is mapped differently across the indices ({})", kinds.join(", "))) };
+    }
     match row.resolved {
         Some(f) => LogTypeField { field: Some(f), why: None },
         None => LogTypeField { field: None, why: Some(row.note.replacen(": not", " is not", 1)) },
@@ -494,6 +502,10 @@ mod tests {
         let of = |fields: Value| log_type_field(&json!({ "indices": ["logstash-1"], "fields": fields }));
         assert_eq!(of(json!({ "log_type": kw })), LogTypeField { field: Some("log_type".into()), why: None });
         assert_eq!(of(json!({ "log_type": text, "log_type.keyword": kw })).field.as_deref(), Some("log_type.keyword"));
+        let mixed = of(json!({ "log_type": { "keyword": { "type": "keyword", "aggregatable": true }, "long": { "type": "long", "aggregatable": true } } }));
+        assert_eq!(mixed, LogTypeField { field: None, why: Some("log_type is mapped differently across the indices (keyword, long)".into()) });
+        let both = of(json!({ "log_type": { "keyword": { "type": "keyword", "aggregatable": true }, "constant_keyword": { "type": "constant_keyword", "aggregatable": true } } }));
+        assert_eq!(both.field.as_deref(), Some("log_type"));
         assert_eq!(of(json!({})).why.as_deref(), Some("log_type is not in the mapping"));
         assert_eq!(of(json!({ "log_type": text })).why.as_deref(), Some("log_type: text with no .keyword"));
         for unread in [json!({ "cluster_name": "x" }), json!({ "indices": [], "fields": {} }), Value::Null] {

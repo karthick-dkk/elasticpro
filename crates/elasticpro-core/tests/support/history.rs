@@ -260,7 +260,8 @@ pub async fn arm(c: &Arc<Core>, s: &str) -> Value {
 
 /// Every write the server received: bulks, PUTs, DELETEs.
 pub fn writes_of(hits: &[Hit]) -> Vec<String> {
-    hits.iter().filter(|h| h.method != "GET" && !h.path.split('?').next().unwrap_or("").ends_with("/_search")
+    let read = |p: &str| p.ends_with("/_search") || p.ends_with("/_field_caps");
+    hits.iter().filter(|h| h.method != "GET" && !read(h.path.split('?').next().unwrap_or(""))
                            && !h.path.starts_with("/_security/user/_has_privileges"))
         .map(|h| format!("{} {}", h.method, h.path)).collect()
 }

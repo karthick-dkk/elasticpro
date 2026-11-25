@@ -321,6 +321,37 @@ fn files_mb(dir: &TempDir) -> (f64, f64) {
     (mb(&root.join("tracker.json")), days)
 }
 
+/// A cluster that refuses the search by log types is measured without them, and says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_refused_for_its_log_types_is_read_without_them() {
+    let dir = TempDir::new("logdelay-types-refused");
+    let asked = Arc::new(AtomicUsize::new(0));
+    let n = asked.clone();
+    let srv = TestServer::with(move |hit| {
+        if hit.path.contains("/_field_caps") {
+            return (200, json!({ "indices": ["logstash-1"], "fields": { "log_type": { "keyword": { "type": "keyword", "aggregatable": true, "searchable": true } } } }).to_string());
+        }
+        if hit.path.contains("/_search") {
+            if hit.body.contains("\"no_type\"") {
+                n.fetch_add(1, Ordering::SeqCst);
+                return (503, json!({ "error": { "type": "search_phase_execution_exception", "reason": "", "caused_by": { "type": "too_many_buckets_exception", "reason": "Trying to create too many buckets" } }, "status": 503 }).to_string());
+            }
+            let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": { "hits": { "hits": [{ "_source": { "@timestamp": "2026-11-24T12:00:00Z", "event_created": "2026-11-24T11:15:00Z" } }] } } }]);
+            return (200, json!({ "took": 1, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": { "buckets": b } } }).to_string());
+        }
+        (200, r#"{"cluster_name":"c","status":"green"}"#.into())
+    }).await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let s = admin(&c).await;
+    c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "name": "Production", "url": srv.url() }] })).await;
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "once, and once with smaller pages");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    let row = &sum["byCluster"][0];
+    assert!(row["logTypes"].is_null() && row["logTypeField"].is_null() && row["logTypeWhy"].as_str().unwrap_or("").contains("refused the search by log types"), "{row}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_log_types_a_device_are_read_in_the_same_pages_and_counted_as_generated() {
     let dir = TempDir::new("logdelay-scale-types");

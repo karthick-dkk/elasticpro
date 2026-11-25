@@ -13,7 +13,7 @@ import { h, svg } from '../lib/dom.js';
 import { sortTh } from '../lib/table-sort.js';
 import { clusters } from '../core/state.js';
 import {
-  ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, logsADay, startedSolvedText, whenText, extraOf, partLateText,
+  ldHash, stateText, rowStateText, typesNotRead, stateTone, nowText, minutesText, durationText, countText, docsText, logsADay, startedSolvedText, whenText, extraOf, partLateText,
 } from '../core/logdelay-report.js';
 import { deviceZoneText, delaySumText } from '../core/log-tz.js';
 import { hasTypes, saysTypes, typesText, typesTitle } from '../core/log-types.js';
@@ -46,7 +46,8 @@ const COLS = {
     { type: 'text', value: (r) => extraOf(r, 'zone') }],
   tag1: ['tag1', false, (r) => { const v = extraOf(r, 'tag1'); return h('td', v === null ? muted() : String(v)); },
     { type: 'text', value: (r) => extraOf(r, 'tag1') }],
-  state: ['Now', false, (r) => h('td', r.state === 'other_tz'
+  state: ['Now', false, (r) => h('td', r.typesUnread ? h('span', { title: rowStateText(r) }, typesNotRead(r) ? statePill('unmeasured', 'log types not read') : statePill(r.state))
+    : r.state === 'other_tz'
     ? h('span', { title: `Its logs are stamped in another time zone (${deviceZoneText(r)}) than the cluster’s: the gap sits at that offset run after run. Not late.` }, statePill(r.state))
     : r.state === 'part_delay' ? h('span', { title: r.types ? typesTitle(r.types) : 'Some of its log types are late, others are on time' }, statePill(r.state))
       : statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],

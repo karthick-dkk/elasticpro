@@ -335,7 +335,7 @@ export function recordFrom(bucket, resolved, levels = null, tz = null) {
     types,
     // With log types: the newest document's figures, and the log type the delay above is of (null: the newest document's).
     ...(types ? { newest, delayLogType } : {}),
-    typesTruncated: !!(types && bucket.types && bucket.types.sum_other_doc_count > 0),
+    typesTruncated: !!(types && bucket.types && (bucket.types.sum_other_doc_count > 0 || strayType(bucket) !== null)),
     pattern,
     patternNote: note,
     trend: 'NO_TREND',
@@ -346,6 +346,14 @@ export function recordFrom(bucket, resolved, levels = null, tz = null) {
       return [plain, dotted(src, plain) ?? dotted(src, m) ?? ''];
     })),
   };
+}
+
+/** The log type in the source of the newest document outside the aggregation (an index mapped otherwise), or null. */
+function strayType(bucket) {
+  const named = (v) => (Array.isArray(v) ? v.map(named).find((x) => x !== null) ?? null : v === null || v === undefined || typeof v === 'object' || !String(v).trim() ? null : String(v).trim());
+  const b = bucket && bucket.no_type;
+  const hit = b && b.doc_count > 0 ? ((((b.latest || {}).hits || {}).hits) || [])[0] : null;
+  return hit ? named(dotted(hit._source || {}, LOG_TYPE_FIELD)) : null;
 }
 
 /**
@@ -362,8 +370,21 @@ function typesFrom(bucket, resolved, levels, tz) {
     return { logType, noType, label: typeLabel({ logType, noType }), docs: b.doc_count || 0, arrival: d.arrival, event: d.event, delayMinutes: d.delayMinutes,
       rawGapMinutes: d.rawGapMinutes, tzOffsetMinutes: d.tzOffsetMinutes, deviceTzOffset: d.deviceTzOffset, state, status: statusFor(d.delayMinutes, levels) };
   };
-  const out = bucket.types.buckets.map((b) => one(b, String(b.key_as_string ?? b.key), false));
-  if (bucket.no_type && bucket.no_type.doc_count > 0) out.push(one(bucket.no_type, NO_LOG_TYPE, true));
+  // The core's reading (logdelay/measure.rs types_of): a blank value is no log type; a document outside
+  // the aggregation that does carry a value is of that type; one type is listed once, at its newest document.
+  const out = [];
+  const add = (b, name) => {
+    const t = name === null ? one(b, NO_LOG_TYPE, true) : one(b, name, false);
+    const i = out.findIndex((x) => x.noType === t.noType && x.logType === t.logType);
+    if (i < 0) { out.push(t); return; }
+    const docs = out[i].docs + t.docs;
+    if (t.arrival !== null && (out[i].arrival === null || t.arrival > out[i].arrival)) out[i] = t;
+    out[i].docs = docs;
+  };
+  for (const b of bucket.types.buckets) { const k = String(b.key_as_string ?? b.key); add(b, k.trim() ? k : null); }
+  if (bucket.no_type && bucket.no_type.doc_count > 0) {
+    add(bucket.no_type, strayType(bucket));
+  }
   const rank = { critical: 0, delay: 1 };
   return out.sort((a, b) => (rank[a.state] ?? 2) - (rank[b.state] ?? 2) || (b.delayMinutes ?? -Infinity) - (a.delayMinutes ?? -Infinity)
     || String(a.logType).localeCompare(String(b.logType)));
@@ -425,7 +446,7 @@ export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
     top_hits: {
       size: 1,
       sort: [{ [resolved.arrival]: { order: 'desc' } }],
-      _source: [...new Set([resolved.arrival, ...eventSource(resolved),
+      _source: [...new Set([resolved.arrival, ...eventSource(resolved), ...(resolved.logType ? [LOG_TYPE_FIELD] : []),
         ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))])],
     },
   };

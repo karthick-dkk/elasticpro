@@ -17,7 +17,7 @@
  */
 
 import { STATUS } from './log-delay.js';
-import { isLate } from './delay-levels.js';
+import { isLate, typeRead } from './delay-levels.js';
 import { noDelayOfStatuses, noDelaySplit, shareText } from './logdelay-report.js';
 
 /** The column order, in one place, so the header and the rows cannot drift apart. */
@@ -41,7 +41,7 @@ const hasTypes = (records) => (records || []).some((r) => Array.isArray(r.types)
 const typeCells = (r) => {
   if (!Array.isArray(r.types)) return [null, null, null, null, null];
   const late = r.types.filter((t) => isLate(t.state));
-  const measured = r.types.filter((t) => t.delayMinutes !== null).length;
+  const measured = r.types.filter((t) => typeRead(t, t.state)).length;
   return [r.typesTruncated ? `${r.types.length}+` : r.types.length, measured, measured ? late.length : null, late.map((t) => t.label).join('; ') || null, r.delayLogType || null];
 };
 const AFTER = DEVICE_COLUMNS.findIndex((c) => c.key === 'status') + 1;

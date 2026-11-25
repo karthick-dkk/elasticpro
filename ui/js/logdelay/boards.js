@@ -48,7 +48,7 @@ import { download, toCsv } from '../lib/fmt.js';
 import {
   LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
   minutesText, durationText, whenText, pctText, countText,
-  stateText, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
+  stateText, rowStateText, typesNotRead, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
   lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, gridHue, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
@@ -972,7 +972,7 @@ function exportDevicesCsv(rows, res) {
   const t = (r) => (hasTypes(r) ? r.types : null);
   const out = rows.map((r) => ({
     device: r.device, cluster: r.clusterName || r.cluster, zone: extraOf(r, 'zone') ?? '', tag1: extraOf(r, 'tag1') ?? '',
-    state: stateText(r.state),
+    state: rowStateText(r),
     ...(withT ? { log_types: t(r) ? `${t(r).total}${t(r).truncated ? '+' : ''}` : '', log_types_measured: t(r) && finite(t(r).measured) ? t(r).measured : '', log_types_late: t(r) && t(r).measured !== 0 ? t(r).late : '', late_log_types: t(r) ? (t(r).lateNames || []).join('; ') : '', delay_log_type: r.delayLogType || '', part_late_ms: finite(r.partLateMs) ? r.partLateMs : '' } : {}),
     delay_minutes: finite(r.nowMinutes) ? r.nowMinutes.toFixed(2) : '',
     raw_gap_minutes: finite(r.rawGapMinutes) ? r.rawGapMinutes.toFixed(2) : '', time_zone_offset: finite(r.tzOffsetMinutes) ? offsetLabel(r.tzOffsetMinutes) : '',
@@ -1096,7 +1096,7 @@ function deviceView(clusterId, device) {
     h('div.ld-title',
       crumbs(link(ldHash('devices'), 'Devices'), link(clusterHref(clusterId), cname)),
       h('h2.ld-dev-h', h('span.mono', device),
-        res ? statePill(res.state, late && age.stale && age.at !== null ? staleText(age.at, res.now) : late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
+        res ? res.typesUnread && res.stateText ? statePill(typesNotRead(res) ? 'unmeasured' : res.state, res.stateText) : statePill(res.state, late && age.stale && age.at !== null ? staleText(age.at, res.now) : late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
           : isPart(res.state) ? (age.stale && age.at !== null ? `part delayed when last measured ${whenText(age.at, res.now).replace(/^today /, '')}, not measured since` : stateText(res.state))
           : res.state === 'silent' && finite(res.silentSince) ? `silent · no logs since ${whenText(res.silentSince, res.now)}` : stateText(res.state)) : null,
         res ? fixButton({ kind: 'device', id: device, items: () => fixesFor(res, 'device') }) : null),

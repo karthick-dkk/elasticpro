@@ -246,6 +246,18 @@ impl Core {
                     continue;
                 }
                 let why = res.get("message").and_then(Value::as_str).unwrap_or("search failed").to_string();
+                // Refused for its log types (too many buckets for this cluster): smaller pages, then
+                // without them: the delays are measured, and the log types say they were not read.
+                let refused = res.get("status").and_then(Value::as_u64) == Some(400) || res.to_string().contains("too_many_buckets");
+                if by_types && f.log_type.is_some() && refused {
+                    if size > measure::PAGE_SIZE_MIN {
+                        size = measure::PAGE_SIZE_MIN;
+                    } else {
+                        walk.limit = 0;
+                        out.log_type = LogTypeField { field: None, why: Some(format!("the cluster refused the search by log types: {why}")) };
+                    }
+                    continue;
+                }
                 if res.get("kind").and_then(Value::as_str) != Some("timeout") {
                     // Refused, unreachable, an HTTP error: asking again at once gets the same.
                     out.error = Some(if out.readings.is_empty() { why } else {

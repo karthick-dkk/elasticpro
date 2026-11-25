@@ -726,7 +726,7 @@ function exportDelayCsv() {
   if (missed.length) rows.push(noteRow(`not measured: ${missed.join('; ')}`));
   for (const x of gapLines()) rows.push(noteRow(`read in part: ${x}`));
   for (const x of noTypeLines()) rows.push(noteRow(`not measured per log type: ${x}`));
-  const scope = `rows: ${delay.ran === 'delayed' ? 'delayed devices only' : delay.ran === 'cluster' ? 'every device, the silent ones too' : 'the devices that sent logs'}${ctx.tz && ctx.tz() !== null && ctx.tz() !== undefined ? ', in the time-zone filter' : ''}${delay.window ? ` · ${delay.window.text}` : ''}`;
+  const scope = `rows: ${delay.ran === 'delayed' ? 'late devices only, part delayed ones among them' : delay.ran === 'cluster' ? 'every device, the silent ones too' : 'the devices that sent logs'}${ctx.tz && ctx.tz() !== null && ctx.tz() !== undefined ? ', in the time-zone filter' : ''}${delay.window ? ` · ${delay.window.text}` : ''}`;
   rows.push(noteRow(scope));
   download(`log-delay-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(rows));
 }
