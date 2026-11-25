@@ -8945,6 +8945,26 @@ await settleFor(300);
     ok(g('ld-by-type').querySelectorAll('tbody tr').length === 10 && /Show all/.test(g('ld-by-type-card').textContent), 'log types: By log type is not its first ten');
     press(g('ld-by-type-all')); await settleFor(120);
     ok(g('ld-by-type').querySelectorAll('tbody tr').length > 10, 'log types: Show all did not list every log type');
+    // A log type opens its own board (0.3.92): a line and a row per device, the same counts as the card.
+    {
+      const row = [...g('ld-by-type').querySelectorAll('tbody tr')].find((x) => x.dataset.type === 'type:threat');
+      const cells = [...row.cells].map((x) => x.textContent);
+      const back = location.hash;
+      location.hash = row.querySelector('a').getAttribute('href');
+      await waitFor(() => g('ld-type-devices') && g('ld-graph'), 'log types: a log type did not open its devices and their graph');
+      const rows = () => [...g('ld-type-devices').querySelectorAll('tbody tr')];
+      ok(/log_type=threat/.test(location.hash) && g('ld-type-h').textContent.startsWith('threat') && String(rows().length) === cells[1], `log types: threat lists ${rows().length} devices, the card said ${cells[1]}`);
+      ok(view().textContent.includes(`${cells[2]} of ${cells[1]} device`), `log types: the head does not say ${cells[2]} of ${cells[1]} late`);
+      ok(drawn() === Math.min(6, rows().length) && chips().length >= drawn() && chips().every((c) => rows().some((x) => x.dataset.device === c.querySelector('.ld-type-chip-n').textContent)), 'log types: a line of the log type is not one of its devices');
+      const on = chips().find((c) => c.getAttribute('aria-pressed') === 'true'); const before = drawn();
+      press(on); await settleFor(120);
+      ok(drawn() === before - 1, 'log types: a device chip did not drop its line');
+      ok(rows()[0].querySelector('a').getAttribute('href').includes('/device/') && g('ld-type-csv'), 'log types: a device row has no link, or there is no CSV');
+      location.hash = `${back.split('?')[0]}?log_type=nothing-sends-this`;
+      await waitFor(() => /No device has sent/.test(view().textContent), 'log types: a log type nobody sends is not said');
+      location.hash = back;
+      await waitFor(() => ldView() === 'cluster' && g('ld-by-type'), 'log types: Back to the cluster lost the card');
+    }
     if (list.length > 1) {
       location.hash = `#/log-delay/cluster/${encodeURIComponent(list[1].id)}`;
       await waitFor(() => ldView() === 'cluster' && g('ld-types-off'), 'log types: a cluster without log_type does not say so');

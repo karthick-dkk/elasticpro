@@ -555,6 +555,20 @@ impl Core {
                 v["ok"] = json!(true);
                 v
             }
+            "LOGDELAY_LOGTYPE" => {
+                let Some(id) = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "clusterId is required") };
+                let none = msg.get("noType").and_then(Value::as_bool) == Some(true);
+                let name = msg.get("logType").and_then(Value::as_str).filter(|_| !none);
+                if name.is_none() && !none { return bad("bad_request", "logType is required (noType: the documents without the field)") }
+                let r = match Self::logdelay_range(msg, now, 30) { Ok(r) => r, Err(e) => return bad("bad_request", e) };
+                let mine = self.logdelay_inputs(caller, Some(&[id.to_string()])).await;
+                let Some(c) = mine.first() else { return bad("not_found", format!("no cluster {id:?}")) };
+                let Some(mut v) = summary::log_type(c, name, &r, now, every, MAX_DEVICES) else {
+                    return bad("not_found", format!("no device on {id:?} has sent log type {:?} in the last week", name.unwrap_or("(none)")));
+                };
+                v["ok"] = json!(true);
+                v
+            }
             "LOGDELAY_SEARCH" => {
                 let r = match Self::logdelay_range(msg, now, 30) { Ok(r) => r, Err(e) => return bad("bad_request", e) };
                 let only = Self::logdelay_ids(msg);

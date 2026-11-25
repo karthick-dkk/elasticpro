@@ -348,7 +348,7 @@ function collectNote(c) {
     const again = end.level !== 'ok'
       ? h('button.btn.sm', { type: 'button', onclick: () => refreshNow(c) }, 'Try again') : null;
     return h(`div.banner.${end.level === 'ok' ? 'info' : end.level}.vs-run`, { role: 'status' },
-      h('div', h('div.ttl', end.title), end.text ? h('div.mono', end.text) : null), h('div.acts', again, close));
+      h('div', e.refused ? h('div', e.refused.text) : null, h('div.ttl', end.title), end.text ? h('div.mono', end.text) : null), h('div.acts', again, close));
   }
   if (e.refused) return h(`div.banner.${e.refused.level}.vs-run`, { role: 'status' }, h('div', e.refused.text), h('div.acts', close));
   return null;

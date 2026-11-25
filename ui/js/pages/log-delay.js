@@ -164,7 +164,7 @@ function reconcile(lead) {
   const sel = pickId();
   if (named === sel) return;
   if (lead === 'address') { bus.emit('select-cluster', named || 'all'); return; }
-  const want = tab === 'devices' || tab === 'summary' ? ldHash(tab, sel, null, route) : sel ? ldHash('cluster', sel, null, route) : ldHash('fleet', null, null, route);
+  const want = tab === 'devices' || tab === 'summary' ? ldHash(tab, sel, null, route) : sel ? ldHash('cluster', sel, null, { tz: route.tz }) : ldHash('fleet', null, null, route);
   if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (_) { location.hash = want; } }
   route = ldRoute(location.hash);
 }
@@ -222,7 +222,7 @@ function busy() {
 function tabs() {
   const cur = ldTab(route.view);
   const sel = pickId();
-  const hrefOf = (id) => (id === 'fleet' && sel ? ldHash('cluster', sel, null, route) : id === 'devices' || id === 'summary' ? ldHash(id, sel, null, route) : ldHash(id, null, null, route));
+  const hrefOf = (id) => (id === 'fleet' && sel ? ldHash('cluster', sel, null, { tz: route.tz }) : id === 'devices' || id === 'summary' ? ldHash(id, sel, null, route) : ldHash(id, null, null, route));
   return P.get('tabs', `${cur}|${route.tz}|${sel}`, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
     ...TABS.map(([id, label, title]) => h('a', { href: hrefOf(id), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
 }
@@ -299,6 +299,8 @@ function tzTools() {
   const rows = boardsZoneRows(route);
   const zones = devicesByZone(rows);
   const tz = route.tz;
+  // A log type's board lists every device that sends it: the filter is not one of its own.
+  if (route.view === 'cluster' && (route.noType || route.logType !== undefined)) { tzOpen = false; return null; }
   // Drawn only when it can say something (zoneChipShown): a zone set or detected in view, or the filter on.
   if (!zoneChipShown(zones, tz)) { tzOpen = false; return null; }
   const pct = boardsMajorityPercent();

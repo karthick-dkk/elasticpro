@@ -29,9 +29,10 @@ export const lineColour = (slot) => LINE_COLOURS[slot % LINE_COLOURS.length];
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
 /** What tells two log types apart: the documents without the field are never a value of the same text. */
-export const typeKey = (s) => `${s && s.noType ? 'none' : 'type'}:${s && s.logType !== undefined && s.logType !== null ? s.logType : ''}`;
+export const typeKey = (s) => (s && s.lineKey) || `${s && s.noType ? 'none' : 'type'}:${s && s.logType !== undefined && s.logType !== null ? s.logType : ''}`;
 /** A log type as it is written: "(no log type)", or its value — quoted when the value itself reads "(no log type)" or is blank. */
 export function typeLabel(s) {
+  if (s && s.lineLabel) return s.lineLabel;
   if (s && s.noType) return NO_LOG_TYPE;
   const v = String(s && s.logType !== undefined && s.logType !== null ? s.logType : '');
   return v === NO_LOG_TYPE || v.trim() === '' ? `“${v}”` : v;
@@ -117,6 +118,20 @@ export function typesHeadline(series, { now = Date.now(), truncated = false } = 
   if (late.length) return `${late.length} of ${what} late: ${namesText(late.map(typeLabel))} — ${othersText(rest, now)}${more}`;
   if (rest.every((s) => isOnTime(s.state) && !s.stale)) return `All ${what} on time${more}`;
   return `None of ${what} late — ${othersText(rest, now).replace(/^the other \d+: /, '')}${more}`;
+}
+
+/**
+ * A log type's devices as series: a line is a device (its own key and name), so the graph, its chips
+ * and its hover are the device page's. Only those the core sent with their points.
+ */
+export const deviceSeries = (res) => (res && res.devices ? res.devices : []).slice(0, finite(res && res.devicesWithPoints) ? res.devicesWithPoints : undefined)
+  .map((s) => ({ ...s, lineKey: `device:${s.device}`, lineLabel: s.device }));
+
+/** "2 of 10 devices late" of a log type's counts, with what else there is; '' when they were not counted. */
+export function typeCountsText(c, b) {
+  if (!c) return '';
+  return [`${c.late} of ${c.devices} device${c.devices === 1 ? '' : 's'} late`, c.late ? `${c.above} ${String(b && b.high ? b.high : 'above the critical line').toLowerCase()}` : '',
+    c.silent ? `${c.silent} with no logs of it now` : ''].filter(Boolean).join(' · ');
 }
 
 /** The newest delay of a series, `{started → …}`, or null. */

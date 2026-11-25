@@ -46,7 +46,7 @@ import { refreshReports } from '../core/reports.js';
 import { rememberLevels, logTypeFieldOf, isPart } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
 import {
-  LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
+  LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldLogType, ldSearch, ldReportRun, ldHash,
   minutesText, durationText, whenText, pctText, countText,
   stateText, rowStateText, typesNotRead, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBands, lastedText, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
@@ -56,8 +56,8 @@ import {
   typesUnreadLine,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank, withTypes } from './rows.js';
-import { LOG_TYPE_FIELD, hasTypes, saysTypes, seriesLate, typeLabel, typesHeadline } from '../core/log-types.js';
-import { typesGraphCard, typesTableCard, typeDelays, byLogTypeCard, partFill } from './device-types.js';
+import { LOG_TYPE_FIELD, hasTypes, saysTypes, seriesLate, typeCountsText, typeKey, typeLabel, typesHeadline } from '../core/log-types.js';
+import { typesGraphCard, typesTableCard, typeDelays, byLogTypeCard, logTypeGraphCard, logTypeDevicesCard, logTypeCsv, partFill } from './device-types.js';
 import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
 import { fetchNowPress } from './fetch-now.js';
 import { measureAgainButton } from './measure-again.js';
@@ -92,7 +92,7 @@ const S = {
   range: null,           // {from, to} the device page was narrowed to by Show
   search: null,          // {state, res}
   // The device graph's log types: which device, the lines drawn (series key → colour slot; null: the worst six), the rest shown.
-  types: { for: '', slots: null, more: false }, byTypeAll: false,
+  types: { for: '', slots: null, more: false }, byTypeAll: false, typeAll: '',
   cache: new Map(),      // key → {state: 'loading'|'ok'|'error', res, seq}
 };
 let seq = 0;
@@ -264,6 +264,7 @@ const sorts = {
   periods: tableSort('logdelay.periods', { onChange: sorted }),
   types: tableSort('logdelay.types', { onChange: sorted }),
   byType: tableSort('logdelay.by-type', { onChange: sorted }),
+  typeDevices: tableSort('logdelay.type-devices', { onChange: sorted }),
 };
 const sortSig = (s) => (s.sort ? `${s.sort.key}:${s.sort.dir}` : '-');
 
@@ -945,8 +946,43 @@ function clusterView(id) {
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
     never ? 'never measured' : `${S.cdSet === 'delayed' ? `${lateWords(cdRows)} of ${countText(cdRows.length)}` : countText(cdRows.length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [cdBtn, filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  const byType = B.get('cl:bytype', `${rid}|${S.byTypeAll}|${sortSig(sorts.byType)}`, () => byLogTypeCard(res, { b, sort: sorts.byType, all: S.byTypeAll, onAll: () => { S.byTypeAll = !S.byTypeAll; repaint(); } }));
+  const byType = B.get('cl:bytype', `${rid}|${S.byTypeAll}|${sortSig(sorts.byType)}`, () => byLogTypeCard(res, { b, sort: sorts.byType, all: S.byTypeAll, onAll: () => { S.byTypeAll = !S.byTypeAll; repaint(); }, hrefOf: (x) => ldHash('cluster', id, null, x.noType ? { noType: true } : { logType: x.logType }) }));
   return [head, focusNote, neverNote, readNote, tileRow, asOf, tzFilterNote, winNote, countsNote, charts, byType, devCard];
+}
+
+/* ------------------------------------ one log type ------------------------------------ */
+
+/**
+ * One log type of a cluster (0.3.92): its devices' delay over time, a line each, and the devices
+ * themselves. The rows are the device page's own series of that log type (the core's `one_series`).
+ */
+function logTypeView(id, type) {
+  const q = winQuery();
+  const label = typeLabel(type.noType ? { noType: true } : { logType: type.logType });
+  const ent = need(`ltype|${id}|${typeKey(type)}|${JSON.stringify(q)}`, (signal) => ldLogType({ clusterId: id, ...type, ...q, signal }));
+  const res = ent.state === 'ok' ? ent.res : null;
+  const cname = (res && res.clusterName) || nameOf(id);
+  const b = bands(res && res.levels);
+  const head = B.get('lt:head', `${id}|${typeKey(type)}|${S.pk}|${entSig(ent)}`, () => h('div.ld-head', h('div.ld-title',
+    crumbs(link(ldHash('fleet'), 'Log Delay'), link(clusterHref(id), cname), 'log type'),
+    h('h2.ld-h-row#ld-type-h', label, h('span.ld-h-sub', ` · ${(res && res.label) || ''}`)),
+    h('p.sub', res ? [type.noType ? 'documents without the log_type field' : `field ${res.logTypeField || 'log_type'}`, res.counts ? typeCountsText(res.counts, b) : `${countText(res.devicesTotal)} devices`,
+      finite(res.typesSinceMs) ? `measured per log type since ${whenText(res.typesSinceMs, res.now)}` : null, res.everyHours ? `measured every ${res.everyHours} hour${res.everyHours === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ') : 'a log type of this cluster'))));
+  if (!res) return [head, B.get('lt:problem', entSig(ent), () => (ent.state !== 'loading' && ent.res && ent.res.kind === 'bad_message' ? h('div.banner.warn', 'This server cannot show one log type yet (needs ElasticPro 0.3.92).')
+    : ent.state !== 'loading' && ent.res && ent.res.kind === 'not_found' ? empty(`No device has sent ${label} in the last week.`, { detail: ent.res.message }) : problem(ent, label)))];
+  const rid = objId(res);
+  const note = B.get('lt:note', rid, () => (res.notMeasured ? h('div.banner.warn', res.notMeasured) : null));
+  const k = `${id}|${typeKey(type)}`;
+  if (S.types.for !== k) S.types = { for: k, slots: null, more: false };
+  const graph = B.get('lt:graph', `${rid}|${S.types.more}|${S.types.slots ? [...S.types.slots].map(([a, v]) => `${a}=${v}`).join('|') : '-'}`, () => (res.devices.some((s) => (s.points || []).length)
+    ? logTypeGraphCard(res, { lv: res.levels || {}, every: res.everyHours, age: { at: null, stale: false }, zone: S.zone, slots: S.types.slots, more: S.types.more,
+      onSlots: (m) => { S.types.slots = m; repaint(); }, onMore: () => { S.types.more = !S.types.more; repaint(); } })
+    : empty('No measurement of this log type in this period.')));
+  const cutNote = res.devicesWithPoints < res.devicesTotal ? h('div.muted.ld-note#ld-type-cut', `The graph has the worst ${countText(res.devicesWithPoints)} of ${countText(res.devicesTotal)} devices; the table has the others.`) : null;
+  const all = S.typeAll === k;
+  const table = B.get('lt:devices', `${rid}|${all}|${sortSig(sorts.typeDevices)}`, () => logTypeDevicesCard(res, { sort: sorts.typeDevices, shown: all ? undefined : PAGE_ROWS, onAll: () => { S.typeAll = k; repaint(); },
+    csv: () => download(`log-delay-${label.replace(/[^\w.-]+/g, '_')}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(logTypeCsv(res))) }));
+  return [head, note, graph, cutNote, table];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */
@@ -1342,7 +1378,8 @@ function periodsCard(res, every, age) {
 export function boardsNode(r, ctx) {
   repaint = ctx.repaint || repaint;
   S.tz = r.tz === undefined ? null : r.tz;
-  const vk = `${r.view}|${r.clusterId}|${r.device}`;
+  const type = r.view === 'cluster' && (r.noType ? { noType: true } : typeof r.logType === 'string' ? { logType: r.logType } : null);
+  const vk = `${r.view}|${r.clusterId}|${r.device}|${type ? typeKey(type) : ''}`;
   if (vk !== ctlFor) {
     boardsLeave();
     ctl = typeof AbortController === 'undefined' ? null : new AbortController();
@@ -1359,7 +1396,7 @@ export function boardsNode(r, ctx) {
       mount(wrap, split);
       return wrap;
     }
-    const kids = r.view === 'cluster' ? clusterView(r.clusterId)
+    const kids = type ? logTypeView(r.clusterId, type) : r.view === 'cluster' ? clusterView(r.clusterId)
       : r.view === 'summary' ? summaryView(r.clusterId)
         : r.view === 'devices' ? devicesView(r.clusterId)
           : fleetView();

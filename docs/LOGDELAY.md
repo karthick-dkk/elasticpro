@@ -579,6 +579,15 @@ Tiles (0.3.62): the same five counts as the fleet's; `started`/`solved` in the c
 `medianNow`/`medianPrevious` are still answered and not drawn. `fixes` = the cluster's findings
 (the head's "i"). Footer: `fields` names.
 
+### `LOGDELAY_LOGTYPE {clusterId, logType | noType: true, from?, to?}` — Log type board
+
+One log type over the devices that send it (0.3.92): `devices[]` is each device's `series[]` row of
+that log type (`LOGDELAY_DEVICE`, the same definition) with `device`, `zone` and `tag1`, worst
+first; the first `devicesWithPoints` carry their `points`. `counts` is the log type's `byLogType`
+row (`null`: not among the worst 500). `devicesTotal` when the list is cut. From memory: a log
+type's points are kept `typeDays` (8); `seriesFromMs` says where they begin when the range is
+older. A device that has not sent it for a week is forgotten and not listed; `not_found` when none has.
+
 ### `LOGDELAY_DEVICE {clusterId, device, from?, to?}` — Device board
 
 ```json

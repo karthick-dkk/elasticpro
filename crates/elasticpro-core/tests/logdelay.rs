@@ -331,6 +331,14 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     assert_eq!(dev["clusters"][0]["id"], json!("prod"));
     let none = c.handle(json!({ "type": "LOGDELAY_DEVICE", "session": &user, "clusterId": "prod", "device": "nope" })).await;
     assert_eq!(none["kind"], json!("not_found"));
+    for (body, kind) in [(json!({ "logType": "nope" }), "not_found"), (json!({}), "bad_request"), (json!({ "noType": true, "clusterId": "other" }), "not_found")] {
+        let mut m = json!({ "type": "LOGDELAY_LOGTYPE", "session": &user, "clusterId": "prod" });
+        m.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+        let v = c.handle(m).await;
+        assert_eq!(v["kind"], json!(kind), "{v}");
+    }
+    let anon = c.handle(json!({ "type": "LOGDELAY_LOGTYPE", "clusterId": "prod", "logType": "x" })).await;
+    assert_eq!(anon["kind"], json!("unauthenticated"), "{anon}");
     let by_zone = c.handle(json!({ "type": "LOGDELAY_SEARCH", "session": &user, "field": "Zone", "value": "dc?" })).await;
     assert_eq!(by_zone["matches"], json!(3), "{by_zone}");
     let by_name = c.handle(json!({ "type": "LOGDELAY_SEARCH", "session": &user, "name": "FW-1" })).await;

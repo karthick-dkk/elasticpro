@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.92
+
+- **Log Delay: one log type's delay graph, per device.** A log type in *By log type* opens its own board: delay over time with a line per device (worst six, the rest to choose from the worst 40), every device that sends it (state, delay now, event and arrival time, delays, time late, last delay) and a CSV. The figures are the device page's own. A log type's measurements are kept 8 days; what is older is not drawn and it says so. `LOGDELAY_LOGTYPE`.
+- **Log Delay: the device list beside a device's board fits its panel**: *Delay now* was cut off by the row's buttons, which the board itself has.
+- **Reports: Collect now pressed right after a run finished** says it was collected less than a minute ago; the finished run's note hid that.
+- Releases: the core image is built while CI tests the same source, and the tag publishes that image (docker.yml compiles it only when there is none for exactly that source). No change to what is in it.
+
 ## 0.3.91
 
 - **Log delay: time late is only the time it was measured.** Between two late measurements with nothing measured between them (no run, the device silent) the hours were counted as late: lists, the log types, the day by day totals and the files. Now only the stretches measured count, as the percentage beside it already did. The red shading and the graph's lines stop where nothing was measured. A delay older than the measurements kept in memory (31 days, 8 for one log type) is counted from start to end and says "about". Late hours of days stored before the upgrade keep their figures. A delay still lasts from its start to its end, with how much of that was measured beside it ("10 h 17 min · 2 h 48 min measured").

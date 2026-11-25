@@ -15,7 +15,7 @@ import {
   LD_COLOURS as C, ldHash, minutesText, durationText, whenText, countText, stateText, periodBands, axisTicks, staleText, startedSolvedText, deviceGraph,
 } from '../core/logdelay-report.js';
 import {
-  LINES_MAX, LINE_DASHES, lineColour, lineSlots, toggleLine, seriesGraph, typeKey, typeLabel, seriesLate, seriesNow, seriesStateText, delaysAt, delaysAtText, lastEpisode,
+  LINES_MAX, LINE_DASHES, deviceSeries, lineColour, lineSlots, toggleLine, seriesGraph, typeKey, typeLabel, seriesLate, seriesNow, seriesStateText, delaysAt, delaysAtText, lastEpisode,
 } from '../core/log-types.js';
 import { fromZonedInput } from '../core/log-range.js';
 import { LATE_ABOUT, statePill, stateRank } from './rows.js';
@@ -45,7 +45,9 @@ const lateTone = (s) => (seriesLate(s) ? (s.state === 'critical' ? '.ld-crit' : 
  * late); the marks are the drawn log types' own. Measurements before the first one with log types
  * are the whole device's, in grey.
  */
-export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, more, onSlots, onMore, insights }) {
+const OF_DEVICE = Object.freeze({ title: 'Delay over time, per log type', one: 'log type', many: 'log types', tail: ' · shaded: the whole device late, where it was measured' });
+const OF_TYPE = Object.freeze({ title: 'Delay over time, per device', one: 'device', many: 'devices', tail: '' });
+export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, more, onSlots, onMore, insights, of = OF_DEVICE }) {
   tooltip.hide();   // a rebuilt graph is no longer under the pointer it was drawn for
   const H = GRAPH_H;
   const series = res.series;
@@ -74,27 +76,29 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
     ...l.dots.map((p) => dot(p, lineColour(slot), l.dots.length > 120 ? 3 : 6))));
   const gaps = lines.flatMap(({ s }) => (s.points || []).filter((p) => p && finite(p.t) && !finite(p.m)));
   const pic = svg('svg', { viewBox: `0 0 1000 ${H}`, preserveAspectRatio: 'none', role: 'img', class: 'ld-graph-svg',
-    'aria-label': `Delay of ${res.device} per log type over the period: ${lines.map(({ s }) => `${typeLabel(s)} ${seriesNow(s, res.now)}`).join(', ') || 'no log type drawn'}` },
+    'aria-label': `Delay of ${res.device || typeLabel(res)} per ${of.one} over the period: ${lines.map(({ s }) => `${typeLabel(s)} ${seriesNow(s, res.now)}`).join(', ') || `no ${of.one} drawn`}` },
   ...(gBefore ? [svg('g', { class: 'ld-type-before' }, ...gBefore.segments.map((p) => poly(p, C.silent, '', 1.4)), ...gBefore.dots.map((p) => dot(p, C.silent, 3)))] : []),
   ...paths, ...gaps.map((p) => svg('rect', { x: g.X(p.t) - 2, y: H - 6, width: 4, height: 6, fill: C.silent })));
 
   // The hover and the arrow keys: the measurement nearest the pointer, every log type's delay at it.
   const cursor = h('div.ld-cursor', { hidden: true });
   let at = -1;
-  const tip = (t) => h('div.ld-tip', h('b', whenText(t, res.now)), ...delaysAt(series, t).map((x) => h('div.ld-tip-row', swatch(slots.get(x.key)), h('span', x.label), h('b', x.text))),
+  // A log type can have more devices than a tip has room for: those drawn.
+  const told = of === OF_TYPE ? drawn : series;
+  const tip = (t) => h('div.ld-tip', h('b', whenText(t, res.now)), ...delaysAt(told, t).map((x) => h('div.ld-tip-row', swatch(slots.get(x.key)), h('span', x.label), h('b', x.text))),
     g.lines.length > drawn.length && t < firstAt - 60000 ? h('div.muted', 'before the first measurement with log types: the whole device’s delay') : null);
   const show = (i, cx, cy) => {
     if (i < 0 || i >= g.times.length) return;
     at = i;
     const t = g.times[i];
     cursor.hidden = false; cursor.style.left = `${pos(t)}%`;
-    plot.setAttribute('aria-valuenow', String(i)); plot.setAttribute('aria-valuetext', `${whenText(t, res.now)} · ${delaysAtText(series, t)}`);
+    plot.setAttribute('aria-valuenow', String(i)); plot.setAttribute('aria-valuetext', `${whenText(t, res.now)} · ${delaysAtText(told, t)}`);
     tooltip.show(tip(t), cx, cy);
   };
   const hide = () => { cursor.hidden = true; tooltip.hide(); };
   const nearest = (t) => g.times.reduce((best, x, i) => (best < 0 || Math.abs(x - t) < Math.abs(g.times[best] - t) ? i : best), -1);
   const plot = h('div.ld-plot.ld-plot-types#ld-graph', { style: { height: `${H}px` }, tabindex: 0, role: 'slider', 'aria-label': 'The measurement read out: left and right arrow keys', 'aria-valuemin': 0, 'aria-valuemax': Math.max(0, g.times.length - 1), 'aria-valuenow': Math.max(0, g.times.length - 1),
-    'aria-valuetext': g.times.length ? `${whenText(g.times[g.times.length - 1], res.now)} · ${delaysAtText(series, g.times[g.times.length - 1])}` : 'no measurement',
+    'aria-valuetext': g.times.length ? `${whenText(g.times[g.times.length - 1], res.now)} · ${delaysAtText(told, g.times[g.times.length - 1])}` : 'no measurement',
     onmousemove: (e) => { const r = plot.getBoundingClientRect(); show(nearest(g.lo + ((e.clientX - r.left) / (r.width || 1)) * (g.hi - g.lo)), e.clientX, e.clientY); },
     onmouseleave: hide, onblur: hide,
     onkeydown: (e) => {
@@ -129,31 +133,68 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
         onSlots(toggleLine(slots, k));
       } }, swatch(slots.get(k)), h('span.ld-type-chip-n', typeLabel(s)), h(`b${lateTone(s)}`, seriesNow(s, res.now)));
   };
-  const chips = h('div.ld-type-chips#ld-type-chips', { role: 'group', 'aria-label': 'Log types drawn' }, ...series.filter(inView).map(chip),
-    rest.length ? h('button.ld-type-chip.ld-type-more#ld-type-more', { type: 'button', 'aria-expanded': String(!!more), title: more ? 'Hide the log types that are not drawn' : `${rest.length} more log type${rest.length === 1 ? '' : 's'}`, onclick: onMore }, more ? 'Fewer' : `+${countText(rest.length)}`) : null);
+  const chips = h('div.ld-type-chips#ld-type-chips', { role: 'group', 'aria-label': `${of.many[0].toUpperCase()}${of.many.slice(1)} drawn` }, ...series.filter(inView).map(chip),
+    rest.length ? h('button.ld-type-chip.ld-type-more#ld-type-more', { type: 'button', 'aria-expanded': String(!!more), title: more ? `Hide the ${of.many} that are not drawn` : `${rest.length} more ${rest.length === 1 ? of.one : of.many}`, onclick: onMore }, more ? 'Fewer' : `+${countText(rest.length)}`) : null);
   const scale = [[g.scaleMax, `${g.scaleMax} min`], [lv.criticalOver, String(lv.criticalOver)], [lv.delayFrom, String(lv.delayFrom)], [0, '0']].filter(([m]) => finite(m) && m <= g.scaleMax);
   const key = (colour, text, dash) => h('span.ld-key', h(`i${dash ? '.ld-ln.ld-dash' : '.ld-ln'}`, { style: dash ? { borderTopColor: colour } : { background: colour } }), text);
-  return card('Delay over time, per log type', `each point is one ${every ? `${every}-hour ` : ''}measurement of one log type · shaded: the whole device late, where it was measured`,
+  return card(of.title, `each point is one ${every ? `${every}-hour ` : ''}measurement of one ${of.one}${of.tail}`,
     [chips,
       h('div.ld-graph', h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))), plot),
-      h('div.ld-marks', { 'aria-label': 'Delay starts and solves per log type' }, ...marks),
+      h('div.ld-marks', { 'aria-label': `Delay starts and solves per ${of.one}` }, ...marks),
       h('div.ld-ticks.ld-indent', ...axisTicks(g.lo, g.hi).map((t) => h('span', t))),
-      h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement, in the log type’s colour${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
-      finite(res.seriesFromMs) ? h('div.muted.ld-tiny.ld-indent#ld-series-from', `The log types’ measurements before ${whenText(res.seriesFromMs, res.now)} were not read: not all of the period is drawn.`) : null,
-      h('div.muted.ld-tiny.ld-whole-note', 'Peak: the highest measurement, whichever log type. Longest delay and Late most often: the whole device’s (every log type late).'),
-      insights(res, age, openText)],
+      h('div.muted.ld-indent.ld-tiny', `▲ delay started · ● solved · ◆ late at the last measurement, in the ${of.one}’s colour${tail ? ' · hatched: not measured' : ''} · `, h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
+      finite(res.seriesFromMs) ? h('div.muted.ld-tiny.ld-indent#ld-series-from', of === OF_TYPE ? `A log type’s measurements are kept ${res.typeDays} days: nothing before ${whenText(res.seriesFromMs, res.now)} is drawn.` : `The log types’ measurements before ${whenText(res.seriesFromMs, res.now)} were not read: not all of the period is drawn.`) : null,
+      of === OF_TYPE ? null : h('div.muted.ld-tiny.ld-whole-note', 'Peak: the highest measurement, whichever log type. Longest delay and Late most often: the whole device’s (every log type late).'),
+      insights ? insights(res, age, openText) : null],
     [h('span.ld-legend', before.length ? key(C.silent, 'whole device, before the first measurement with log types') : null, key(C.delayLine, `${lv.delayFrom ?? '?'} min`, true), key(C.critLine, `${lv.criticalOver ?? '?'} min`, true))]);
 }
 
+/** A log type's graph: a line per device, worst first (0.3.92). */
+export const logTypeGraphCard = (res, o) => typesGraphCard({ ...res, points: [], periods: [], series: deviceSeries(res) }, { ...o, of: OF_TYPE });
+
+/** A log type's devices, as a CSV's rows: blank is not measured, never 0. */
+export function logTypeCsv(res) {
+  const iso = (t) => (finite(t) ? new Date(t).toISOString() : '');
+  return res.devices.map((s) => {
+    const e = lastEpisode(s);
+    return { device: s.device, cluster: res.clusterName, zone: s.zone ?? '', tag1: s.tag1 ?? '', log_type: typeLabel(res), state: seriesStateText(s, res.now),
+      delay_minutes: finite(s.delayMinutes) ? s.delayMinutes.toFixed(2) : '', current: s.stale ? 'no' : 'yes', event_time: iso(s.lastEvent), arrival: iso(s.lastArrival), last_measured: iso(s.lastMeasuredMs), event_field: s.eventField || '',
+      logs_in_last_run: finite(s.docs) ? s.docs : '', delays: Array.isArray(s.episodes) ? s.episodes.length : '', late_ms: finite(s.lateMs) ? s.lateMs : '', late_ms_about: s.lateAbout ? 'yes' : '',
+      last_delay_started: e ? iso(e.started) : '', last_delay_solved: e ? iso(e.solved) : '', last_delay_ended: e ? iso(e.ended) : '', last_delay_ended_why: e ? e.endedWhy || '' : '' };
+  });
+}
+
+/** A log type's devices: one row each, worst first until a column is chosen. A device name opens its page. */
+export const logTypeDevicesCard = (res, { sort, shown, onAll, csv }) => rowsCard({ ...res, series: res.devices }, {
+  sort, id: 'ld-type-devices', title: 'Devices with this log type', sub: `${countText(res.devicesTotal)} · each with its own delay of ${typeLabel(res)}`,
+  first: ['device', 'Device', (s) => h('td.mono', h('a', { href: ldHash('device', res.cluster, s.device), title: `${s.device} · delay over time and every delay` }, s.device)), { type: 'text', value: (s) => s.device }],
+  extra: [['zone', 'zone', (s) => h('td', s.zone || h('span.muted', '—')), { type: 'text', value: (s) => s.zone }], ['tag1', 'tag1', (s) => h('td', s.tag1 || h('span.muted', '—')), { type: 'text', value: (s) => s.tag1 }]],
+  href: (s) => ldHash('live', res.cluster, s.device, res.noType ? { noType: true } : { logType: res.logType }), who: (s) => `${s.device} · ${typeLabel(res)}`,
+  rowData: (s) => ({ device: s.device }), shown,
+  actions: [h('button.btn.sm#ld-type-csv', { type: 'button', onclick: csv }, 'CSV')],
+  foot: (n) => h('div.ld-foot.muted', `Showing ${countText(n)} of ${countText(res.devicesTotal)}. A device that has sent no ${res.noType ? 'documents without log_type' : 'log of this type'} for a week is not listed.`,
+    n < res.devices.length ? [' · ', h('button.linkish#ld-type-all', { type: 'button', onclick: onAll }, 'Show all')] : null,
+    res.devices.length < res.devicesTotal ? ` · the server sent the first ${countText(res.devices.length)}` : null,
+    finite(res.seriesFromMs) ? ` Time late before ${whenText(res.seriesFromMs, res.now)} is counted from each delay’s start to its end ("about"); the device’s page has what was measured.` : null),
+});
+
 /** Log types of this device: one row per log type, worst first until a column is chosen. */
-export function typesTableCard(res, { clusterId, device, sort }) {
+export const typesTableCard = (res, { clusterId, device, sort }) => rowsCard(res, {
+  sort, id: 'ld-log-types', title: 'Log types of this device', sub: `${countText(res.series.length)}${res.types && res.types.truncated ? ' read, the device has more' : ''} · each with its own delay, by the same levels`,
+  first: ['logType', 'Log type', (s) => h('td.ld-type-name', { title: s.noType ? 'documents without the log_type field' : typeLabel(s) }, typeLabel(s)), { type: 'text', value: typeLabel }],
+  extra: [], href: (s) => ldHash('live', clusterId, device, s.noType ? { noType: true } : { logType: s.logType }), who: (s) => `${device} · ${typeLabel(s)}`,
+  rowData: (s) => ({ type: typeKey(s) }),
+});
+
+/** The rows of both: a series' state, delay now, newest document, delays and time late. */
+function rowsCard(res, { sort, id, title, sub, first, extra, href: hrefOf, who, rowData, shown, actions, foot }) {
   const now = res.now;
   const muted = (t = '—') => h('span.muted', t);
   const asRow = (s) => { const e = lastEpisode(s); return { state: s.state, silentSince: s.state === 'silent' ? s.lastArrival : null, lastStarted: e ? e.started : null, lastSolved: e && finite(e.solved) ? e.solved : null,
     lateSince: e && !finite(e.solved) && !finite(e.ended) ? e.started : null, stale: s.stale, lastMeasuredMs: s.lastMeasuredMs, ended: e && finite(e.ended) && !finite(e.solved) ? e : null }; };
   const lastText = (s) => { const r = asRow(s); return r.ended ? `${whenText(r.ended.started, now)} → ${whenText(r.ended.ended, now)} (${r.ended.endedWhy || 'ended, not solved'})` : startedSolvedText(r, now); };
   const list = sort.apply(res.series, {
-    logType: { type: 'text', value: typeLabel },
+    [first[0]]: first[3], ...Object.fromEntries(extra.map((x) => [x[0], x[3]])),
     state: { type: 'number', value: (s) => (s.stale ? null : stateRank(s.state)), start: -1 },
     now: { type: 'number', value: (s) => s.delayMinutes, start: -1 },
     event: { type: 'date', value: (s) => s.lastEvent },
@@ -163,12 +204,12 @@ export function typesTableCard(res, { clusterId, device, sort }) {
     lateMs: { type: 'duration', value: (s) => s.lateMs, start: -1 },
     last: { type: 'date', value: (s) => { const e = lastEpisode(s); return e ? e.started : null; } },
   });
-  const cols = [['logType', 'Log type'], ['state', 'Now'], ['now', 'Delay now', 1], ['event', 'Event time'], ['arrival', 'Arrived'], ['docs', 'Logs', 1], ['delays', 'Delays', 1], ['lateMs', 'Time late', 1], ['last', 'Last delay: started → solved']];
+  const cols = [[first[0], first[1]], ...extra.map((x) => [x[0], x[1]]), ['state', 'Now'], ['now', 'Delay now', 1], ['event', 'Event time'], ['arrival', 'Arrived'], ['docs', 'Logs', 1], ['delays', 'Delays', 1], ['lateMs', 'Time late', 1], ['last', 'Last delay: started → solved']];
   const row = (s) => {
-    const href = ldHash('live', clusterId, device, s.noType ? { noType: true } : { logType: s.logType });
+    const href = hrefOf(s);
     const stale = s.stale && finite(s.lastMeasuredMs);
-    return h('tr', { dataset: { type: typeKey(s) } },
-      h('td.ld-type-name', { title: s.noType ? 'documents without the log_type field' : typeLabel(s) }, typeLabel(s)),
+    return h('tr', { dataset: rowData(s) },
+      first[2](s), ...extra.map((x) => x[2](s)),
       h('td', { title: seriesStateText(s, now) }, statePill(stale ? 'unmeasured' : s.state, stale ? 'not measured since' : stateText(s.state))),
       h(`td.num${stale ? '.muted' : ''}`, { title: [finite(s.rawGap) ? `raw gap ${minutesText(s.rawGap)}` : '', stale ? `last measured ${whenText(s.lastMeasuredMs, now)}, not measured since` : ''].filter(Boolean).join(' · ') || null }, seriesNow(s, now)),
       h('td.mono', { title: s.eventField ? `from ${s.eventField}` : null }, whenText(s.lastEvent, now, { seconds: true }).replace(/^today /, '')),
@@ -177,10 +218,12 @@ export function typesTableCard(res, { clusterId, device, sort }) {
       h('td.num', Array.isArray(s.episodes) ? countText(s.episodes.length) : muted()),
       h('td.num', { title: s.lateAbout ? LATE_ABOUT : null }, s.lateAbout ? 'about ' : '', durationText(s.lateMs)),
       h('td', lastText(s)),
-      h('td.ld-acts', h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href }, title: `${device} · ${typeLabel(s)}: its logs (Log Delay › Live)`, onclick: () => { location.hash = href; } }, 'Open in logs')));
+      h('td.ld-acts', h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href }, title: `${who(s)}: its logs (Log Delay › Live)`, onclick: () => { location.hash = href; } }, 'Open in logs')));
   };
-  return card('Log types of this device', `${countText(res.series.length)}${res.types && res.types.truncated ? ' read, the device has more' : ''} · each with its own delay, by the same levels`,
-    h('div.tbl-wrap', h('table.tbl#ld-log-types', h('thead', h('tr', ...cols.map(([k, label, num]) => sortTh(sort, k, label, { num: !!num })), h('th', 'Open'))), h('tbody', ...list.map(row)))));
+  const cut = finite(shown) ? list.slice(0, shown) : list;
+  return card(title, sub, [
+    h('div.tbl-wrap', h('table.tbl', { id }, h('thead', h('tr', ...cols.map(([k, label, num]) => sortTh(sort, k, label, { num: !!num })), h('th', 'Open'))), h('tbody', ...cut.map(row)))),
+    foot ? foot(cut.length) : null], actions);
 }
 
 /**
@@ -198,7 +241,7 @@ export function typeDelays(res, age) {
 const notKept = (res) => (finite(res.logTypesNotKept) && res.logTypesNotKept > 0 ? h('div.ld-foot.muted#ld-types-not-kept', `${countText(res.logTypesNotKept)} more log types were read and not kept: they count in their devices’ states and have no history here.`) : null);
 
 /** A cluster's log types, worst first: devices, late, above the critical line, with no logs, the worst delay. */
-export function byLogTypeCard(res, { b, sort, all, onAll }) {
+export function byLogTypeCard(res, { b, sort, all, onAll, hrefOf }) {
   if (res.logTypeField === null) return h('div.muted.ld-note#ld-types-off', `Not measured per log type: ${res.logTypeWhy || 'log_type is not in the mapping'}.`);
   if (!Array.isArray(res.byLogType)) return null;
   const list = sort.apply(res.byLogType, {
@@ -207,10 +250,11 @@ export function byLogTypeCard(res, { b, sort, all, onAll }) {
   });
   const shown = all ? list : list.slice(0, BY_TYPE_TOP);
   const cols = [['logType', 'Log type'], ['devices', 'Devices', 1], ['late', 'Late', 1], ['above', b.high, 1], ['silent', 'No logs', 1], ['worst', 'Worst delay', 1]];
-  const el = card('By log type', `devices per log type, worst first · field ${res.logTypeField || 'log_type'}`,
+  const el = card('By log type', `devices per log type, worst first · field ${res.logTypeField || 'log_type'}${hrefOf ? ' · a log type opens its devices and their graph' : ''}`,
     list.length ? [h('div.tbl-wrap', h('table.tbl#ld-by-type', h('thead', h('tr', ...cols.map(([k, label, num]) => sortTh(sort, k, label, { num: !!num })))),
       h('tbody', ...shown.map((x) => h('tr', { dataset: { type: typeKey(x) } },
-        h('td.ld-type-name', { title: x.noType ? 'documents without the log_type field' : typeLabel(x) }, typeLabel(x)),
+        h('td.ld-type-name', { title: `${x.noType ? 'documents without the log_type field' : typeLabel(x)} · its devices and their delay over time` },
+          hrefOf ? h('a', { href: hrefOf(x) }, typeLabel(x)) : typeLabel(x)),
         h('td.num', countText(x.devices)), h(`td.num${x.late ? '.ld-delay' : ''}`, { title: 'devices this log type is late on' }, countText(x.late)),
         h(`td.num${x.above ? '.ld-crit' : ''}`, countText(x.above)), h('td.num', { title: 'devices with no documents of this log type now' }, countText(x.silent)),
         h('td.num', minutesText(x.worstMinutes))))))),

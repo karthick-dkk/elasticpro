@@ -3272,7 +3272,11 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-part-fill { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink)); }
 .ld .ld-cl-part, .ld .ld-part-ms { font-weight: 400; white-space: nowrap; }
 .ld td.ld-types-cell, .ld td.ld-type-name { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ld .ld-split-list td.ld-types-cell { max-width: 62px; }
+/* Beside a device's board the list is its four columns and no wider than its panel: the row's
+   buttons are on the board itself. */
+.ld .ld-split-list table.tbl :is(th, td) { padding-left: 5px; padding-right: 5px; }
+.ld .ld-split-list table.tbl :is(th:last-child, td.ld-acts) { display: none; }
+.ld .ld-split-list td.ld-types-cell { max-width: 56px; }
 .ld .ld-ended { white-space: normal; }
 .ld-type-chips { display: flex; flex-wrap: wrap; gap: 5px 6px; padding-bottom: 4px; }
 .ld-type-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; max-width: 260px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
@@ -3438,7 +3442,7 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld .ld-chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ld .ld-chips#ld-dev-chips { margin-top: 0; }
 /* One device beside the short list. */
-.ld-split { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.ld-split { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 14px; align-items: start; }
 .ld-split-list, .ld-split-board { min-width: 0; display: grid; gap: 10px; }
 .ld-split-list .ld-dev-bar input[type="search"] { min-width: 0; width: 100%; }
 .ld table.tbl tr.ld-sel td { background: color-mix(in srgb, var(--accent) 12%, var(--surface-1)); }
