@@ -111,6 +111,8 @@ const ids = (o) => (Array.isArray(o.clusterIds) && o.clusterIds.length ? { clust
 export const ldSummary = (o = {}) => send({ type: 'LOGDELAY_SUMMARY', ...pick(o, ['from', 'to', 'days', 'maxDevices']), ...ids(o) }, o.signal);
 export const ldCluster = (o) => send({ type: 'LOGDELAY_CLUSTER', clusterId: o.clusterId, ...pick(o, ['from', 'to', 'days']) }, o.signal);
 export const ldDevice = (o) => send({ type: 'LOGDELAY_DEVICE', clusterId: o.clusterId, device: o.device, ...pick(o, ['from', 'to', 'days']) }, o.signal);
+/** One log type over its devices (0.3.92): `logType`, or `noType` for the documents without the field. */
+export const ldLogType = (o) => send({ type: 'LOGDELAY_LOGTYPE', clusterId: o.clusterId, ...(o.noType ? { noType: true } : { logType: o.logType }), ...pick(o, ['from', 'to', 'days']) }, o.signal);
 export const ldSearch = (o = {}) => send({ type: 'LOGDELAY_SEARCH', ...pick(o, ['name', 'field', 'value', 'from', 'to', 'max']), ...ids(o) }, o.signal);
 export const ldFixes = (o = {}) => send({ type: 'LOGDELAY_FIXES', ...pick(o, ['from', 'to']), ...ids(o) }, o.signal);
 export const ldSettingsGet = () => send({ type: 'LOGDELAY_SETTINGS_GET' });
@@ -142,7 +144,7 @@ export function ldRoute(hash) {
   if (page !== LD_PAGE) return fleet;
   const dec = (s) => { try { return decodeURIComponent(s || ''); } catch (_) { return s || ''; } };
   const [kind, a, ...more] = rest ? rest.split('/') : [];
-  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null, tz };
+  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null, tz, ...type };
   if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')), tz };
   if (kind === 'summary') return { view: 'summary', clusterId: a ? dec(a) : null, device: null, tz };
   // `fixes` is the old Recommended fixes address: its devices, with their fixes, are on Devices.
@@ -168,20 +170,20 @@ export function tzOfHash(hash) {
   return Number.isFinite(n) ? n : null;
 }
 
-/** The log type Live's address asks for (0.3.90): `{logType}` (`?log_type=threat`), `{noType: true}` (`?no_log_type=1`: the documents without the field) or nothing. */
+/** The log type Live's and a cluster's (its Log type board, 0.3.92) address asks for (0.3.90): `{logType}` (`?log_type=threat`), `{noType: true}` (`?no_log_type=1`: the documents without the field) or nothing. */
 function logTypeOfHash(hash) {
   const q = new URLSearchParams(String(hash || '').split('?')[1] || '');
   if (q.get('no_log_type') === '1') return { noType: true };
   const v = q.get('log_type');
-  return v ? { logType: v } : {};
+  return v !== null ? { logType: v } : {};
 }
 
 const enc = encodeURIComponent;
-/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it, `o.logType` / `o.noType` Live's log type. */
+/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it, `o.logType` / `o.noType` Live's log type, or the cluster's Log type board. */
 export function ldHash(view, clusterId, device, o) {
   const base = `#/${LD_PAGE}`;
   const args = [o && o.tz !== null && o.tz !== undefined ? `tz=${enc(String(o.tz))}` : '',
-    view === 'live' && device && o ? (o.noType ? 'no_log_type=1' : o.logType ? `log_type=${enc(o.logType)}` : '') : ''].filter(Boolean);
+    ((view === 'live' && device) || (view === 'cluster' && clusterId)) && o ? (o.noType ? 'no_log_type=1' : typeof o.logType === 'string' ? `log_type=${enc(o.logType)}` : '') : ''].filter(Boolean);
   const q = args.length ? `?${args.join('&')}` : '';
   if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}${q}`;
   if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;

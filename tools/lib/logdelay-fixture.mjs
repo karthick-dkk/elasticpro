@@ -377,6 +377,17 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
         return { id: q.c.id, name: q.c.name, lateNow: totalsOf(q.rows).late, sparkline: s, days: d.map((x) => x.day), peak, peakDay: d[s.indexOf(peak)].day }; }),
       olderMeasurements: [], olderTruncated: false };
   }
+  if (t === 'LOGDELAY_LOGTYPE') {
+    const p = per.find((x) => x.c.id === body.clusterId);
+    const start = Date.parse(`${from}T00:00:00`);
+    const devices = (p ? p.rows : []).flatMap((row, i) => (seriesOf(row, i, p.ci, now, start).series || []).filter((s) => (body.noType ? s.noType : !s.noType && s.logType === body.logType))
+      .map((s) => ({ ...s, device: row.device, zone: row.zone, tag1: row.tag1 })))
+      .sort((a, b) => isLateState(b.state) - isLateState(a.state) || (b.delayMinutes ?? -1) - (a.delayMinutes ?? -1));
+    if (!devices.length) return { ok: false, kind: 'not_found', message: `no device on ${body.clusterId} has sent log type ${body.logType} in the last week` };
+    const counts = byLogTypeOf(p.rows.map((row, i) => ({ row, i, ci: p.ci }))).find((x) => !!x.noType === !!body.noType && (body.noType || x.logType === body.logType)) || null;
+    return { ...common, cluster: p.c.id, clusterName: p.c.name, logType: body.noType ? '(no log type)' : body.logType, noType: !!body.noType, levels: LEVELS, ...typeFieldOf(p.ci), counts, devicesTotal: devices.length,
+      devicesWithPoints: Math.min(40, devices.length), typesSinceMs: now - 8 * DAY, seriesFromMs: start < now - 8 * DAY ? now - 8 * DAY : null, seriesPeriodsFromMs: null, typeDays: 8, notMeasured: null, staleAfterMs: 3 * 3600000, timeZone: timeZoneOf(p.ci, now), devices };
+  }
   if (t === 'LOGDELAY_SEARCH') {
     const name = String(body.name || '').toLowerCase();
     const re = body.value ? new RegExp(`^${String(body.value).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i') : null;

@@ -832,12 +832,32 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
     let gone: BTreeSet<Option<String>> = older.points.iter().filter(|(_, v)| v.iter().any(|p| in_range(p.t))).map(|(k, _)| k).chain(eps.keys())
         .filter(|k| !d.types.iter().any(|s| s.log_type == **k)).cloned().collect();
     let gone: Vec<DeviceState> = gone.into_iter().map(|k| DeviceState { no_type: k.is_none(), log_type: k, state: State::Silent, ..DeviceState::default() }).collect();
-    let mut out: Vec<(State, f64, Value)> = vec![];
-    for s in d.types.iter().chain(&gone) {
+    let mut out: Vec<(State, f64, Value)> = d.types.iter().chain(&gone).map(|s| {
         let mine = eps.remove(&s.log_type).unwrap_or_default();
+        one_series(c, d, s, &mine, older.points.get(&s.log_type).map_or(&[], Vec::as_slice), r, now, true)
+    }).collect();
+    worst_first(&mut out, "logType");
+    out.into_iter().map(|(_, _, v)| v).collect()
+}
+
+fn points_json(points: impl Iterator<Item = Point>) -> Vec<Value> {
+    points.map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect()
+}
+
+/// Late ones first, the latest of them first; those with no logs last. `name` breaks a tie.
+fn worst_first(out: &mut [(State, f64, Value)], name: &str) {
+    let class = |s: State| if s.late() { 0 } else if s == State::Silent { 2 } else { 1 };
+    out.sort_by(|a, b| class(a.0).cmp(&class(b.0)).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| a.2[name].as_str().cmp(&b.2[name].as_str())));
+}
+
+/// One log type of one device over the range: `mine` are its periods, `older` its points before
+/// those the tracker keeps. With what `worst_first` orders it by. Its `points` only when asked for.
+#[allow(clippy::too_many_arguments)]
+fn one_series(c: &ClusterInput, d: &DeviceState, s: &DeviceState, mine: &[Episode], older: &[Point], r: &Range, now: i64, with_points: bool) -> (State, f64, Value) {
+        let in_range = |t: i64| t >= r.from_ms && t < r.to_ms;
         let kept_from = s.recent.iter().next().map_or(i64::MAX, |p| p.t);
-        let points: Vec<Point> = older.points.get(&s.log_type).into_iter().flatten().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).filter(|p| in_range(p.t)).collect();
-        let all: Vec<Point> = older.points.get(&s.log_type).into_iter().flatten().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).collect();
+        let all: Vec<Point> = older.iter().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).collect();
+        let points: Vec<Point> = all.iter().copied().filter(|p| in_range(p.t)).collect();
         let spans = measured_spans(all.iter().copied(), c.tracker.stale_after(), i64::MIN, i64::MAX, now);
         let in_spans: Vec<(i64, i64, State)> = spans.iter().map(|(a, b, x)| ((*a).max(r.from_ms), (*b).min(r.to_ms), *x)).filter(|(a, b, _)| b > a).collect();
         let first = all.first().map_or(i64::MAX, |p| p.t);
@@ -861,20 +881,66 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
             (x, ..) => x.label().to_string(),
         };
         let rank = if stale { -1.0 } else { 0.0 };
-        out.push((s.state, rank + if s.state.late() { delay.unwrap_or(0.0) } else { rank }, json!({
+        (s.state, rank + if s.state.late() { delay.unwrap_or(0.0) } else { rank }, json!({
             "logType": s.type_name(), "noType": s.no_type, "state": s.state, "stateText": text,
             "delayMinutes": delay, "rawGap": s.last_raw_minutes.filter(|_| s.state.measured()), "eventField": s.event_field,
             "lastArrival": s.last_arrival_ms, "lastEvent": s.last_event_ms, "docs": s.docs,
             "episodes": mine.iter().map(|e| { let mut v = period_json(e, now); v["measuredMs"] = json!((e.started_ms >= first).then(|| late_in(e, &spans, now))); v }).collect::<Vec<_>>(),
-            "points": points.iter().map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect::<Vec<_>>(),
+            "points": if with_points { points_json(points.iter().copied()) } else { vec![] },
             "lateMs": late.iter().map(|(ms, _)| ms).sum::<i64>(), "lateAbout": late.iter().any(|(_, about)| *about),
             "lastMeasuredMs": last, "stale": stale,
-        })));
+        }))
+}
+
+/// Devices of a log type that come with their points: the graph's lines are chosen from these.
+pub const LOG_TYPE_POINTS: usize = 40;
+
+/// One log type over the devices that send it (the Log type board): each device's series, worst
+/// first, with `by_log_type`'s counts. Points and periods are the tracker's: a log type's are kept
+/// `TYPE_RECENT_MS`. `None`: no device of the cluster has it.
+pub fn log_type(c: &ClusterInput, name: Option<&str>, r: &Range, now: i64, every_hours: u64, max: usize) -> Option<Value> {
+    let mut eps: BTreeMap<&str, Vec<Episode>> = BTreeMap::new();
+    let overlaps = |e: &Episode| e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms;
+    for e in c.tracker.type_episodes.iter().filter(|e| e.log_type.as_deref() == name).filter(|e| overlaps(e)) {
+        eps.entry(&e.device).or_default().push(e.clone());
     }
-    // Late ones first, the latest of them first; those with no logs last.
-    let class = |s: State| if s.late() { 0 } else if s == State::Silent { 2 } else { 1 };
-    out.sort_by(|a, b| class(a.0).cmp(&class(b.0)).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then_with(|| a.2["logType"].as_str().cmp(&b.2["logType"].as_str())));
-    out.into_iter().map(|(_, _, v)| v).collect()
+    let mut out: Vec<(State, f64, Value)> = vec![];
+    let mut since: Option<i64> = None;
+    for (dev, d) in &c.tracker.devices {
+        let Some(s) = d.types.iter().find(|s| s.log_type.as_deref() == name) else { continue };
+        let mut mine = eps.remove(dev.as_str()).unwrap_or_default();
+        mine.extend(c.tracker.open_at(s, now).filter(&overlaps));
+        let (state, rank, mut v) = one_series(c, d, s, &mine, &[], r, now, false);
+        v["device"] = json!(dev);
+        v["zone"] = json!(super::extra_ci(&d.extras, "Zone"));
+        v["tag1"] = json!(super::extra_ci(&d.extras, "tag1"));
+        since = [since, d.types_since_ms].into_iter().flatten().min();
+        out.push((state, rank, v));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    worst_first(&mut out, "device");
+    let total = out.len();
+    out.truncate(max);
+    for (_, _, v) in out.iter_mut().take(LOG_TYPE_POINTS) {
+        let of = v["device"].as_str().and_then(|n| c.tracker.devices.get(n)).and_then(|d| d.types.iter().find(|s| s.log_type.as_deref() == name));
+        v["points"] = json!(of.map(|s| points_json(s.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms))).unwrap_or_default());
+    }
+    let counts = by_log_type(std::iter::once(c)).into_iter().find(|x| x["noType"] == json!(name.is_none()) && (name.is_none() || x["logType"].as_str() == name));
+    let (field, why) = c.log_type_field();
+    let kept = now - TYPE_RECENT_MS;
+    Some(json!({
+        "cluster": c.id, "clusterName": c.name, "logType": name.unwrap_or(NO_LOG_TYPE), "noType": name.is_none(),
+        "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(), "label": r.label(), "now": now, "everyHours": every_hours,
+        "levels": c.levels, "staleAfterMs": c.tracker.stale_after(), "logTypeField": field, "logTypeWhy": why, "notMeasured": c.tracker.not_measured(now),
+        // Not in the worst `MAX_LOG_TYPES`: not counted, never 0.
+        "counts": counts, "devicesTotal": total, "devicesWithPoints": total.min(max).min(LOG_TYPE_POINTS),
+        // What the range asks for before this was not kept, or not measured by log type yet.
+        "typesSinceMs": since, "seriesFromMs": (r.from_ms < kept).then_some(kept), "seriesPeriodsFromMs": c.tracker.type_episodes_cut_ms, "typeDays": TYPE_RECENT_MS / 86_400_000,
+        "timeZone": c.time_zone(now),
+        "devices": out.into_iter().map(|(_, _, v)| v).collect::<Vec<_>>(),
+    }))
 }
 
 /// `seriesWhy`: the device was never read by its log types.
@@ -1428,6 +1494,23 @@ mod tests {
                    (4, Value::Null, json!(2 * H), json!("event_created"), json!(false)));
         assert_eq!((d["episodes"].clone(), d["seriesWhy"].clone(), d["partLateMs"].clone()), (json!(0), Value::Null, json!(2 * H)), "the device had no period");
         assert_eq!(s.iter().filter(|x| x["logType"] == "(no log type)").map(|x| x["noType"].as_bool().unwrap()).filter(|x| *x).count(), 1);
+        // The same log type, over its devices: the device page's own series, worst first, and the counts of By log type.
+        let v = log_type(&c, Some("threat"), &r, now, 2, 100).unwrap();
+        let t = v["devices"].as_array().unwrap().iter().find(|x| x["device"] == "one").cloned().unwrap();
+        assert!(!t["points"].as_array().unwrap().is_empty());
+        for k in ["state", "delayMinutes", "points", "episodes", "lateMs", "lastArrival", "stale", "stateText"] {
+            assert_eq!(t[k], s[0][k], "{k}");
+        }
+        let by = |n: &str, no: bool| by_log_type(std::iter::once(&c)).into_iter().find(|x| x["logType"] == n && x["noType"] == json!(no)).unwrap();
+        assert_eq!((v["counts"].clone(), v["devicesTotal"].clone()), (by("threat", false), by("threat", false)["devices"].clone()));
+        let b = log_type(&c, Some("b"), &r, now, 2, 100).unwrap();
+        assert_eq!(b["devices"].as_array().unwrap().iter().map(|x| x["device"].as_str().unwrap()).collect::<Vec<_>>(), ["all", "quiet"], "late first, no logs last");
+        let none = log_type(&c, None, &r, now, 2, 100).unwrap();
+        assert_eq!((none["noType"].clone(), none["counts"].clone()), (json!(true), by("(no log type)", true)), "apart from the value of that text");
+        assert!(log_type(&c, Some("nope"), &r, now, 2, 100).is_none());
+        let cut = log_type(&c, Some("b"), &r, now, 2, 1).unwrap();
+        assert_eq!((cut["devices"].as_array().unwrap().len(), cut["devicesTotal"].clone()), (1, json!(2)));
+        assert!(v["seriesFromMs"].is_i64() && log_type(&c, Some("b"), &Range::last_days(now, 2), now, 2, 1).unwrap()["seriesFromMs"].is_null(), "30 days asked, 8 kept");
         let q = device(&c, "quiet", &r, now, 2, None, &OlderTypes::default()).unwrap();
         let b = q["series"].as_array().unwrap().last().cloned().unwrap();
         assert!(b["logType"] == "b" && b["stateText"].as_str().unwrap().starts_with("no logs since ") && b["delayMinutes"] == Value::Null && b["docs"] == json!(0), "{b}");

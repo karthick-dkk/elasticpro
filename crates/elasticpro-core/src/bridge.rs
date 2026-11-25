@@ -1555,7 +1555,7 @@ impl Core {
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg, caller.as_ref()).await,
             // The log delay report (docs/LOGDELAY.md): read from the built-in store; settings an admin's.
-            "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES"
+            "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_LOGTYPE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES"
             | "LOGDELAY_SETTINGS_GET" | "LOGDELAY_SETTINGS_SET" => self.logdelay_msg(&t, &msg, caller.as_ref()).await,
             // The history store (docs/HISTORY.md): a dedicated endpoint, never a monitored cluster.
             "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => {
