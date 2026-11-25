@@ -147,6 +147,33 @@ discovery rules build per-cluster and per-rule items automatically from the
 "Held back" alerting louder than "proposals waiting" is deliberate. A proposal is routine
 housekeeping; a refusal means the rule found something it could not make safe.
 
+## Upgrading
+
+An ElasticPro release reaches Zabbix in four steps. The first is `deploy.sh`'s; the others are done in
+Zabbix, by a Super admin, when the release notes name them.
+
+1. **The scrapers' code.** `plan-scraper` (`compose.plan.yml`) and `scraper` (`compose.scraper.yml`) run
+   ElasticPro's own `ui/` and `tools/` under node. Since 0.3.93 the core image carries both and
+   `deploy.sh --upgrade` copies them to `deploy/scraper/<version>/`, points `ELASTICPRO_UI_DIR` and
+   `ELASTICPRO_TOOLS_DIR` in `.env` there and restarts the scraper; `--rollback` goes back with the
+   images. **Until 0.3.93 an upgrade moved the images only**: the scraper went on running, and Zabbix went
+   on getting the figures of, the release the install was first made from. The first upgrade to 0.3.93 or
+   later repairs that, also where the images are already current.
+   A folder you named in those two keys yourself is left alone, with a note: bring its `ui/` and `tools/`
+   to the release by hand. A scraper started with `-f zabbix/compose.scraper.yml` instead of `COMPOSE_FILE` in
+   `.env` is not seen by `deploy.sh`: name the file in `COMPOSE_FILE`. A build from a checkout (`deploy.sh`
+   without `--upgrade`) moves the core alone and says so. An image from before 0.3.93 has no code to copy; the same note, the same way.
+   To see what the scraper runs: `docker compose config | grep -B1 'target: /app/ui'` in `deploy/`, and its log after
+   the next run, where `failed` counts the values Zabbix has no item for (step 3).
+2. **The modules**: `sudo bash zabbix-modules-install.sh --upgrade` on the Zabbix web host (below).
+3. **The templates**, when the release or the modules' changelog says they changed: Data collection →
+   Templates → Import, over the ones there, with **Delete missing** off. Keys and uuids do not change, so
+   links and history stay. Until then Zabbix refuses the new items' values and keeps the rest.
+4. **Cluster Management → Write master template**, when that page asks for it.
+
+Elasticsearch figures are never made up to fill a gap: an item this ElasticPro does not send, or that a
+cluster cannot answer (`part delayed` without a `log_type` field), has no value, never 0.
+
 ## Authentication
 
 Three separate boundaries. Only the first involves Zabbix credentials.

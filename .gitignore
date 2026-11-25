@@ -26,6 +26,7 @@ node_modules/
 
 # Deploy secrets written by the setup scripts (Vault init, tokens, TLS keys). Never commit.
 /deploy/secrets/
+/deploy/scraper/
 /deploy/vault/secrets/
 /deploy/zabbix/stack/secrets/
 /deploy/zabbix/stack/tls/

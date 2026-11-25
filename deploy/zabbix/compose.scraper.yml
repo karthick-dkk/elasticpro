@@ -24,8 +24,8 @@ services:
       ELASTICPRO_TOKEN_FILE: /run/secrets/scraper_token
     secrets: [scraper_token]
     volumes:
-      - ../ui:/app/ui:ro
-      - ../tools:/app/tools:ro
+      - ${ELASTICPRO_UI_DIR:-../ui}:/app/ui:ro
+      - ${ELASTICPRO_TOOLS_DIR:-../tools}:/app/tools:ro
       - ./config:/app/config:ro
       - scrape-state:/app/state
     # `|| true` because a failed scrape must not stop the loop: the staleness trigger in

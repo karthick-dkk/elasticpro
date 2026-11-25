@@ -49,6 +49,10 @@ RUN apk --no-cache upgrade \
 WORKDIR /app
 COPY --from=build /src/target/release/elasticpro-bridge /usr/local/bin/elasticpro-bridge
 COPY ui ./ui
+# What the Zabbix scrapers run (deploy/zabbix/compose.plan.yml, compose.scraper.yml): the core itself
+# never does. deploy.sh --upgrade takes it, and ui, from here, so they are the running release's.
+COPY tools/elasticpro-scrape.mjs tools/zabbix-sender.mjs ./tools/
+COPY tools/lib/refetch-interval.mjs tools/lib/scrape-sender.mjs ./tools/lib/
 RUN mkdir -p /app/data && chown -R elasticpro /app
 USER elasticpro
 # Hosted mode: bind the compose network, not loopback. nginx is the only way in.

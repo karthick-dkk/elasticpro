@@ -25,6 +25,11 @@
 #      existing install where secrets/admin cannot be made still upgrades; a fresh install whose
 #      .env has no ELASTICPRO_GID gets this user's group (written to .env), and a group the user is
 #      not in is a clear error.
+#  10. a Zabbix scraper's code (0.3.93): with the plan scraper in the stack, an upgrade copies ui and
+#      tools out of the new core image and points .env there, also on an install whose images are
+#      already current; --rollback goes back and forward; code no longer needed is removed; a folder
+#      the operator named is left alone; an image without the code changes nothing; a stack without a
+#      scraper is untouched; a dry run makes nothing.
 #
 # The mirror's releases are made from today's deploy/docker-compose.yml: the target is it as
 # it is, an older release is it without the worker (and with the db it had then) and with its
@@ -172,7 +177,7 @@ case "$1 ${2:-}" in
   "compose version") echo "Docker Compose version v2-shim" ;;
   "compose config")
     case " $* " in
-      *" --services "*) awk '/^services:/{f=1;next} /^[^ #]/{f=0} f && /^  [a-z_-]+:/{sub(/:.*/,"");sub(/^  /,"");print}' docker-compose.yml ;;
+      *" --services "*) awk '/^services:/{f=1;next} /^[^ #]/{f=0} f && /^  [a-z_-]+:/{sub(/:.*/,"");sub(/^  /,"");print}' docker-compose.yml; [ "${SHIM_SCRAPER:-0}" = 0 ] || echo "$SHIM_SCRAPER" ;;
       *" -q "*) ;;
       *) echo "name: shimproj" ;;
     esac ;;
@@ -184,6 +189,9 @@ case "$1 ${2:-}" in
   "volume ls") [ "${SHIM_FRESH:-0}" = 1 ] || echo shimproj_core-data ;;
   "inspect "*) echo healthy ;;
   "image inspect") grep -qxF "$3" "$SHIM_IMAGES"; exit $? ;;
+  "create "*) echo shim-created ;;
+  "cp shim-created:/app/ui") mkdir -p "$3/js/core"; echo "// ui" > "$3/js/core/state.js" ;;
+  "cp shim-created:/app/tools") [ "${SHIM_NO_TOOLS:-0}" = 1 ] && exit 1; mkdir -p "$3"; echo "// tools" > "$3/elasticpro-scrape.mjs" ;;
   "pull "*) printf '%s\n' "${*: -1}" >> "$SHIM_IMAGES" ;;
 esac
 exit 0
@@ -372,5 +380,92 @@ else
   [ $RC != 0 ] && [ ! -e "$NF" ] && case $OUT in *"not in it"*) true ;; *) false ;; esac \
     && ok "ELASTICPRO_GID names a group this user is not in: a clear error, no file left" || bad "a group the user is not in (rc $RC): $OUT"
 fi
+
+
+# --- 10. the Zabbix scraper's code (0.3.93) ----------------------------------------------------
+echo "== the Zabbix scraper's code comes with the release"
+Z=$T/scr/deploy
+mkdir -p "$T/scr"
+cp -R "$T/inst/deploy" "$Z"; cp Cargo.toml "$T/scr/"
+rm -rf "$Z/scraper"
+scr_env() {   # VERSION [lines…]
+  printf 'ELASTICPRO_IMAGE=karthickdk02/elasticpro-core:%s\nELASTICPRO_NGINX_IMAGE=karthickdk02/elasticpro-nginx:%s\n' "$1" "$1" > "$Z/.env"; shift
+  [ $# = 0 ] || printf '%s\n' "$@" >> "$Z/.env"
+}
+scr() {
+  RC=0; : > "$T/shim.log"
+  OUT=$(cd "$Z" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_IMAGES="$T/images" SHIM_SCRAPER=${SCRAPER_ON:-plan-scraper} SHIM_NO_TOOLS=${NO_TOOLS:-0} \
+        ELASTICPRO_NO_SELF_UPDATE=1 ELASTICPRO_RELEASE_URL="file://$T/mirror" ./deploy.sh --timeout 5 "$@" 2>&1) || RC=$?
+  LOG=$(cat "$T/shim.log")
+}
+zenv() { [ "$(sed -n "s/^$1=//p" "$Z/.env" | tail -1)" = "$2" ]; }
+cp "$T/mirror/v9.9.0/deploy/docker-compose.yml" "$Z/docker-compose.yml"
+scr_env 9.8.0
+printf '%s\n' karthickdk02/elasticpro-core:9.8.0 karthickdk02/elasticpro-nginx:9.8.0 > "$T/images"
+
+scr --upgrade=9.9.0 --dry-run
+[ $RC = 0 ] && case $OUT in *"would: copy ui and tools out of karthickdk02/elasticpro-core:9.9.0"*) true ;; *) false ;; esac \
+  && [ ! -e "$Z/scraper" ] && zenv ELASTICPRO_UI_DIR "" && ok "a dry run says it and makes nothing" || bad "dry run (rc $RC): $OUT"
+
+scr --upgrade=9.9.0
+[ $RC = 0 ] && [ -f "$Z/scraper/9.9.0/ui/js/core/state.js" ] && [ -f "$Z/scraper/9.9.0/tools/elasticpro-scrape.mjs" ] \
+  && ok "ui and tools are copied out of the 9.9.0 core image" || bad "no code of 9.9.0 (rc $RC): $OUT"
+zenv ELASTICPRO_UI_DIR ./scraper/9.9.0/ui && zenv ELASTICPRO_TOOLS_DIR ./scraper/9.9.0/tools && zenv ELASTICPRO_UI_DIR_PREVIOUS ../ui \
+  && ok ".env names them, and keeps the old folders for --rollback" || bad ".env: $(cat "$Z/.env")"
+case $LOG in *"rm shim-created"*) ok "the container made for the copy is removed" ;; *) bad "the copy's container stays: $LOG" ;; esac
+
+scr --upgrade=9.9.0
+[ $RC = 0 ] && case $OUT in *"already on 9.9.0"*) true ;; *) false ;; esac && ok "a second run has nothing to do" || bad "second run (rc $RC): $OUT"
+
+scr --rollback
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR ../ui && zenv ELASTICPRO_TOOLS_DIR ../tools && ok "--rollback goes back to the old folders" || bad "--rollback (rc $RC): $(cat "$Z/.env") $OUT"
+scr --rollback
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR ./scraper/9.9.0/ui && ok "a second --rollback goes forward again" || bad "second --rollback (rc $RC): $(cat "$Z/.env")"
+
+scr_env 9.9.0
+rm -rf "$Z/scraper"
+scr --upgrade=9.9.0
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR ./scraper/9.9.0/ui && [ -d "$Z/scraper/9.9.0/ui" ] \
+  && ok "images already on 9.9.0, the scraper's code not: it is brought in" || bad "current images (rc $RC): $OUT"
+zenv ELASTICPRO_IMAGE_PREVIOUS "" && case $LOG in *"compose up -d plan-scraper"*) true ;; *) false ;; esac \
+  && ok "only the scraper restarts, and the last upgrade's rollback record is left as it was" || bad "scraper-only run: $LOG $(cat "$Z/.env")"
+
+mkdir -p "$Z/scraper/9.1.0/ui" "$Z/scraper/9.8.0/ui"
+scr_env 9.8.0 ELASTICPRO_UI_DIR=./scraper/9.8.0/ui ELASTICPRO_TOOLS_DIR=./scraper/9.8.0/tools
+scr --upgrade=9.9.0
+[ $RC = 0 ] && [ ! -e "$Z/scraper/9.1.0" ] && [ -d "$Z/scraper/9.8.0" ] && [ -d "$Z/scraper/9.9.0" ] \
+  && ok "code of versions neither running nor to roll back to is removed" || bad "tidy (rc $RC): $(ls "$Z/scraper")"
+
+scr_env 9.8.0 ELASTICPRO_UI_DIR=/srv/my-ui
+rm -rf "$Z/scraper"
+scr --upgrade=9.9.0
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR /srv/my-ui && [ ! -e "$Z/scraper" ] && case $OUT in *"ELASTICPRO_UI_DIR=/srv/my-ui"*) true ;; *) false ;; esac \
+  && ok "a folder the operator named is left alone, with a note" || bad "own folder (rc $RC): $OUT"
+
+scr_env 9.8.0
+NO_TOOLS=1 scr --upgrade=9.9.0
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR "" && [ ! -e "$Z/scraper/9.9.0" ] && zenv ELASTICPRO_IMAGE karthickdk02/elasticpro-core:9.9.0 \
+  && case $OUT in *"could not be taken from"*) true ;; *) false ;; esac && ok "an image without the code: the upgrade goes on, the scraper keeps its code, and it says so" || bad "no code (rc $RC): $OUT"
+
+scr_env 9.8.0
+rm -rf "$Z/scraper"
+SCRAPER_ON=0 scr --upgrade=9.9.0
+[ $RC = 0 ] && zenv ELASTICPRO_UI_DIR "" && [ ! -e "$Z/scraper" ] && ok "a stack without a scraper is untouched" || bad "no scraper (rc $RC): $OUT"
+
+sed -i.tmp -e 's|\${ELASTICPRO_UI_DIR:-../ui}|../ui|' -e 's|\${ELASTICPRO_TOOLS_DIR:-../tools}|../tools|' "$Z/zabbix/compose.scraper.yml"
+scr_env 9.8.0
+cp "$Z/zabbix/compose.scraper.yml" "$T/old-scraper.yml"
+scr --upgrade=9.9.0
+cmp -s "$Z/zabbix/compose.scraper.yml" "$T/old-scraper.yml" && ok "that file is left as it is while only the plan scraper is in the stack" || bad "compose.scraper.yml rewritten without its service"
+scr_env 9.8.0
+SCRAPER_ON=scraper scr --upgrade=9.9.0
+[ $RC = 0 ] && cmp -s "$Z/zabbix/compose.scraper.yml" deploy/zabbix/compose.scraper.yml && ok "an automation scraper file from before 0.3.93 reads the same two keys now" \
+  || bad "compose.scraper.yml (rc $RC): $(diff "$Z/zabbix/compose.scraper.yml" deploy/zabbix/compose.scraper.yml)"
+for f in tools/elasticpro-scrape.mjs tools/zabbix-sender.mjs tools/lib/refetch-interval.mjs tools/lib/scrape-sender.mjs; do
+  grep -q "$f" deploy/Dockerfile || bad "deploy/Dockerfile does not carry $f"
+done
+for f in $(grep -ohE "from '\./lib/[a-z-]+\.mjs'" tools/elasticpro-scrape.mjs | sed "s/.*'\.\/\(.*\)'/\1/"); do
+  grep -q "tools/$f" deploy/Dockerfile && ok "the image carries tools/$f, which the scraper imports" || bad "deploy/Dockerfile does not carry tools/$f, which tools/elasticpro-scrape.mjs imports"
+done
 
 [ $fail = 0 ] && echo "ok" || { echo "FAILED"; exit 1; }
