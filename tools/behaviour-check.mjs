@@ -9669,6 +9669,8 @@ for (const id of ['snapshots', 'indices', 'shards', 'jobs', 'console']) {
     // No "read-only (operator)" pill anywhere on the board (the owner banned it app-wide).
     ok(!/read-only \(operator\)/.test(view().textContent), 'overview: a read-only (operator) pill is drawn');
     // Kept nodes: a push that changed nothing leaves every card where it was.
+    // The Devices card is redrawn every minute on purpose ("next in 12 min"): not while this looks.
+    if (Date.now() % 60000 > 57000) await settleFor(3500);
     const before = CARDS.map(card);
     st.bus.emit('data'); await settleFor(1700);
     const after = CARDS.map(card);
