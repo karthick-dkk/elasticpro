@@ -16,6 +16,7 @@ import { heldLine } from '../core/alert-groups.js';
 import { FLEET_KEYS, readFleetOrder } from '../core/play-config.js';
 import { donut, unknown, fitRows, openFor, clockText } from './parts.js';
 import { HEALTH_WORD } from './status.js';
+import { ownStart } from './opened.js';
 import { delayRows, delayTotals, levelWords } from './logdelay.js';
 import { cardsOf } from './volume.js';
 
@@ -43,10 +44,13 @@ export function levelCounts(ctx) {
   return n;
 }
 
+/** From where a disk counts as full: the High line, or Critical when the settings leave no room for High. */
+const fullFrom = (lines) => (Number.isFinite(lines.high) ? lines.high : lines.critical);
+
 /** The clusters whose fullest data node is at or past the High line, fullest first; `read` how many have a disk figure. */
 export function fullDisks(ctx) {
   const all = ctx.clusters.map((c) => ({ c, f: ctx.st.get(c.id).fullest })).filter((x) => x.f);
-  const list = all.filter((x) => x.f.pct >= ctx.lines.high).sort((a, b) => b.f.pct - a.f.pct || byName(a.c, b.c));
+  const list = all.filter((x) => x.f.pct >= fullFrom(ctx.lines)).sort((a, b) => b.f.pct - a.f.pct || byName(a.c, b.c));
   const top = all.length ? all.reduce((m, x) => (x.f.pct > m.f.pct ? x : m)) : null;
   return { list, read: all.length, top };
 }
@@ -134,8 +138,13 @@ export const orderTitle = (order) => readFleetOrder(order).map((k) => FLEET_KEYS
 
 /** Since when a problem has been open, as words: how long, or that nobody knows. */
 export function sinceText(ctx, p) {
-  const at = p.alert ? ctx.openSince(p.alert) : p.since;
-  return at ? openFor(Math.max(0, ctx.now - at)) : 'since: not known';
+  // Server times against the server's clock: this screen's own may be wrong.
+  const now = ctx.serverNow ? ctx.serverNow() : ctx.now;
+  const long = (at) => openFor(Math.max(0, now - at));
+  const own = p.alert ? ownStart(p.alert) : null;
+  if (own) return `failing ${long(own)}`;
+  const at = p.since || ctx.openSince(p);
+  return at ? long(at) : 'since: not known';
 }
 
 const pct = (n) => `${Math.floor(n)} %`;
@@ -164,7 +173,7 @@ function bigTile(ctx, c, dev, hot) {
     h('div.pl-fty', whyText(p)),
     heldNote(ctx, c.id),
     h('div.pl-ftf',
-      h('span.pl-dim', 'Disk'), s.fullest ? track(s.fullest.pct, diskTone(s.fullest.pct, ctx.lines), ctx.lines.high) : h('span'),
+      h('span.pl-dim', 'Disk'), s.fullest ? track(s.fullest.pct, diskTone(s.fullest.pct, ctx.lines), fullFrom(ctx.lines)) : h('span'),
       s.fullest ? h('span', `${pct(s.fullest.pct)} · fullest of ${s.fullest.of}`) : unknown('not read'),
       h('span.pl-dim', 'Devices'), total ? h('span.pl-fbar', h('i.green', { style: { width: w(dev.onTime + dev.partDelayed) } }), h('i.yellow', { style: { width: w(dev.delay) } }), h('i.red', { style: { width: w(dev.critical) } })) : h('span'),
       dev && dev.state === 'ok' ? h('span', `${dev.onTime + dev.partDelayed} on time · ${dev.late} late`) : unknown('delay not read')));
@@ -213,9 +222,9 @@ function top(ctx, rows) {
       t.clusters ? donut([{ n: t.onTime, label: 'On time', tone: 'green' }, { n: t.late, label: one ? `Late, ${one[1]} min or more` : 'Late', tone: 'yellow' },
         { n: t.grey, label: 'Silent or can’t measure', tone: 'blue' }, ...(t.otherTz ? [{ n: t.otherTz, label: 'Other time zone, not late', tone: 'grey' }] : [])],
       { total: t.devices, label: t.devices === 1 ? 'device' : 'devices' }) : unknown('not measured')),
-    h('div.pl-panel', h('div.pl-ph', `Disk at ${ctx.lines.high} % or more, ${FULLEST} fullest clusters`,
+    h('div.pl-panel', h('div.pl-ph', `Disk at ${fullFrom(ctx.lines)} % or more, ${FULLEST} fullest clusters`,
       h('small', disks.read < total ? `${disks.list.length} of ${disks.read} read, ${total - disks.read} not read` : `${disks.list.length} of ${total}`)),
-    shown.length ? h('div.pl-fdisk', ...shown.map(({ c, f }) => h('div.pl-fdr', h('b', c.name), h('span.pl-dim', f.name), track(f.pct, diskTone(f.pct, ctx.lines), ctx.lines.high),
+    shown.length ? h('div.pl-fdisk', ...shown.map(({ c, f }) => h('div.pl-fdr', h('b', c.name), h('span.pl-dim', f.name), track(f.pct, diskTone(f.pct, ctx.lines), fullFrom(ctx.lines)),
       h(`b.num.${diskTone(f.pct, ctx.lines)}`, pct(f.pct)), h('span', `${bytes(f.avail)} free`))))
       : disks.read ? h('div.pl-fnone', `None. Fullest: ${pct(disks.top.f.pct)} on ${disks.top.f.name}, ${disks.top.c.name}`) : unknown('no disk read yet')));
 }

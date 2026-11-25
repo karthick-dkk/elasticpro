@@ -160,7 +160,6 @@ export function render(ctx) {
   const t = delayTotals(rows);
   const ws = has ? delayWindows(ctx) : [];
   const words = levelWords(rows, { delayFrom: ctx.watch.delayYellowFromMin, criticalOver: ctx.watch.delayRedAboveMin });
-  const now = t.clusters || Math.max(0, ...ws.map((w) => w.measured));
   const page = pageNow(ctx, rows.length);
   const shown = rows.slice(page.from, page.to);
   const half = Math.ceil(Math.min(PER_PAGE, shown.length) / 2);
@@ -171,7 +170,7 @@ export function render(ctx) {
     h('div.pl-panel.pl-ldgraph',
       h('div.pl-ph', 'Devices still late = late − solved, each 12 h, all clusters',
         ws.length ? h('small', `${dayText(ws[0].from, ctx.tz)} ${at(ws[0].from, ctx.tz)} to ${dayText(ctx.delayBoard.now, ctx.tz)} ${at(ctx.delayBoard.now, ctx.tz)}`) : null),
-      ws.length ? graph(ws, ctx.tz, now)
+      ws.length ? graph(ws, ctx.tz, rows.length)
         : h('div.pl-ldnone', unknown(ctx.delayBoard && ctx.delayBoard.scheduled === false
           ? 'Not recorded: the scheduled log delay measurement is off (Config-Management › Log delay)' : 'Not recorded yet'))),
     h('div.pl-panel', h('div.pl-ph', 'All devices now', t.clusters < rows.length ? h('small', `${t.clusters} of ${rows.length} clusters`) : null),

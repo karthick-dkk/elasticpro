@@ -36,11 +36,13 @@ export const DISK_HYSTERESIS = 2;
 /**
  * The three disk lines, percent of a node's disk: Warning, High and Critical from (85 / 90 / 95
  * unless the settings say otherwise). The one definition: the Alerts page, the mail and Play's
- * Fleet page all read it.
+ * Fleet page all read it. Lines out of order (a Warning kept at 92 from before there was a High
+ * line of 90) leave no room for High: it is not used, rather than raised below Warning.
  */
 export function diskLines(defaults = {}) {
   const line = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
-  return { warning: line(defaults.diskWarnPercent), high: line(defaults.diskHighPercent), critical: line(defaults.diskCritPercent) };
+  const warning = line(defaults.diskWarnPercent), critical = line(defaults.diskCritPercent), high = line(defaults.diskHighPercent);
+  return { warning, high: high < warning || high > critical ? NaN : high, critical };
 }
 
 /**

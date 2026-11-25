@@ -1180,6 +1180,8 @@ export async function saveDefaultsForm() {
   const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dh = n('ce-dh', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
   const needed = { refreshIntervalSec: ri, diskWarnPercent: dw, diskHighPercent: dh, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to };
   if (Object.entries(needed).some(([k, v]) => v == null && !(k in managed))) return { ok: false, message: 'Check the numeric fields.' };
+  const disk = [['diskWarnPercent', dw], ['diskHighPercent', dh], ['diskCritPercent', dc]].map(([k, v]) => Number(k in managed ? state.defaults[k] : v));
+  if (disk[0] > disk[1] || disk[1] > disk[2]) return { ok: false, message: 'Disk levels go up: warn, then high, then critical.' };
   const next = { readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
     diskWarnPercent: dw, diskHighPercent: dh, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
     logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),

@@ -8,7 +8,7 @@
 
 import { healthState } from '../core/state.js';
 import { diskBalance } from '../core/disk-balance.js';
-import { diskLevel } from '../core/alert-tuning.js';
+import { diskLevel, DISK_HYSTERESIS } from '../core/alert-tuning.js';
 import { unreachableReason } from '../core/alert-groups.js';
 import { levelRank, countLevels } from '../core/alert-levels.js';
 import { bytes } from '../lib/fmt.js';
@@ -53,11 +53,14 @@ const balanceCauses = (m) => (m.members || []).flatMap((x) => x.balanceCauses ||
 const isFullDisk = (m) => m.family === 'disk' || (m.family === 'disk-balance' && balanceCauses(m).some((x) => x === 'high' || x === 'flood'));
 
 function diskProblem(m, fullest, lines) {
-  const level = diskLevel(fullest.pct, null, lines);
+  // Its own level: one held by the hysteresis just below its line is still that level.
+  const level = m.family === 'disk' ? m.level : diskLevel(fullest.pct, null, lines);
   const free = fullest.total > 0 ? `${bytes(fullest.avail)} free` : '';
   // A cluster with its own watermarks (flood below our Critical line, say) is told in its alert's words.
   const own = balanceCauses(m).includes('flood') && level !== 'critical';
-  const why = DISK_WHY[level] && !own ? DISK_WHY[level](lines[level]) : m.detail || '';
+  const held = m.family === 'disk' && fullest.pct < lines[level];
+  const why = held ? `Stays ${level === 'critical' ? 'Critical' : 'High'} until it falls below ${lines[level] - DISK_HYSTERESIS} %.`
+    : DISK_WHY[level] && !own ? DISK_WHY[level](lines[level]) : m.detail || '';
   return { what: `Disk ${Math.floor(fullest.pct)} % on ${fullest.name}`, why: [free, why].filter(Boolean).join('. ') };
 }
 

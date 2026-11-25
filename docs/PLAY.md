@@ -132,12 +132,16 @@ written beside the colour. Nothing blinks or moves.
 ### Since when
 
 The server keeps when each problem opened, one record for every display and browser
-(`<data>/play/open-since.json`): the first time any of them showed it open. `openSince` holds a key
-only when that time is **known**: a display had been telling the server about that cluster for at
-least 10 min, with no gap over 3 min, before the problem appeared. Otherwise the wall says
-"since: not known". An alert with its own start (an SLM policy's first failure) uses that. A
-problem seen open by nobody for 3 min is closed and forgotten without a click; the same problem
-later is a new one.
+(`<data>/play/open-since.json`): when one of them first showed it open **at its level**, so a High
+that becomes Critical opens again as Critical. `openSince` holds it only when that time is **known**:
+a display had been telling the server about that cluster for at least 10 min with no gap over 3 min,
+and that display had been reading the data the problem comes from for at least 10 min without a
+break (`play/opened.js`). Otherwise the wall says "since: not known". Snapshots that fail say
+"failing 3 d", from the first failed run. An acknowledged, silenced or held problem stays open and
+keeps its time. One seen open by nobody for 3 min is closed and forgotten without a click; the same
+problem later is a new one. Durations are against the server's clock. At most 200 problems per
+cluster are kept. The report is taken at its word: whoever holds a display link to a cluster could
+say a problem of it opened earlier than it did.
 
 ### Where each figure comes from (all existing unless marked NEW)
 
@@ -147,7 +151,7 @@ later is a new one.
 | disk per node, fullest; its level | `nodes` dataset → `diskBalance()`; `core/alert-tuning.js diskLevel` (Warning 85, High 90, Critical 95 by default: `UI_DISK_WARN_PERCENT`, `_HIGH_`, `_CRIT_`) |
 | open alerts, severity, merged | `alerts()` → `mergedAlerts()` |
 | acknowledged by / since | NEW shared acks (core) |
-| since when | the alert's own start, else `openSince` (the server's, "Since when" above) |
+| since when | failing snapshots: the first failed run; else `openSince` (the server's, "Since when" above) |
 | cluster log delay, delayed devices, top devices | `measureDelay()` + `summarise()` + `classify()` (thresholds from Play watch rules, default 30/60), in two tiers per cluster — a full check every 2 h, the late devices every 15 min (below) — **shared through the core cache** so N TVs measure once |
 | node left | NEW core node-name history (24 h) |
 | last good snapshot, failures in 24 h | snapshot rows (`d.snapshots`): NEW small helpers in `ui/js/play/snapshots.js` (filter by status / end time) |
@@ -304,8 +308,8 @@ late; none when none is) — about 54–58, from about 95.
 
 ### PLAY_STATE
 
-`PLAY_STATE {}` (User / play_only) → `{settings (watch + this display's), excluded:[ids],
-nodes: {clusterId: {expected:[…], present:[…], left:[{node, since}]}}, openSince:{alertKey:
+`PLAY_STATE {open?: ["<alertKey>|<level>"], sure?: [the same]}` (User / play_only) → `{settings (watch + this display's), excluded:[ids],
+nodes: {clusterId: {expected:[…], present:[…], left:[{node, since}]}}, openSince:{"<alertKey>|<level>":
 at}, now}` — one small call per minute.
 
 ## Cluster type and ULM (its own PR)

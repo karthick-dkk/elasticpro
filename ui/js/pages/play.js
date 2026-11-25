@@ -17,9 +17,10 @@
 
 import { h, mount } from '../lib/dom.js';
 import { state, clusters, client, mergedAlerts, invalidateAlerts, watchForPlay, fleetMode,
-  datasetFreshness, refreshAll } from '../core/state.js';
+  datasetFreshness, coverage, refreshAll } from '../core/state.js';
 import { isOpen, isHeld, heldByCluster, toObservations } from '../core/alert-groups.js';
 import { diskLines } from '../core/alert-tuning.js';
+import { noteReads, openReport, openKey } from '../play/opened.js';
 import { alertHistory } from '../core/alert-history.js';
 import { isStale } from '../lib/freshness.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -74,6 +75,8 @@ let lastObserved = 0;
 let lastAckPoll = 0;
 let ctxMemo = { at: 0, ctx: null };
 let ctlUntil = 0;
+/** Since when each dataset of each cluster has been read without a break (play/opened.js). */
+const readSince = new Map();
 const volume = new Map();
 const repoSize = new Map();
 /** The last LOGDELAY_BOARD answer (the scheduled measurement's record), or null before one. */
@@ -182,9 +185,10 @@ function context(force = false) {
     repoSize, volume, delayBoard,
     acked: (m) => (m.state === 'acked' ? { by: m.ackedBy, at: m.ackedAt } : null),
     sharedAcks: acksOnServer() === true,
-    // When the problem began: its own timestamp, else the first time the server saw it open. Not
-    // when this browser first saw it: a TV switched on later must not say "2 min".
-    openSince: (m) => m.startHint || Number(ps.openSince[m.key]) || null,
+    // When the server saw the problem open at this level (play/opened.js). Not when this browser
+    // first saw it: a TV switched on later must not say "2 min".
+    openSince: (p) => Number(ps.openSince[openKey(p)]) || null,
+    serverNow,
     lines,
     staleMs, logPattern: state.defaults.logIndexPattern,
     takeover: take && take.active,
@@ -402,6 +406,8 @@ function tick() {
     lastObserved = now;
     // What this browser has seen of each alert — the shell records it only when it announces.
     try { if (alertHistory.observe(toObservations(mergedAlerts()), now)) invalidateAlerts(); } catch (_) { /* a convenience */ }
+    noteReads(readSince, ctx.clusters.map((c) => c.id), [...DATASETS, 'log-delay'], (id, ds) => (ds === 'log-delay'
+      ? !!(ctx.delay.get(id) && ctx.delay.get(id).summary) : coverage([id], [ds]).read === 1), now);
   }
   const crit = ctx.open.filter((m) => m.level === 'critical');
   const before = take && take.active ? take.active.key : null;
@@ -433,10 +439,10 @@ async function loadPlayState() {
   // The open alerts go with it once the warm-up is over (before that the data is still arriving,
   // and an empty list would wipe the times the server kept across a reload).
   const warm = Date.now() - openedAt >= warmMs;
-  // Held keys go too: only so the server keeps "open for" across an outage — an alert raised
-  // before its cluster went down and still true when it answers is not one minute old.
+  // Held, acknowledged and silenced ones go too: an alert raised before its cluster went down and
+  // still true when it answers, or one whose acknowledgement is taken back, is not a minute old.
   const c = warm && support.play !== false ? context() : null;
-  const res = await playState(c ? [...c.open, ...c.held].map((m) => m.key) : undefined);
+  const res = await playState(c ? openReport([...c.merged, ...c.held], c.st, readSince, DATASETS, Date.now()) : undefined);
   if (res && res.ok) {
     support.play = true;
     ps = readPlayState(res);

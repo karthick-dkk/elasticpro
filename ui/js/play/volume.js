@@ -146,13 +146,15 @@ function perDay(days, all, basisWord) {
 function diskPanel(ctx) {
   const disk = diskList(ctx);
   const line = ctx.lines.warning;
+  // The level of a disk is its fullest node's, on every page; the bar is the whole cluster.
+  const nodeOf = (c, d) => { const s = ctx.st && ctx.st.get(c.id); return s && s.fullest ? s.fullest.pct : d.percent; };
   return h('div.pl-panel', h('div.pl-ph', 'Top clusters by disk used', h('small', disk.read ? `${disk.read < ctx.clusters.length ? `${disk.read} of ${ctx.clusters.length} read` : 'all'}: ${Math.round((disk.used / disk.total) * 100)} %, ${bytes(disk.used)} of ${bytes(disk.total)}` : '')),
     disk.read ? h('div.pl-vlist', ...disk.list.map(({ c, d }) => {
-      const t = ({ critical: 'red', high: 'orange', warning: 'yellow' })[diskLevel(d.percent, null, ctx.lines)];
+      const t = ({ critical: 'red', high: 'orange', warning: 'yellow' })[diskLevel(nodeOf(c, d), null, ctx.lines)];
       return h('div.pl-vdr', h('b', c.name), h('span.pl-trk', h(`i.${t || 'green'}`, { style: { width: `${Math.min(100, d.percent)}%` } }), Number.isFinite(line) ? h('u', { style: { left: `${line}%` } }) : null),
         h(`b.num${t ? `.${t}` : ''}`, `${Math.floor(d.percent)} %`), h('span', `${bytes(d.used)} of ${bytes(d.total)}`));
     })) : unknown('no disk read yet'),
-    h('div.pl-vnote', `${Number.isFinite(line) ? `White line: ${line} %. ` : ''}Used share of the whole cluster's disk`));
+    h('div.pl-vnote', `${Number.isFinite(line) ? `White line: ${line} %. ` : ''}Used share of the whole cluster's disk; colour: its fullest node`));
 }
 
 function changePanel(days) {

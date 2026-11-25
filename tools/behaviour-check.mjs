@@ -7495,9 +7495,9 @@ if (viaFleet) {
     sent.length = 0;
     await pPlay._poll(); await settleFor(200);
     const asked = sent.find((m) => m.type === 'PLAY_STATE');
-    ok(asked && Array.isArray(asked.open) && asked.open.includes(hot), `play: PLAY_STATE did not carry the open alert keys: ${JSON.stringify(asked)}`);
+    ok(asked && Array.isArray(asked.open) && asked.open.includes(`${hot}|critical`), `play: PLAY_STATE did not carry the open alert keys: ${JSON.stringify(asked)}`);
     // This core has watched for seconds only: when the problem began is not known, and that is said.
-    ok(!(hot in pPlay._debug().ps.openSince) && /since: not known/.test(doc.querySelector('.pl-ft.big .pl-lvl').textContent), 'play: a time nobody knows is given as one');
+    ok(!(`${hot}|critical` in pPlay._debug().ps.openSince) && /since: not known/.test(doc.querySelector('.pl-ft.big .pl-lvl').textContent), 'play: a time nobody knows is given as one');
     // A record kept only for its notes (acked: false) is not an acknowledgement.
     play.notesOnly = { [hot]: { by: 'qa', at: Date.now(), note: 'looking', record: { acked: false, ackedBy: '', ackedAt: 0, notes: [{ text: 'looking', by: 'qa', ts: Date.now() }] } } };
     // Not awaited: the record is in acks.js's cache at once; the shim's IndexedDB never says it is written.

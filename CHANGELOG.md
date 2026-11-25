@@ -7,8 +7,8 @@
   - *Log delay*: one graph, the devices still late in each 12 hours of the last 7 days; devices now; the most delayed clusters of each period; every cluster. From the scheduled measurement's record (`LOGDELAY_BOARD`). Part delayed devices count as on time on this page only.
   - *Backups*: a donut of the clusters by backup state, 14 days, age of the last good backup. *Volume and capacity*: logs per day with the 7-day average, the change per day, the biggest changes per cluster, who sends most, the fullest clusters. "Days until full" is gone.
   - What is not read, not measured, not final or not known says so.
-- **Since when a problem is open** is kept on the server, one time for every display and browser; a time nobody saw start is "not known". A problem that clears is closed by itself.
-- **Disk levels are one rule everywhere** (alerts, mail, Play): Warning 85 %, **High 90 %**, Critical 95 % of the fullest data node. Shipped until now: Warning 80, Critical 90, against the cluster's average in the alert. New `UI_DISK_HIGH_PERCENT` / `diskHighPercent`. Levels set in config.txt or the clusters file stay as they are.
+- **Since when a problem is open** is kept on the server, one time for every display and browser, at its level (a High that becomes Critical opens again); a time nobody saw start is "not known". A problem that clears is closed by itself; acknowledging or silencing one does not restart its time.
+- **Disk levels are one rule everywhere** (alerts, mail, Play): Warning 85 %, **High 90 %**, Critical 95 % of the fullest data node. Shipped until now: Warning 80, Critical 90, against the cluster's average in the alert. New `UI_DISK_HIGH_PERCENT` / `diskHighPercent`. Levels set in config.txt or the clusters file stay as they are. A Warning kept above the new High, or a Critical below it, leaves no High level.
 - **Retired settings**: `UI_PLAY_NODE_BLINK`, `UI_PLAY_SPOTLIGHT_WHEN`, `UI_PLAY_SPOTLIGHT_LEAVE_MIN`, `UI_PLAY_SPOTLIGHT_SECONDS`. A config.txt that still has them loads, with a warning; saved displays load without the two pages.
 
 ## 0.3.93

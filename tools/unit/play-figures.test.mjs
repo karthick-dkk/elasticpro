@@ -36,6 +36,8 @@ test('a problem says what it is and why it matters: disk, red health, a node tha
   assert.match(s.problems[0].why, /^3\.\d+ GB free\. From 95 % Elasticsearch may make/);
   const hi = St.clusterStatus(cluster, data('green', [node('n', 92)]), { alerts: [al('high', 'disk', 'x')], lines });
   assert.match(hi.problems[0].why, /8\.00 GB free\. From 90 % shards may move away/);
+  const held = St.clusterStatus(cluster, data('green', [node('n', 94)]), { alerts: [al('critical', 'disk', 'x')], lines });
+  assert.match(held.problems[0].why, /Stays Critical until it falls below 93 %/, 'held by the hysteresis: the reason is its level\'s');
   const red = St.clusterStatus(cluster, data('red', [node('a', 10)]), {});
   assert.deepEqual([red.level, red.problems[0].what, red.problems[0].why], ['critical', 'Cluster health red', '3 shards have no node. Red: part of the data cannot be read.']);
   const left = St.clusterStatus(cluster, data('yellow', [node('a', 10)]), { nodes: { left: [{ node: 'es-warm-2', since: 777 }] } });
@@ -83,7 +85,7 @@ function fleetCtx(specs, over = {}) {
   const st = new Map(specs.map((s) => [s.id, St.clusterStatus({ id: s.id, name: s.name || s.id }, s.data, { alerts: s.alerts || [], nodes: s.nodes || null, lines })]));
   return { now: NOW, tz: null, clusters, st, lines, data: (id) => datas.get(id) || null, open: specs.flatMap((s) => (s.alerts || []).filter((m) => m.state === 'open')), openBy: new Map(),
     heldBy: new Map(), delay: new Map(), delayBoard: null, volume: new Map(), takeover: null, watch: { delayYellowFromMin: 30, delayRedAboveMin: 60 },
-    display: { fleetOrder: ['critical', 'name'] }, openSince: (m) => m.opened || null, afterMount: () => {}, ...over };
+    display: { fleetOrder: ['critical', 'name'] }, openSince: (p) => (p.alert && p.alert.opened) || null, afterMount: () => {}, ...over };
 }
 const good = (id) => ({ id, data: data('green', [node('a', 40)]) });
 
@@ -106,6 +108,10 @@ test('Fleet: how long a problem is open is said only when it is known', () => {
     { id: 'b', data: data('green', [node('n1', 96)]), alerts: [al('critical', 'disk', 'x', { key: 'b:disk' })] }]);
   const pills = [...F.render(ctx).querySelectorAll('.pl-lvl')].map((x) => x.textContent);
   assert.deepEqual(pills, ['Critical · 2 min', 'Critical · since: not known']);
+  // Against the server's clock, not this screen's; failing snapshots by their first failed run.
+  assert.equal(F.sinceText({ ...ctx, serverNow: () => NOW + 600000 }, ctx.st.get('a').problems[0]), '12 min');
+  const snaps = { key: 'a:repo', level: 'critical', alert: { key: 'a:repo', level: 'critical', members: [{ level: 'warning', failingSince: NOW - 9 * 86400000 }, { level: 'critical', failingSince: NOW - 3 * 86400000 }] } };
+  assert.equal(F.sinceText(ctx, snaps), 'failing 3 d 0 h');
   assert.deepEqual([0, 59, 60, 192, 1439, 1620].map((m) => P.openFor(m * 60000)), ['0 min', '59 min', '1 h 0 min', '3 h 12 min', '23 h 59 min', '1 d 3 h']);
 });
 

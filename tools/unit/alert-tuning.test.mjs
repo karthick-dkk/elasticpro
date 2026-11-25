@@ -33,6 +33,15 @@ test('disk hysteresis: raised at the threshold, cleared two points below it', ()
   assert.equal(T.diskLevel(NaN, 'critical', L), null, 'unknown is not a level');
 });
 
+test('disk lines out of order leave no High, never one below Warning', () => {
+  assert.deepEqual(T.diskLines({ diskWarnPercent: 85, diskHighPercent: 90, diskCritPercent: 95 }), { warning: 85, high: 90, critical: 95 });
+  const kept = T.diskLines({ diskWarnPercent: 92, diskHighPercent: 90, diskCritPercent: 97 });
+  assert.equal(T.diskLevel(91, null, kept), null);
+  assert.equal(T.diskLevel(93, null, kept), 'warning');
+  assert.equal(T.diskLevel(98, null, kept), 'critical');
+  assert.equal(T.diskLevel(91, null, T.diskLines({ diskWarnPercent: 80, diskHighPercent: 90, diskCritPercent: 88 })), 'critical');
+});
+
 test('a node at the flood stage is one row: the cluster average is folded into it', () => {
   const out = T.tuneAlerts([A('disk', 'warning', { diskPercent: 91, diskAverage: 84.2 }), A('disk-balance', 'critical', { balanceCauses: ['flood'] }), A('health', 'warning')]);
   assert.deepEqual(fams(out), ['disk-balance', 'health']);

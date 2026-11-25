@@ -106,7 +106,7 @@ export function readPlayState(res) {
 export const defaultPlayState = () => readPlayState({});
 
 /** `open`: the alert keys this display shows open now, so each keeps its first time on the server. */
-export const playState = (open) => send(Array.isArray(open) ? { type: 'PLAY_STATE', open } : { type: 'PLAY_STATE' });
+export const playState = (report) => send(report ? { type: 'PLAY_STATE', open: report.open, sure: report.sure } : { type: 'PLAY_STATE' });
 
 /* ------------------------------ shared measurements ------------------------------ */
 

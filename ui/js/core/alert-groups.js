@@ -383,7 +383,7 @@ export function heldText(n) {
  * The held alerts of one unreachable cluster as one line: "2 older alerts held, not current ·
  * as of 14:02" — the time of the OLDEST reading any of them rests on, written by `clock`
  * (the Alerts page's dt, Play's clockText). The one wording for the Alerts page's unreachable
- * line and Play's down tile and Alerts slide.
+ * line and Play's down tile.
  */
 export function heldLine(held, clock = (t) => new Date(t).toISOString().slice(11, 16)) {
   const list = held || [];

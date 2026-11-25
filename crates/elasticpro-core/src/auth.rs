@@ -210,7 +210,7 @@ pub fn guest_may_read(path: &str) -> bool {
 /// the shell's startup no-ops (BADGE, OPEN_APP, ENABLE_NET_ERRORS), and ZABBIX_CLUSTERS — the
 /// credential-free list of the clusters that are Zabbix hosts, without which a wall could
 /// not name them; and CLUSTER_META_GET, each cluster's type and ULM, without which the wall
-/// would raise "no snapshot" for a ULM cluster that takes none (docs/PLAY.md, Spotlight and
+/// would raise "no snapshot" for a ULM cluster that takes none (docs/PLAY.md, Fleet and
 /// Backups); and LOGDELAY_BOARD, the late devices as counts per cluster (no device is named).
 pub const PLAY_READS: &[&str] = &[
     "FLEET_STATE", "CLUSTER_DATASET", "EVENTS_TICKET", "REFRESH",

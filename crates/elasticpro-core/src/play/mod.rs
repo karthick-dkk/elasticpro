@@ -31,7 +31,7 @@ use crate::bridge::Core;
 use crate::fleet::now_ms;
 use parking_lot::{Mutex, RwLock};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -48,8 +48,11 @@ pub(crate) fn write_private(p: &Path, body: &[u8]) -> Result<(), String> {
 /// (`<clusterId>:node-left`). `PLAY_NODE_FORGET` still clears one that was kept.
 pub const NODE_LEFT_ACK: &str = "node-left";
 
-/// Problems whose opening time is kept, at most.
-const OPEN_KEYS_MAX: usize = 5000;
+/// Problems of one cluster whose opening time is kept, at most: a display's reports can fill
+/// its own clusters' share and nobody else's.
+const OPEN_KEYS_PER_CLUSTER: usize = 200;
+/// Problems read from one report, at most.
+const OPEN_KEYS_REPORT: usize = 5000;
 /// A cluster no display has reported on for this long is not being watched.
 const WATCH_GAP_MS: u64 = 3 * 60_000;
 /// How long a cluster must have been watched before a problem first seen on it counts as just
@@ -86,6 +89,13 @@ struct OpenTimes {
     saved: u64,
 }
 
+impl OpenTimes {
+    fn kept_for(&self, cluster: &str) -> usize {
+        let prefix = format!("{cluster}:");
+        self.keys.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix)).count()
+    }
+}
+
 /// When each problem opened, one record for every display (docs/PLAY.md "Open since"): a TV
 /// switched on, reloaded or added reads the same time as the one beside it. A problem closes
 /// by itself when no display reports it any more.
@@ -105,15 +115,18 @@ impl OpenSince {
         OpenSince { path, state: Mutex::new(state) }
     }
 
-    /// What a display reports: the problems open now (`open`, when it says) on the clusters it
-    /// shows (`clusters`). `known` is every cluster there is. Returns the times that are known,
-    /// of the clusters in `clusters` only.
-    fn update(&self, open: Option<&[String]>, clusters: &[String], known: &[String], now: u64) -> BTreeMap<String, u64> {
+    /// What a display reports: the problems open now (`open`, when it says; `<alert key>|<level>`,
+    /// so a problem that got worse opened anew) on the clusters it shows (`clusters`), and which of
+    /// them it would have seen open earlier (`sure`: it was reading what they come from all along).
+    /// `known` is every cluster there is. Returns the times that are known, of the clusters in
+    /// `clusters` only. A report is taken at its word: whoever has a display link to a cluster
+    /// can say a problem of it opened earlier than it did (docs/PLAY.md "Since when").
+    fn update(&self, open: Option<&[String]>, sure: &HashSet<String>, clusters: &[String], known: &[String], now: u64) -> BTreeMap<String, u64> {
         let of = |k: &str| crate::silences::cluster_of("alert", k, known).filter(|c| clusters.contains(c)).cloned();
         let mut st = self.state.lock();
         if let Some(open) = open {
             let mut changed = false;
-            for k in open {
+            for k in open.iter().take(OPEN_KEYS_REPORT) {
                 let Some(c) = of(k) else { continue };
                 if let Some(e) = st.keys.get_mut(k) {
                     if e.known && now.saturating_sub(e.seen) > UNSEEN_MS {
@@ -121,10 +134,10 @@ impl OpenSince {
                         changed = true;
                     }
                     e.seen = now;
-                } else if st.keys.len() < OPEN_KEYS_MAX {
+                } else if st.kept_for(&c) < OPEN_KEYS_PER_CLUSTER {
                     let settled = st.watched.get(&c)
                         .is_some_and(|w| now.saturating_sub(w.last) <= WATCH_GAP_MS && now.saturating_sub(w.since) >= WATCH_SETTLE_MS);
-                    st.keys.insert(k.clone(), Opened { at: now, seen: now, known: settled });
+                    st.keys.insert(k.clone(), Opened { at: now, seen: now, known: settled && sure.contains(k) });
                     changed = true;
                 }
             }
@@ -138,7 +151,8 @@ impl OpenSince {
             let (keys, watched) = (st.keys.len(), st.watched.len());
             st.keys.retain(|k, e| match crate::silences::cluster_of("alert", k, known) {
                 None => false,
-                Some(c) => !clusters.contains(c) || now.saturating_sub(e.seen) <= CLEARED_MS,
+                // A cluster nobody shows: after UNSEEN_MS its times are no longer known anyway.
+                Some(c) => now.saturating_sub(e.seen) <= if clusters.contains(c) { CLEARED_MS } else { UNSEEN_MS },
             });
             st.watched.retain(|c, _| known.contains(c));
             changed |= st.keys.len() != keys || st.watched.len() != watched;
@@ -620,7 +634,9 @@ impl Core {
             .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).filter(|k| !k.is_empty() && k.len() <= acks::MAX_KEY).collect());
         let shown: Vec<String> = visible.iter().filter(|id| !excluded.contains(id)).cloned().collect();
         let known: Vec<String> = self.all_specs().into_iter().map(|s| s.id).collect();
-        let open_since = self.play.open_since.update(open.as_deref(), &shown, &known, now);
+        let sure: HashSet<String> = msg.get("sure").and_then(Value::as_array)
+            .map(|a| a.iter().take(OPEN_KEYS_REPORT).filter_map(|k| k.as_str().map(String::from)).collect()).unwrap_or_default();
+        let open_since = self.play.open_since.update(open.as_deref(), &sure, &shown, &known, now);
         json!({
             "ok": true,
             "settings": { "watch": self.watch_for(&eff.watch, caller), "display": eff.display_for(link.as_deref()) },
@@ -733,12 +749,17 @@ mod open_since_tests {
         a.iter().map(|s| s.to_string()).collect()
     }
 
+    fn set(a: &[&str]) -> HashSet<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn a_problem_opens_once_for_every_display_and_closes_by_itself() {
         let o = OpenSince::open(None);
         let all = ids(&["c1", "c2"]);
         let t0 = 1_000_000_000;
-        let say = |open: &[&str], on: &[&str], at: u64| o.update(Some(&ids(open)), &ids(on), &all, at);
+        let say = |open: &[&str], on: &[&str], at: u64| o.update(Some(&ids(open)), &set(open), &ids(on), &all, at);
+        let none = HashSet::new();
         // Already there at the first look: when it opened is not known.
         assert!(say(&["c1:disk"], &["c1", "c2"], t0).is_empty());
         for m in 1..=12 {
@@ -747,11 +768,11 @@ mod open_since_tests {
         // A new one on a cluster that has been watched: it opened now, on this and every display.
         let t1 = t0 + 13 * MIN;
         assert_eq!(say(&["c1:disk", "c1:health"], &["c1", "c2"], t1).get("c1:health"), Some(&t1));
-        assert_eq!(o.update(None, &ids(&["c1"]), &all, t1 + 5).get("c1:health"), Some(&t1), "a display just switched on reads it");
-        assert!(o.update(None, &ids(&["c2"]), &all, t1 + 5).is_empty(), "not one that does not show the cluster");
+        assert_eq!(o.update(None, &none, &ids(&["c1"]), &all, t1 + 5).get("c1:health"), Some(&t1), "a display just switched on reads it");
+        assert!(o.update(None, &none, &ids(&["c2"]), &all, t1 + 5).is_empty(), "not one that does not show the cluster");
         // A display that does not show c1 can neither clear nor add its problems.
         assert!(say(&["c1:heap"], &["c2"], t1 + 5 * MIN).is_empty());
-        assert_eq!(o.update(None, &ids(&["c1"]), &all, t1 + 5 * MIN).keys().collect::<Vec<_>>(), vec!["c1:health"]);
+        assert_eq!(o.update(None, &none, &ids(&["c1"]), &all, t1 + 5 * MIN).keys().collect::<Vec<_>>(), vec!["c1:health"]);
         // Left out of one report it is still open; left out for three minutes it has closed.
         assert!(say(&["c1:disk"], &["c1"], t1 + MIN).contains_key("c1:health"));
         assert!(!say(&["c1:disk"], &["c1"], t1 + 4 * MIN).contains_key("c1:health"));
@@ -761,11 +782,44 @@ mod open_since_tests {
     }
 
     #[test]
+    fn one_cluster_fills_its_own_share_only_and_what_nobody_shows_is_dropped() {
+        let o = OpenSince::open(None);
+        let all = ids(&["c1", "c2"]);
+        let t0 = 1_000_000_000;
+        let many: Vec<String> = (0..OPEN_KEYS_PER_CLUSTER + 50).map(|i| format!("c1:user:{i}")).collect();
+        o.update(Some(&many), &set(&[]), &ids(&["c1"]), &all, t0);
+        assert_eq!(o.state.lock().keys.len(), OPEN_KEYS_PER_CLUSTER);
+        o.update(Some(&ids(&["c2:disk"])), &set(&[]), &ids(&["c2"]), &all, t0 + MIN);
+        assert!(o.state.lock().keys.contains_key("c2:disk"), "c1's are not in c2's way");
+        o.update(Some(&ids(&["c2:disk"])), &set(&[]), &ids(&["c2"]), &all, t0 + 11 * MIN);
+        assert_eq!(o.state.lock().keys.keys().collect::<Vec<_>>(), vec!["c2:disk"], "nobody has shown c1 for ten minutes");
+    }
+
+    #[test]
+    fn a_problem_the_display_could_not_have_seen_before_is_not_known_and_a_worse_one_opens_anew() {
+        let o = OpenSince::open(None);
+        let all = ids(&["c1"]);
+        let t0 = 1_000_000_000;
+        for m in 0..=12 {
+            o.update(Some(&ids(&["c1:health|high"])), &set(&["c1:health|high"]), &all, &all, t0 + m * MIN);
+        }
+        let t1 = t0 + 13 * MIN;
+        // Its data has only just arrived: the problem may be days old.
+        let got = o.update(Some(&ids(&["c1:health|high", "c1:repo|critical"])), &set(&["c1:health|high"]), &all, &all, t1);
+        assert!(!got.contains_key("c1:repo|critical"));
+        // Sure a minute later: too late, it was already there.
+        assert!(!o.update(Some(&ids(&["c1:repo|critical"])), &set(&["c1:repo|critical"]), &all, &all, t1 + MIN).contains_key("c1:repo|critical"));
+        // High until now, Critical from now: not the High one's time.
+        let got = o.update(Some(&ids(&["c1:health|critical"])), &set(&["c1:health|critical"]), &all, &all, t1 + 2 * MIN);
+        assert_eq!(got.get("c1:health|critical"), Some(&(t1 + 2 * MIN)));
+    }
+
+    #[test]
     fn a_time_nobody_watched_is_not_known() {
         let o = OpenSince::open(None);
         let all = ids(&["c1"]);
         let t0 = 1_000_000_000;
-        let say = |open: &[&str], at: u64| o.update(Some(&ids(open)), &all, &all, at);
+        let say = |open: &[&str], at: u64| o.update(Some(&ids(open)), &set(open), &all, &all, at);
         say(&[], t0);
         // Two minutes after the first look the data may still be arriving.
         assert!(say(&["c1:repo:r:failing"], t0 + 2 * MIN).is_empty());
@@ -787,14 +841,14 @@ mod open_since_tests {
         let all = ids(&["c1"]);
         let t0 = 1_000_000_000;
         let o = OpenSince::open(Some(p.clone()));
-        assert!(o.update(None, &all, &all, t0).is_empty());
+        assert!(o.update(None, &set(&[]), &all, &all, t0).is_empty());
         for m in 0..=11 {
-            o.update(Some(&ids(&["c1:disk"])), &all, &all, t0 + m * MIN);
+            o.update(Some(&ids(&["c1:disk"])), &set(&["c1:disk"]), &all, &all, t0 + m * MIN);
         }
         let t1 = t0 + 12 * MIN;
-        o.update(Some(&ids(&["c1:disk", "c1:health"])), &all, &all, t1);
+        o.update(Some(&ids(&["c1:disk", "c1:health"])), &set(&["c1:disk", "c1:health"]), &all, &all, t1);
         let again = OpenSince::open(Some(p));
-        assert_eq!(again.update(Some(&ids(&["c1:disk", "c1:health"])), &all, &all, t1 + MIN), [("c1:health".to_string(), t1)].into());
+        assert_eq!(again.update(Some(&ids(&["c1:disk", "c1:health"])), &set(&[]), &all, &all, t1 + MIN), [("c1:health".to_string(), t1)].into());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
