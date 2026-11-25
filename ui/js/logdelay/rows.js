@@ -31,6 +31,8 @@ export const stateRank = (s) => (s in STATE_RANK ? STATE_RANK[s] : null);
 /** When the last delay (or silence) began: what "Last delay: started → solved" sorts on. */
 export const lastDelayAt = (r) => (r.state === 'silent' && finite(r.silentSince) ? r.silentSince : finite(r.lateSince) ? r.lateSince : finite(r.lastStarted) ? r.lastStarted : null);
 
+/** Why a time late is "about": the core's `lateAbout`. */
+export const LATE_ABOUT = 'A delay in it is older than the measurements kept in memory: that part is counted from its start to its end, not only where it was measured.';
 export const statePill = (state, text) => h(`span.pill.ld-pill.${stateTone(state)}`, h('i.dot'), text || stateText(state));
 
 /**
@@ -71,7 +73,7 @@ const COLS = {
     { type: 'text', value: (r) => deviceZoneText(r) }],
   max: ['Max', true, (r) => h('td.num', minutesText(r.maxMinutes)), { type: 'number', value: (r) => r.maxMinutes }],
   episodes: ['Delays', true, (r) => h('td.num', countText(r.episodes)), { type: 'number', value: (r) => r.episodes }],
-  lateMs: ['Time late', true, (r) => h('td.num', { title: partLateText(r) ? 'late: every log type of the device was late · part late: only some of them' : null }, durationText(r.lateMs),
+  lateMs: ['Time late', true, (r) => h('td.num', { title: partLateText(r) ? 'late: every log type of the device was late · part late: only some of them' : r.lateAbout ? LATE_ABOUT : null }, r.lateAbout ? 'about ' : '', durationText(r.lateMs),
     partLateText(r) ? h('span.muted.ld-part-ms', ` · ${partLateText(r)}`) : null), { type: 'duration', value: (r) => r.lateMs }],
   last: ['Last delay: started → solved', false, (r, ctx) => h('td', r.live ? muted('not in one measurement') : startedSolvedText(r, ctx.now)),
     { type: 'date', value: lastDelayAt }],

@@ -440,7 +440,7 @@ in memory, replaced when the run writes it; the pages never re-read the file. Da
 `Tracker::apply(run_ms, readings, levels, silent_after_ms)` is the pure transition; the
 tests in `state.rs` are the spec. `state::daily(tracker, day, from, to, now)` makes a day's
 totals: each device once by its **last state of the day**; `started`/`solved` by instant;
-`lateHours` = overlap of periods with the day, each up to its last measurement; `medianMinutes`/`p95Minutes` of devices'
+`lateHours` = overlap of periods with the day, only where the device was measured (`state::measured_spans`); `medianMinutes`/`p95Minutes` of devices'
 last measured delay (`null` when nothing measured); `complete` when the day had ended.
 
 ## Recommended fixes (`logdelay/fixes.rs`)
@@ -566,7 +566,7 @@ percentile or average.
 `nowMinutes: null` with `state: silent|unmeasured` — show "—" / "can't measure". *Last delay:
 started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still late", or "not solved ·
 last measured 14:00" when the device is `stale`; `silentSince` = "no logs since"). *Time late* =
-`lateMs`, with how long it was measured. *Logs a day* = `docsPerDay` (`null` = fewer than 24 hours
+`lateMs`: only the stretches measured (`state::measured_spans`: from a measurement to the next reading, at most `stale_after_ms` of today's schedule), with how long it was measured; `lateAbout: true` where a delay is older than the points kept (that part from start to end, the period's `measuredMs` is `null`). A period's `lastedMs` is from its start to its end; `measuredMs` is how much of it was measured, `spans` those stretches in the range. *Logs a day* = `docsPerDay` (`null` = fewer than 24 hours
 counted: the page gives the count and the hours instead). The event time column is headed by the
 field the cluster's event time is read from (`fields.eventTime`, a device's `eventField` when the
 core names it).
@@ -945,7 +945,7 @@ drawn on Live (Live's Fetch is the browser's).
   late at that window's own measurement (`lateAtWindow`): the core's `windows[].lateAt` (the delay
   band and above the critical line, as By cluster's *Late now* and *Change* count late) or
   `criticalAt` with the toggle on *Above 60 min*. The core counts each device by its last reading
-  inside the window (`summary::measured_late`); a window with no reading is `measured: false` and
+  inside the window (`summary::measured_late`); a window with no measured delay (no run, or no logs from any device) is `measured: false` and
   drawn hatched "not measured" — never an earlier reading carried forward. The window in progress
   (`complete: false`) with no reading yet is *pending*, light dots, its tooltip giving when the next
   measurement is due (the last run plus the interval): runs are not aligned to windows, so this is

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.91
+
+- **Log delay: time late is only the time it was measured.** Between two late measurements with nothing measured between them (no run, the device silent) the hours were counted as late: lists, the log types, the day by day totals and the files. Now only the stretches measured count, as the percentage beside it already did. The red shading and the graph's lines stop where nothing was measured. A delay older than the measurements kept in memory (31 days, 8 for one log type) is counted from start to end and says "about". Late hours of days stored before the upgrade keep their figures. A delay still lasts from its start to its end, with how much of that was measured beside it ("10 h 17 min · 2 h 48 min measured").
+- **Log delay: a window in which no device sent logs is not measured**, not "0 late".
+- **Log delay: "Longest delay" of a delay that ended unsolved** gives its end and why, not "still late".
+- *Every delay* and the devices list fit without a sideways scroll ("Looks like" only where a delay has a pattern).
+
 ## 0.3.90
 
 - **Log delay per log type.** Each device's log types (`log_type`, the same field on every cluster; no setting) are measured on their own in the same query as the device: own delay, level, delay periods. A device with only some log types late is **part delayed**, not delayed: its own count and percentage beside No delay, 30–60, above 60 and other time zone (they add up to 100). A device is delayed only when every log type measured in the run is late. A cluster without `log_type` in its mapping works as before and says so.

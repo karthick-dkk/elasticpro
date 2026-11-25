@@ -1163,6 +1163,48 @@ impl Daily {
     }
 }
 
+/// The stretches of `[from, to)` that were measured, with the state at their start: from one
+/// measurement to the next reading (a silence ends it), at most `stale_after` of it, and from the
+/// last one to now while that still speaks for now. Nothing is known of the time between them.
+pub fn measured_spans(points: impl Iterator<Item = Point>, stale_after: i64, from: i64, to: i64, now: i64) -> Vec<(i64, i64, State)> {
+    let at: Vec<Point> = points.collect();
+    let end = to.min(now);
+    at.iter().enumerate().filter(|(_, p)| p.m.is_some() && !p.s.cant_measure()).map(|(i, p)| {
+        let to = match at.get(i + 1) {
+            Some(next) => next.t.min(p.t + stale_after),
+            None if now - p.t <= stale_after => now,
+            None => p.t,
+        };
+        (p.t.max(from), to.min(end), p.s)
+    }).filter(|(a, b, _)| b > a).collect()
+}
+
+/// How much of a delay period was measured: the time late, and nothing nobody measured.
+pub fn late_in(e: &Episode, spans: &[(i64, i64, State)], now: i64) -> i64 {
+    let first = spans.partition_point(|(_, b, _)| *b <= e.started_ms);
+    let end = e.end_ms(now);
+    spans[first..].iter().take_while(|(a, _, _)| *a < end).map(|(a, b, _)| e.overlap_ms(*a, *b, now)).sum()
+}
+
+/// `late_in`, for a period that may be older than the points kept (`kept_from`: the oldest of them):
+/// what is before them is counted from start to end, and `true` says so.
+pub fn late_kept(e: &Episode, spans: &[(i64, i64, State)], kept_from: Option<i64>, from: i64, to: i64, now: i64) -> (i64, bool) {
+    let before = e.overlap_ms(from, to.min(kept_from.unwrap_or(i64::MAX)), now);
+    (late_in(e, spans, now) + before, before > 0)
+}
+
+/// Stretches that touch, as one.
+pub fn joined(spans: impl Iterator<Item = (i64, i64)>) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = vec![];
+    for (a, b) in spans.filter(|(a, b)| b > a) {
+        match out.last_mut() {
+            Some(last) if last.1 >= a => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
 /// The totals of `[from, to)` (one local day) from the tracker's memory. `now` is the run's
 /// time; `complete` says whether the day had ended at `now`.
 pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
@@ -1199,6 +1241,7 @@ pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
     d.median_minutes = percentile(&mut lasts, 0.5);
     d.p95_minutes = percentile(&mut lasts, 0.95);
     let mut late_ms = 0i64;
+    let mut spans: std::collections::HashMap<String, Vec<(i64, i64, State)>> = Default::default();
     for e in t.all_episodes(now) {
         if e.started_ms >= from && e.started_ms < to {
             d.started += 1;
@@ -1206,7 +1249,10 @@ pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
         if e.solved_ms.is_some_and(|s| s >= from && s < to) {
             d.solved += 1;
         }
-        late_ms += e.overlap_ms(from, to, now);
+        if e.overlap_ms(from, to, now) > 0 {
+            let mine = spans.entry(e.device.clone()).or_insert_with(|| t.devices.get(&e.device).map(|d| measured_spans(d.recent.iter(), t.stale_after(), from, to, now)).unwrap_or_default());
+            late_ms += late_in(&e, mine, now);
+        }
     }
     d.late_hours = round2(late_ms as f64 / 3_600_000.0);
     d
@@ -1231,6 +1277,34 @@ mod tests {
     fn r(device: &str, m: Option<f64>, run: i64) -> Reading {
         Reading { device: device.into(), docs: 10, arrival_ms: m.map(|_| run), event_ms: m.map(|x| run - (x * 60_000.0) as i64),
                   delay_minutes: m, ..Reading::default() }
+    }
+
+    #[test]
+    fn time_nobody_measured_is_not_time_late() {
+        let p = |h: i64, m: Option<f64>, s: State| Point { t: h * 3_600_000, m, s };
+        let late = |h| p(h, Some(90.0), State::Critical);
+        let (h, stale) = (3_600_000, 90 * 60_000);
+        // Late at 0 and 1, nothing until 8: an hour and a half of it is known, the rest is not.
+        assert_eq!(measured_spans([late(0), late(1), late(8)].into_iter(), stale, 0, 24 * h, 8 * h), vec![(0, h, State::Critical), (h, h + stale, State::Critical)]);
+        // A silence ends what is known; it is no measurement itself.
+        assert_eq!(measured_spans([late(0), p(1, None, State::Silent), late(2)].into_iter(), stale, 0, 24 * h, 2 * h), vec![(0, h, State::Critical)]);
+        // Only the range, and up to now while the last one still speaks for it.
+        assert_eq!(measured_spans([late(0), late(1)].into_iter(), stale, h / 2, 24 * h, 2 * h), vec![(h / 2, h, State::Critical), (h, 2 * h, State::Critical)]);
+        let mut t = Tracker::default();
+        for at in [0, h, 8 * h] {
+            t.apply(at, vec![Reading { device: "fw".into(), docs: 1, arrival_ms: Some(at), event_ms: Some(at - 90 * 60_000), delay_minutes: Some(90.0), ..Reading::default() }], &Levels::default(), 12 * h);
+        }
+        t.interval_ms = Some(h);
+        t.silent_after_ms = Some(2 * h);
+        let e = t.devices["fw"].open.clone().unwrap();
+        assert_eq!((e.lasted_ms(8 * h), daily(&t, "d", 0, 24 * h, 8 * h).late_hours), (8 * h, 2.5), "open from 0 to 8, measured 2 h 30");
+        // Older than the points kept: from its start to its end there, and said to be about.
+        let spans = vec![(5 * h, 6 * h, State::Critical)];
+        assert_eq!(late_kept(&e, &spans, Some(5 * h), 0, 24 * h, 8 * h), (6 * h, true));
+        assert_eq!(late_kept(&e, &spans, Some(0), 0, 24 * h, 8 * h), (h, false));
+        assert_eq!(late_kept(&e, &spans, Some(5 * h), 5 * h, 24 * h, 8 * h), (h, false), "nothing of the range is older");
+        assert_eq!(late_kept(&e, &[], None, 0, 24 * h, 8 * h), (8 * h, true), "no point is kept");
+        assert_eq!(joined([(0, h), (h, 2 * h), (3 * h, 3 * h), (4 * h, 5 * h)].into_iter()), vec![(0, 2 * h), (4 * h, 5 * h)]);
     }
 
     #[test]

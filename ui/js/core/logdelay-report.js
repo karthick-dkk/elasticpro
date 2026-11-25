@@ -1042,7 +1042,7 @@ export function timeZoneCell(tz, offsetText) {
  * holds the worst point and the critical line — or the one given (`scaleMax`: several series on one
  * scale, core/log-types.js seriesGraph). Unknown points (m null) are breaks, not dots.
  */
-export function deviceGraph(points, { fromMs, toMs, height = 240, levels, scaleMax: given } = {}) {
+export function deviceGraph(points, { fromMs, toMs, height = 240, levels, scaleMax: given, gapMs } = {}) {
   const pts = (points || []).filter((p) => p && finite(p.t));
   const lo = finite(fromMs) ? fromMs : Math.min(...pts.map((p) => p.t));
   const hi = finite(toMs) ? toMs : Math.max(...pts.map((p) => p.t));
@@ -1052,8 +1052,11 @@ export function deviceGraph(points, { fromMs, toMs, height = 240, levels, scaleM
   const scaleMax = finite(given) && given > 0 ? given : niceCeil(top);
   const X = (t) => Math.max(0, Math.min(1000, ((t - lo) / span) * 1000));
   const Y = (m) => height - (Math.max(0, Math.min(m, scaleMax)) / scaleMax) * height;
-  const segments = []; let cur = [];
+  const segments = []; let cur = []; let last = null;
   for (const p of pts) {
+    // No line over a stretch nobody measured (`gapMs`: the core's staleAfterMs).
+    if (cur.length && finite(gapMs) && p.t - last > gapMs) { segments.push(cur.join(' ')); cur = []; }
+    last = p.t;
     if (finite(p.m)) cur.push(`${X(p.t).toFixed(1)},${Y(p.m).toFixed(1)}`);
     else if (cur.length) { segments.push(cur.join(' ')); cur = []; }
   }
@@ -1137,6 +1140,13 @@ function niceCeil(v) {
  * The band for a delay period on the graph: left/width in % of [lo,hi]. One that is not over ends at
  * `until`, the last measurement — nothing was measured after it, so nothing is shaded after it.
  */
+export function periodBands(p, lo, hi, until = Date.now()) {
+  // Only what was measured is shaded (a core since 0.3.91 says which stretches); before, the period whole.
+  if (!p || !Array.isArray(p.spans)) { const b = periodBand(p, lo, hi, until); return b ? [b] : []; }
+  return p.spans.map(([a, b]) => periodBand({ started: a, solved: b, worstState: p.worstState }, lo, hi, until)).filter(Boolean);
+}
+/** How long a period lasted; how much of that was measured, when that is less. */
+export const lastedText = (ms, measured) => `${durationText(ms)}${finite(measured) && finite(ms) && ms - measured > 60000 ? ` · ${measured > 0 ? durationText(measured) : '0 min'} measured` : ''}`;
 export function periodBand(p, lo, hi, until = Date.now()) {
   const span = hi - lo || 1;
   const a = Math.max(lo, finite(p.started) ? p.started : lo);

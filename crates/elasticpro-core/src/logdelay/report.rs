@@ -379,7 +379,7 @@ fn log_types_sheet(i: &Inputs<'_>) -> Option<Sheet> {
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
     let all = rows.len();
-    let mut r = vec![["Cluster", "Device", "Log type", "State", "Delay now (min)", "Delay: started → solved", "Lasted", "Worst (min)"].map(Cell::head).to_vec()];
+    let mut r = vec![["Cluster", "Device", "Log type", "State", "Delay now (min)", "Delay: started → solved", "Lasted (start to end, time not measured included)", "Worst (min)"].map(Cell::head).to_vec()];
     r.extend(rows.into_iter().take(TYPE_ROWS).map(|(_, _, x)| x));
     if all > TYPE_ROWS {
         r.push(vec![Cell::text(format!("{TYPE_ROWS} of {all} rows: the rest are not in this sheet"))]);
@@ -495,7 +495,7 @@ fn column_cell(c: &str, r: &DeviceRow, now: i64) -> Cell {
         "median" => opt_min(r.median_minutes),
         "max" => opt_min(r.max_minutes),
         "episodes" => Cell::Int(r.episodes as f64),
-        "lateTime" => Cell::text(time::duration(r.late_ms)),
+        "lateTime" => Cell::text(format!("{}{}", if r.late_about { "about " } else { "" }, time::duration(r.late_ms))),
         "docsPerDay" => match (r.docs_per_day, r.docs_counted, r.docs_counted_hours) {
             (Some(d), _, _) => Cell::Int(d as f64),
             (None, Some(d), Some(h)) => Cell::text(format!("{d} in {h} h measured")),

@@ -12,13 +12,13 @@ import { card, empty } from '../pages/common.js';
 import { sortTh } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import {
-  LD_COLOURS as C, ldHash, minutesText, durationText, whenText, countText, stateText, periodBand, axisTicks, staleText, startedSolvedText, deviceGraph,
+  LD_COLOURS as C, ldHash, minutesText, durationText, whenText, countText, stateText, periodBands, axisTicks, staleText, startedSolvedText, deviceGraph,
 } from '../core/logdelay-report.js';
 import {
   LINES_MAX, LINE_DASHES, lineColour, lineSlots, toggleLine, seriesGraph, typeKey, typeLabel, seriesLate, seriesNow, seriesStateText, delaysAt, delaysAtText, lastEpisode,
 } from '../core/log-types.js';
 import { fromZonedInput } from '../core/log-range.js';
-import { statePill, stateRank } from './rows.js';
+import { LATE_ABOUT, statePill, stateRank } from './rows.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const GRAPH_H = 220;
@@ -56,15 +56,14 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
   const drawn = series.filter((s) => slots.has(typeKey(s)));
   const firstAt = series.reduce((m, s) => (s.points || []).reduce((n, p) => (p && finite(p.t) && p.t < n ? p.t : n), m), Infinity);
   const before = (res.points || []).filter((p) => p && finite(p.t) && p.t >= lo && p.t < firstAt - 60000);
-  const g = seriesGraph([...drawn, ...(before.length ? [{ points: before }] : [])], { fromMs: lo, toMs: hi, height: H, levels: lv });
-  const gBefore = before.length ? deviceGraph(before, { fromMs: lo, toMs: hi, height: H, levels: lv, scaleMax: g.scaleMax }) : null;
+  const g = seriesGraph([...drawn, ...(before.length ? [{ points: before }] : [])], { fromMs: lo, toMs: hi, height: H, levels: lv, gapMs: res.staleAfterMs });
+  const gBefore = before.length ? deviceGraph(before, { fromMs: lo, toMs: hi, height: H, levels: lv, scaleMax: g.scaleMax, gapMs: res.staleAfterMs }) : null;
   const pos = (t) => Math.min(100, Math.max(0, ((t - g.lo) / (g.hi - g.lo || 1)) * 100));
   const y = (m) => g.Y(m);
   const line = (m, colour) => (finite(m) && m <= g.scaleMax ? h('div.ld-hline', { style: { top: `${y(m)}px`, borderTopColor: colour } }) : null);
-  const bandsEls = (res.periods || []).map((p) => {
-    const b = periodBand(p, g.lo, g.hi, until);
-    return b ? h(`div.ld-band${b.critical ? '.ld-band-crit' : ''}`, { title: `whole device: ${whenText(p.started, res.now)} → ${p.solved ? whenText(p.solved, res.now) : openText}, worst ${minutesText(p.worstMinutes)}`, style: { left: `${b.left}%`, width: `${b.width}%` } }) : null;
-  });
+  const bandsEls = (res.periods || []).flatMap((p) => periodBands(p, g.lo, g.hi, until).map((b) => {
+    return h(`div.ld-band${b.critical ? '.ld-band-crit' : ''}`, { title: `whole device: ${whenText(p.started, res.now)} → ${p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? `${whenText(p.ended, res.now)} (${p.endedWhy || 'ended'})` : openText}, worst ${minutesText(p.worstMinutes)}`, style: { left: `${b.left}%`, width: `${b.width}%` } });
+  }));
   const tail = age.stale && age.at !== null && age.at < g.hi ? h('div.ld-tail', { title: `not measured after ${whenText(age.at, res.now)}`, style: { left: `${pos(age.at)}%` } }) : null;
   const poly = (points, stroke, dash, width = 1.8) => svg('polyline', { points, fill: 'none', stroke, 'stroke-width': width, 'stroke-dasharray': dash || null, 'vector-effect': 'non-scaling-stroke' });
   const dot = (p, stroke, w) => svg('path', { d: `M${p.x.toFixed(1)},${p.y.toFixed(1)}h0.01`, class: 'ld-dot', fill: 'none', stroke, 'stroke-width': w, 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' });
@@ -134,7 +133,7 @@ export function typesGraphCard(res, { lv = {}, every, age, zone, slots: chosen, 
     rest.length ? h('button.ld-type-chip.ld-type-more#ld-type-more', { type: 'button', 'aria-expanded': String(!!more), title: more ? 'Hide the log types that are not drawn' : `${rest.length} more log type${rest.length === 1 ? '' : 's'}`, onclick: onMore }, more ? 'Fewer' : `+${countText(rest.length)}`) : null);
   const scale = [[g.scaleMax, `${g.scaleMax} min`], [lv.criticalOver, String(lv.criticalOver)], [lv.delayFrom, String(lv.delayFrom)], [0, '0']].filter(([m]) => finite(m) && m <= g.scaleMax);
   const key = (colour, text, dash) => h('span.ld-key', h(`i${dash ? '.ld-ln.ld-dash' : '.ld-ln'}`, { style: dash ? { borderTopColor: colour } : { background: colour } }), text);
-  return card('Delay over time, per log type', `each point is one ${every ? `${every}-hour ` : ''}measurement of one log type · shaded: the whole device late`,
+  return card('Delay over time, per log type', `each point is one ${every ? `${every}-hour ` : ''}measurement of one log type · shaded: the whole device late, where it was measured`,
     [chips,
       h('div.ld-graph', h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))), plot),
       h('div.ld-marks', { 'aria-label': 'Delay starts and solves per log type' }, ...marks),
@@ -176,7 +175,7 @@ export function typesTableCard(res, { clusterId, device, sort }) {
       h('td.mono', whenText(s.lastArrival, now, { seconds: true }).replace(/^today /, '')),
       h('td.num', { title: 'its documents in the last measurement’s window' }, countText(s.docs)),
       h('td.num', Array.isArray(s.episodes) ? countText(s.episodes.length) : muted()),
-      h('td.num', durationText(s.lateMs)),
+      h('td.num', { title: s.lateAbout ? LATE_ABOUT : null }, s.lateAbout ? 'about ' : '', durationText(s.lateMs)),
       h('td', lastText(s)),
       h('td.ld-acts', h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href }, title: `${device} · ${typeLabel(s)}: its logs (Log Delay › Live)`, onclick: () => { location.hash = href; } }, 'Open in logs')));
   };
