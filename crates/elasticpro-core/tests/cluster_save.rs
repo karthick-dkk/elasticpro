@@ -219,7 +219,7 @@ async fn an_operator_adds_changes_and_switches_off_a_cluster_and_the_fleet_follo
     assert_eq!(r["ok"], json!(true), "{r}");
     let versions = r["versions"].as_array().cloned().unwrap_or_default();
     assert!(!versions.is_empty(), "{r}");
-    let last = versions.last().unwrap();
+    let last = &versions[0]; // newest first; the saves may cross a second
     let kept = c.handle(json!({ "type": "CONFIG_RESTORE", "session": a, "id": last["id"] })).await;
     let kept = kept["text"].as_str().unwrap_or("");
     assert!(kept.contains("alpha-api-key") && kept.contains("Gamma Two") && !kept.contains("\"r1\""),
