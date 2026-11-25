@@ -352,6 +352,7 @@ async fn a_search_refused_for_its_log_types_is_read_without_them() {
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     let s = admin(&c).await;
     c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "name": "Production", "url": srv.url() }] })).await;
+    c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": false, "destination": "builtin", "everyHours": 2 } })).await;
     // First by log types, on time; then refused, the device over 60 minutes late: it is said late, not kept on time.
     let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
