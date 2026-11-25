@@ -392,7 +392,7 @@ scraper_fetch() {
     rm -rf "${SCRAPER_DIRS:?}/$1"; mv "$new" "$SCRAPER_DIRS/$1"
   fi
   # The automation scraper's file named the folders outright until 0.3.93.
-  if grep -q '^ *- \.\./ui:/app/ui:ro$' zabbix/compose.scraper.yml 2>/dev/null; then
+  if docker compose config --services 2>/dev/null | grep -qx scraper && grep -q '^ *- \.\./ui:/app/ui:ro$' zabbix/compose.scraper.yml 2>/dev/null; then
     cp -p zabbix/compose.scraper.yml "zabbix/compose.scraper.yml.bak-$(date +%Y%m%d-%H%M%S)"
     sed -i.tmp -e 's|^\( *- \)\.\./ui:/app/ui:ro$|\1${ELASTICPRO_UI_DIR:-../ui}:/app/ui:ro|' \
       -e 's|^\( *- \)\.\./tools:/app/tools:ro$|\1${ELASTICPRO_TOOLS_DIR:-../tools}:/app/tools:ro|' zabbix/compose.scraper.yml && rm -f zabbix/compose.scraper.yml.tmp
@@ -404,6 +404,7 @@ scraper_env() {
   [ -n "$SCRAPER" ] || return 0
   for pair in $SCRAPER_KEYS; do
     key=${pair%%:*}; old=$(env_get "$key")
+    [ "$old" = "./$SCRAPER_DIRS/$1/${pair#*:}" ] && continue
     env_set "${key}_PREVIOUS" "${old:-../${pair#*:}}"
     env_set "$key" "./$SCRAPER_DIRS/$1/${pair#*:}"
   done
@@ -412,10 +413,20 @@ scraper_env() {
 scraper_tidy() {
   local d keep
   [ -d "$SCRAPER_DIRS" ] || return 0
-  keep=" $(env_get ELASTICPRO_UI_DIR) $(env_get ELASTICPRO_UI_DIR_PREVIOUS) "
+  keep=" $(env_get ELASTICPRO_UI_DIR) $(env_get ELASTICPRO_UI_DIR_PREVIOUS) $(env_get ELASTICPRO_TOOLS_DIR) $(env_get ELASTICPRO_TOOLS_DIR_PREVIOUS) "
   for d in "$SCRAPER_DIRS"/[0-9]*.[0-9]*.[0-9]*; do
     [ -d "$d" ] || continue
-    case $keep in *" ./$d/ui "*) ;; *) rm -rf -- "$d" ;; esac
+    case $keep in *" ./$d/ui "*|*" ./$d/tools "*) ;; *) rm -rf -- "$d" ;; esac
+  done
+}
+# The scraper's loop carries on over any error: that it can read its code is checked here (a mount
+# it may not read, as under SELinux, would leave Zabbix without data and the upgrade none the wiser).
+scraper_check() {
+  local s
+  [ -n "$SCRAPER" ] || return 0
+  for s in $(scraper_services); do
+    docker compose exec -T "$s" sh -c 'head -c1 /app/ui/js/core/state.js && head -c1 /app/tools/elasticpro-scrape.mjs' >/dev/null 2>&1 </dev/null \
+      || say "! $s cannot read its code (deploy/$SCRAPER_DIRS/$SCRAPER) — Zabbix gets no data from it: docker compose logs $s"
   done
 }
 
@@ -1118,6 +1129,22 @@ if [ -n "$UPGRADE" ]; then
     run docker pull -q "$img" >/dev/null || fail "$img is not published (or cannot be pulled) — nothing changed"
   done
   scraper_fetch "$TARGET" "$REG/elasticpro-core:$TARGET"
+  # The images are current and only the scraper's code is not: the record of the last upgrade, which
+  # --rollback reads, stays as it is, and nothing but the scraper restarts.
+  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ] && [ "$LEFTOVER_DB" = 0 ]; then
+    apply_config keep
+    [ -n "$SCRAPER" ] || exit 0
+    BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
+    run cp .env "$BACKUP"
+    scraper_env "$TARGET"
+    # shellcheck disable=SC2046
+    run docker compose up -d $(scraper_services)
+    [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
+    scraper_check
+    scraper_tidy
+    say "✓ the Zabbix scraper runs $TARGET's code (the images were on $TARGET already)   ·   .env before: $BACKUP"
+    exit 0
+  fi
   # After the pulls, so a release that is not published leaves everything as it was; before
   # the .env backup, so the way back keeps the port and memory limit config.txt asks for.
   apply_config keep
@@ -1165,6 +1192,7 @@ if [ -n "$UPGRADE" ]; then
   if wait_healthy; then
     say "✓ ElasticPro $TARGET is running and healthy"
     sync_nginx
+    scraper_check
     scraper_tidy
     say "  .env before this upgrade: $BACKUP${COMPOSE_BACKUP:+   ·   $COMPOSE before: $COMPOSE_BACKUP}   ·   undo: deploy/deploy.sh --rollback"
     docker compose ps
@@ -1207,6 +1235,9 @@ env_set ELASTICPRO_IMAGE "$IMAGE"
 # nor its compose file.
 for key in $SUPPORT_KEYS $RETIRED_KEYS ELASTICPRO_UI_DIR ELASTICPRO_TOOLS_DIR; do env_del "${key}_PREVIOUS"; done
 compose_forget
+case $(env_get ELASTICPRO_UI_DIR) in
+  "./$SCRAPER_DIRS/"*) [ -z "$(scraper_services)" ] || say "! the Zabbix scraper keeps the code it runs ($(env_get ELASTICPRO_UI_DIR)): this deploy moves the core only — remove ELASTICPRO_UI_DIR and ELASTICPRO_TOOLS_DIR from .env to run this checkout's ui and tools" ;;
+esac
 say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || app_services)"
 # shellcheck disable=SC2046
 if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d $(app_services); fi

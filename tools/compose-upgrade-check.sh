@@ -177,7 +177,7 @@ case "$1 ${2:-}" in
   "compose version") echo "Docker Compose version v2-shim" ;;
   "compose config")
     case " $* " in
-      *" --services "*) awk '/^services:/{f=1;next} /^[^ #]/{f=0} f && /^  [a-z_-]+:/{sub(/:.*/,"");sub(/^  /,"");print}' docker-compose.yml; [ "${SHIM_SCRAPER:-0}" = 1 ] && echo plan-scraper ;;
+      *" --services "*) awk '/^services:/{f=1;next} /^[^ #]/{f=0} f && /^  [a-z_-]+:/{sub(/:.*/,"");sub(/^  /,"");print}' docker-compose.yml; [ "${SHIM_SCRAPER:-0}" = 0 ] || echo "$SHIM_SCRAPER" ;;
       *" -q "*) ;;
       *) echo "name: shimproj" ;;
     esac ;;
@@ -394,7 +394,7 @@ scr_env() {   # VERSION [lines…]
 }
 scr() {
   RC=0; : > "$T/shim.log"
-  OUT=$(cd "$Z" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_IMAGES="$T/images" SHIM_SCRAPER=${SCRAPER_ON:-1} SHIM_NO_TOOLS=${NO_TOOLS:-0} \
+  OUT=$(cd "$Z" && PATH="$T/bin:$PATH" SHIM_LOG="$T/shim.log" SHIM_IMAGES="$T/images" SHIM_SCRAPER=${SCRAPER_ON:-plan-scraper} SHIM_NO_TOOLS=${NO_TOOLS:-0} \
         ELASTICPRO_NO_SELF_UPDATE=1 ELASTICPRO_RELEASE_URL="file://$T/mirror" ./deploy.sh --timeout 5 "$@" 2>&1) || RC=$?
   LOG=$(cat "$T/shim.log")
 }
@@ -427,6 +427,8 @@ rm -rf "$Z/scraper"
 scr --upgrade=9.9.0
 [ $RC = 0 ] && zenv ELASTICPRO_UI_DIR ./scraper/9.9.0/ui && [ -d "$Z/scraper/9.9.0/ui" ] \
   && ok "images already on 9.9.0, the scraper's code not: it is brought in" || bad "current images (rc $RC): $OUT"
+zenv ELASTICPRO_IMAGE_PREVIOUS "" && case $LOG in *"compose up -d plan-scraper"*) true ;; *) false ;; esac \
+  && ok "only the scraper restarts, and the last upgrade's rollback record is left as it was" || bad "scraper-only run: $LOG $(cat "$Z/.env")"
 
 mkdir -p "$Z/scraper/9.1.0/ui" "$Z/scraper/9.8.0/ui"
 scr_env 9.8.0 ELASTICPRO_UI_DIR=./scraper/9.8.0/ui ELASTICPRO_TOOLS_DIR=./scraper/9.8.0/tools
@@ -452,7 +454,11 @@ SCRAPER_ON=0 scr --upgrade=9.9.0
 
 sed -i.tmp -e 's|\${ELASTICPRO_UI_DIR:-../ui}|../ui|' -e 's|\${ELASTICPRO_TOOLS_DIR:-../tools}|../tools|' "$Z/zabbix/compose.scraper.yml"
 scr_env 9.8.0
+cp "$Z/zabbix/compose.scraper.yml" "$T/old-scraper.yml"
 scr --upgrade=9.9.0
+cmp -s "$Z/zabbix/compose.scraper.yml" "$T/old-scraper.yml" && ok "that file is left as it is while only the plan scraper is in the stack" || bad "compose.scraper.yml rewritten without its service"
+scr_env 9.8.0
+SCRAPER_ON=scraper scr --upgrade=9.9.0
 [ $RC = 0 ] && cmp -s "$Z/zabbix/compose.scraper.yml" deploy/zabbix/compose.scraper.yml && ok "an automation scraper file from before 0.3.93 reads the same two keys now" \
   || bad "compose.scraper.yml (rc $RC): $(diff "$Z/zabbix/compose.scraper.yml" deploy/zabbix/compose.scraper.yml)"
 for f in tools/elasticpro-scrape.mjs tools/zabbix-sender.mjs tools/lib/refetch-interval.mjs tools/lib/scrape-sender.mjs; do

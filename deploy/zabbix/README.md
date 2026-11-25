@@ -160,8 +160,10 @@ Zabbix, by a Super admin, when the release notes name them.
    on getting the figures of, the release the install was first made from. The first upgrade to 0.3.93 or
    later repairs that, also where the images are already current.
    A folder you named in those two keys yourself is left alone, with a note: bring its `ui/` and `tools/`
-   to the release by hand. An image from before 0.3.93 has no code to copy; the same note, the same way.
-   To see what the scraper runs: `docker compose config | grep -A1 /app/ui` in `deploy/`, and its log after
+   to the release by hand. A scraper started with `-f zabbix/compose.scraper.yml` instead of `COMPOSE_FILE` in
+   `.env` is not seen by `deploy.sh`: name the file in `COMPOSE_FILE`. A build from a checkout (`deploy.sh`
+   without `--upgrade`) moves the core alone and says so. An image from before 0.3.93 has no code to copy; the same note, the same way.
+   To see what the scraper runs: `docker compose config | grep -B1 'target: /app/ui'` in `deploy/`, and its log after
    the next run, where `failed` counts the values Zabbix has no item for (step 3).
 2. **The modules**: `sudo bash zabbix-modules-install.sh --upgrade` on the Zabbix web host (below).
 3. **The templates**, when the release or the modules' changelog says they changed: Data collection →
