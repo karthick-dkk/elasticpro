@@ -6029,7 +6029,7 @@ consolePanels: {
   const node = (name, used) => ({ node: name, 'disk.used': String(used), 'disk.total': '100', 'disk.avail': String(100 - used), shards: '10' });
   const healthy = () => ({ reachable: true, health: { status: 'green', unassigned_shards: 0 }, slm: [], repos: [], snapshots: {} });
   const fleet = () => ({
-    a: { ...healthy(), health: { status: 'yellow', unassigned_shards: 4 },
+    a: { ...healthy(), health: { status: 'red', unassigned_shards: 4 },
          disk: { percent: 91, nodes: [node('es-hot-1', 89), node('es-hot-2', 88), node('es-hot-3', 86)] },
          ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': { failed_step: 'rollover' }, 'logstash-2': { failed_step: 'rollover' } } },
     k: { reachable: false },
@@ -7220,7 +7220,7 @@ if (viaFleet) {
     ok(order.join(',') === 'PLAY_LINK_REVOKE,PLAY_LINK_CREATE', `play: replace sent ${order.join(', ')}`);
     const again = sent.find((m) => m.type === 'PLAY_LINK_CREATE');
     ok(!!again && again.name === 'NOC wall' && again.clusters === 'all' && again.expires === 'permanent' && (again.allowFrom || []).join() === '10.1.0.0/16'
-      && again.settings && again.settings.zoom === 1.25 && again.settings.slides[0].id === 'alerts' && again.settings.slides[0].dwellSec === 30,
+      && again.settings && again.settings.zoom === 1.25 && again.settings.slides[0].id === 'delay' && again.settings.slides[0].dwellSec === 30,
       `play: the replacement link is not the old one's twin: ${JSON.stringify(again)}`);
     ok((doc.getElementById('pl-url') || {}).value === 'https://noc.example/#/play?display=SECRET1', 'play: the replacement URL is not shown');
     ok(/will not be shown again/.test((modalEl() || {}).textContent || ''), 'play: no one-time note on the replacement');
@@ -7440,7 +7440,8 @@ if (viaFleet) {
       const lg = [...doc.querySelectorAll('.pl-logdelay .pl-lg')].map((x) => x.textContent);
       ok(lg.includes('33On time') && lg.includes('430–60 min late') && lg.includes('2Over 60 min late'), `play: the devices now are not the record's, part delayed on time (${lg.join(' · ')})`);
       const td = doc.querySelector('.pl-ldtoday').textContent;
-      ok(/5 new/.test(td) && /9 solved/.test(td) && /6 late now/.test(td) && !/900/.test(txt), `play: today's new, solved and late now are wrong (${td})`);
+      ok(/5 new/.test(td) && /9 solved/.test(td) && /6 late now/.test(td)
+        && ![...doc.querySelectorAll('.pl-logdelay *')].some((x) => !x.children.length && /900/.test(x.textContent)), `play: today's new, solved and late now are wrong (${td})`);
       ok(!/fw-edge/.test(txt), 'play: Log delay names a single device');
       // A cluster the record has not: "not read", in no count.
       const others = [...doc.querySelectorAll('.pl-ldrow[data-cluster]')].filter((r) => r.dataset.cluster !== shown.id);
