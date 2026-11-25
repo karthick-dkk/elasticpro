@@ -59,3 +59,17 @@ test('Play’s reading without log types does not replace the server’s by log 
   S.setDelaySummary('c1', L.summarise([{ device: 'a', status: 'CRITICAL', delayMinutes: 95 }]));
   assert.match(alerts()[0].title, /over 60 min/, 'a cluster without log types: the newer reading, as before');
 });
+
+test('only what was measured is shaded, drawn and counted (0.3.91)', () => {
+  const H = 3600000;
+  const p = { started: 0, solved: null, ended: 10 * H, lastedMs: 10 * H, measuredMs: 3 * H, worstState: 'critical', spans: [[0, 2 * H], [9 * H, 10 * H]] };
+  assert.deepEqual(R.periodBands(p, 0, 10 * H).map((b) => [b.left, b.width, b.critical]), [[0, 20, true], [90, 10, true]]);
+  assert.equal(R.periodBands({ ...p, spans: undefined }, 0, 10 * H).length, 1, 'a core before: the period whole');
+  assert.deepEqual(R.periodBands({ ...p, spans: [] }, 0, 10 * H), []);
+  assert.equal(R.lastedText(10 * H, 3 * H), '10 h 00 min · 3 h 00 min measured');
+  assert.equal(R.lastedText(10 * H, 10 * H), '10 h 00 min');
+  assert.equal(R.lastedText(10 * H, undefined), '10 h 00 min');
+  const pts = [{ t: 0, m: 40 }, { t: H, m: 41 }, { t: 8 * H, m: 42 }, { t: 9 * H, m: 43 }];
+  assert.equal(R.deviceGraph(pts, { fromMs: 0, toMs: 9 * H, gapMs: 1.5 * H }).segments.length, 2, 'no line over 1 h–8 h');
+  assert.equal(R.deviceGraph(pts, { fromMs: 0, toMs: 9 * H }).segments.length, 1);
+});

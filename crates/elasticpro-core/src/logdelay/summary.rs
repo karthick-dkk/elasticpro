@@ -1216,6 +1216,11 @@ mod tests {
         assert_eq!(ws[1]["stillLate"], 2, "the episode count still carries, as before");
         assert_eq!((ws[2]["measured"].clone(), ws[2]["lateAt"].clone(), ws[2]["criticalAt"].clone()), (json!(true), json!(1), json!(1)));
         assert_eq!(measured_late(&[&t], t0 + 2 * H, t0 + 4 * H), None);
+        // A run that found no logs from any device measured no delay: not "0 late".
+        let mut quiet = t.clone();
+        quiet.apply(t0 + 9 * H, vec![], &l, 2 * H);
+        assert!(quiet.devices.values().all(|d| d.state == State::Silent));
+        assert_eq!(measured_late(&[&quiet], t0 + 8 * H, t0 + 10 * H), None);
         assert_eq!(same_window_yesterday(&t, 2).map(|y| y["measured"].clone()), Some(json!(false)), "nothing kept from yesterday");
         assert_eq!(same_window_yesterday(&Tracker::default(), 2), None, "never run: unknown");
     }

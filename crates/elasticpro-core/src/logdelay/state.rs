@@ -1259,6 +1259,27 @@ mod tests {
     }
 
     #[test]
+    fn time_nobody_measured_is_not_time_late() {
+        let p = |h: i64, m: Option<f64>, s: State| Point { t: h * 3_600_000, m, s };
+        let late = |h| p(h, Some(90.0), State::Critical);
+        let (h, stale) = (3_600_000, 90 * 60_000);
+        // Late at 0 and 1, nothing until 8: an hour and a half of it is known, the rest is not.
+        assert_eq!(measured_spans([late(0), late(1), late(8)].into_iter(), stale, 0, 24 * h, 8 * h), vec![(0, h, State::Critical), (h, h + stale, State::Critical)]);
+        // A silence ends what is known; it is no measurement itself.
+        assert_eq!(measured_spans([late(0), p(1, None, State::Silent), late(2)].into_iter(), stale, 0, 24 * h, 2 * h), vec![(0, h, State::Critical)]);
+        // Only the range, and up to now while the last one still speaks for it.
+        assert_eq!(measured_spans([late(0), late(1)].into_iter(), stale, h / 2, 24 * h, 2 * h), vec![(h / 2, h, State::Critical), (h, 2 * h, State::Critical)]);
+        let mut t = Tracker::default();
+        for at in [0, h, 8 * h] {
+            t.apply(at, vec![Reading { device: "fw".into(), docs: 1, arrival_ms: Some(at), event_ms: Some(at - 90 * 60_000), delay_minutes: Some(90.0), ..Reading::default() }], &Levels::default(), 12 * h);
+        }
+        t.interval_ms = Some(h);
+        t.silent_after_ms = Some(2 * h);
+        let e = t.devices["fw"].open.clone().unwrap();
+        assert_eq!((e.lasted_ms(8 * h), daily(&t, "d", 0, 24 * h, 8 * h).late_hours), (8 * h, 2.5), "open from 0 to 8, measured 2 h 30");
+    }
+
+    #[test]
     fn a_period_opens_at_the_first_late_measurement_and_solves_at_the_first_under_the_line() {
         let l = Levels::default();
         let mut t = Tracker::default();
