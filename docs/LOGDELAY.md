@@ -86,7 +86,9 @@ the same on every cluster; no setting). Only the mapping decides `log_type` or `
 * **The field.** One `_field_caps` per cluster and run, over the indices with documents in the
   window. Not in the mapping → off for that cluster: `logTypeField: null`, `logTypeWhy: "log_type is
   not in the mapping"`, and everything is as before 0.3.90. Not answered → as the last run that was
-  (`"mapping not read"` when none was). Documents without the field are the type `(no log type)`
+  (`"mapping not read"` when none was). Off, with the reason, where indices map it as different kinds of
+  field, or where the cluster refuses the search by log types (status 400, too many buckets; tried once
+  with pages of 100): the devices are then measured by their newest document. Documents without the field are the type `(no log type)`
   (`noType: true`); a real value of that text is another type, quoted in lists of names.
 * **A series is a device and a log type**: its own newest document, zone, level, delay periods, points
   and last measurement, by the same code as the device's (`DeviceState::take_reading`) and the
@@ -801,7 +803,7 @@ Log types are the logs' own text: text nodes only, and a real "(no log type)" is
   the browser's measurement (Live, Play; good 2 hours) and the server's own last run (`loadServerRuns`:
   `LOGDELAY_SUMMARY {days: 1, maxDevices: 1}` at most every 5 minutes for a signed-in person, never a
   display link; `byCluster` as sent, "as of last run 14:02 GMT+5:30", good until the next run is due and
-  the core's grace is over, never once it is `stale`). An older one never replaces a newer one. The Overview card
+  the core's grace is over, never once it is `stale`). An older one never replaces a newer one, but a server run by log types stands over a newer measurement without them (Play's). The Overview card
   says them too. The Live report (.xlsx) has a *Log types* sheet.
 * **Play** asks for no log types: its display links' search is unchanged and reads the newest document.
 
