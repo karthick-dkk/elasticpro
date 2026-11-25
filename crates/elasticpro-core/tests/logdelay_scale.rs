@@ -9,7 +9,11 @@
 //!   * *Max devices per run* above 20 000 is a setting, and reaching it is said, without
 //!     turning the devices it did not read silent;
 //!   * a run scoped to one device reads that device only and changes nobody else;
-//!   * the run log shows the progress and the devices measured.
+//!   * the run log shows the progress and the devices measured;
+//!   * with log types (25 000 devices × 3) the pages are of at most 500, the counts are as generated,
+//!     and the memory and the state file stay inside the core's 1 GB limit. The full history (31 days
+//!     of devices, 8 of log types) is the ignored test: `cargo test --release --test logdelay_scale --
+//!     --ignored --nocapture` prints its figures.
 
 mod support;
 
@@ -231,4 +235,210 @@ async fn twenty_five_thousand_devices_are_read_in_pages_and_nothing_is_cut() {
     assert_eq!((cl["lastRead"]["devices"].clone(), cl["lastRead"]["truncated"].clone(), cl["lastRead"]["maxDevices"].clone()), (json!(20_500), json!(true), json!(20_500)), "{}", cl["lastRead"]);
     assert_eq!(cl["totals"]["silent"], json!(0), "{}", cl["totals"]);
     assert_eq!(cl["counts"]["inLastRun"], json!(20_500));
+}
+
+/* ------------------------------------ log types ------------------------------------ */
+
+const TYPES: [&str; 3] = ["traffic", "threat", "system"];
+
+/// Log type `k` of device `i`: every 10th device's threat is 46 min late, every 50th device is late
+/// with every type, every 40th has no threat logs.
+fn type_minutes(i: usize, k: usize) -> Option<f64> {
+    match (i, k) {
+        (i, _) if i.is_multiple_of(50) => Some(95.0),
+        (i, 1) if i.is_multiple_of(40) => None,
+        (i, 1) if i.is_multiple_of(10) => Some(46.0),
+        _ => Some((i % 7) as f64),
+    }
+}
+
+/// One page as Elasticsearch answers it with the types in it.
+fn typed_page(body: &Value, seen: &Seen) -> String {
+    let comp = &body["aggs"]["devices"]["composite"];
+    let size = comp["size"].as_u64().unwrap() as usize;
+    seen.largest_ask.fetch_max(size, Ordering::SeqCst);
+    let each = &body["aggs"]["devices"]["aggs"];
+    assert_eq!(each["types"]["terms"]["field"], json!("log_type.keyword"), "the types are in the same search: {body}");
+    let start = comp["after"]["d"].as_str().map(|a| a.trim_start_matches("dev-").parse::<usize>().unwrap() + 1).unwrap_or(1);
+    let now = chrono::Utc::now().timestamp_millis();
+    let ids: Vec<usize> = (start..=DEVICES).take(size).collect();
+    let hit = |i: usize, m: f64, t: &str| {
+        let arrival = now - 60_000;
+        json!({ "hits": { "hits": [ { "_source": { "@timestamp": iso(arrival), "Zone": format!("dc{}", i % 4 + 1), "tag1": "firewall", "fwd_tag": "syslog-dc1-02",
+            "parser_tag": "fortigate-grok", "event_created": iso(arrival - (m * 60_000.0) as i64), "log_type": t } } ] } })
+    };
+    let buckets: Vec<Value> = ids.iter().map(|&i| {
+        let types: Vec<Value> = TYPES.iter().enumerate().filter_map(|(k, t)| type_minutes(i, k).map(|m| json!({ "key": t, "doc_count": 30, "latest": hit(i, m, t) }))).collect();
+        json!({ "key": { "d": name(i) }, "doc_count": 90, "latest": hit(i, type_minutes(i, 0).unwrap(), TYPES[0]),
+                "types": { "sum_other_doc_count": 0, "buckets": types }, "no_type": { "doc_count": 0, "latest": { "hits": { "hits": [] } } } })
+    }).collect();
+    let mut devices = json!({ "buckets": buckets });
+    if let Some(&last) = ids.last() {
+        devices["after_key"] = json!({ "d": name(last) });
+    }
+    let text = json!({ "took": 7, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": devices } }).to_string();
+    seen.pages.fetch_add(1, Ordering::SeqCst);
+    seen.largest_answer.fetch_max(text.len(), Ordering::SeqCst);
+    text
+}
+
+async fn typed_core(dir: &TempDir, seen: Arc<Seen>) -> (Arc<Core>, String, TestServer) {
+    let srv = TestServer::with(move |hit| {
+        if hit.path.contains("/_field_caps") {
+            let kw = json!({ "keyword": { "type": "keyword", "aggregatable": true, "searchable": true } });
+            let text = json!({ "text": { "type": "text", "aggregatable": false, "searchable": true } });
+            return (200, json!({ "indices": ["logstash-1"], "fields": { "log_type": text, "log_type.keyword": kw } }).to_string());
+        }
+        if hit.path.contains("/_search") {
+            return (200, typed_page(&serde_json::from_str(&hit.body).unwrap(), &seen));
+        }
+        (200, r#"{"cluster_name":"big","status":"green"}"#.into())
+    }).await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let s = admin(&c).await;
+    let p = c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "name": "Production", "url": srv.url() }] })).await;
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let set = c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": false, "destination": "builtin", "everyHours": 2, "maxDevices": 30000 } })).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+    (c, s, srv)
+}
+
+/// A line of /proc/self/status, MB (`None` off Linux).
+fn memory_mb(key: &str) -> Option<u64> {
+    let t = std::fs::read_to_string("/proc/self/status").ok()?;
+    t.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb / 1024)
+}
+
+/// The peak counted from here.
+fn reset_peak() {
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+}
+
+fn files_mb(dir: &TempDir) -> (f64, f64) {
+    let mb = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0);
+    let root = dir.0.join("logdelay").join("prod");
+    let days = std::fs::read_dir(root.join("m")).map(|d| d.flatten().map(|e| mb(&e.path())).sum()).unwrap_or(0.0);
+    (mb(&root.join("tracker.json")), days)
+}
+
+/// A cluster that refuses the search by log types is measured without them, and says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_refused_for_its_log_types_is_read_without_them() {
+    let dir = TempDir::new("logdelay-types-refused");
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (n, refuses) = (asked.clone(), Arc::new(AtomicUsize::new(0)));
+    let refuse = refuses.clone();
+    let srv = TestServer::with(move |hit| {
+        if hit.path.contains("/_field_caps") {
+            return (200, json!({ "indices": ["logstash-1"], "fields": { "log_type": { "keyword": { "type": "keyword", "aggregatable": true, "searchable": true } } } }).to_string());
+        }
+        if hit.path.contains("/_search") {
+            if hit.body.contains("\"no_type\"") && refuse.load(Ordering::SeqCst) == 0 {
+                let now = chrono::Utc::now();
+                let hit = |m: i64, t: &str| json!({ "hits": { "hits": [{ "_source": { "@timestamp": now.to_rfc3339(), "event_created": (now - chrono::Duration::minutes(m)).to_rfc3339(), "log_type": t } }] } });
+                let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": hit(2, "a"), "types": { "sum_other_doc_count": 0, "buckets": [
+                    { "key": "a", "doc_count": 5, "latest": hit(2, "a") }, { "key": "b", "doc_count": 4, "latest": hit(3, "b") } ] }, "no_type": { "doc_count": 0, "latest": { "hits": { "hits": [] } } } }]);
+                return (200, json!({ "took": 1, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": { "buckets": b } } }).to_string());
+            }
+            if hit.body.contains("\"no_type\"") {
+                n.fetch_add(1, Ordering::SeqCst);
+                return (503, json!({ "error": { "type": "search_phase_execution_exception", "reason": "", "caused_by": { "type": "too_many_buckets_exception", "reason": "Trying to create too many buckets" } }, "status": 503 }).to_string());
+            }
+            let b = json!([{ "key": { "d": "fw-1" }, "doc_count": 9, "latest": { "hits": { "hits": [{ "_source": { "@timestamp": chrono::Utc::now().to_rfc3339(), "event_created": (chrono::Utc::now() - chrono::Duration::minutes(95)).to_rfc3339() } }] } } }]);
+            return (200, json!({ "took": 1, "timed_out": false, "_shards": { "total": 1, "successful": 1, "failed": 0 }, "aggregations": { "devices": { "buckets": b } } }).to_string());
+        }
+        (200, r#"{"cluster_name":"c","status":"green"}"#.into())
+    }).await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let s = admin(&c).await;
+    c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [{ "id": "prod", "name": "Production", "url": srv.url() }] })).await;
+    c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": false, "destination": "builtin", "everyHours": 2 } })).await;
+    // First by log types, on time; then refused, the device over 60 minutes late: it is said late, not kept on time.
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    assert_eq!((sum["byCluster"][0]["critical"].clone(), sum["byCluster"][0]["logTypes"]["total"].clone()), (json!(0), json!(2)), "{}", sum["byCluster"][0]);
+    refuses.store(1, Ordering::SeqCst);
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(1)), "{run}");
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "once, and once with smaller pages");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    let row = &sum["byCluster"][0];
+    assert_eq!((row["critical"].clone(), row["typesUnread"].clone()), (json!(1), json!(0)), "{row}");
+    assert!(row["logTypes"].is_null() && row["logTypeField"].is_null() && row["logTypeWhy"].as_str().unwrap_or("").contains("refused the search by log types"), "{row}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_log_types_a_device_are_read_in_the_same_pages_and_counted_as_generated() {
+    let dir = TempDir::new("logdelay-scale-types");
+    let seen = Arc::new(Seen::default());
+    let (c, s, srv) = typed_core(&dir, seen.clone()).await;
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(DEVICES)), "{run}");
+    assert_eq!(seen.pages.load(Ordering::SeqCst), 51, "50 pages of 500 and the empty one: no second search per page");
+    assert!(seen.largest_ask.load(Ordering::SeqCst) <= 500);
+    assert!(seen.largest_answer.load(Ordering::SeqCst) < 2 * 1024 * 1024, "{}", seen.largest_answer.load(Ordering::SeqCst));
+    let caps = srv.hits().iter().filter(|h| h.path.contains("_field_caps")).count();
+    assert_eq!(caps, 1, "one mapping request a run, not one a page");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    let n = |f: &dyn Fn(usize) -> bool| (1..=DEVICES).filter(|i| f(*i)).count() as u64;
+    let late = n(&|i| i.is_multiple_of(50));
+    let part = n(&|i| !i.is_multiple_of(50) && type_minutes(i, 1) == Some(46.0));
+    let t = &sum["totals"];
+    assert_eq!((t["late"].clone(), t["critical"].clone(), t["partDelayed"].clone()), (json!(late), json!(late), json!(part)), "{t}");
+    assert_eq!(t["noDelay"], json!(DEVICES as u64 - late - part), "{t}");
+    let pct: f64 = ["pctNoDelay", "pctPartDelayed", "pctLate", "pctOtherTz"].iter().map(|k| t[*k].as_f64().unwrap()).sum();
+    assert!((pct - 100.0).abs() < 1e-6, "{t}");
+    let series = (1..=DEVICES).map(|i| (0..3).filter(|k| type_minutes(i, *k).is_some()).count() as u64).sum::<u64>();
+    assert_eq!(t["logTypes"], json!({ "total": series, "late": late * 3 + part, "above": late * 3 }));
+    let bc = &sum["byCluster"][0];
+    assert_eq!((bc["logTypeField"].clone(), bc["logTypeWhy"].clone(), bc["logTypesNotKept"].clone()), (json!("log_type.keyword"), Value::Null, json!(0)));
+    assert_eq!(sum["byLogType"][0]["logType"], json!("threat"), "{}", sum["byLogType"]);
+    let (tracker, day) = files_mb(&dir);
+    println!("one run of {DEVICES} devices x 3 log types: tracker.json {tracker:.1} MB, day file {day:.1} MB, VmRSS {:?} MB, VmHWM {:?} MB", memory_mb("VmRSS"), memory_mb("VmHWM"));
+    assert!(tracker < 120.0 && day < 40.0, "{tracker} {day}");
+}
+
+/// A month of a 25 000-device cluster as a run finds it: 372 points a device, 96 a log type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "full history: minutes in a debug build; run by hand for the figures"]
+async fn the_memory_of_a_full_months_history_with_log_types() {
+    use elasticpro_core::logdelay::{levels::State, state::{DeviceState, Point, Tracker}, store::Store};
+    const STEP: i64 = 2 * 3_600_000;
+    let dir = TempDir::new("logdelay-scale-full");
+    let (c, s, _srv) = typed_core(&dir, Arc::new(Seen::default())).await;
+    fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    let st = Store::new(&dir.0);
+    let now = chrono::Utc::now().timestamp_millis();
+    let base = memory_mb("VmRSS").unwrap_or(0);
+    let mut t: Tracker = (*st.read_tracker("prod")).clone();
+    for (i, d) in t.devices.values_mut().enumerate() {
+        let points = |n: i64, at: usize| (1..=n).rev().map(move |k| Point { t: now - k * STEP, m: Some(((i * 37 + at + k as usize * 11) % 2000) as f64 / 100.0), s: State::NoDelay });
+        let fill = |d: &mut DeviceState, n: i64, at: usize| { let mut r = std::mem::take(&mut d.recent); r.keep_after(i64::MAX); points(n, at).for_each(|p| r.push(p)); d.recent = r; };
+        fill(d, 371, 0);
+        for (k, x) in d.types.iter_mut().enumerate() {
+            fill(x, 95, k + 1);
+        }
+    }
+    st.put_tracker("prod", t).unwrap();
+    let held = memory_mb("VmRSS").unwrap_or(0);
+    let (size, _) = files_mb(&dir);
+    println!("full history: tracker.json {size:.0} MB; core before {base} MB, with it held {held} MB");
+    reset_peak();
+    let at = std::time::Instant::now();
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
+    assert_eq!(run["status"], json!("completed"), "{run}");
+    println!("a run over it: {:.1} s, VmRSS {:?} MB, peak {:?} MB", at.elapsed().as_secs_f64(), memory_mb("VmRSS"), memory_mb("VmHWM"));
+    // Another process wrote it: parsed again.
+    let path = dir.0.join("logdelay").join("prod").join("tracker.json");
+    let f = std::fs::File::options().append(true).open(&path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+    reset_peak();
+    let at = std::time::Instant::now();
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 100 })).await;
+    assert_eq!(sum["totals"]["devices"], json!(DEVICES));
+    println!("parsed again and summed: {:.1} s, VmRSS {:?} MB, peak {:?} MB", at.elapsed().as_secs_f64(), memory_mb("VmRSS"), memory_mb("VmHWM"));
+    if let Some(peak) = memory_mb("VmHWM") {
+        assert!(peak < 900, "the core's limit is 1 GB: {peak} MB");
+    }
 }

@@ -14,7 +14,8 @@
  *
  * Delay is arrival time minus the time the event happened, per device (core/log-delay.js): a
  * preflight per cluster says whether it can be measured at all, then one aggregation per cluster
- * measures it, FAN_OUT at a time. Leaving the tab stops the fan-out and lets go of what is still out.
+ * measures it, FAN_OUT at a time — with its log types in the same search where the cluster maps
+ * log_type (0.3.90), so a device with only some of them late is listed as part delayed. Leaving the tab stops the fan-out and lets go of what is still out.
  */
 
 import { h, mount, svg } from '../lib/dom.js';
@@ -26,7 +27,8 @@ import { card, pill, table } from '../pages/common.js';
 import {
   preflight, measureDelayIn, answerGaps, measureSeenIn, SEEN_LOOKBACK, summarise, delayCoverage, LATE_MAX, buildLateSearchBody, recordFrom, logFilterFields,
 } from '../core/log-delay.js';
-import { levelsOf, zoneOf, loadLevels, isLate, fleetLevels } from '../core/delay-levels.js';
+import { levelsOf, zoneOf, loadLevels, isLate, isPart, fleetLevels } from '../core/delay-levels.js';
+import { hasTypes, saysTypes, typesText, typesTitle } from '../core/log-types.js';
 import { offsetLabel } from '../core/log-tz.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
 import { reportSheets, reportFilename } from '../core/delay-report.js';
@@ -37,7 +39,7 @@ import { rangeBounds, rangeMinutes, rangeText, rangeWords, zonedText } from '../
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
-import { deviceTable, sortCols } from './rows.js';
+import { deviceTable, sortCols, withTypes } from './rows.js';
 import { fixButton } from './fix-popover.js';
 import { pickId } from './boards.js';
 import { liveNarrow, liveUnnarrow } from './live-logs.js';
@@ -200,7 +202,7 @@ async function fetchDelay(list, scope) {
   delay.records = null; delay.summary = null; delay.at = 0; delay.ran = scope;
   delay.progress = { done: 0, total: list.length };
   bump();
-  const pre = await runBounded(list, (c) => preflight(client(c.id), c), {
+  const pre = await runBounded(list, (c) => preflight(client(c.id), c, { logType: true }), {
     limit: FAN_OUT, token,
     onSettled: (s, p) => {
       setEntry(s.item.id, s.error ? { state: 'error', error: s.error.message || String(s.error) } : { state: 'checked', pre: s.value });
@@ -283,6 +285,11 @@ function gapLines() {
     const own = d.gaps || []; const seen = (d.seen && d.seen.gaps) || [];
     return `${c.name}: ${[...own, ...seen.map((x) => `the 7 days before: ${x}`)].join('; ')}${own.length && d.seen ? ' — which devices are silent is not known' : ''}`;
   });
+}
+
+/** The measured clusters whose mapping has no log type, each with why: a device there is delayed or not, never part delayed. */
+function noTypeLines() {
+  return delayRows().filter(({ d }) => d.records && d.pre && d.pre.logTypeWhy).map(({ c, d }) => `${c.name}: ${d.pre.logTypeWhy}`);
 }
 
 /** What the fan-out did not cover, in one line (delayCoverage is the one count). */
@@ -407,7 +414,7 @@ const ABOUT = [
   { title: `Up to ${LATE_MAX} devices per cluster`, cause: 'On a larger cluster a late device can be missing here; Dashboard and Summary count every device from the core’s store, as of its last scheduled run or Fetch now.' },
 ];
 
-/** Every device measured, as board rows (and, for "all devices in cluster", the silent ones); the delayed ones only for "delayed". */
+/** Every device measured, as board rows (and, for "all devices in cluster", the silent ones); the delayed and part delayed ones only for "delayed". */
 function liveRows() {
   const tz = ctx.tz ? ctx.tz() : null;
   const rows = (delay.records || []).map((r) => ({
@@ -423,29 +430,30 @@ function liveRows() {
     }
   }
   const shown = rows.filter((r) => matchesZone(r, tz));
-  return delay.ran === 'delayed' ? shown.filter((r) => isLate(r.state)) : shown;
+  return delay.ran === 'delayed' ? shown.filter((r) => isLate(r.state) || isPart(r.state)) : shown;
 }
 
 /** The columns: the boards' row, the address field's own column, the delay as a bar. */
-function liveKeys(several) {
+function liveKeys(several, rows) {
   const ips = [...new Set(delayRows().map(({ c }) => logFilterFields(c).ip).filter(Boolean))];
   const ipKey = ips.length === 1 ? `x:${ips[0]}` : null;
-  return { keys: ['device', ...(several ? ['cluster'] : []), 'zone', 'tag1', ...(ipKey ? [ipKey] : []), 'nowBar', 'state'], ipKey, ip: ips[0] || null };
+  return { keys: withTypes(['device', ...(several ? ['cluster'] : []), 'zone', 'tag1', ...(ipKey ? [ipKey] : []), 'nowBar', 'state'], rows), ipKey, ip: ips[0] || null };
 }
 
 function devicesBody() {
   const several = delay.clusterIds.length > 1;
   const rows = liveRows();
   // Worst first by default: a critical device at the bottom of an alphabetical list is a device nobody sees.
-  const rank = (st) => ({ critical: 0, delay: 1, clock_ahead: 2, silent: 3, unmeasured: 4, unknown: 5, little: 6, no_delay: 7 }[st] ?? 8);
+  const rank = (st) => ({ critical: 0, delay: 1, part_delay: 1.5, clock_ahead: 2, silent: 3, unmeasured: 4, unknown: 5, little: 6, no_delay: 7 }[st] ?? 8);
   const base = [...rows].sort((a, b) => rank(a.state) - rank(b.state) || ((b.nowMinutes ?? -1e9) - (a.nowMinutes ?? -1e9)));
-  const { keys, ipKey, ip } = liveKeys(several);
+  const { keys, ipKey, ip } = liveKeys(several, rows);
   const extra = ipKey ? { [ipKey]: [ip, false, (r) => { const v = extraOf(r, ip); return h('td.mono', v === null ? h('span.muted', '—') : String(v)); }, { type: 'text', value: (r) => extraOf(r, ip) }] } : {};
   const ordered = sortLate.apply(base, sortCols(keys, extra));
   const w = delay.watched;
   return W.get('w:dev:body', `${delay.ver}|${ctx.tz ? ctx.tz() : ''}|${sortLate.sort ? `${sortLate.sort.key}${sortLate.sort.dir}` : '-'}`, () => {
     const note = coverageNote('fetch');
     const gaps = gapLines();
+    const noTypes = noTypeLines();
     const max = Math.max(0, ...ordered.map((r) => (Number.isFinite(r.nowMinutes) ? r.nowMinutes : 0)));
     return [
       note ? h('div.banner.warn.ld-flat', note) : null,
@@ -454,6 +462,7 @@ function devicesBody() {
         ctx: { now: delay.at || Date.now(), mode: 'live', barMax: max, onWatch: watch, watching: (r) => !!(w && w.clusterId === r.cluster && w.device === r.device) },
         labels: { state: 'Level' },
         emptyText: delay.fetching ? 'Measuring…' : delay.ran === 'delayed' ? `No device is ${behind()} in ${rangeWords(ctx.range())}.` : 'No device sent logs in this range.' }),
+      noTypes.length ? h('div.muted.ld-note#ld-live-notypes', `Not measured per log type: ${noTypes.join('; ')}`) : null,
       h('div.ld-foot', h('button.btn.sm#delay-csv', { type: 'button', disabled: !delay.records, onclick: exportDelayCsv }, icon(ICON_DOWN), ' Export CSV')),
     ];
   });
@@ -508,6 +517,7 @@ function stripBody() {
     return h('div.ld-strip#ld-watch-strip', { dataset: { device: w.device } },
       h('div.ld-strip-k', h('span', 'Device'), h('b.mono', w.device)),
       h('div.ld-strip-k', h('span', 'Delay now'), h('b', r && Number.isFinite(r.nowMinutes) ? minutesText(r.nowMinutes) : r && r.state === 'silent' ? 'no logs in range' : '—')),
+      hasTypes(r) ? h('div.ld-strip-k', { title: typesTitle(r.types) }, h('span', 'Log types'), h('b', typesText(r.types))) : null,
       h('div.ld-strip-k', { title: lateTitle }, h('span', 'Late since'), h('b', late)),
       h('div.ld-strip-k', h('span', 'Measured'), h('b', w.at ? zonedText(w.at, ctx.zone()).slice(11) : '—')),
       w.error ? h('span.ld-strip-err', { title: w.error }, pill('re-measure failed', 'red')) : null,
@@ -622,7 +632,7 @@ function buildDelayReport() {
   return workbook(reportSheets(delay.records || [], delay.summary || {}, {
     generatedAt: delay.at || Date.now(),
     windowText: delay.window ? delay.window.text : rangeText(ctx.range(), ctx.zone()),
-    measured, notMeasured: missing.length, missing,
+    measured, notMeasured: missing.length, missing, noLogTypes: noTypeLines(),
   }));
 }
 
@@ -699,20 +709,24 @@ function maybeScheduledReport() {
 function exportDelayCsv() {
   if (!delay.records) return;
   // The rows on screen (the fetch's scope and the time-zone filter), the silent ones too.
-  const rows = liveRows().map((x) => ({
+  const live = liveRows();
+  const withT = live.some(saysTypes);
+  const typeCols = (x) => (withT ? { log_types: hasTypes(x) ? `${x.types.total}${x.types.truncated ? '+' : ''}` : '', log_types_measured: hasTypes(x) ? x.types.measured : '', log_types_late: hasTypes(x) && x.types.measured !== 0 ? x.types.late : '', late_log_types: hasTypes(x) ? x.types.lateNames.join('; ') : '', delay_log_type: x.delayLogType || '' } : {});
+  const rows = live.map((x) => ({
     cluster: x.clusterName, device: x.device, zone: extraOf(x, 'zone') ?? '', tag1: extraOf(x, 'tag1') ?? '',
-    state: x.state === 'unknown' ? 'levels unknown' : stateText(x.state),
+    state: x.state === 'unknown' ? 'levels unknown' : stateText(x.state), ...typeCols(x),
     delay_minutes: Number.isFinite(x.nowMinutes) ? x.nowMinutes.toFixed(2) : '',
     raw_gap_minutes: Number.isFinite(x.rawGapMinutes) ? x.rawGapMinutes.toFixed(2) : '',
     time_zone_offset: Number.isFinite(x.tzOffsetMinutes) ? offsetLabel(x.tzOffsetMinutes) : '',
     pattern: x.pattern || '', docs: x.docs ?? '',
     last_seen: x.lastArrival ? new Date(x.lastArrival).toISOString() : '', detail: x.patternNote || '',
   }));
-  const noteRow = (detail) => ({ cluster: '', device: '', zone: '', tag1: '', state: '', delay_minutes: '', raw_gap_minutes: '', time_zone_offset: '', pattern: '', docs: '', last_seen: '', detail });
+  const noteRow = (detail) => ({ cluster: '', device: '', zone: '', tag1: '', state: '', ...typeCols(null), delay_minutes: '', raw_gap_minutes: '', time_zone_offset: '', pattern: '', docs: '', last_seen: '', detail });
   const missed = delayRows().filter(({ d }) => !d.records).map(({ c, d }) => `${c.name} (${d.state})`);
   if (missed.length) rows.push(noteRow(`not measured: ${missed.join('; ')}`));
   for (const x of gapLines()) rows.push(noteRow(`read in part: ${x}`));
-  const scope = `rows: ${delay.ran === 'delayed' ? 'delayed devices only' : delay.ran === 'cluster' ? 'every device, the silent ones too' : 'the devices that sent logs'}${ctx.tz && ctx.tz() !== null && ctx.tz() !== undefined ? ', in the time-zone filter' : ''}${delay.window ? ` · ${delay.window.text}` : ''}`;
+  for (const x of noTypeLines()) rows.push(noteRow(`not measured per log type: ${x}`));
+  const scope = `rows: ${delay.ran === 'delayed' ? 'late devices only, part delayed ones among them' : delay.ran === 'cluster' ? 'every device, the silent ones too' : 'the devices that sent logs'}${ctx.tz && ctx.tz() !== null && ctx.tz() !== undefined ? ', in the time-zone filter' : ''}${delay.window ? ` · ${delay.window.text}` : ''}`;
   rows.push(noteRow(scope));
   download(`log-delay-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(rows));
 }

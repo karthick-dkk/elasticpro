@@ -21,7 +21,7 @@
 
 import { bridge } from './transport.js';
 import { pct } from '../lib/fmt.js';
-import { STATE_LABEL, isLate, levelState } from './delay-levels.js';
+import { STATE_LABEL, isLate, isPart, levelState, deviceReading, typeRead } from './delay-levels.js';
 import { parseHash } from '../reports/route.js';
 import { zonedParts } from './log-range.js';
 
@@ -33,10 +33,11 @@ export const LD_SECTION = 'log-delay';
  * The colours of the levels (the owner, 2026-11-24): No delay green, the delay band yellow, above the
  * critical line red — the states' tokens every page uses (ui/css/app.css --state-*) — violet for
  * another time zone, grey for silent and can't measure. `delayLine` / `critLine`: a level's line, the
- * same hue a step stronger, so a thin line shows on a light page.
+ * same hue a step stronger, so a thin line shows on a light page. `part` (0.3.90): part delayed, the
+ * delayed yellow let through to the ground — drawn with a yellow outline, so never read as delayed.
  */
 export const LD_COLOURS = Object.freeze({
-  ok: 'var(--state-ok)', delay: 'var(--state-late)', crit: 'var(--state-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)',
+  ok: 'var(--state-ok)', delay: 'var(--state-late)', crit: 'var(--state-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)', part: 'var(--ld-part)',
   delayLine: 'color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink))', critLine: 'color-mix(in srgb, var(--state-crit) 72%, var(--state-crit-ink))',
 });
 
@@ -135,6 +136,7 @@ export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'summary', 'devices',
  */
 export function ldRoute(hash) {
   const tz = tzOfHash(hash);
+  const type = logTypeOfHash(hash);
   const fleet = { view: 'fleet', clusterId: null, device: null, tz };
   const { page, rest } = parseHash(hash);
   if (page !== LD_PAGE) return fleet;
@@ -147,7 +149,7 @@ export function ldRoute(hash) {
   if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null, tz };
   // `watch` is the old Live Watch address: Live Watch and Live logs are one tab, Live, since the merge.
   if (kind === 'watch') return { view: 'live', clusterId: null, device: null, tz };
-  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null, tz };
+  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null, tz, ...type };
   return fleet;
 }
 
@@ -166,11 +168,21 @@ export function tzOfHash(hash) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** The log type Live's address asks for (0.3.90): `{logType}` (`?log_type=threat`), `{noType: true}` (`?no_log_type=1`: the documents without the field) or nothing. */
+function logTypeOfHash(hash) {
+  const q = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  if (q.get('no_log_type') === '1') return { noType: true };
+  const v = q.get('log_type');
+  return v ? { logType: v } : {};
+}
+
 const enc = encodeURIComponent;
-/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it. */
+/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it, `o.logType` / `o.noType` Live's log type. */
 export function ldHash(view, clusterId, device, o) {
   const base = `#/${LD_PAGE}`;
-  const q = o && o.tz !== null && o.tz !== undefined ? `?tz=${enc(String(o.tz))}` : '';
+  const args = [o && o.tz !== null && o.tz !== undefined ? `tz=${enc(String(o.tz))}` : '',
+    view === 'live' && device && o ? (o.noType ? 'no_log_type=1' : o.logType ? `log_type=${enc(o.logType)}` : '') : ''].filter(Boolean);
+  const q = args.length ? `?${args.join('&')}` : '';
   if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}${q}`;
   if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;
   if (view === 'summary') return `${clusterId ? `${base}/summary/${enc(clusterId)}` : `${base}/summary`}${q}`;
@@ -283,19 +295,22 @@ export function extraOf(row, name) {
  * before it, time spent late, logs a day — is null: drawn as unknown, not 0.
  */
 export function liveDeviceRow(rec, cluster, levels) {
-  const st = levelState(rec ? rec.delayMinutes : null, levels);
+  const { state: st, figures: f, delayLogType } = deviceReading(rec, levels);
+  const types = rec && Array.isArray(rec.types) ? typesSummary(rec, levels) : null;
   return {
     device: rec.device, cluster: cluster.id, clusterName: cluster.name,
-    state: st || 'unknown', nowMinutes: finite(rec.delayMinutes) ? rec.delayMinutes : null,
+    state: st || 'unknown', nowMinutes: finite(f.delayMinutes) ? f.delayMinutes : null,
     // The zone step as the browser applied it (core/log-tz.js): the gap as measured, what was
     // taken out (the cluster's offset; null = no zone), the offset the gap itself sits at.
-    rawGapMinutes: finite(rec.rawGapMinutes) ? rec.rawGapMinutes : null,
-    tzOffsetMinutes: finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null,
+    rawGapMinutes: finite(f.rawGapMinutes) ? f.rawGapMinutes : null,
+    tzOffsetMinutes: finite(f.tzOffsetMinutes) ? f.tzOffsetMinutes : null,
     clusterTzOffset: finite(rec.clusterTzOffset) ? rec.clusterTzOffset : (finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null),
     deviceTzOffset: finite(rec.deviceTzOffset) ? rec.deviceTzOffset : null,
+    // Its log types, when this measurement read them (typesSummary); left out when it did not.
+    ...(types ? { types, delayLogType } : {}),
     medianMinutes: null, maxMinutes: null, episodes: null, lateMs: null, lastStarted: null, lastSolved: null, lateSince: null,
     docsPerDay: null, docs: finite(rec.docs) ? rec.docs : null,
-    lastArrival: rec.arrival ?? null, lastEvent: rec.event ?? null, silentSince: null,
+    lastArrival: rec.arrival ?? null, lastEvent: f.event ?? null, silentSince: null,
     pattern: rec.pattern && rec.pattern !== '-' ? rec.pattern : null, patternNote: rec.patternNote || '',
     extras: rec.meta || {}, live: true,
   };
@@ -448,7 +463,8 @@ export function shareTenths(parts) {
 /**
  * The owner's "No delay" (2026-11-24), the ONE definition for every tile, percentage, bar, ring and
  * sentence: on time + silent + can't measure (a clock ahead is can't measure) — every device not
- * shown to be late — always with its split. Another time zone stays apart. `t` is the core's
+ * shown to be late — always with its split. Another time zone stays apart, and so does part delayed
+ * (`part`, 0.3.90: some of the device's log types late, others not; only where the core counts it). `t` is the core's
  * `totals`, a `byCluster` row or a day; the core's own `noDelay` / `pct…` are used when it sends
  * them, else the same sum is made here. `why` (or the row's `notMeasured`): no percentage, and the
  * reason — never measured, its last run failed, no device.
@@ -467,14 +483,16 @@ export function noDelayOf(t, { why = '' } = {}) {
   const devices = first(x.devices);
   const reason = why || (typeof x.notMeasured === 'string' ? x.notMeasured : '') || (neverRan(x) ? 'never measured' : '') || (devices === 0 || count === null ? 'no device measured' : '');
   const of = x.pctOf && finite(x.pctOf.clusters) && x.pctOf.clusters < x.pctOf.ofClusters ? x.pctOf : null;
+  // Part delayed: null for a core that does not measure log types (before 0.3.90).
+  const part = finite(x.partDelayed) ? x.partDelayed : null;
   let p = null;
   if (!reason && x.pctNoDelay !== undefined) {
-    if (finite(x.pctNoDelay)) p = { noDelay: x.pctNoDelay, onTime: x.pctOnTime, silent: x.pctSilent, cant: x.pctCantMeasure, late: x.pctLate, tz: x.pctOtherTz };
+    if (finite(x.pctNoDelay)) p = { noDelay: x.pctNoDelay, onTime: x.pctOnTime, silent: x.pctSilent, cant: x.pctCantMeasure, late: x.pctLate, tz: x.pctOtherTz, ...(finite(x.pctPartDelayed) ? { part: x.pctPartDelayed } : {}) };
   } else if (!reason) {
-    const parts = shareTenths([n(onTime), silent, cant, n(late), n(x.otherTz)]);
-    if (parts) p = { noDelay: (parts[0] + parts[1] + parts[2]) / 10, onTime: parts[0] / 10, silent: parts[1] / 10, cant: parts[2] / 10, late: parts[3] / 10, tz: parts[4] / 10 };
+    const parts = shareTenths([n(onTime), silent, cant, n(late), n(x.otherTz), n(part)]);
+    if (parts) p = { noDelay: (parts[0] + parts[1] + parts[2]) / 10, onTime: parts[0] / 10, silent: parts[1] / 10, cant: parts[2] / 10, late: parts[3] / 10, tz: parts[4] / 10, ...(part !== null ? { part: parts[5] / 10 } : {}) };
   }
-  return { count, devices, onTime, silent, cant, late, lateBeforeSilent: n(x.lateBeforeSilent), pct: p,
+  return { count, devices, onTime, silent, cant, late, ...(part !== null ? { part } : {}), lateBeforeSilent: n(x.lateBeforeSilent), pct: p,
     of, why: p ? '' : reason || (of && of.clusters === 0 ? 'no cluster was measured in its last run' : 'not measured') };
 }
 const neverRan = (x) => 'lastRunAt' in x && !finite(x.lastRunAt);
@@ -483,9 +501,36 @@ const neverRan = (x) => 'lastRunAt' in x && !finite(x.lastRunAt);
 export function noDelayOfStatuses(s) {
   const by = (s && s.by) || {};
   const n = (k) => Number(by[k]) || 0;
-  return noDelayOf({ devices: Number(s && s.devices) || 0, onTime: n('OK'), silent: n('NO_DATA'), cantMeasure: n('ERROR') + n('CLOCK_AHEAD'), late: n('DELAYED') + n('CRITICAL'), otherTz: n('OTHER_TZ') },
+  return noDelayOf({ devices: Number(s && s.devices) || 0, onTime: n('OK'), silent: n('NO_DATA'), cantMeasure: n('ERROR') + n('CLOCK_AHEAD'), late: n('DELAYED') + n('CRITICAL'), otherTz: n('OTHER_TZ'), ...(by.PART_DELAY !== undefined ? { partDelayed: n('PART_DELAY') } : {}) },
     { why: n('UNKNOWN') ? 'the levels of some devices are not known' : '' });
 }
+
+/**
+ * Part delayed for a tile (0.3.90): null when the answer has no such figure (a core before 0.3.90:
+ * nothing is drawn); else `{count, pct, late, above, off, of, why}` — `late` the log types late,
+ * `off` of `of` measured clusters without the log_type field. Off on every one of them: no count
+ * and why, never 0.
+ */
+export function partOf(t, clusters = []) {
+  if (!t || t.partDelayed === undefined) return null;
+  const list = (clusters || []).filter((c) => c && c.logTypeField !== undefined && !neverRan(c));
+  const off = list.filter((c) => c.logTypeField === null);
+  const whys = [...new Set(off.map((c) => c.logTypeWhy || 'log_type is not in the mapping'))];
+  const all = list.length > 0 && off.length === list.length;
+  // logTypes null (0.3.90): no cluster read by log types — not 0.
+  const ok = !all && finite(t.partDelayed) && t.logTypes !== null;
+  const lt = t.logTypes || {};
+  return { count: ok ? t.partDelayed : null, pct: ok && finite(t.pctPartDelayed) ? t.pctPartDelayed : null, late: ok && finite(lt.late) ? lt.late : null,
+    above: ok && finite(lt.above) ? lt.above : null, off: off.length, of: list.length, why: ok ? '' : all ? whys.join(' · ') : 'not measured with log types yet' };
+}
+/** The tile's second line: "7 log types late", with the clusters that have no log_type; why there is no count. */
+export function partText(p) {
+  if (!p) return '';
+  if (p.count === null) return p.why;
+  return [p.late === null ? '' : `${countText(p.late)} log type${p.late === 1 ? '' : 's'} late`, p.off ? `not on ${countText(p.off)} of ${countText(p.of)} clusters: no log_type` : ''].filter(Boolean).join(' · ');
+}
+/** How much of `byCluster` carries log types in words for a percent line: " · part delayed 3 %", '' when not known. */
+export const partShareText = (pc) => (pc && finite(pc.part) ? `${shareText(pc.part)} part delayed` : '');
 
 /** A share as it is written: "95 %", "94.7 %"; unknown "—". */
 export const shareText = (p) => (finite(p) ? pct(p, Number.isInteger(p) ? 0 : 1, ' ') : '—');
@@ -503,17 +548,22 @@ export function noDelaySplit(nd, { counts = false } = {}) {
 export const noDelayOfText = (nd) => (nd && nd.of ? `of ${countText(nd.of.clusters)} of ${countText(nd.of.ofClusters)} clusters` : '');
 
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
+/** A device row's state in a file or a heading: as the core words it when it was not measured, or not by its log types, in the last run; else the state. */
+export const rowStateText = (r) => (r && (r.typesUnread || r.stale) && r.stateText ? r.stateText : stateText(r && r.state));
+/** Its log types were not read in the last run (over the limit) and it is not known late: never drawn as on time. */
+export const typesNotRead = (r) => !!(r && r.typesUnread) && !isLate(r.state) && r.state !== 'part_delay' && r.state !== 'silent';
 export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
 /**
- * The pill tone per state (the three configured levels and the two states apart): green below
+ * The pill tone per state (the three configured levels and the states apart — part delayed a yellow
+ * outline, 0.3.90): green below
  * the delay line, light blue in the delay band, blue
  * above the critical line, violet for another time zone, grey for silent and can't measure (a clock ahead is one: how late
  * its logs are cannot be told from it).
  * `little` is what a core before 0.3.62 stored: below the line, so green.
  */
 export const STATE_TONE = Object.freeze({
-  critical: 'ld-crit', delay: 'ld-delay', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'grey', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
+  critical: 'ld-crit', delay: 'ld-delay', part_delay: 'ld-part', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'grey', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
 });
 export const stateTone = (s) => STATE_TONE[s] || 'grey';
 
@@ -532,37 +582,50 @@ export function startedSolvedText(row, now = Date.now()) {
   if (!row) return '—';
   if (row.state === 'silent' && finite(row.silentSince)) return `no logs since ${whenText(row.silentSince, now).replace(/^today /, '')}`;
   // Not measured since: what is known of it ends at the last measurement.
+  if (isPart(row.state)) {
+    const before = finite(row.lastStarted) ? ` · whole device ${whenText(row.lastStarted, now)} → ${finite(row.lastSolved) ? whenText(row.lastSolved, now) : 'not solved'}` : '';
+    return `${partLateText(row) || 'part late now'}${before}`;
+  }
   const open = row.stale === true && finite(row.lastMeasuredMs) ? `not solved · last measured ${whenText(row.lastMeasuredMs, now).replace(/^today /, '')}` : 'still late';
   if (finite(row.lateSince)) return `${whenText(row.lateSince, now)} → ${open}`;
   if (finite(row.lastStarted)) return `${whenText(row.lastStarted, now)} → ${finite(row.lastSolved) ? whenText(row.lastSolved, now) : open}`;
   return 'never late in this period';
 }
 
-/* ------------------------------ tables: order, filter ------------------------------ */
+/** "part late 2 h 10 min": the time only some of the device's log types were late; '' when none or not known. */
+export const partLateText = (row) => (row && finite(row.partLateMs) && row.partLateMs > 0 ? `part late ${durationText(row.partLateMs)}` : '');
 
-/** Devices sorted by time spent late, then delay now (unknown last), then name. */
-export function byTimeLate(rows) {
-  const n = (v) => (finite(v) ? v : -Infinity);
-  return [...(rows || [])].sort((a, b) => n(b.lateMs) - n(a.lateMs) || n(b.nowMinutes) - n(a.nowMinutes) || String(a.device).localeCompare(String(b.device)));
+/** A browser measurement's log types as a device row's `types`: `{total, measured, late, lateNames, truncated}`. */
+function typesSummary(rec, levels) {
+  const late = rec.types.filter((t) => isLate(levelState(t.delayMinutes, levels)));
+  return { total: rec.types.length, measured: rec.types.filter((t) => typeRead(t, levelState(t.delayMinutes, levels))).length, late: late.length, lateNames: late.map((t) => t.label), truncated: !!rec.typesTruncated };
 }
 
-/** Rows whose device, cluster or an extra value contains `q` (case-insensitive). */
+/* ------------------------------ tables: order, filter ------------------------------ */
+
+/** Devices sorted by time spent late, then part late, then delay now (unknown last), then name. */
+export function byTimeLate(rows) {
+  const n = (v) => (finite(v) ? v : -Infinity);
+  return [...(rows || [])].sort((a, b) => n(b.lateMs) - n(a.lateMs) || (n(b.partLateMs) === n(a.partLateMs) ? 0 : n(b.partLateMs) - n(a.partLateMs)) || n(b.nowMinutes) - n(a.nowMinutes) || String(a.device).localeCompare(String(b.device)));
+}
+
+/** Rows whose device, cluster, an extra value or a late log type contains `q` (case-insensitive). */
 export function filterRows(rows, q) {
   const s = String(q || '').trim().toLowerCase();
   if (!s) return rows || [];
-  return (rows || []).filter((r) => [r.device, r.clusterName, r.cluster, ...Object.values(r.extras || {})]
+  return (rows || []).filter((r) => [r.device, r.clusterName, r.cluster, ...Object.values(r.extras || {}), ...((r.types && r.types.lateNames) || [])]
     .some((v) => v !== null && v !== undefined && String(v).toLowerCase().includes(s)));
 }
 
 /**
  * The Devices tab's state filters (the KPI tiles open the list on one of them): `all`, `late`
- * (the delay band and above), the three configured levels (`ok` below the delay line; `delay`;
+ * (the delay band and above), `part` (part delayed), the three configured levels (`ok` below the delay line; `delay`;
  * `critical`), `tz` (another time zone), `silent` (silent or can't measure, a clock ahead among
  * them — none has a figure) and `noDelay` (noDelayOf: ok and silent together). `little` is a core-before-0.3.62 state: below the line.
  */
-export const DEVICE_FILTERS = Object.freeze(['all', 'late', 'critical', 'delay', 'noDelay', 'ok', 'tz', 'silent']);
+export const DEVICE_FILTERS = Object.freeze(['all', 'late', 'critical', 'delay', 'part', 'noDelay', 'ok', 'tz', 'silent']);
 const FILTER_STATES = Object.freeze({
-  late: ['delay', 'critical'], critical: ['critical'], delay: ['delay'], ok: ['no_delay', 'little'], tz: ['other_tz'], silent: ['silent', 'unmeasured', 'clock_ahead'],
+  late: ['delay', 'critical'], critical: ['critical'], delay: ['delay'], part: ['part_delay'], ok: ['no_delay', 'little'], tz: ['other_tz'], silent: ['silent', 'unmeasured', 'clock_ahead'],
   noDelay: ['no_delay', 'little', 'silent', 'unmeasured', 'clock_ahead'],
 });
 export function matchesFilter(row, filter) {
@@ -617,17 +680,18 @@ export function ringsOrder(byCluster) {
 
 /**
  * A ring's arcs on a circumference of 100 — above the critical line first, then the delay band, then
- * No delay (`noDelay`, when known): `[{kind, dash, offset}]`, a sliver at least for a count above 0.
+ * part delayed (`part`, when known), then No delay (`noDelay`, when known): `[{kind, dash, offset}]`, a sliver at least for a count above 0.
  * What is left is another time zone. Null when the share is not known (no device, a figure missing):
  * drawn as an empty ring with "—", never 0 %.
  */
-export function ringArcs(delay, critical, devices, noDelay = null) {
+export function ringArcs(delay, critical, devices, noDelay = null, part = null) {
   if (!finite(devices) || devices <= 0 || !finite(delay) || !finite(critical)) return null;
   const len = (n) => (n > 0 ? Math.max((n / devices) * 100, 1.5) : 0);
   const c = Math.min(100, len(critical)); const d = Math.min(100 - c, len(delay));
-  const o = finite(noDelay) ? Math.min(100 - c - d, len(noDelay)) : 0;
+  const p = finite(part) ? Math.min(100 - c - d, len(part)) : 0;
+  const o = finite(noDelay) ? Math.min(100 - c - d - p, len(noDelay)) : 0;
   const arc = (kind, l, at) => ({ kind, dash: `${l.toFixed(2)} ${(100 - l).toFixed(2)}`, offset: (-at).toFixed(2) });
-  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null, o ? arc('ok', o, c + d) : null].filter(Boolean);
+  return [c ? arc('critical', c, 0) : null, d ? arc('delay', d, c) : null, p ? arc('part', p, c + d) : null, o ? arc('ok', o, c + d + p) : null].filter(Boolean);
 }
 
 /** A grid cell's hue: red when a device was above the critical line at that measurement, yellow when one was late, '' for none. */
@@ -646,6 +710,11 @@ export function noDeviceTotal(items) {
   }
   return n ? { docs, clusters: n } : null;
 }
+/** Devices whose log types the last runs did not come to (a cluster over its limit), in words; '' for none. `items`: `byCluster` rows or a cluster answer's totals. */
+export function typesUnreadLine(items) {
+  const n = (items || []).reduce((a, x) => a + (x && finite(x.typesUnread) && x.typesUnread > 0 ? x.typesUnread : 0), 0);
+  return n ? `${countText(n)} device${n === 1 ? ' is' : 's are'} counted as when ${n === 1 ? 'its' : 'their'} log types were last read: the last run did not come to ${n === 1 ? 'its' : 'their'} log types (over the limit of one run).` : '';
+}
 /** That sum in one line: "12,404 documents in 9 clusters have no device name …"; one cluster needs no "in 1 cluster". */
 export function noDeviceLine(sum) {
   if (!sum) return '';
@@ -654,7 +723,8 @@ export function noDeviceLine(sum) {
 }
 
 /**
- * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz}`
+ * Day by day, stacked and scaled to the tallest day: each `{day, gap, ok, delay, critical, tz}` — and
+ * `part` (part delayed) for a day whose totals count it —
  * in pixels — no delay (noDelayOf: on time, silent, can't measure), the delay band, above the
  * critical line, another time zone. A day without totals is a gap (drawn hatched,
  * "no measurement"), never 0.
@@ -664,12 +734,12 @@ export function dayBars(days, height) {
   const gap = (d) => !d || !finite(d.devices) || d.devices <= 0;
   const n = (v) => (finite(v) ? v : 0);
   const free = (d) => n(noDelayOf(d).count);
-  const total = (d) => free(d) + n(d.delayed) + n(d.critical) + n(d.otherTz);
+  const total = (d) => free(d) + n(d.delayed) + n(d.critical) + n(d.partDelayed) + n(d.otherTz);
   const max = Math.max(1, ...list.filter((d) => !gap(d)).map(total));
   const px = (v) => (finite(v) && v > 0 ? Math.max(1, Math.round((v / max) * height)) : 0);
   return list.map((d) => (gap(d)
     ? { day: d && d.day, gap: true, ok: 0, delay: 0, critical: 0, tz: 0 }
-    : { day: d.day, gap: false, ok: px(free(d)), delay: px(d.delayed), critical: px(d.critical), tz: px(d.otherTz) }));
+    : { day: d.day, gap: false, ok: px(free(d)), delay: px(d.delayed), critical: px(d.critical), ...(finite(d.partDelayed) ? { part: px(d.partDelayed) } : {}), tz: px(d.otherTz) }));
 }
 
 /** One day's bar in words, for its title, on the levels' own names. */
@@ -677,6 +747,7 @@ export function dayTitle(d, b = bands(null)) {
   if (!d || !finite(d.devices) || d.devices <= 0) return `${dayText(d && d.day)} · no measurement`;
   const nd = noDelayOf(d);
   return `${dayText(d.day)} · No delay ${countText(nd.count)} (${noDelaySplit(nd, { counts: true })}), ${countText(d.delayed)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}`
+    + (finite(d.partDelayed) && d.partDelayed ? `, ${countText(d.partDelayed)} part delayed` : '')
     + (finite(d.otherTz) && d.otherTz ? `, ${countText(d.otherTz)} in another time zone` : '')
     + (d.complete === false ? ' · day not over' : '');
 }
@@ -931,22 +1002,28 @@ export function timeZoneChipText(zones, tz, offsetText) {
 /**
  * The counts the tiles show for a list of rows (the time-zone filter on): the same figures as
  * the core's `totals` — on time = under the delay line (an old `little` too), the delay band, above
- * the critical line, another time zone, silent, can't measure (a clock ahead among them).
+ * the critical line, another time zone, silent, can't measure (a clock ahead among them). Part
+ * delayed and the log types late only when the rows carry log types (0.3.90).
  */
 export function tileCounts(rows) {
   const t = { devices: 0, onTime: 0, delay: 0, critical: 0, otherTz: 0, silent: 0, unmeasured: 0, clockAhead: 0, cantMeasure: 0, lateBeforeSilent: 0 };
+  let part = 0; let typesKnown = false; const lt = { total: 0, late: 0 };
   for (const r of rows || []) {
     t.devices += 1;
+    if (r && (r.types !== undefined || isPart(r.state))) typesKnown = true;
+    if (r && r.types) { lt.total += r.types.total || 0; lt.late += r.types.late || 0; }
     const s = r && r.state;
     if (s === 'no_delay' || s === 'little') t.onTime += 1;
     else if (s === 'delay') t.delay += 1;
     else if (s === 'critical') t.critical += 1;
+    else if (s === 'part_delay') part += 1;
     else if (s === 'other_tz') t.otherTz += 1;
     else if (s === 'silent') { t.silent += 1; if (finite(r.lateSince)) t.lateBeforeSilent += 1; }
     else if (s === 'unmeasured') t.unmeasured += 1;
     else if (s === 'clock_ahead') t.clockAhead += 1;
   }
   t.cantMeasure = t.unmeasured + t.clockAhead;
+  if (typesKnown) { t.partDelayed = part; t.logTypes = lt; }
   return t;
 }
 
@@ -962,16 +1039,17 @@ export function timeZoneCell(tz, offsetText) {
 
 /**
  * The device graph: points → x in [0,1000] over [from,to], y in [0,height] with a scale that
- * holds the worst point and the critical line. Unknown points (m null) are breaks, not dots.
+ * holds the worst point and the critical line — or the one given (`scaleMax`: several series on one
+ * scale, core/log-types.js seriesGraph). Unknown points (m null) are breaks, not dots.
  */
-export function deviceGraph(points, { fromMs, toMs, height = 240, levels } = {}) {
+export function deviceGraph(points, { fromMs, toMs, height = 240, levels, scaleMax: given } = {}) {
   const pts = (points || []).filter((p) => p && finite(p.t));
   const lo = finite(fromMs) ? fromMs : Math.min(...pts.map((p) => p.t));
   const hi = finite(toMs) ? toMs : Math.max(...pts.map((p) => p.t));
   const span = hi - lo || 1;
   const crit = levels && finite(levels.criticalOver) ? levels.criticalOver : null;
   const top = Math.max(crit ? crit * 1.5 : 0, ...pts.map((p) => (finite(p.m) ? p.m : 0)), 1);
-  const scaleMax = niceCeil(top);
+  const scaleMax = finite(given) && given > 0 ? given : niceCeil(top);
   const X = (t) => Math.max(0, Math.min(1000, ((t - lo) / span) * 1000));
   const Y = (m) => height - (Math.max(0, Math.min(m, scaleMax)) / scaleMax) * height;
   const segments = []; let cur = [];

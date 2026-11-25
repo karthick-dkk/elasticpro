@@ -18,11 +18,11 @@ import { shardAllocation, nodeRoles } from './cluster-detail.js';
 import { isDataNode, slmCard, ilmCard } from './cluster-boxes.js';
 import { staleIndices } from './nodes-shards.js';
 import { byLevel, worstOf } from './alert-levels.js';
-import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js';
+import { lifecycleView, ilmErrorsOf, logPatternOf, logsOf } from './lifecycle-errors.js';
 import { sumKnown, notCounted } from './index-figures.js';
 import { clusterKind } from './cluster-kind.js';
 import { durationMs } from './snapshot-list.js';
-import { bands, noDelayOf, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
+import { bands, noDelayOf, partOf, countText, LD_NEVER_MEASURED, LD_SCHEDULE_OFF, LD_NO_SCHEDULER } from './logdelay-report.js';
 
 /* ------------------------------------ the route ------------------------------------ */
 
@@ -230,6 +230,9 @@ export function devicesDelay(res, clusterId) {
   out.critical = n(t.critical);
   // The Log Delay page's No delay (one definition), and why there is no percentage.
   out.noDelay = noDelayOf(t, { why: (mine && mine.notMeasured) || '' });
+  // Part delayed (0.3.90): only where the core measures log types.
+  const part = partOf(t, mine ? [mine] : []);
+  if (part) out.part = part;
   out.late = out.delay === null && out.critical === null ? null : (out.delay || 0) + (out.critical || 0);
   out.state = sch.enabled === false ? 'off' : 'ok';
   out.message = sch.enabled === false ? LD_SCHEDULE_OFF : null;
@@ -315,6 +318,10 @@ export function ilmSummary(d, c, defaults, indices, now = Date.now()) {
     managed: card.known ? card.managed : null, total: card.known ? card.total : null,
     stale: { count: st.list.length, bytes: st.bytes, policy: st.policy, known: Array.isArray(indices) && !!st.policy },
     errors: errs.known ? errs.count : null, errorsKnown: errs.known,
-    why: card.why || null,
+    why: card.why || null, pattern: logsOf(pattern),
   };
 }
+
+/** The ILM card's figure with what it was counted over: "0 of 12 open log indices managed" — the open indices of the cluster's log pattern, not every index; null when not known. */
+export const ilmNote = (s) => (s.managed === null || s.total === null ? null : `${countText(s.managed)} of ${countText(s.total)} open log ${s.total === 1 ? 'index' : 'indices'} managed`);
+export const ilmNoteTitle = (s) => (ilmNote(s) === null ? null : `Open ${s.pattern} indices with an ILM policy. Other indices (hidden and system ones too) are not counted here.`);

@@ -12,7 +12,7 @@
  * (#/log-delay/live/<cluster>/<device>), narrows the filters to that device and waits for Search.
  *
  * The filters' field names are the cluster's configured log fields (core/log-delay.js
- * logFilterFields — the one definition); a field the configuration does not name is a disabled
+ * logFilterFields — the one definition), and log_type where the cluster has it (0.3.90); a field the configuration does not name is a disabled
  * filter that says so, and one the indices do not map is refused in words before a search is sent.
  *
  * A tail is one stream of one cluster's documents — merging several would give a list whose
@@ -30,7 +30,8 @@ import { state, client, activeClusters, fetchIndices, clusters } from '../core/s
 import { timeHistogram, histogramEmptyText } from '../lib/charts.js';
 import { resolveFields, docDelay, logFilterFields, logFilterClause, looksLikeIp, aggregatableName } from '../core/log-delay.js';
 import { minutesText } from '../core/logdelay-report.js';
-import { zoneOf, loadLevels } from '../core/delay-levels.js';
+import { zoneOf, loadLevels, logTypeFieldOf } from '../core/delay-levels.js';
+import { LOG_TYPE_FIELD, NO_LOG_TYPE } from '../core/log-types.js';
 import { clusterOffsetAt, offsetLabel, timeZoneShort } from '../core/log-tz.js';
 import { rangeBounds, rangeText, zonedText, zoneOffsetMinutes, offsetText } from '../core/log-range.js';
 import { jsonView } from '../lib/jsonview.js';
@@ -40,6 +41,7 @@ const ui = {
   clusterId: '',
   sourceFilter: 'all',
   host: '', ip: '', tag1: '', query: '',
+  logType: '', typeExact: '', noType: false,   // log_type: the box; the value an address asked for (matched exactly); the documents without it
   size: 200,
   running: false,
   searched: false,        // a search ran for the filters on screen (false: "Nothing searched yet")
@@ -92,10 +94,11 @@ function forget() {
 export function liveEnter(c, route) {
   ctx = { ...ctx, ...c };
   if (route && route.clusterId) {
-    const want = `${route.clusterId}|${route.device || ''}`;
-    const have = ui.narrowed ? `${ui.narrowed.clusterId}|${ui.narrowed.device || ''}` : '';
+    const keyOf = (x) => `${x.clusterId}|${x.device || ''}|${x.noType ? 'none' : x.logType ? `type:${x.logType}` : ''}`;
+    const want = keyOf(route);
+    const have = ui.narrowed ? keyOf(ui.narrowed) : '';
     if (want !== have) {
-      if (route.device) liveNarrow({ clusterId: route.clusterId, device: route.device }, false);
+      if (route.device) liveNarrow({ clusterId: route.clusterId, device: route.device, logType: route.logType, noType: route.noType }, false);
       else { forget(); ui.narrowed = null; ui.clusterId = route.clusterId; }
     }
   }
@@ -115,10 +118,11 @@ export const liveBusy = () => ui.running;
 /** The range changed above: a tail over a custom range has nothing new to follow. Nothing is searched. */
 export function liveRangeChanged() { if (ui.tail && ctx.range().id === 'custom') { stopTail(); bump(); } }
 
-/** Narrow the filters to one device (Watch, or an address): its name in the device field, an address in the address field. */
-export function liveNarrow({ clusterId, device }, repaint = true) {
+/** Narrow the filters to one device (Watch, or an address): its name in the device field, an address in the address field; and to one log type (a log type's Open in logs). */
+export function liveNarrow({ clusterId, device, logType = '', noType = false }, repaint = true) {
   forget();
-  ui.narrowed = { clusterId, device };
+  ui.narrowed = { clusterId, device, ...(noType ? { noType: true } : logType ? { logType } : {}) };
+  ui.logType = noType ? '' : logType || ''; ui.typeExact = ui.logType; ui.noType = !!noType;
   ui.clusterId = clusterId;
   const ip = looksLikeIp(device);
   ui.host = ip ? '' : device; ui.ip = ip ? device : '';
@@ -132,6 +136,8 @@ export function liveUnnarrow() {
   forget();
   if (ui.host === n.device) ui.host = '';
   if (ui.ip === n.device) ui.ip = '';
+  if (ui.typeExact && ui.logType === ui.typeExact) ui.logType = '';
+  ui.typeExact = ''; ui.noType = false;
   ui.narrowed = null;
 }
 
@@ -157,7 +163,25 @@ function interval(ms) {
 /** The filters with a value, as `[label, field, value]`; a filter whose field is not configured has none. */
 function filled(c) {
   const f = logFilterFields(c);
-  return [['src_hostname', f.host, ui.host], ['src_ip', f.ip, ui.ip], ['tag1', f.tag1, ui.tag1]].filter(([, field, v]) => field && String(v || '').trim());
+  return [['src_hostname', f.host, ui.host], ['src_ip', f.ip, ui.ip], ['tag1', f.tag1, ui.tag1], [LOG_TYPE_FIELD, LOG_TYPE_FIELD, ui.noType ? NO_LOG_TYPE : ui.logType]].filter(([, field, v]) => field && String(v || '').trim());
+}
+
+/** Whether the Logs card shows log_type (its filter and column): the core or a search here found it mapped, a filter asks for it, or a document has it. Nothing is asked to find out. */
+function showsType(c) {
+  const have = ui.mapped.get(c.id);
+  return !!logTypeFieldOf(c.id) || !!ui.logType || ui.noType || !!(have && (have.present.has(LOG_TYPE_FIELD) || have.present.has(`${LOG_TYPE_FIELD}.keyword`)))
+    || ui.hits.some((x) => x && x._source && x._source[LOG_TYPE_FIELD] !== undefined && x._source[LOG_TYPE_FIELD] !== null);
+}
+
+/**
+ * The log_type filter's clause: a value an address asked for is that exact value on the field the
+ * mapping aggregates by (it may hold a * of its own); one typed is searched like the other filters.
+ */
+function logTypeClause(c) {
+  const have = ui.mapped.get(c.id);
+  const field = logTypeFieldOf(c.id) || (have && have.present.has(`${LOG_TYPE_FIELD}.keyword`) ? `${LOG_TYPE_FIELD}.keyword` : LOG_TYPE_FIELD);
+  if (ui.noType) return { must_not: { exists: { field } } };
+  return { must: ui.logType === ui.typeExact ? { term: { [field]: ui.logType } } : logFilterClause(LOG_TYPE_FIELD, ui.logType) };
 }
 
 /**
@@ -184,12 +208,17 @@ function searchBody(c, b) {
   const gte = new Date(b.from).toISOString();
   const lte = new Date(b.to).toISOString();
   const must = ui.query.trim() ? [{ query_string: { query: ui.query.trim(), analyze_wildcard: true, default_field: '*' } }] : [];
-  for (const [, field, value] of filled(c)) { const cl = logFilterClause(field, value); if (cl) must.push(cl); }
+  const mustNot = [];
+  for (const [label, field, value] of filled(c)) {
+    const cl = label === LOG_TYPE_FIELD ? logTypeClause(c) : { must: logFilterClause(field, value) };
+    if (cl.must) must.push(cl.must);
+    if (cl.must_not) mustNot.push(cl.must_not);
+  }
   return {
     size: Number(ui.size) || 200,
     track_total_hits: 10000,
     sort: [{ [c.timeField]: { order: 'desc', unmapped_type: 'date' } }],
-    query: { bool: { filter: [{ range: { [c.timeField]: { gte, lte, format: 'strict_date_optional_time' } } }], must } },
+    query: { bool: { filter: [{ range: { [c.timeField]: { gte, lte, format: 'strict_date_optional_time' } } }], must, ...(mustNot.length ? { must_not: mustNot } : {}) } },
     aggs: { over_time: { date_histogram: { field: c.timeField, fixed_interval: interval(b.to - b.from), min_doc_count: 0, extended_bounds: { min: gte, max: lte } } } },
   };
 }
@@ -215,7 +244,7 @@ async function search({ silent = false } = {}) {
   if (missing.length) {
     ui.running = false; ui.hits = []; ui.buckets = []; ui.total = 0;
     ui.error = missing.map(([label, f]) => `${label}: ${f} is not mapped in ${c.logIndexPattern || 'logstash-*'} on ${c.name}, so this filter cannot match`).join(' · ')
-      + ' — empty it, or set the cluster’s delayFields to the name its parser produces.';
+      + (missing.every(([label]) => label === LOG_TYPE_FIELD) ? ' — empty it: the log type is always log_type.' : ' — empty it, or set the cluster’s delayFields to the name its parser produces.');
     stopTail();
     bump();
     return;
@@ -309,6 +338,7 @@ function docOf(hit, c) {
     host: pick(s, [lf.host, 'src_hostname', 'host.name', 'host.hostname', 'agent.hostname', 'hostname'].filter(Boolean)) ?? null,
     ip: lf.ip ? pick(s, [lf.ip]) ?? null : null,
     tag1: pick(s, [lf.tag1, 'tag1']) ?? null,
+    logType: pick(s, [LOG_TYPE_FIELD]) ?? null,
     delay: d.delayMinutes,
     rawGap: d.rawGapMinutes,
     tzOffset: d.tzOffsetMinutes,
@@ -326,6 +356,9 @@ const COLS = [
   ['message', 'Message', 'text', (d) => d.message],
 ];
 
+/** The columns on screen: log_type after tag1 where the cluster has it. */
+const colsOf = (c) => (showsType(c) ? [...COLS.slice(0, 5), ['logType', LOG_TYPE_FIELD, 'text', (d) => d.logType], ...COLS.slice(5)] : COLS);
+
 /** The zone both times are written in: the cluster's log time zone when it has one (the difference seen is the delay), else the page's. */
 function zoneOfCard(c) {
   const tz = ctx.zone();
@@ -342,8 +375,9 @@ function tableNode(c) {
   const z = zoneOfCard(c);
   const lf = logFilterFields(c);
   const docs = ui.hits.map((hit) => docOf(hit, c));
-  const ordered = sortLogs.apply(docs, Object.fromEntries(COLS.map(([k, , type, value]) => [k, { type, value }])));
-  const sig = `${objId(ui.hits)}|${[...ui.expanded].join(',')}|${sortLogs.sort ? `${sortLogs.sort.key}${sortLogs.sort.dir}` : '-'}|${z.tz}|${z.ltz ? `${z.ltz.mode}${z.lOff}` : '-'}|${ui.running && !ui.hits.length}|${lf.host}|${lf.ip}`;
+  const cols = colsOf(c); const typed = cols.length > COLS.length;
+  const ordered = sortLogs.apply(docs, Object.fromEntries(cols.map(([k, , type, value]) => [k, { type, value }])));
+  const sig = `${objId(ui.hits)}|${[...ui.expanded].join(',')}|${sortLogs.sort ? `${sortLogs.sort.key}${sortLogs.sort.dir}` : '-'}|${z.tz}|${z.ltz ? `${z.ltz.mode}${z.lOff}` : '-'}|${ui.running && !ui.hits.length}|${lf.host}|${lf.ip}|${typed}`;
   return L.get('live:table', sig, () => {
     const cell = (v, cls = '') => h(`td${cls}`, v === null || v === undefined ? h('span.muted', '—') : String(v));
     const rows = ordered.flatMap((d, i) => {
@@ -356,32 +390,33 @@ function tableNode(c) {
         },
         h('td.mono.nowrap', d.ts === null ? h('span.muted', 'unreadable') : z.inZone(d.ts).slice(11)),
         h('td.mono.nowrap', d.event === null ? h('span.muted', 'unreadable') : z.inZone(d.event).slice(d.ts !== null && z.inZone(d.ts).slice(0, 10) === z.inZone(d.event).slice(0, 10) ? 11 : 0)),
-        cell(d.host, '.mono'), cell(d.ip, '.mono'), cell(d.tag1),
+        cell(d.host, '.mono'), cell(d.ip, '.mono'), cell(d.tag1), typed ? h('td.ld-type-name', { title: d.logType === null ? 'no log_type in this document' : String(d.logType) }, d.logType === null ? h('span.muted', NO_LOG_TYPE) : String(d.logType)) : null,
         h('td.num', { title: d.delay === null ? null : d.tzOffset === null ? `arrival − event = ${minutesText(d.delay)}`
           : `arrival − event − time zone ${offsetLabel(d.tzOffset)} = ${minutesText(d.delay)} (raw gap ${minutesText(d.rawGap)})` },
         d.delay === null ? h('span.muted', 'unknown') : minutesText(d.delay)),
         h(`td.mono.ld-msg${open ? '.ld-open-msg' : ''}`, d.message)),
-        open ? h('tr', h('td.ld-json', { colspan: COLS.length }, jsonView(d.hit._source))) : null,
+        open ? h('tr', h('td.ld-json', { colspan: cols.length }, jsonView(d.hit._source))) : null,
       ];
     }).filter(Boolean);
     const evName = (resolveFields(c).eventTime || [])[0] || 'event time';
     const label = (k, lbl) => lbl || (k === 'host' ? lf.host || 'src_hostname' : k === 'ip' ? lf.ip || 'src_ip' : lf.tag1);
     const title = (k) => (k === 'ts' ? `When it arrived (${c.timeField || '@timestamp'}), in ${z.words}`
       : k === 'event' ? `When it happened (${evName}), stored in UTC, written in the same zone as Arrived so the difference is the delay` : null);
-    const head = h('thead', h('tr', ...COLS.map(([k, lbl, type]) => sortTh(sortLogs, k, label(k, lbl), { num: type === 'number', title: title(k) }))));
+    const head = h('thead', h('tr', ...cols.map(([k, lbl, type]) => sortTh(sortLogs, k, label(k, lbl), { num: type === 'number', title: title(k) }))));
     return h('div.tbl-wrap', h('table.tbl.ld-logs#ld-live-logs', head,
-      h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: COLS.length }, h('div.tbl-empty', ui.running ? 'Searching…' : 'No documents in this range for these filters.')))]))));
+      h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: cols.length }, h('div.tbl-empty', ui.running ? 'Searching…' : 'No documents in this range for these filters.')))]))));
   });
 }
 
 function exportHits(c) {
   const z = zoneOfCard(c);
   const lf = logFilterFields(c);
+  const typed = showsType(c);
   const data = ui.hits.map((hit) => {
     const d = docOf(hit, c);
     return {
       [`arrived (${z.off})`]: d.ts === null ? '' : zonedText(d.ts, z.tz), [`event_time (${z.off})`]: d.event === null ? '' : zonedText(d.event, z.tz),
-      [lf.host || 'src_hostname']: d.host ?? '', [lf.ip || 'src_ip']: d.ip ?? '', [lf.tag1]: d.tag1 ?? '',
+      [lf.host || 'src_hostname']: d.host ?? '', [lf.ip || 'src_ip']: d.ip ?? '', [lf.tag1]: d.tag1 ?? '', ...(typed ? { [LOG_TYPE_FIELD]: d.logType ?? '' } : {}),
       delay_minutes: d.delay === null ? '' : d.delay.toFixed(2), message: d.message, index: hit._index,
     };
   });
@@ -412,7 +447,7 @@ function filtersRow(c) {
   const sources = [...new Set(known.filter((r) => r.source).map((r) => r.source))].sort();
   const lf = logFilterFields(c);
   const pickHere = !pickId() && active.length > 1 && !ui.narrowed;
-  const shell = L.get('live:filters', `${active.map((x) => x.id).join(',')}|${c.id}|${sources.join(',')}|${ui.sourceFilter}|${lf.host}|${lf.ip}|${lf.tag1}|${pickHere}`, () => {
+  const shell = L.get('live:filters', `${active.map((x) => x.id).join(',')}|${c.id}|${sources.join(',')}|${ui.sourceFilter}|${lf.host}|${lf.ip}|${lf.tag1}|${pickHere}|${showsType(c)}|${ui.noType}`, () => {
     const pickC = pickHere ? h('label.ld-lf', { title: 'Logs follow one cluster at a time' }, 'Cluster', (() => {
       const sel = h('select#ld-live-cluster', { onchange: (e) => { ui.clusterId = e.target.value; forget(); bump(); } },
         ...active.map((x) => h('option', { value: x.id }, x.name)));
@@ -421,7 +456,7 @@ function filtersRow(c) {
     const src = h('select#ld-live-source', { onchange: (e) => { ui.sourceFilter = e.target.value; } },
       h('option', { value: 'all' }, 'All sources'), ...sources.map((n) => h('option', { value: n }, n)));
     src.value = ui.sourceFilter;
-    const field = (id, key, name, fallback, placeholder) => h('label.ld-lf', { title: name ? `Searches ${name} (the cluster’s configured log field)` : `No ${fallback} field is configured for ${c.name}: set it in the cluster’s delayFields to filter by it` },
+    const field = (id, key, name, fallback, placeholder) => h('label.ld-lf', { title: name === LOG_TYPE_FIELD ? 'Searches log_type (the same field on every cluster)' : name ? `Searches ${name} (the cluster’s configured log field)` : `No ${fallback} field is configured for ${c.name}: set it in the cluster’s delayFields to filter by it` },
       name || fallback, textField(id, key, { placeholder: name ? placeholder : 'not configured', 'aria-label': name || fallback, disabled: !name }));
     return h('div.ld-lfilters',
       pickC,
@@ -429,11 +464,14 @@ function filtersRow(c) {
       field('ld-live-host', 'host', lf.host, 'src_hostname', 'fw-core-*'),
       field('ld-live-ip', 'ip', lf.ip, 'src_ip', '10.4.0.0/16'),
       field('ld-live-tag1', 'tag1', lf.tag1, 'tag1', 'firewall'),
+      !showsType(c) ? null : ui.noType
+        ? h('span.ld-lf', LOG_TYPE_FIELD, h('button.ld-chip.ld-chip-btn#ld-live-notype', { type: 'button', title: 'Only the documents without log_type: press to take the filter away', onclick: () => { ui.noType = false; bump(); } }, NO_LOG_TYPE, ' ×'))
+        : field('ld-live-type', 'logType', LOG_TYPE_FIELD, LOG_TYPE_FIELD, 'threat'),
       h('label.ld-lf.ld-lf-q', 'Query', textField('ld-live-query', 'query', { placeholder: 'log_type:syslog AND level:error', 'aria-label': 'Query' })),
       h('button.btn.primary#ld-live-search', { type: 'button', onclick: () => search() }, icon(['M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z', 'M20 20l-3.5-3.5']), ' Search'));
   });
   // The row is kept while its shape holds; what a Watch or an address put in a filter reaches its box on every draw.
-  for (const [id, key] of [['ld-live-host', 'host'], ['ld-live-ip', 'ip'], ['ld-live-tag1', 'tag1'], ['ld-live-query', 'query']]) {
+  for (const [id, key] of [['ld-live-host', 'host'], ['ld-live-ip', 'ip'], ['ld-live-tag1', 'tag1'], ['ld-live-type', 'logType'], ['ld-live-query', 'query']]) {
     const el = fields.get(id);
     if (el && el.value !== String(ui[key])) el.value = String(ui[key]);
   }
@@ -457,7 +495,7 @@ export function liveCard(strip) {
     const lf = logFilterFields(c);
     const n = ui.narrowed;
     const t = n ? `Logs · ${n.device}` : 'Logs';
-    const narrowWords = n ? ` · ${looksLikeIp(n.device) ? lf.ip || 'src_ip' : lf.host || 'src_hostname'} = ${n.device}` : '';
+    const narrowWords = n ? ` · ${looksLikeIp(n.device) ? lf.ip || 'src_ip' : lf.host || 'src_hostname'} = ${n.device}${ui.noType ? ' · no log_type' : n.logType && ui.logType === n.logType ? ` · log_type = ${n.logType}` : ''}` : '';
     const s = `${c.name}${narrowWords} · one cluster’s documents · times in ${z.words}${z.ltz && z.ltz.mode === 'none' ? ` · cluster time zone ${timeZoneShort(z.ltz)}: delay as measured` : ''}`;
     if (title.textContent !== t) title.textContent = t;
     if (sub.textContent !== s) sub.textContent = s;
@@ -499,6 +537,6 @@ export function liveCard(strip) {
 export function liveReset() {
   liveLeave();
   forget();
-  Object.assign(ui, { narrowed: null, host: '', ip: '', tag1: '', query: '', mapped: new Map() });
+  Object.assign(ui, { narrowed: null, host: '', ip: '', tag1: '', query: '', logType: '', typeExact: '', noType: false, mapped: new Map() });
   L.clear();
 }

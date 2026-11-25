@@ -971,7 +971,7 @@ short version.
   (the timer tries again next tick); an unreachable cluster is skipped.
 - **Where it lives**: `<data>/volume/<escaped id>/YYYY-MM.json.gz` + `state.json` (0600, tmp +
   rename), `<data>/volume/layouts.json` for the shared column layouts. Nothing is held in memory
-  between requests; `VOLUME_MONTHLY_ALL` reads only the `state.json` files. Months older than
+  between requests; `VOLUME_MONTHLY_ALL` reads only the `state.json` files and the current month's file. Months older than
   `keepMonths` are removed after each run.
 - **Settings**: built-in < `defaults.volume` < cluster override (`defaults.volume.overrides[id]`
   or `clusters[].volume`) < config.txt `UI_VOLUME_*`. Hosted reads its own config file; the

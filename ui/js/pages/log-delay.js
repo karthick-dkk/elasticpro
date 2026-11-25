@@ -282,7 +282,7 @@ function wirePopups() {
 /** Go to the same view with the time-zone filter `tz` (an offset, 'none', or null for every zone). */
 function setTz(tz) {
   tzOpen = false;
-  location.hash = ldHash(route.view, route.clusterId, route.device, { tz });
+  location.hash = ldHash(route.view, route.clusterId, route.device, { ...route, tz });
 }
 
 /**

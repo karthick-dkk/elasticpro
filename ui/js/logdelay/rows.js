@@ -13,9 +13,10 @@ import { h, svg } from '../lib/dom.js';
 import { sortTh } from '../lib/table-sort.js';
 import { clusters } from '../core/state.js';
 import {
-  ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, logsADay, startedSolvedText, whenText, extraOf,
+  ldHash, stateText, rowStateText, typesNotRead, stateTone, nowText, minutesText, durationText, countText, docsText, logsADay, startedSolvedText, whenText, extraOf, partLateText,
 } from '../core/logdelay-report.js';
 import { deviceZoneText, delaySumText } from '../core/log-tz.js';
+import { hasTypes, saysTypes, typesText, typesTitle } from '../core/log-types.js';
 import { fixButton, fixesFor } from './fix-popover.js';
 import { measureAgainButton } from './measure-again.js';
 
@@ -25,7 +26,7 @@ const link = (href, text, title) => h('a', { href, title: title || null }, text)
 const muted = (t = '—') => h('span.muted', t);
 
 /** How bad a state is, for sorting "Now": worst highest; can't measure and unknown are unknown. */
-const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, other_tz: 2.5, silent: 2, little: 0, no_delay: 0 };
+const STATE_RANK = { critical: 5, delay: 4, part_delay: 3.5, clock_ahead: 3, other_tz: 2.5, silent: 2, little: 0, no_delay: 0 };
 export const stateRank = (s) => (s in STATE_RANK ? STATE_RANK[s] : null);
 /** When the last delay (or silence) began: what "Last delay: started → solved" sorts on. */
 export const lastDelayAt = (r) => (r.state === 'silent' && finite(r.silentSince) ? r.silentSince : finite(r.lateSince) ? r.lateSince : finite(r.lastStarted) ? r.lastStarted : null);
@@ -45,11 +46,16 @@ const COLS = {
     { type: 'text', value: (r) => extraOf(r, 'zone') }],
   tag1: ['tag1', false, (r) => { const v = extraOf(r, 'tag1'); return h('td', v === null ? muted() : String(v)); },
     { type: 'text', value: (r) => extraOf(r, 'tag1') }],
-  state: ['Now', false, (r) => h('td', r.state === 'other_tz'
+  state: ['Now', false, (r) => h('td', r.typesUnread ? h('span', { title: rowStateText(r) }, typesNotRead(r) ? statePill('unmeasured', 'log types not read') : statePill(r.state))
+    : r.state === 'other_tz'
     ? h('span', { title: `Its logs are stamped in another time zone (${deviceZoneText(r)}) than the cluster’s: the gap sits at that offset run after run. Not late.` }, statePill(r.state))
-    : statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],
+    : r.state === 'part_delay' ? h('span', { title: r.types ? typesTitle(r.types) : 'Some of its log types are late, others are on time' }, statePill(r.state))
+      : statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],
+  // Its log types (0.3.90): how many are late and which; the rest in the title. Only in tables whose rows carry them (withTypes).
+  types: ['Log types', false, (r) => h(`td.ld-types-cell${r.types && r.types.late ? '' : '.muted'}`, { title: typesTitle(r.types) }, typesText(r.types)),
+    { type: 'number', value: (r) => (hasTypes(r) && r.types.measured !== 0 ? r.types.late : null), start: -1 }],
   // The figure after the zone step; its title spells the sum out (docs/LOGDELAY.md "Time zones").
-  now: ['Delay now', true, (r, ctx) => h(`td.num${r.stale ? '.muted' : ''}`, { title: [r.stale && finite(r.lastMeasuredMs) ? `last measured ${whenText(r.lastMeasuredMs, ctx.now || Date.now())}, not measured since` : '', delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true }))].filter(Boolean).join(' · ') || null }, nowText(r)),
+  now: ['Delay now', true, (r, ctx) => h(`td.num${r.stale || (r.state === 'part_delay' && !r.delayLogType) ? '.muted' : ''}`, { title: [r.delayLogType ? `of log type ${r.delayLogType}` : '', r.stale && finite(r.lastMeasuredMs) ? `last measured ${whenText(r.lastMeasuredMs, ctx.now || Date.now())}, not measured since` : '', delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true }))].filter(Boolean).join(' · ') || null }, nowText(r)),
     { type: 'number', value: (r) => r.nowMinutes }],
   // Live's delay: a bar against the worst in the table (ctx.barMax) and the minutes; unknown is an empty track and "—", never 0.
   nowBar: ['Delay now', true, (r, ctx) => {
@@ -65,7 +71,8 @@ const COLS = {
     { type: 'text', value: (r) => deviceZoneText(r) }],
   max: ['Max', true, (r) => h('td.num', minutesText(r.maxMinutes)), { type: 'number', value: (r) => r.maxMinutes }],
   episodes: ['Delays', true, (r) => h('td.num', countText(r.episodes)), { type: 'number', value: (r) => r.episodes }],
-  lateMs: ['Time late', true, (r) => h('td.num', durationText(r.lateMs)), { type: 'duration', value: (r) => r.lateMs }],
+  lateMs: ['Time late', true, (r) => h('td.num', { title: partLateText(r) ? 'late: every log type of the device was late · part late: only some of them' : null }, durationText(r.lateMs),
+    partLateText(r) ? h('span.muted.ld-part-ms', ` · ${partLateText(r)}`) : null), { type: 'duration', value: (r) => r.lateMs }],
   last: ['Last delay: started → solved', false, (r, ctx) => h('td', r.live ? muted('not in one measurement') : startedSolvedText(r, ctx.now)),
     { type: 'date', value: lastDelayAt }],
   docs: ['Logs a day', true, (r) => h('td.num', { title: finite(r.docsPerDay) ? null : logsADay(r).text === 'unknown' ? null : `${logsADay(r).text} ${logsADay(r).label}` }, docsText(r.docsPerDay)), { type: 'number', value: (r) => r.docsPerDay }],
@@ -75,6 +82,12 @@ const COLS = {
   pattern: ['Looks like', false, (r) => h('td', r.pattern ? h('span', { title: r.patternNote || null }, statePill('clock_ahead', r.pattern)) : muted()),
     { type: 'text', value: (r) => r.pattern }],
 };
+
+/** `keys` with the Log types column after the state where a row says its log types (a core before 0.3.90 sends none: the table as it was). */
+export function withTypes(keys, rows) {
+  const i = keys.indexOf('state');
+  return i < 0 || !(rows || []).some(saysTypes) ? keys : [...keys.slice(0, i + 1), 'types', ...keys.slice(i + 1)];
+}
 
 /** A cluster's own context fields as columns (`x:<name>`), zone and tag1 left out: they always have their own. */
 export function extraCols(extras) {

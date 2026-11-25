@@ -82,6 +82,7 @@ import * as pPlay from './pages/play.js';
 import { fullscreen } from './core/fullscreen.js';
 import { displaySecretOf, playExchange } from './play/api.js';
 import { loadSilences } from './core/silences.js';
+import { loadServerRuns } from './core/delay-levels.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
 import { setPageGate } from './core/intent.js';
@@ -1237,9 +1238,19 @@ async function start(config, handle) {
   // The team's alert silences: loaded now and kept current, so a silence set on another
   // screen leaves this one's counts within a minute.
   if (!isSnapshotMode()) { loadSilences(); setInterval(() => { loadSilences(); }, 60000); }
+  // The scheduled log delay runs, for the log-delay alert (Alerts, the bell, Clusters): asked each
+  // minute, sent at most every 5 (core/delay-levels.js loadServerRuns).
+  readServerRuns();
+  setInterval(readServerRuns, 60000);
   // Certificates are seen as connections are made, so the core is asked again every
   // minute — but only to learn whether something *new* was accepted (see trust-notice.js).
   if (!isSnapshotMode() && !isDisplay()) { checkAcceptedCertificates(); setInterval(checkAcceptedCertificates, 60000); }
+}
+
+/** The server's last log delay runs: a signed-in person on a hosted core, never a display link or a snapshot file. */
+async function readServerRuns() {
+  if (!me || me.role === 'guest' || isDisplay() || isSnapshotMode()) return;
+  if (await loadServerRuns()) bus.emit('data');
 }
 
 /**

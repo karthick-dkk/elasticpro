@@ -81,6 +81,14 @@ fn private(_: &Path, _: u32) {}
 /// Write `bytes` to `p` through a temporary file: created 0600, synced, renamed. The
 /// report queue and the mail settings are written the same way (`report`).
 pub(crate) fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic_with(p, |f| {
+        use std::io::Write as _;
+        f.write_all(bytes).map_err(|e| e.to_string())
+    })
+}
+
+/// The same, for what is written as it is made (a file too large to hold as text).
+pub(crate) fn write_atomic_with(p: &Path, write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), String>) -> Result<(), String> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         private(d, 0o700);
@@ -96,9 +104,13 @@ pub(crate) fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
             use std::os::unix::fs::OpenOptionsExt;
             o.mode(0o600);
         }
-        let mut f = o.open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        f.write_all(bytes).map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| e.to_string())?;
+        let f = o.open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 18, f);
+        if let Err(e) = write(&mut w).and_then(|()| w.flush().map_err(|e| e.to_string())).and_then(|()| w.get_ref().sync_all().map_err(|e| e.to_string())) {
+            drop(w);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
     }
     std::fs::rename(&tmp, p).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);

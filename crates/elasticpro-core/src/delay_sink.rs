@@ -559,7 +559,9 @@ pub fn bulk_failure(res: &Value) -> Option<String> {
     if body.get("errors").and_then(|v| v.as_bool()) != Some(true) {
         return None;
     }
-    let items = body.get("items").and_then(|v| v.as_array())?;
+    let Some(items) = body.get("items").and_then(|v| v.as_array()) else {
+        return Some("documents were rejected, and the answer does not say which".into());
+    };
     let first = items.iter().find_map(|it| {
         it.get("index")?
             .get("error")?
@@ -576,6 +578,16 @@ pub fn bulk_failure(res: &Value) -> Option<String> {
         items.len(),
         first.unwrap_or_else(|| "no reason given".into())
     ))
+}
+
+/// A bulk that was taken, some documents of it rejected: how many, and why the first was. The
+/// others of it are written, and so may the next requests be.
+pub fn bulk_rejected(res: &Value) -> Option<(usize, String)> {
+    let taken = res.get("ok").and_then(|v| v.as_bool()) == Some(true) && res.pointer("/json/errors").and_then(|v| v.as_bool()) == Some(true);
+    let items = res.pointer("/json/items").and_then(|v| v.as_array()).filter(|_| taken)?;
+    let bad: Vec<&Value> = items.iter().filter_map(|it| it.pointer("/index/error")).collect();
+    let why = bad.first().and_then(|e| e.get("reason")).and_then(|r| r.as_str()).unwrap_or("no reason given");
+    (!bad.is_empty() && bad.len() < items.len()).then(|| (bad.len(), why.to_string()))
 }
 
 /* ------------------------------- time, locally ------------------------------- */
@@ -853,6 +865,11 @@ mod tests {
             { "index": { "status": 400, "error": { "reason": "mapper_parsing_exception" } } },
         ] } }));
         let partial = partial.unwrap();
+        let of = |items: Value| json!({ "ok": true, "json": { "errors": true, "items": items } });
+        let (ok, bad) = (json!({ "index": { "status": 201 } }), json!({ "index": { "status": 400, "error": { "reason": "mapper_parsing_exception" } } }));
+        assert_eq!(bulk_rejected(&of(json!([ok, bad, bad]))), Some((2, "mapper_parsing_exception".into())), "the one that was taken is not lost with them");
+        assert_eq!(bulk_rejected(&of(json!([bad]))), None, "none taken: the write failed");
+        assert_eq!(bulk_rejected(&json!({ "ok": false, "kind": "http" })), None);
         assert!(partial.contains("1 of 2"), "{partial}");
         assert!(partial.contains("mapper_parsing_exception"), "{partial}");
     }

@@ -6262,7 +6262,7 @@ impl Core {
                 // This cluster's part of the run's details (docs/JOBS.md "Run details").
                 let part_at = crate::fleet::now_ms();
                 // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
-                // stored at this moment (late = delay or critical by the cluster's own levels, on the
+                // stored at this moment (late = delay, critical or part delayed by the cluster's own levels, on the
                 // corrected delay — levels.rs is the one definition), or every one.
                 let (filter, expected) = match (&scope.device, scope.devices) {
                     (Some(d), _) => (crate::logdelay::measure::DeviceFilter::One(d.clone()), Some(1u64)),
@@ -6270,10 +6270,12 @@ impl Core {
                         let t = self.logdelay_store().map(|st| st.read_tracker(id));
                         let known = t.as_ref().map(|t| t.devices.len()).unwrap_or(0);
                         let late: Vec<String> = t.as_ref().map(|t| t.devices.iter()
-                            .filter(|(_, d)| d.state.late())
+                            .filter(|(_, d)| d.state.late() || d.state == crate::logdelay::levels::State::PartDelay)
                             .map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                        let part = t.as_ref().map_or(0, |t| t.devices.values().filter(|d| d.state == crate::logdelay::levels::State::PartDelay).count());
+                        let part = if part > 0 { format!(", {part} of them part delayed") } else { String::new() };
                         if late.is_empty() {
-                            scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
+                            scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed, critical or part delayed) at the start, so nothing was read; \
                                                        Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
                             if let Some(r) = run { r.progress(0, 0); }
                             ld_part(run, id, part_at, 0, None);
@@ -6282,10 +6284,10 @@ impl Core {
                         }
                         if late.len() > LATE_FILTER_MAX {
                             // More late devices than one query's terms filter should carry: the whole cluster.
-                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known}{part}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
                             (crate::logdelay::measure::DeviceFilter::All, Some(known as u64))
                         } else {
-                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start)", self.cluster_name(id), late.len()));
+                            scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start{part})", self.cluster_name(id), late.len()));
                             let n = late.len() as u64;
                             (crate::logdelay::measure::DeviceFilter::Some(late), Some(n))
                         }
@@ -6429,12 +6431,18 @@ impl Core {
                 continue;
             }
             let mut wrote_all = true;
+            let mut rejected: Option<(usize, String)> = None;
             for body in self.logdelay_bulk(id, &applied, &daily, &prefix, now) {
                 let wrote = if to_history {
                     self.history_delay_bulk(body).await
                 } else {
                     self.es_req(delay_sink::bulk_request(&cfg, body)).await
                 };
+                // Some documents refused: the rest are written, the next ones too, and it is said.
+                if let Some((n, why)) = delay_sink::bulk_rejected(&wrote) {
+                    rejected = Some(rejected.map_or((n, why), |(a, first)| (a + n, first)));
+                    continue;
+                }
                 if let Some(e) = delay_sink::bulk_failure(&wrote) {
                     failed += 1;
                     write_failed += 1;
@@ -6447,9 +6455,24 @@ impl Core {
                     break;
                 }
             }
-            if wrote_all {
-                measured += applied.rows.len();
-                done_part(applied.rows.len() as u64);
+            match rejected.filter(|_| wrote_all) {
+                Some((n, why)) => {
+                    let e = format!("{n} documents rejected, the rest written: {why}");
+                    if partly.is_none() {
+                        failed += 1;
+                        failed_ids.push(id.clone());
+                    }
+                    let written = applied.rows.len().saturating_sub(n);
+                    measured += written;
+                    ld_part(run, id, part_at, written as u64, Some((PartStatus::Partial, &e)));
+                    let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
+                    errors.push((place, SinkNote::write(Some(id), sink, e)));
+                }
+                None if wrote_all => {
+                    measured += applied.rows.len();
+                    done_part(applied.rows.len() as u64);
+                }
+                None => {}
             }
         }
         let at = |id: &String| targets.iter().position(|t| t == id);

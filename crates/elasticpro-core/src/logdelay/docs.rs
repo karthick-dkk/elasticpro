@@ -6,15 +6,35 @@
 //! | record | index | `_id` |
 //! |---|---|---|
 //! | measurement | `<prefix>-YYYY.MM` | `cluster\|device\|hour` (a rerun overwrites) |
-//! | period | `<prefix>-episodes-YYYY` | `cluster\|device\|started` (solving overwrites the open one) |
+//! | period | `<prefix>-episodes-YYYY` | `cluster\|device\|started` (solving overwrites the open one); a log type's: `cluster\|t\|<hash>` |
 //! | daily | `<prefix>-daily-YYYY` | `cluster\|day` (every run rewrites today) |
+//!
+//! An `_id` Elasticsearch would refuse (`ID_MAX`; it refuses the whole request, not the one
+//! document) is `cluster\|<kind>\|<hash>` instead (`hashed`).
 //!
 //! On the history store `<prefix>` is `<store prefix>-delay`; on a sink cluster it is the
 //! sink's `indexPrefix` (`elasticpro-log-delay`). Every document carries `record`, so a
 //! search on `<prefix>-*` can tell them apart.
 
-use super::state::{Daily, Episode, Row};
+use super::state::{Daily, Episode, Row, RowType};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+/// The longest `_id` Elasticsearch takes, bytes.
+const ID_MAX: usize = 512;
+
+/// An `_id` of fixed length, whatever the names in it: the sha256 of its parts as a JSON array, so
+/// no name can be read as a part of another.
+fn hashed(cluster: &str, kind: &str, parts: Value) -> String {
+    let sha = |s: &str| hex::encode(Sha256::digest(s.as_bytes()));
+    let parts = sha(&parts.to_string());
+    if cluster.len() > ID_MAX / 2 { format!("{}|{kind}|{parts}", sha(cluster)) } else { format!("{cluster}|{kind}|{parts}") }
+}
+
+/// The id as it always was, unless Elasticsearch would not take it.
+fn fit(id: String, over: impl FnOnce() -> String) -> String {
+    if id.len() > ID_MAX { over() } else { id }
+}
 
 pub fn measurement_index(prefix: &str, year: i64, month: i64) -> String {
     format!("{prefix}-{year:04}.{month:02}")
@@ -54,11 +74,25 @@ pub fn measurement_doc(cluster: &str, r: &Row, bucket: &str, run_ms: i64) -> Val
         "device_tz_offset": r.device_tz_offset,
         "state": r.state.as_str(),
         "extras": extras(&r.extras),
+        // The log type its figures are from; null: its newest document's, whatever its type.
+        "log_type": r.by_type.and_then(|i| r.types.as_ref()?.get(i)).map(RowType::name),
+        "late_types": r.types.as_ref().map(|v| v.iter().filter(|t| t.state.late()).map(RowType::name).collect::<Vec<_>>()),
+        "types": r.types.as_ref().map(|v| v.iter().map(type_doc).collect::<Vec<_>>()),
+        "types_truncated": r.types_truncated,
     })
 }
 
+/// One log type of a measurement; `no_type` marks the documents without one.
+fn type_doc(t: &RowType) -> Value {
+    let mut v = json!({ "log_type": t.name(), "state": t.state.as_str(), "delay_minutes": t.delay_minutes, "raw_gap_minutes": t.raw_gap_minutes, "docs": t.docs });
+    if t.log_type.is_none() {
+        v["no_type"] = json!(true);
+    }
+    v
+}
+
 pub fn measurement_id(cluster: &str, device: &str, bucket: &str) -> String {
-    format!("{cluster}|{device}|{bucket}")
+    fit(format!("{cluster}|{device}|{bucket}"), || hashed(cluster, "m", json!([device, "measurement", null, bucket])))
 }
 
 pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
@@ -81,11 +115,19 @@ pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
         "measurements": e.measurements,
         "pattern": e.pattern(),
         "extras": extras(&e.extras),
+        // A log type's own period; the device's has neither.
+        "log_type": e.log_type,
+        "no_type": e.no_type,
     })
 }
 
 pub fn episode_id(cluster: &str, e: &Episode) -> String {
-    format!("{cluster}|{}|{}", e.device, e.started_ms)
+    let parts = |kind: &str| json!([e.device, kind, e.log_type, e.started_ms]);
+    match (&e.log_type, e.no_type) {
+        (Some(_), _) => hashed(cluster, "t", parts("type")),
+        (None, true) => hashed(cluster, "t", parts("no-type")),
+        (None, false) => fit(format!("{cluster}|{}|{}", e.device, e.started_ms), || hashed(cluster, "d", parts("device"))),
+    }
 }
 
 pub fn daily_doc(cluster: &str, cluster_name: &str, d: &Daily, written_ms: i64) -> Value {
@@ -108,19 +150,13 @@ pub fn daily_doc(cluster: &str, cluster_name: &str, d: &Daily, written_ms: i64) 
 }
 
 pub fn daily_id(cluster: &str, day: &str) -> String {
-    format!("{cluster}|{day}")
+    fit(format!("{cluster}|{day}"), || hashed(cluster, "y", json!([day])))
 }
 
-/// NDJSON of `(index, id, document)` triples.
-pub fn bulk(items: &[(String, String, Value)]) -> String {
-    let mut s = String::new();
-    for (index, id, doc) in items {
-        s.push_str(&json!({ "index": { "_index": index, "_id": id } }).to_string());
-        s.push('\n');
-        s.push_str(&doc.to_string());
-        s.push('\n');
-    }
-    s
+/// One document of a bulk request, as NDJSON, added to `s`.
+pub fn bulk_line(s: &mut String, index: &str, id: &str, doc: &Value) {
+    use std::fmt::Write as _;
+    let _ = write!(s, "{}\n{doc}\n", json!({ "index": { "_index": index, "_id": id } }));
 }
 
 /// The index template for `<prefix>-*` on the history store: every field of the three
@@ -142,7 +178,9 @@ pub fn template_body(prefix: &str) -> Value {
         ("day", &json!({ "type": "date", "format": "yyyy-MM-dd" })), ("devices", &long), ("onTime", &long), ("little", &long), ("delayed", &long),
         ("critical", &long), ("clockAhead", &long), ("otherTz", &long), ("silent", &long), ("unmeasured", &long), ("lateBeforeSilent", &long), ("noDelay", &long), ("startedCount", &long), ("solvedCount", &long),
         ("lateHours", &float), ("medianMinutes", &float), ("p95Minutes", &float), ("measured", &long), ("complete", &json!({ "type": "boolean" })),
-        ("writtenAt", &ms),
+        ("writtenAt", &ms), ("partDelayed", &long), ("logTypes", &json!({ "properties": { "total": long, "late": long, "above": long } })),
+        ("log_type", &kw), ("no_type", &json!({ "type": "boolean" })), ("late_types", &kw), ("types_truncated", &json!({ "type": "boolean" })),
+        ("types", &json!({ "properties": { "log_type": kw, "no_type": { "type": "boolean" }, "state": kw, "delay_minutes": float, "raw_gap_minutes": float, "docs": long } })),
     ];
     let properties: Map<String, Value> = fields.iter().map(|(k, v)| (k.to_string(), (*v).clone())).collect();
     json!({
@@ -167,8 +205,8 @@ mod tests {
     fn ids_repeat_so_a_rerun_overwrites() {
         let mut extras = BTreeMap::new();
         extras.insert("fwd_tag".to_string(), "syslog-1".to_string());
-        let e = Episode { device: "fw".into(), started_ms: 1_000, solved_ms: None, ended_ms: None, ended_why: None, last_measured_ms: None, measured_until_ms: None, worst_minutes: 45.0, worst_state: State::Delay,
-                          last_minutes: 45.0, last_state: State::Delay, measurements: 1, whole_hour: 0, extras: extras.clone() };
+        let e = Episode { device: "fw".into(), started_ms: 1_000, worst_minutes: 45.0, worst_state: State::Delay, last_minutes: 45.0, last_state: State::Delay, measurements: 1,
+                          extras: extras.clone(), ..Episode::default() };
         assert_eq!(episode_id("prod", &e), "prod|fw|1000");
         let mut solved = e.clone();
         solved.solved_ms = Some(7_000);
@@ -177,18 +215,69 @@ mod tests {
         assert_eq!(d["open"], false);
         assert_eq!(d["extras"]["fwd_tag"], "syslog-1");
         assert_eq!(d["@timestamp"], "1970-01-01T00:00:01.000Z");
+        // A log type's period never overwrites its device's, nor another type's.
+        let threat = Episode { log_type: Some("threat".into()), ..e.clone() };
+        let none = Episode { no_type: true, ..e.clone() };
+        let odd = Episode { log_type: Some("(no log type)".into()), ..e.clone() };
+        let ids: std::collections::BTreeSet<String> = [&e, &threat, &none, &odd].iter().map(|x| episode_id("prod", x)).collect();
+        assert_eq!(ids.len(), 4);
+        // Written by every later run, so it never changes.
+        assert_eq!(episode_id("prod", &threat), format!("prod|t|{}", hex::encode(Sha256::digest(br#"["fw","type","threat",1000]"#))));
+        assert_eq!((episode_doc("prod", &threat, 9)["log_type"].clone(), episode_doc("prod", &none, 9)["no_type"].clone(), episode_doc("prod", &e, 9)["log_type"].clone()),
+                   (json!("threat"), json!(true), Value::Null));
         assert_eq!(daily_id("prod", "2026-11-04"), "prod|2026-11-04");
         assert_eq!(measurement_id("prod", "fw", "2026-11-04T14:00:00Z"), "prod|fw|2026-11-04T14:00:00Z");
     }
 
     #[test]
+    fn no_name_makes_an_id_too_long_or_another_documents() {
+        let ep = |device: &str, log_type: Option<&str>, no_type: bool| Episode { device: device.into(), log_type: log_type.map(String::from), no_type, started_ms: 1_000, ..Episode::default() };
+        let id = |device: &str, log_type: Option<&str>, no_type: bool| episode_id("prod", &ep(device, log_type, no_type));
+        // Long names, of a device and of a log type, and of a cluster.
+        let long = "é".repeat(16_000);
+        let all = [id(&long, None, false), id(&long, Some("threat"), false), id("fw", Some(&long), false), id(&long, None, true),
+                   measurement_id("prod", &long, "2026-11-04T14:00:00Z"), daily_id(&long, "2026-11-04"), episode_id(&long, &ep("fw", None, true))];
+        assert!(all.iter().all(|i| i.len() <= ID_MAX), "{all:?}");
+        assert_eq!(all.iter().collect::<std::collections::BTreeSet<_>>().len(), all.len());
+        assert!(all[0].starts_with("prod|d|") && all[1].starts_with("prod|t|") && all[4].starts_with("prod|m|"));
+        assert_ne!(id(&long, None, false), id(&format!("{long}x"), None, false));
+        // The device's own ids are as they were in 0.3.89, up to the last byte Elasticsearch takes.
+        let edge = "d".repeat(ID_MAX - "prod||1000".len());
+        assert_eq!(id(&edge, None, false), format!("prod|{edge}|1000"));
+        assert_eq!(id(&format!("{edge}d"), None, false).len(), "prod|d|".len() + 64);
+        assert_eq!(id("a|b", None, false), "prod|a|b|1000");
+        // "|" in a name, and a log type with the text of another kind.
+        let mut seen = std::collections::BTreeSet::new();
+        for (d, t, none) in [("fw", None, false), ("fw", None, true), ("fw", Some("no-type"), false), ("fw", Some("null"), false), ("fw|no-type", None, false), ("fw|type:x", None, false),
+                             ("fw", Some("x"), false), ("fw", Some("x|y"), false), ("fw|x", Some("y"), false), ("fw", Some("type"), false), ("fw\",\"type", Some("x"), false), ("t", None, false)] {
+            assert!(seen.insert(id(d, t, none)), "{d} {t:?} {none}");
+        }
+    }
+
+    #[test]
     fn a_silent_row_carries_no_delay_and_its_state() {
-        let r = Row { device: "fw".into(), docs: 0, arrival_ms: Some(5), event_ms: None, event_field: None, delay_minutes: None, raw_gap_minutes: None, device_tz_offset: None,
-                      tz_offset_minutes: None, state: State::Silent, extras: BTreeMap::new() };
+        let r = Row { device: "fw".into(), arrival_ms: Some(5), state: State::Silent, ..Row::default() };
         let d = measurement_doc("prod", &r, "2026-11-04T14:00:00Z", 1);
         assert_eq!(d["delay_minutes"], Value::Null);
         assert_eq!(d["state"], "silent");
         assert_eq!(d["record"], "measurement");
+        assert_eq!((d["types"].clone(), d["late_types"].clone(), d["log_type"].clone()), (Value::Null, Value::Null, Value::Null), "not read by log types: not none");
+    }
+
+    #[test]
+    fn a_rows_log_types_are_written_with_it() {
+        let t = |n: Option<&str>, m: f64, s: State| RowType { log_type: n.map(String::from), delay_minutes: Some(m), docs: 3, state: s, ..RowType::default() };
+        let r = Row { device: "fw".into(), state: State::PartDelay, delay_minutes: Some(46.0), by_type: Some(1),
+                      types: Some(vec![t(Some("traffic"), 1.0, State::NoDelay), t(Some("threat"), 46.0, State::Delay), t(None, 2.0, State::NoDelay)]), ..Row::default() };
+        let d = measurement_doc("prod", &r, "2026-11-04T14:00:00Z", 1);
+        assert_eq!((d["state"].clone(), d["log_type"].clone(), d["late_types"].clone()), (json!("part_delay"), json!("threat"), json!(["threat"])));
+        assert_eq!(d["types"][2], json!({ "log_type": "(no log type)", "no_type": true, "state": "no_delay", "delay_minutes": 2.0, "raw_gap_minutes": null, "docs": 3 }));
+        assert!(d["types"][1].get("no_type").is_none());
+        let p = &template_body("x")["template"]["mappings"]["properties"];
+        for (k, v) in [("log_type", "keyword"), ("late_types", "keyword"), ("no_type", "boolean"), ("partDelayed", "long")] {
+            assert_eq!(p[k]["type"], v, "{k}");
+        }
+        assert_eq!((p["types"]["properties"]["log_type"]["type"].clone(), p["logTypes"]["properties"]["late"]["type"].clone()), (json!("keyword"), json!("long")));
     }
 
     #[test]
@@ -199,7 +288,8 @@ mod tests {
         assert_eq!(t["priority"], 210);
         assert!(crate::guard::history_guard(crate::guard::Writes::HistoryWrite, "elasticpro-history",
             "PUT", "/_index_template/elasticpro-history-delay-template?create=true", Some(&t.to_string())).is_none());
-        let b = bulk(&[(measurement_index("elasticpro-history-delay", 2026, 11), "prod|fw|x".into(), json!({ "a": 1 }))]);
+        let mut b = String::new();
+        bulk_line(&mut b, &measurement_index("elasticpro-history-delay", 2026, 11), "prod|fw|x", &json!({ "a": 1 }));
         assert_eq!(b.lines().count(), 2);
         assert!(crate::guard::history_guard(crate::guard::Writes::HistoryWrite, "elasticpro-history", "POST", "/_bulk", Some(&b)).is_none());
         assert_eq!(episodes_index("p", 2026), "p-episodes-2026");

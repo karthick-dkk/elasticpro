@@ -1,7 +1,7 @@
 /** Small pieces the Reports sections share: amber "unknown" text, pills, the disk bar. */
 
 import { h } from '../lib/dom.js';
-import { bytes } from '../lib/fmt.js';
+import { bytes, gbFigure } from '../lib/fmt.js';
 
 /** Unknown is not zero: amber words, with what would fix it on hover. */
 export const amber = (text, title = null) => h('span.rp-na', { title }, text);
@@ -41,5 +41,5 @@ export function diskBar(used, total, { what = 'disk' } = {}) {
     h('span.rp-dl', h('b', bytes(used)), ` of ${bytes(total)}, ${bytes(free)} avail`));
 }
 
-/** Bytes as GB with one decimal for a CSV cell (binary, as every size here); null stays empty. */
-export const gbCell = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round((v / 1024 ** 3) * 10) / 10 : null);
+/** Bytes as GB for a CSV cell (binary, as every size here; lib/fmt.js says the digits); null stays empty. */
+export const gbCell = gbFigure;

@@ -1,9 +1,11 @@
 /** Application state, refresh loop and auto-reconnect. */
 
+import { namesText } from './log-types.js';
+import { serverRunOf, levelsOf } from './delay-levels.js';
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
-import { bytes as bytesish, ago, dur, dtz } from '../lib/fmt.js';
+import { bytes as bytesish, ago, dur, dtz, hmz } from '../lib/fmt.js';
 import { diskLevel, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
 import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
@@ -1964,7 +1966,7 @@ export function coverage(clusterIds, datasets, now = Date.now()) {
  * Published by whoever measured — the Log delay page when a person runs it, the scraper
  * on its own schedule — because measuring is one aggregation per cluster and alerts()
  * runs on every refresh. A measurement older than DELAY_ALERT_HOURS says nothing about now
- * and raises nothing.
+ * and raises nothing. The server's own scheduled runs are read beside it (delayReading).
  */
 const delaySummaries = new Map();
 const DELAY_ALERT_HOURS = 2;
@@ -1976,6 +1978,28 @@ export function setDelaySummary(clusterId, summary, at = Date.now()) {
 }
 
 export function delaySummaryFor(clusterId) { return delaySummaries.get(clusterId) || null; }
+
+/**
+ * What the log-delay alert rests on: the newest of the browser's measurement and the server's last
+ * run (delay-levels.js serverRunOf) — an older one never replaces it, even once the newest is too
+ * old to say anything. `{summary, at, server, levels, failed}`, or null: nothing measured, or the
+ * newest is out of date. A server run by log types stands over a newer measurement without them. A measurement of ours is good DELAY_ALERT_HOURS; a run of the server's until the next
+ * one is due and the core's grace is over, and not once the core itself calls it stale.
+ */
+function delayReading(clusterId, now) {
+  const mine = delaySummaries.get(clusterId);
+  const run = state.mode === 'snapshot' ? null : serverRunOf(clusterId);
+  const ours = DELAY_ALERT_HOURS * 3600 * 1000;
+  const over = !!run && (run.stale || now >= (run.goodUntil === null ? run.at + ours : run.goodUntil));
+  // Play measures a device by its newest document only: on a cluster measured by log types that cannot
+  // tell part delayed from late or on time, so it does not replace a run of the server's that does.
+  const coarse = !!run && run.typed && !run.failed && !over && !!mine && !mine.summary.logTypes;
+  if (run && (!mine || run.at > mine.at || coarse)) {
+    if (over) return null;
+    return { summary: run.summary, at: run.at, server: true, levels: run.levels, failed: run.failed };
+  }
+  return mine && now - mine.at < ours ? { summary: mine.summary, at: mine.at, server: false, levels: levelsOf(clusterId), failed: false } : null;
+}
 
 /**
  * alerts(), memoised for the places that ask on every redraw — the tab badge, the topbar,
@@ -2040,22 +2064,35 @@ export function alerts() {
  * Pushes through `add`; nothing here fetches.
  */
 function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
-  // Devices shipping late, from the last measurement — see setDelaySummary.
-  const ds = delaySummaries.get(c.id);
-  if (ds && now - ds.at < DELAY_ALERT_HOURS * 3600 * 1000) {
+  // Devices shipping late, from the last measurement — ours or the server's (delayReading).
+  const ds = delayReading(c.id, now);
+  if (ds) {
     const by = ds.summary.by || {};
     const w = ds.summary.worst;
-    const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${w.delayLogType ? `log type ${w.delayLogType}, ` : ''}${Math.round(w.delayMinutes)} min behind${w.notMeasuredSince ? ` when last measured ${hmz(w.notMeasuredSince, now)}` : ''}.` : '';
+    // The server's run says which: "as of last run 14:02 GMT+5:30"; a newer one that failed is said too.
+    const asOf = ds.server ? `, as of last run ${hmz(ds.at, now)}${ds.failed ? ' (a newer run failed)' : ''}` : '';
+    const lv = ds.levels || { delayFrom: 30, criticalOver: 60 };
+    // Part delayed (0.3.90): only some of a device's log types late. Said beside the delayed ones, which
+    // alone decide the level; on its own it is a warning. Nothing where log types were not measured.
+    const partN = by.PART_DELAY || 0;
+    const partTypes = (ds.summary.partLate || []).map((x) => x.logType);
+    const part = partN ? ` · ${partN} part delayed${partTypes.length ? ` (log types: ${namesText(partTypes, 5)})` : ''}` : '';
     // Past the red line (classify's CRITICAL, over 60 min) is High, not critical: logs late
     // are searches seeing the past, not data lost (the owner's rule, 2026-11-01).
     if (by.CRITICAL) {
       add({ key: `${c.id}:log-delay`, level: 'high', cluster: c,
-        title: `${c.name}: ${by.CRITICAL} device(s) shipping logs over 60 min late`,
-        detail: `${by.CRITICAL} over 60 min, ${by.DELAYED || 0} 30–60 min late, of ${ds.summary.devices}.${worst}` });
+        title: `${c.name}: ${by.CRITICAL} device(s) shipping logs over ${lv.criticalOver} min late`,
+        detail: `${by.CRITICAL} over ${lv.criticalOver} min, ${by.DELAYED || 0} ${lv.delayFrom}–${lv.criticalOver} min late, of ${ds.summary.devices}${part}${asOf}.${worst}` });
     } else if (by.DELAYED) {
       add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
         title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
-        detail: `${by.DELAYED} delayed of ${ds.summary.devices}.${worst}` });
+        detail: `${by.DELAYED} delayed of ${ds.summary.devices}${part}${asOf}.${worst}` });
+    } else if (partN) {
+      const wt = ds.summary.worstLogType;
+      add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
+        title: `${c.name}: ${partN} device(s) part delayed, the other log types on time`,
+        detail: `0 delayed of ${ds.summary.devices}${part}${asOf}.${wt ? ` Worst log type: ${wt.logType} on ${wt.device}, ${Math.round(wt.delayMinutes)} min behind.` : worst}` });
     }
   }
   if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
@@ -2314,7 +2351,7 @@ export function heldAlerts(now = Date.now()) {
       if (!when || now - when > HELD_MAX_AGE_MS) continue;
       const raised = [];
       clusterAlerts(c, src.d, (...a) => raised.push(...a.filter(Boolean)), { now: when, live: false });
-      const ds = delaySummaries.get(c.id);
+      const ds = delayReading(c.id, when);
       out.push(...stampHeld(raised, { at: src.at, delayAt: ds ? ds.at : null, now }));
     }
   }

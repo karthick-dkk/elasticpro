@@ -33,7 +33,8 @@
  * Checking the base name instead of this one is the mistake that makes a preflight pass
  * and the query that follows return nothing.
  */
-import { statusFor, levelsOf, zoneOf } from './delay-levels.js';
+import { statusFor, levelState, levelsOf, zoneOf, deviceReading } from './delay-levels.js';
+import { LOG_TYPE_FIELD, NO_LOG_TYPE, typeLabel } from './log-types.js';
 import { correct as correctByZone, matchOffset as matchOffsetFor, offsetLabel as offsetLabelOf } from './log-tz.js';
 
 const IP_LIKE = /(^|[._])(ip|addr|address)([._]|$)/i;
@@ -68,13 +69,28 @@ export function resolveFields(cluster) {
  * aggregation will use. Event-time and arrival are date fields read from `_source`, never
  * aggregated as keywords, so they are asked about as they are.
  */
-export function fieldsToProbe(fields) {
+export function fieldsToProbe(fields, { logType = false } = {}) {
   return [
     aggregatableName(fields.device),
     ...fields.eventTime,
     fields.arrival,
     ...fields.metadata.map(aggregatableName),
+    ...(logType ? [LOG_TYPE_FIELD, `${LOG_TYPE_FIELD}.keyword`] : []),
   ];
+}
+
+/**
+ * The log type field a _field_caps answer allows (0.3.90): `{field, why}`. The field is one and the
+ * same on every cluster (log-types.js LOG_TYPE_FIELD, the owner, 2026-11-24); the mapping alone says
+ * whether it is aggregated as itself or as its `.keyword`. Not mapped: no field, and why.
+ */
+export function logTypeFrom(caps) {
+  const f = (caps && caps.fields) || {};
+  const aggregatable = (name) => f[name] && Object.values(f[name]).every((t) => !t || t.aggregatable !== false);
+  if (aggregatable(LOG_TYPE_FIELD)) return { field: LOG_TYPE_FIELD, why: null };
+  const kw = `${LOG_TYPE_FIELD}.keyword`;
+  if (aggregatable(kw)) return { field: kw, why: null };
+  return { field: null, why: f[LOG_TYPE_FIELD] ? `${LOG_TYPE_FIELD} is mapped as text without a keyword` : `${LOG_TYPE_FIELD} is not in the mapping` };
 }
 
 /**
@@ -133,13 +149,23 @@ export function decide(fields, caps) {
  *
  * Returns the same shape whether the answer is yes, no, or the question could not be
  * asked — a cluster that refuses the call is "unknown", never "no fields".
+ *
+ * `logType: true` asks for the log type field in the same call: `resolved.logType` is its name or
+ * null and `logTypeWhy` says why null. Without it nothing changes — a display link's measurement
+ * (auth.rs delay_search_body) holds only the device aggregation.
  */
-export async function preflight(client, cluster) {
+export async function preflight(client, cluster, { logType = false } = {}) {
   const fields = resolveFields(cluster);
   if (!client) return { ok: false, unknown: true, error: 'not connected', fields, missing: [], resolved: {} };
   try {
-    const caps = await client.fieldCaps(cluster.logIndexPattern || 'logstash-*', fieldsToProbe(fields));
-    return { ...decide(fields, caps), unknown: false, error: null, fields };
+    const caps = await client.fieldCaps(cluster.logIndexPattern || 'logstash-*', fieldsToProbe(fields, { logType }));
+    const out = { ...decide(fields, caps), unknown: false, error: null, fields };
+    if (logType) {
+      const t = logTypeFrom(caps);
+      out.resolved.logType = t.field;
+      out.logTypeWhy = t.why;
+    }
+    return out;
   } catch (e) {
     const es = e.res && e.res.json && e.res.json.error;
     return {
@@ -165,6 +191,7 @@ export const STATUS = {
   OK: { label: 'ok', cls: 'green' },
   DELAYED: { label: 'delayed', cls: 'yellow' },
   CRITICAL: { label: 'critical', cls: 'red' },
+  PART_DELAY: { label: 'part delayed', cls: 'part' },
   CLOCK_AHEAD: { label: 'clock ahead', cls: 'grey' },
   OTHER_TZ: { label: 'other time zone', cls: 'blue' },
   ERROR: { label: 'error', cls: 'grey' },
@@ -184,6 +211,7 @@ export function reasonFor(status, trend = 'NO_TREND') {
     OK: 'Healthy — within threshold',
     DELAYED: 'Pipeline lag: forwarder batching or network latency',
     CRITICAL: 'Severe lag: forwarder backlog, pipeline backpressure, or device clock behind',
+    PART_DELAY: 'Only some of its log types are late; the others arrive on time',
     CLOCK_AHEAD: 'Device clock is ahead of real time (NTP)',
     OTHER_TZ: 'Logs stamped in another time zone than the cluster’s (device clock or parser date filter)',
     ERROR: 'Timestamp missing or unparseable (parser)',
@@ -204,6 +232,7 @@ export function fixFor(status) {
     OK: 'None',
     DELAYED: 'Reduce the forwarder flush interval; check the site link; tune Logstash batch and workers',
     CRITICAL: 'Check the forwarder queue and service; Logstash backpressure; Elasticsearch write rejections; NTP on the device',
+    PART_DELAY: 'Look at the late log type’s path (its forwarder input / parser), not the device or the network',
     CLOCK_AHEAD: 'Fix NTP and timezone on the source device, and the parser date filter',
     OTHER_TZ: 'Set the device’s time zone, or the parser’s date filter time zone (Logstash date { timezone => "…" })',
     ERROR: 'Fix the parser, or point eventTime at the field your pipeline actually writes',
@@ -284,8 +313,11 @@ function offsetWords(minutes) {
 export function recordFrom(bucket, resolved, levels = null, tz = null) {
   const hit = ((((bucket || {}).latest || {}).hits || {}).hits || [])[0];
   const src = (hit && hit._source) || {};
-  const { arrival, event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = docDelay(src, resolved.arrival, eventSource(resolved), tz);
-  const status = statusFor(delayMinutes, levels);
+  const newest = docDelay(src, resolved.arrival, eventSource(resolved), tz);
+  const { arrival } = newest;
+  const types = typesFrom(bucket, resolved, levels, tz);
+  const { status, figures, delayLogType } = deviceReading({ newest, types }, levels);
+  const { event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = figures;
   const { pattern, note } = analysePattern(rawGapMinutes, PATTERN, deviceTzOffset);
 
   return {
@@ -299,6 +331,11 @@ export function recordFrom(bucket, resolved, levels = null, tz = null) {
     deviceTzOffset,
     clusterTzOffset: tzOffsetMinutes,
     status,
+    // Its log types (worst first), or null: the field is not mapped or was not asked for.
+    types,
+    // With log types: the newest document's figures, and the log type the delay above is of (null: the newest document's).
+    ...(types ? { newest, delayLogType } : {}),
+    typesTruncated: !!(types && bucket.types && (bucket.types.sum_other_doc_count > 0 || strayType(bucket) !== null)),
     pattern,
     patternNote: note,
     trend: 'NO_TREND',
@@ -310,6 +347,51 @@ export function recordFrom(bucket, resolved, levels = null, tz = null) {
     })),
   };
 }
+
+/** The log type in the source of the newest document outside the aggregation (an index mapped otherwise), or null. */
+function strayType(bucket) {
+  const named = (v) => (Array.isArray(v) ? v.map(named).find((x) => x !== null) ?? null : v === null || v === undefined || typeof v === 'object' || !String(v).trim() ? null : String(v).trim());
+  const b = bucket && bucket.no_type;
+  const hit = b && b.doc_count > 0 ? ((((b.latest || {}).hits || {}).hits) || [])[0] : null;
+  return hit ? named(dotted(hit._source || {}, LOG_TYPE_FIELD)) : null;
+}
+
+/**
+ * A device's log types from its bucket (0.3.90): one per `log_type` value — its newest document,
+ * measured as the device's is — and one for the documents without the field (noType). Worst first.
+ * null when the search asked for none.
+ */
+function typesFrom(bucket, resolved, levels, tz) {
+  if (!resolved.logType || !bucket || !bucket.types || !Array.isArray(bucket.types.buckets)) return null;
+  const one = (b, logType, noType) => {
+    const hit = ((((b || {}).latest || {}).hits || {}).hits || [])[0];
+    const d = docDelay((hit && hit._source) || {}, resolved.arrival, eventSource(resolved), tz);
+    const state = levelState(d.delayMinutes, levels);
+    return { logType, noType, label: typeLabel({ logType, noType }), docs: b.doc_count || 0, arrival: d.arrival, event: d.event, delayMinutes: d.delayMinutes,
+      rawGapMinutes: d.rawGapMinutes, tzOffsetMinutes: d.tzOffsetMinutes, deviceTzOffset: d.deviceTzOffset, state, status: statusFor(d.delayMinutes, levels) };
+  };
+  // The core's reading (logdelay/measure.rs types_of): a blank value is no log type; a document outside
+  // the aggregation that does carry a value is of that type; one type is listed once, at its newest document.
+  const out = [];
+  const add = (b, name) => {
+    const t = name === null ? one(b, NO_LOG_TYPE, true) : one(b, name, false);
+    const i = out.findIndex((x) => x.noType === t.noType && x.logType === t.logType);
+    if (i < 0) { out.push(t); return; }
+    const docs = out[i].docs + t.docs;
+    if (t.arrival !== null && (out[i].arrival === null || t.arrival > out[i].arrival)) out[i] = t;
+    out[i].docs = docs;
+  };
+  for (const b of bucket.types.buckets) { const k = String(b.key_as_string ?? b.key); add(b, k.trim() ? k : null); }
+  if (bucket.no_type && bucket.no_type.doc_count > 0) {
+    add(bucket.no_type, strayType(bucket));
+  }
+  const rank = { critical: 0, delay: 1 };
+  return out.sort((a, b) => (rank[a.state] ?? 2) - (rank[b.state] ?? 2) || (b.delayMinutes ?? -Infinity) - (a.delayMinutes ?? -Infinity)
+    || String(a.logType).localeCompare(String(b.logType)));
+}
+
+/** Whether a record's log type is late now (delayed or critical). */
+const typeLate = (t) => LATE_STATUSES.has(t.status);
 
 const dotted = (o, path) => {
   if (o && path && Object.prototype.hasOwnProperty.call(o, path)) return o[path];
@@ -353,8 +435,21 @@ export const eventSource = (resolved) => ((resolved.eventTimes && resolved.event
  * One terms aggregation over the device field with a top_hits picking the newest document
  * per device. `size` bounds the device count; a fleet with more devices than that reports
  * the shortfall rather than silently showing a subset.
+ *
+ * With `resolved.logType` each device bucket also holds its log types (at most TYPES_MAX, each with
+ * its newest document) and the documents without one — the same request: 500 devices × 21 buckets,
+ * far under search.max_buckets. Without it the body is exactly the one a display link may send.
  */
+export const TYPES_MAX = 20;
 export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
+  const latest = {
+    top_hits: {
+      size: 1,
+      sort: [{ [resolved.arrival]: { order: 'desc' } }],
+      _source: [...new Set([resolved.arrival, ...eventSource(resolved), ...(resolved.logType ? [LOG_TYPE_FIELD] : []),
+        ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))])],
+    },
+  };
   return {
     size: 0,
     query: { bool: { filter: [{ range: { [resolved.arrival]: { gte: from, lte: to, format: 'strict_date_optional_time' } } }] } },
@@ -362,14 +457,11 @@ export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
       devices: {
         terms: { field: resolved.device, size, order: { _count: 'desc' } },
         aggs: {
-          latest: {
-            top_hits: {
-              size: 1,
-              sort: [{ [resolved.arrival]: { order: 'desc' } }],
-              _source: [...new Set([resolved.arrival, ...eventSource(resolved),
-                        ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))])],
-            },
-          },
+          latest,
+          ...(resolved.logType ? {
+            types: { terms: { field: resolved.logType, size: TYPES_MAX, shard_size: 100 }, aggs: { latest } },
+            no_type: { missing: { field: resolved.logType }, aggs: { latest } },
+          } : {}),
         },
       },
     },
@@ -444,13 +536,25 @@ export async function measureLate(esClient, cluster, pre, devices, hours = 24, l
  * is not late, and one that sent nothing measurable is unknown, not on time. Delays go in
  * seconds, which Zabbix formats itself; one that could not be measured is null and is not
  * sent — a gap in Zabbix, never a zero.
+ *
+ * With log types measured (0.3.90) `delayed`, `critical` and `late` count the devices every log type
+ * of which is late; a device with only some of them late is in `part_delayed`. Where log types are
+ * not measured (the field is not mapped) the two log type figures are not sent and the others are
+ * what they always were. `description` is the item's, where the label does not say it all.
  */
 export const DELAY_ITEMS = [
   { key: 'devices', label: 'Devices measured', units: '', value: (s) => s.devices },
   // A count that needs the levels is unknown — not sent — while any device's levels are (UNKNOWN).
-  { key: 'late', label: 'Devices late (delayed + critical)', units: '', value: (s) => levelled(s, (s.by.DELAYED || 0) + (s.by.CRITICAL || 0)) },
-  { key: 'delayed', label: 'Devices delayed', units: '', value: (s) => levelled(s, s.by.DELAYED || 0) },
-  { key: 'critical', label: 'Devices critical', units: '', value: (s) => levelled(s, s.by.CRITICAL || 0) },
+  { key: 'late', label: 'Devices late (delayed + critical)', units: '', description: 'Devices fully late: where log types are measured, every log type of the device is late. A device with only some log types late is in elasticpro.delay[part_delayed].',
+    value: (s) => levelled(s, (s.by.DELAYED || 0) + (s.by.CRITICAL || 0)) },
+  { key: 'delayed', label: 'Devices delayed', units: '', description: 'Devices fully late, at the delayed level. A device with only some log types late is in elasticpro.delay[part_delayed].',
+    value: (s) => levelled(s, s.by.DELAYED || 0) },
+  { key: 'critical', label: 'Devices critical', units: '', description: 'Devices fully late, above the critical line. A device with only some log types late is in elasticpro.delay[part_delayed].',
+    value: (s) => levelled(s, s.by.CRITICAL || 0) },
+  { key: 'part_delayed', label: 'Devices part delayed', units: '', description: 'Devices with some log types late and others on time (field log_type). Not in late, delayed or critical. Not sent where log_type is not mapped.',
+    value: (s) => (s.logTypes ? levelled(s, s.by.PART_DELAY || 0) : null) },
+  { key: 'log_types_late', label: 'Log types late', units: '', description: 'Log types late, counted per device (two late log types on one device count 2). Not sent where log_type is not mapped.',
+    value: (s) => (s.logTypes ? levelled(s, s.logTypes.late) : null) },
   { key: 'clock_ahead', label: 'Devices with clock ahead', units: '', value: (s) => levelled(s, s.by.CLOCK_AHEAD || 0) },
   { key: 'median', label: 'Median delay', units: 's', value: (s) => (s.median === null || s.median === undefined ? null : Math.round(s.median * 60)) },
   { key: 'worst', label: 'Worst delay', units: 's',
@@ -459,11 +563,15 @@ export const DELAY_ITEMS = [
 
 function levelled(s, n) { return s.by.UNKNOWN ? null : n; }
 
-/** `summarise()` output → `[{ key, value }]`, unknowns left out; plus the worst device's name. */
+/** "threat on fw-blr-05": the log type furthest behind, with the device it comes from. */
+export const worstLogTypeText = (w) => `${w.logType} on ${w.device}`;
+
+/** `summarise()` output → `[{ key, value }]`, unknowns left out; plus the worst device's name and the worst log type. */
 export function delayItemValues(summary) {
   if (!summary || !summary.by) return [];
   const out = DELAY_ITEMS.map((d) => ({ key: d.key, value: d.value(summary) })).filter((v) => v.value !== null && v.value !== undefined);
   if (summary.worst && summary.worst.device) out.push({ key: 'worst_device', value: String(summary.worst.device) });
+  if (summary.worstLogType) out.push({ key: 'worst_log_type', value: worstLogTypeText(summary.worstLogType) });
   return out;
 }
 
@@ -540,15 +648,38 @@ export async function measureSeenIn(esClient, cluster, pre, { from, to }, opts =
   };
 }
 
+/**
+ * A measurement's counts. `by` holds PART_DELAY only where log types were measured; `logTypes`
+ * ({total, late, above}: log types counted per device), `partLate` (the late log types of the part
+ * delayed devices, most devices first) and `worstLogType` are null where they were not — not
+ * measured is not 0.
+ */
 export function summarise(records) {
   const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, OTHER_TZ: 0, ERROR: 0, NO_DATA: 0, UNKNOWN: 0 };
   let worst = null;
+  let logTypes = null; let worstLogType = null;
+  const part = new Map();
+  const addTypes = (r) => {
+    logTypes = logTypes || { total: 0, late: 0, above: 0 };
+    for (const t of r.types) {
+      logTypes.total += 1;
+      if (typeLate(t)) logTypes.late += 1;
+      if (t.status === 'CRITICAL') logTypes.above += 1;
+      if (t.delayMinutes !== null && (worstLogType === null || t.delayMinutes > worstLogType.delayMinutes)) worstLogType = { logType: t.label, device: r.device, delayMinutes: t.delayMinutes };
+      if (r.status === 'PART_DELAY' && typeLate(t)) part.set(t.label, (part.get(t.label) || 0) + 1);
+    }
+  };
   for (const r of records) {
     by[r.status] = (by[r.status] || 0) + 1;
+    if (Array.isArray(r.types)) addTypes(r);
     if (r.delayMinutes !== null && (worst === null || r.delayMinutes > worst.delayMinutes)) worst = r;
   }
   const measured = records.filter((r) => r.delayMinutes !== null).map((r) => r.delayMinutes);
+  if (logTypes) by.PART_DELAY = by.PART_DELAY || 0;
   return {
+    logTypes,
+    partLate: logTypes ? [...part.entries()].map(([logType, devices]) => ({ logType, devices })).sort((a, b) => b.devices - a.devices || a.logType.localeCompare(b.logType)) : null,
+    worstLogType,
     devices: records.length,
     by,
     unhealthy: by.DELAYED + by.CRITICAL + by.CLOCK_AHEAD,

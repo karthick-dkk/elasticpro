@@ -2,7 +2,7 @@
 
 import { h, mount, $, tooltip, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
-import { ago, dt, dur, toCsv, download, num } from '../lib/fmt.js';
+import { ago, dt, dtz, dur, toCsv, download, num } from '../lib/fmt.js';
 import { state, bus, mergedAlerts, invalidateAlerts, clusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage, healthState } from '../core/state.js';
 import { coverageBar, refreshButton } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
@@ -665,7 +665,7 @@ function buildRow(m, all, { expanded, notes, sil, single }) {
           stateNote ? [' ', h('span.apill.grey', stateNote)] : null,
           unsavedPill(m),
           m.stale ? [' ', h('span.apill.grey', { title: 'The reading is older than its dataset allows' }, 'stale reading')] : null),
-        m.snapshot ? h('div.arow-sub.muted', `${dt(m.snapshot.at)} · ${m.snapshot.repo || ''}${m.snapshot.status ? ` · ${m.snapshot.status}` : ''}`) : null),
+        m.snapshot ? h('div.arow-sub.muted', snapshotLine(m.snapshot)) : null),
       h('span.arow-age', { title: ageTitle(m) }, ageText(m)),
       goLink(g, m),
       handled
@@ -1009,9 +1009,11 @@ function notePeek(el, m) {
 
 /* ----------------------------------- export ------------------------------------ */
 
-function exportAlerts(merged) {
-  download(`es-alerts-${new Date().toISOString().slice(0, 10)}.csv`,
-    toCsv(merged.map((m) => ({
+/** A snapshot alert's second line: when the snapshot started, with its zone as the line above says it, its repository and state. */
+export const snapshotLine = (s) => `${dtz(s.at)} · ${s.repo || ''}${s.status ? ` · ${s.status}` : ''}`;
+
+export function alertsCsv(merged) {
+  return toCsv(merged.map((m) => ({
       level: m.level,
       cluster: m.cluster ? m.cluster.name : '',
       url: m.cluster ? m.cluster.url : '',
@@ -1023,7 +1025,7 @@ function exportAlerts(merged) {
       since_is_first_seen: m.approxSince ? 'yes' : 'no',
       repository: m.snapshot ? m.snapshot.repo : '',
       snapshot: m.snapshot ? m.snapshot.id : '',
-      snapshot_date: m.snapshot ? new Date(m.snapshot.at).toISOString() : '',
+      snapshot_date: m.snapshot && m.snapshot.at ? new Date(m.snapshot.at).toISOString() : '',
       snapshot_status: m.snapshot ? m.snapshot.status : '',
       snapshot_is_new: m.snapshot ? (m.snapshot.isNew ? 'yes' : 'no') : '',
       // Held: raised on a cluster that cannot be reached now. Listed here, never as current.
@@ -1037,5 +1039,7 @@ function exportAlerts(merged) {
       notes: allNotes(m).map((n) => `[${new Date(n.ts).toISOString().slice(0, 16)} ${n.by}] ${n.text}`).join(' | '),
       key: m.key,
       observed_at: new Date(state.lastRefresh || Date.now()).toISOString(),
-    }))), 'text/csv');
+    })));
 }
+
+function exportAlerts(merged) { download(`es-alerts-${new Date().toISOString().slice(0, 10)}.csv`, alertsCsv(merged), 'text/csv'); }

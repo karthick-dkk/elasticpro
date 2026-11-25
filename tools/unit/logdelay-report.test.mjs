@@ -277,11 +277,11 @@ test('late grid: each row is shaded on its own scale, its worst window darkest',
 
 test('device filters: the three levels, late, another time zone, silent (can\'t measure too); counts per chip', () => {
   const rows = ['no_delay', 'little', 'clock_ahead', 'delay', 'critical', 'other_tz', 'silent', 'unmeasured'].map((state) => ({ state }));
-  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, noDelay: 5, ok: 2, tz: 1, silent: 3 });
+  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, part: 0, noDelay: 5, ok: 2, tz: 1, silent: 3 });
   assert.ok(R.matchesFilter({ state: 'little' }, 'ok'), 'an old little row is under the line');
   assert.ok(!R.matchesFilter({ state: 'silent' }, 'late'), 'silent is not late: it has no figure');
   assert.ok(R.matchesFilter({ state: 'silent' }, 'all'));
-  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'noDelay', 'ok', 'tz', 'silent']);
+  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'part', 'noDelay', 'ok', 'tz', 'silent']);
 });
 
 test('time zones: a device\'s zone, the filter, the counts behind Expand, the chip\'s words, the By cluster cell', () => {
@@ -556,4 +556,11 @@ test('event time: the fields the devices\' times really came from', () => {
   assert.equal(R.eventFieldsText([{ eventField: 'ingested_time' }, { eventField: 'event_created' }, { eventField: 'ingested_time' }], []), 'ingested_time (2 devices), event_created (1 device)');
   assert.equal(R.eventFieldsText([{}], ['ingested_time', 'event_created']), 'the first of ingested_time, event_created a device’s log has');
   assert.equal(R.eventFieldsText([], []), 'field not known');
+});
+
+test('devices whose log types were not read in the last run are said, summed over the clusters', () => {
+  assert.equal(R.typesUnreadLine([{ typesUnread: 0 }, {}, { typesUnread: null }]), '');
+  assert.equal(R.typesUnreadLine(undefined), '');
+  assert.match(R.typesUnreadLine([{ typesUnread: 1 }]), /^1 device is counted as when its log types were last read/);
+  assert.match(R.typesUnreadLine([{ typesUnread: 3 }, { typesUnread: 4 }]), /^7 devices are counted as when their log types were last read/);
 });

@@ -28,6 +28,7 @@ zabbix_export:
           type: TRAP
           key: 'elasticpro.delay[late]'
           value_type: UNSIGNED
+          description: 'Devices fully late: where log types are measured, every log type of the device is late. A device with only some log types late is in elasticpro.delay[part_delayed].'
           tags:
             - tag: component
               value: log-delay
@@ -36,6 +37,7 @@ zabbix_export:
           type: TRAP
           key: 'elasticpro.delay[delayed]'
           value_type: UNSIGNED
+          description: 'Devices fully late, at the delayed level. A device with only some log types late is in elasticpro.delay[part_delayed].'
           tags:
             - tag: component
               value: log-delay
@@ -44,6 +46,25 @@ zabbix_export:
           type: TRAP
           key: 'elasticpro.delay[critical]'
           value_type: UNSIGNED
+          description: 'Devices fully late, above the critical line. A device with only some log types late is in elasticpro.delay[part_delayed].'
+          tags:
+            - tag: component
+              value: log-delay
+        - uuid: c23a3a96d946477b884a28b2eb659148
+          name: 'Log delay: Devices part delayed'
+          type: TRAP
+          key: 'elasticpro.delay[part_delayed]'
+          value_type: UNSIGNED
+          description: 'Devices with some log types late and others on time (field log_type). Not in late, delayed or critical. Not sent where log_type is not mapped.'
+          tags:
+            - tag: component
+              value: log-delay
+        - uuid: d6d65fe18ff04cafb83525456a0b3b90
+          name: 'Log delay: Log types late'
+          type: TRAP
+          key: 'elasticpro.delay[log_types_late]'
+          value_type: UNSIGNED
+          description: 'Log types late, counted per device (two late log types on one device count 2). Not sent where log_type is not mapped.'
           tags:
             - tag: component
               value: log-delay
@@ -80,6 +101,16 @@ zabbix_export:
           value_type: TEXT
           trends: '0'
           description: 'The device furthest behind at the last measurement.'
+          tags:
+            - tag: component
+              value: log-delay
+        - uuid: 62c4f780d2124afe96a0d451597bf885
+          name: 'Log delay: Worst log type'
+          type: TRAP
+          key: 'elasticpro.delay[worst_log_type]'
+          value_type: TEXT
+          trends: '0'
+          description: 'The log type furthest behind at the last measurement, and its device. Not sent for a cluster whose mapping has no log_type.'
           tags:
             - tag: component
               value: log-delay

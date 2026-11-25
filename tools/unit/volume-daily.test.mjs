@@ -16,6 +16,7 @@ for (const k of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'Event'
   try { globalThis[k] = k === 'window' ? dom.window : dom.window[k]; } catch (_) { /* read-only in this Node */ }
 }
 const V = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/volume-daily.js')).href);
+const { gbFigure } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/fmt.js')).href);
 
 test('an older core is told apart from a real refusal', () => {
   assert.equal(V.isUnsupported({ ok: false, kind: 'bad_message', message: 'Unknown message type "VOLUME_DAILY" (EP-202)' }, 'VOLUME_DAILY'), true);
@@ -94,12 +95,13 @@ test('breakdown periods are whole UTC days, finished ones for yesterday and the 
   const now = Date.UTC(2026, 9, 29, 15);
   const p = V.breakdownPeriods(now, 2);
   const by = Object.fromEntries(p.map((x) => [x.id, x]));
-  assert.deepEqual([by.month.from, by.month.to], ['2026-10-01', '2026-10-29']);
+  assert.deepEqual([by.month.from, by.month.to], ['2026-10-01', '2026-10-28']);
   assert.deepEqual([by.yesterday.from, by.yesterday.to], ['2026-10-28', '2026-10-28']);
   assert.deepEqual([by.last7.from, by.last7.to], ['2026-10-22', '2026-10-28']);
   assert.deepEqual([by['m:2026-09'].from, by['m:2026-09'].to], ['2026-09-01', '2026-09-30']);
   assert.deepEqual([by['m:2026-08'].from, by['m:2026-08'].to], ['2026-08-01', '2026-08-31']);
   assert.deepEqual(V.lastMonths(3, now), ['2026-08', '2026-09', '2026-10']);
+  assert.equal(V.breakdownPeriods(Date.UTC(2026, 10, 1, 3), 1).some((x) => x.id === 'month'), false, 'on the 1st the month has no finished day');
 });
 
 test('monthly CSV primary columns come from avgPriPerDay and peakPrimary, never the basis figures', () => {
@@ -113,4 +115,13 @@ test('monthValue plots basisBytes (basis is the name) and guesses nothing else',
   assert.equal(V.monthValue({ basis: 'total', basisBytes: 42, priBytes: 7, daysWithData: 3 }), 42);
   assert.equal(V.monthValue({ basis: 'total', priBytes: 7, daysWithData: 3 }), null);
   assert.equal(V.monthValue(null), null);
+});
+
+test('a GB figure never turns a size that is there into 0', () => {
+  assert.equal(gbFigure(14036757), 0.0131);
+  assert.equal(gbFigure(0), 0);
+  assert.equal(gbFigure(null), null);
+  assert.equal(gbFigure(undefined), null);
+  assert.equal(gbFigure(5.25 * 1024 ** 3), 5.25);
+  assert.equal(gbFigure(1234.56 * 1024 ** 3), 1234.6);
 });

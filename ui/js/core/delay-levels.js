@@ -19,6 +19,8 @@
  *   silent       no document for silentAfterHours (only the core knows; never on time)
  *   other_tz     the gap sits steadily at another real UTC offset than the cluster's (only the
  *                core knows the steadiness; not late, counted apart)
+ *   part_delay   a device with two or more log types measured, some late and some on time
+ *                (stateFromTypes, 0.3.90): neither late nor on time, counted apart
  *
  * `m` is the corrected delay: the raw gap with the cluster's log time zone taken out
  * (core/log-tz.js, the core's tz.rs). The zone comes from the core too (`zoneOf`).
@@ -27,17 +29,17 @@
 import { bridge } from './transport.js';
 
 /** The states, worst first where it matters for sorting. */
-export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'little', 'no_delay', 'clock_ahead', 'other_tz', 'silent', 'unmeasured']);
+export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'part_delay', 'little', 'no_delay', 'clock_ahead', 'other_tz', 'silent', 'unmeasured']);
 
 /** A level state in words, as the pages and the mail say it. */
 export const STATE_LABEL = Object.freeze({
-  no_delay: 'on time', little: 'on time', delay: 'delayed', critical: 'critical',
+  no_delay: 'on time', little: 'on time', delay: 'delayed', critical: 'critical', part_delay: 'part delayed',
   clock_ahead: 'clock ahead', other_tz: 'other time zone', silent: 'silent', unmeasured: "can't measure",
 });
 
 /** The Logs page's STATUS names for the core's states (docs/LOGDELAY.md "UI copy to remove"). */
 export const STATUS_OF_STATE = Object.freeze({
-  no_delay: 'OK', little: 'OK', delay: 'DELAYED', critical: 'CRITICAL',
+  no_delay: 'OK', little: 'OK', delay: 'DELAYED', critical: 'CRITICAL', part_delay: 'PART_DELAY',
   clock_ahead: 'CLOCK_AHEAD', other_tz: 'OTHER_TZ', silent: 'NO_DATA', unmeasured: 'ERROR',
 });
 
@@ -72,14 +74,72 @@ export function statusFor(minutes, levels) {
   return s ? STATUS_OF_STATE[s] : 'UNKNOWN';
 }
 
-/** Late = delayed or critical (the contract's one definition). */
+/** Late = delayed or critical (the contract's one definition). A part delayed device is not: only some of its log types are. */
 export const isLate = (state) => state === 'delay' || state === 'critical';
+/** Part delayed: some of the device's log types late, others on time (0.3.90). */
+export const isPart = (state) => state === 'part_delay';
 /** On time in totals = no_delay, little. Silent, unmeasured and clock ahead are neither (they are in No delay, logdelay-report.js noDelayOf). */
 export const isOnTime = (state) => state === 'no_delay' || state === 'little';
 
+/** One log type of a browser measurement was measured: it has a delay, and not a clock ahead. */
+export const typeRead = (t, state) => !!t && typeof t.delayMinutes === 'number' && Number.isFinite(t.delayMinutes) && state !== 'clock_ahead';
+
+/** A log type whose delay was measured: not silent, not can't measure (a clock ahead is that too). */
+const typeMeasured = (s) => s !== 'silent' && s !== 'unmeasured' && s !== 'clock_ahead' && s !== 'unknown';
+
+/**
+ * A device's state from its log types' states (0.3.90; the core's rule, logdelay/levels.rs
+ * `State::of_types`): fewer than two, or none measured → `own`, its newest document's, as before;
+ * every measured one late → the worst of them; some late → `part_delay`; none late → on time (in
+ * another time zone when all of them are). A state not known (null: levels unknown) keeps `own`.
+ */
+export function stateFromTypes(states, own) {
+  const list = states || [];
+  if (list.length < 2 || list.some((s) => !s)) return own;
+  const measured = list.filter(typeMeasured);
+  const late = measured.filter(isLate);
+  if (!measured.length) return own;
+  if (late.length === measured.length) return late.includes('critical') ? 'critical' : 'delay';
+  if (late.length) return 'part_delay';
+  return measured.every((s) => s === 'other_tz') ? 'other_tz' : 'no_delay';
+}
+
+/**
+ * Which of a device's log types its figures are of (the core's `device_by_types`): an index into
+ * `types` ([{state, delayMinutes}]), or -1: its newest document's. Late or part delayed → the worst
+ * late one; none late → the newest document's when that is in the same state, else the worst in it.
+ */
+export function figuresOfType(types, state, own) {
+  const list = types || [];
+  if (list.length < 2 || !list.some((t) => typeMeasured(t.state || 'unknown'))) return -1;
+  const late = isLate(state) || isPart(state);
+  if (!late && own === state) return -1;
+  let best = -1;
+  list.forEach((t, i) => {
+    if (!(late ? isLate(t.state) : t.state === state) || t.delayMinutes === null || t.delayMinutes === undefined) return;
+    if (best < 0 || t.delayMinutes > list[best].delayMinutes) best = i;
+  });
+  return best;
+}
+
+/**
+ * A measured device on `levels`: its state, its status, and the figures it is shown with — from its
+ * log types when two or more were read (stateFromTypes, figuresOfType), else its
+ * newest document's, as always without log types. `delayLogType`: the log type they are of, or null.
+ */
+export function deviceReading(r, levels) {
+  const newest = (r && r.newest) || r || {};
+  const list = r && Array.isArray(r.types) ? r.types : [];
+  const own = levelState(newest.delayMinutes ?? null, levels);
+  const typed = list.map((t) => ({ state: levelState(t.delayMinutes, levels), delayMinutes: t.delayMinutes }));
+  const state = stateFromTypes(typed.map((t) => t.state), own);
+  const i = state ? figuresOfType(typed, state, own) : -1;
+  return { state, status: state ? STATUS_OF_STATE[state] : 'UNKNOWN', figures: i < 0 ? newest : list[i], delayLogType: i < 0 ? null : list[i].label };
+}
+
 /* ------------------------------- what the core said ------------------------------- */
 
-const known = { byCluster: new Map(), zones: new Map(), fleet: null, at: 0, from: '' };
+const known = { byCluster: new Map(), zones: new Map(), types: new Map(), fleet: null, at: 0, from: '' };
 let asking = null;
 
 /** A cluster's `timeZone` as the core says it (docs/LOGDELAY.md "Time zones"), or null. */
@@ -100,12 +160,14 @@ export function rememberLevels(res) {
     if (l && r.id) { known.byCluster.set(String(r.id), l); any = true; }
     const z = zoneFrom(r && r.timeZone);
     if (z && r.id) { known.zones.set(String(r.id), z); any = true; }
+    if (r && r.id && r.logTypeField !== undefined) known.types.set(String(r.id), r.logTypeField);
   }
   if (typeof res.cluster === 'string' && res.cluster) {
     const l = levelsFrom(res.levels);
     if (l) { known.byCluster.set(res.cluster, l); any = true; }
     const z = zoneFrom(res.timeZone);
     if (z) { known.zones.set(res.cluster, z); any = true; }
+    if (res.logTypeField !== undefined) known.types.set(res.cluster, res.logTypeField);
   }
   const fleet = levelsFrom(res.settings && res.settings.levels);
   if (fleet) { known.fleet = fleet; any = true; }
@@ -126,11 +188,19 @@ export function zoneOf(clusterId) {
   return known.zones.get(String(clusterId)) || null;
 }
 
+/**
+ * The log type field a cluster's mapping has, as the core said it (`logTypeField`): its name, null
+ * when the mapping has none, undefined when the core has not said (a core before 0.3.90).
+ */
+export function logTypeFieldOf(clusterId) {
+  return known.types.get(String(clusterId));
+}
+
 /** The fleet's default levels (logdelay.json `levels`), when an admin's read said them. */
 export const fleetLevels = () => known.fleet;
 
 /** Forget what was read (a test, a sign-out). */
-export function forgetLevels() { known.byCluster.clear(); known.zones.clear(); known.fleet = null; known.at = 0; asking = null; }
+export function forgetLevels() { runs.byId.clear(); runs.askedAt = 0; runs.asking = null; known.byCluster.clear(); known.zones.clear(); known.types.clear(); known.fleet = null; known.at = 0; asking = null; }
 
 /**
  * Ask the core for every visible cluster's levels: LOGDELAY_SETTINGS_GET where the caller is an
@@ -144,7 +214,9 @@ export async function loadLevels({ send = bridge, maxAgeMs = 5 * 60000, force = 
     try {
       const a = await send({ type: 'LOGDELAY_SETTINGS_GET' });
       if (rememberLevels(a)) return true;
-      const b = await send({ type: 'LOGDELAY_SUMMARY', days: 1, maxDevices: 1 });
+      runs.askedAt = Date.now();
+      const b = await send(RUNS_MESSAGE);
+      rememberRuns(b);
       return rememberLevels(b);
     } catch (_) {
       return false;
@@ -153,4 +225,65 @@ export async function loadLevels({ send = bridge, maxAgeMs = 5 * 60000, force = 
     }
   })();
   return asking;
+}
+
+/* ----------------------------- the server's own last run ----------------------------- */
+
+/** The one message both the levels and the last runs are read from (any user, the clusters they see). */
+const RUNS_MESSAGE = Object.freeze({ type: 'LOGDELAY_SUMMARY', days: 1, maxDevices: 1 });
+const runs = { byId: new Map(), askedAt: 0, asking: null };
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * A cluster's last scheduled run as its `byCluster` row says it: `{at, summary, levels, stale,
+ * failed, goodUntil}`, or null when it was never measured or a count is missing (no claim).
+ * `summary` has the shape of log-delay.js `summarise` — the counts and the worst device as the core
+ * sent them; `failed`: the core says a newer run failed, so the figures are of the one before.
+ * `goodUntil`: when the next run is due and the core's grace is over (logdelay/state.rs
+ * `stale_after_ms`: the interval and half of it, 30 minutes at least); null: the interval is not known.
+ */
+export function serverRun(row, everyHours = null) {
+  const at = num(row && row.lastRunAt);
+  const delay = num(row && row.delay); const critical = num(row && row.critical); const devices = num(row && row.devices);
+  if (at === null || delay === null || critical === null || devices === null) return null;
+  const every = num(everyHours) === null || everyHours <= 0 ? null : everyHours * 3600000;
+  const part = num(row.partDelayed);
+  const w = row.worst && row.worst.device && num(row.worst.minutes) !== null
+    ? { device: row.worst.device, delayMinutes: row.worst.minutes, delayLogType: row.worst.logType || null, notMeasuredSince: row.worst.stale === true ? num(row.worst.at) : null } : null;
+  return { at, levels: levelsFrom(row.levels), stale: row.stale === true, failed: !!row.notMeasured, typed: !!row.logTypes,
+    goodUntil: every === null ? null : at + every + Math.max(every / 2, 30 * 60000),
+    summary: { devices, by: { DELAYED: delay, CRITICAL: critical, ...(part === null ? {} : { PART_DELAY: part }) }, worst: w, partLate: null, worstLogType: null } };
+}
+
+/** Keep the last runs an answer to RUNS_MESSAGE gives; a cluster it no longer names is forgotten. False: it gave none. */
+function rememberRuns(res) {
+  if (!res || res.ok === false || !Array.isArray(res.byCluster)) return false;
+  const every = num(res.everyHours) !== null ? res.everyHours : num(res.schedule && res.schedule.everyHours);
+  runs.byId = new Map(res.byCluster.filter((r) => r && r.id).map((r) => [String(r.id), serverRun(r, every)]).filter(([, r]) => r));
+  return true;
+}
+
+/** A cluster's last scheduled run (serverRun), or null: not read, or never measured. */
+export const serverRunOf = (clusterId) => runs.byId.get(String(clusterId)) || null;
+
+/**
+ * Read the last runs, at most once in `maxAgeMs` (as long as the levels are kept), answered or not.
+ * Resolves to true when they were read; never throws.
+ */
+export async function loadServerRuns({ send = bridge, maxAgeMs = 5 * 60000, now = Date.now() } = {}) {
+  if (runs.askedAt && now - runs.askedAt < maxAgeMs) return false;
+  if (runs.asking) return runs.asking;
+  runs.askedAt = now;
+  runs.asking = (async () => {
+    try {
+      const res = await send(RUNS_MESSAGE);
+      rememberLevels(res);
+      return rememberRuns(res);
+    } catch (_) {
+      return false;
+    } finally {
+      runs.asking = null;
+    }
+  })();
+  return runs.asking;
 }

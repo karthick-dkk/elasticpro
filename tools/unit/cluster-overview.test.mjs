@@ -152,6 +152,12 @@ test('the ILM line: managed count, the past-retention figure from the index date
   const s = O.ilmSummary(d, CLUSTER, DEFAULTS, idx, now);
   assert.deepEqual([s.pill.word, s.known, s.managed, s.total, s.errors], ['running', true, 3, 3, 1]);
   assert.deepEqual(s.stale, { count: 2, bytes: 150, policy: '30 days', known: true }, 'two dated indices are older than 30 days; the undated one is not guessed');
+  // The figure says what it was counted over: the open indices of the log pattern, not every index.
+  assert.equal(O.ilmNote(s), '3 of 3 open log indices managed');
+  assert.match(O.ilmNoteTitle(s), /^Open logstash-\*.* indices with an ILM policy\. Other indices \(hidden and system ones too\) are not counted here\.$/);
+  const none = O.ilmSummary({ ilm: { operation_mode: 'RUNNING' }, ilmOfIndex: { 'logstash-a-2026.09.01': null, '.ds-logs-1': 'p', '.ds-logs-2': 'p' } }, CLUSTER, DEFAULTS, idx, now);
+  assert.equal(O.ilmNote(none), '0 of 1 open log index managed', 'two managed hidden indices are not called unmanaged: they are not counted');
+  assert.equal(O.ilmNote(O.ilmSummary({}, CLUSTER, DEFAULTS, null, now)), null, 'not read: no figure');
   const noRet = O.ilmSummary(d, { ...CLUSTER, liveRetention: undefined }, DEFAULTS, idx, now);
   assert.deepEqual([noRet.stale.known, noRet.stale.policy], [false, ''], 'no retention set: not known, not 0');
   const unread = O.ilmSummary({}, CLUSTER, DEFAULTS, null, now);
@@ -177,6 +183,12 @@ test('the Devices & log delay card: the last run’s devices, the late counts by
   assert.equal(O.devicesDelay(null, 'c1').state, 'none');
   const noTotals = O.devicesDelay({ ...res, totals: {} }, 'c1');
   assert.deepEqual([noTotals.delay, noTotals.critical, noTotals.late], [null, null, null], 'a count the core did not give is not 0');
+  // Part delayed (0.3.90): said only where the core measures log types, beside the delayed devices and never in them.
+  assert.equal(d.part, undefined, 'a core without log types');
+  const typed = O.devicesDelay({ ...res, totals: { ...res.totals, partDelayed: 5, pctPartDelayed: 4.2, logTypes: { total: 300, late: 9, above: 3 } }, byCluster: [{ ...res.byCluster[0], logTypeField: 'log_type' }] }, 'c1');
+  assert.deepEqual([typed.part.count, typed.part.late, typed.late], [5, 9, 21]);
+  const off0 = O.devicesDelay({ ...res, totals: { ...res.totals, partDelayed: 0 }, byCluster: [{ ...res.byCluster[0], logTypeField: null, logTypeWhy: 'log_type is not in the mapping' }] }, 'c1');
+  assert.deepEqual([off0.part.count, off0.part.why], [null, 'log_type is not in the mapping'], 'no field: not 0 part delayed');
 });
 
 test('rate text: null is a dash, small rates keep a decimal, large ones are whole', () => {

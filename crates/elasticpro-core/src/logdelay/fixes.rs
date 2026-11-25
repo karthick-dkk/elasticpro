@@ -12,13 +12,14 @@
 //! | most devices share one offset and the cluster has no zone set | Cluster |
 //! | many devices late in the same windows, across forwarders | Elasticsearch |
 //! | late devices share one `fwd_tag` (or `Zone`), others there on time | Forwarder |
+//! | one log type late, the device's others on time | Log type path |
 //! | late devices share one `parser_tag`, across forwarders | Parser |
 //! | steady whole-hour offset, or negative | Device clock |
 //! | a silence, then a burst of old logs | Device link |
 //! | nothing above | not enough evidence |
 
 use super::levels::State;
-use super::state::{Episode, Silence, Tracker};
+use super::state::{DeviceState, Episode, Silence, Tracker};
 use super::time;
 use super::tz::{self, LogTimeZone};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,8 @@ pub enum Step {
     /// zone, or the parser's date filter for it.
     DeviceTimeZone,
     DeviceLink,
+    /// One log type of the device is late, its others are not: that type's own way in.
+    LogType,
     /// The cluster itself: its log time zone is not set, and most devices agree on one.
     Cluster,
     Unknown,
@@ -51,6 +54,7 @@ impl Step {
             Step::DeviceClock => "Device clock",
             Step::DeviceTimeZone => "Device clock / parser",
             Step::DeviceLink => "Device link",
+            Step::LogType => "Log type path",
             Step::Cluster => "Cluster",
             Step::Unknown => "Not enough evidence",
         }
@@ -160,18 +164,50 @@ pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> 
     out
 }
 
+/// The part-delayed devices, one finding per late log type: only that type is late, so nothing the
+/// device's other log types share with it is the cause. Read from the states now.
+pub fn log_type_findings(cluster: &str, t: &Tracker, now: i64) -> Vec<Finding> {
+    // Its name and whether it is the documents without one; the devices, each with that series.
+    type Late<'a> = (&'a String, &'a DeviceState, &'a DeviceState);
+    let mut by_type: BTreeMap<(bool, &str), Vec<Late>> = BTreeMap::new();
+    if t.has_log_types() {
+        for (name, d) in t.devices.iter().filter(|(_, d)| d.state == State::PartDelay && now - d.last_run_ms <= t.stale_after()) {
+            for s in d.late_types() {
+                by_type.entry((s.no_type, s.type_name())).or_default().push((name, d, s));
+            }
+        }
+    }
+    by_type.into_iter().map(|((_, name), v)| {
+        let others: usize = v.iter().map(|(_, d, _)| d.types.iter().filter(|s| d.type_state(s).is_some_and(|x| x.measured() && !x.cant_measure() && !x.late())).count()).sum();
+        let zone = v.iter().all(|(_, _, s)| s.open.as_ref().is_some_and(|e| e.pattern().is_some_and(|p| p.contains("time zone"))));
+        let worst = v.iter().filter_map(|(_, _, s)| s.last_minutes).fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+        Finding {
+            cluster: cluster.into(), step: Step::LogType, devices: v.iter().map(|(n, _, _)| n.to_string()).collect(), group: Some(("logType".into(), name.to_string())),
+            why: format!("only log type {name} is late; other log types from the same device{} are on time", if v.len() == 1 { "" } else { "s" }),
+            fix: if zone {
+                format!("its delay sits at a time-zone offset every time: check the time zone in the date filter of the parser {name} goes through, not the device or the network")
+            } else {
+                format!("look at {name}'s own path — its forwarder input and its parser — not the device or the network")
+            },
+            evidence: json!({ "devices": v.len(), "logType": name, "otherTypesOnTime": others, "worstMinutes": worst, "steadyTimeZoneOffset": zone }),
+            missing: vec![],
+        }
+    }).collect()
+}
+
 /// The findings for one cluster over `[from, to)`. `every_ms` is the measurement interval;
 /// `zone` the cluster's log time zone setting.
 #[allow(clippy::too_many_arguments)]
 pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_ms: i64, facts: &ClusterFacts, zone: &LogTimeZone) -> Vec<Finding> {
     let mut out = tz_findings(cluster, t, now, zone);
+    out.extend(log_type_findings(cluster, t, now));
     let episodes: Vec<Episode> = t.all_episodes(now).into_iter()
         .filter(|e| e.started_ms < to && e.end_ms(now) >= from).collect();
     if episodes.is_empty() {
         return out;
     }
     let late_devices: BTreeSet<String> = episodes.iter().map(|e| e.device.clone()).collect();
-    // A device named by a time-zone finding has its answer: the rules below do not claim it.
+    // A device named by a time-zone or a log type finding has its answer: the rules below do not claim it.
     let mut claimed: BTreeSet<String> = out.iter().flat_map(|f| f.devices.iter().cloned()).collect();
     let measured = t.devices.len().max(late_devices.len());
     let extras_of = |d: &str| t.devices.get(d).map(|x| x.extras.clone()).unwrap_or_default();
@@ -470,7 +506,7 @@ mod tests {
         if !parser.is_empty() {
             extras.insert("parser_tag".into(), parser.into());
         }
-        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, event_field: None, extras }
+        Reading { device: device.into(), docs: 100, arrival_ms: Some(run), event_ms: m.map(|x| run - (x * 60_000.0) as i64), delay_minutes: m, extras, ..Reading::default() }
     }
 
     fn run(t: &mut Tracker, at: i64, rs: Vec<Reading>) {
@@ -664,5 +700,36 @@ mod tests {
         assert_eq!(f.snapshots, vec![(1000, 5000, "nightly".to_string())]);
         let none = facts_from_cache(None, None, None, 0, 10);
         assert_eq!((none.write_rejected, none.nodes_over_watermark, none.snapshots_known), (None, None, false));
+    }
+
+    #[test]
+    fn a_log_type_late_beside_others_on_time_points_at_its_own_path() {
+        use crate::logdelay::measure::{LogTypeField, TypeReading};
+        const NOW: i64 = 1_763_100_000_000;
+        let typed = |d: &str, at: i64, late: f64| {
+            let ty = |n: &str, m: f64| TypeReading { log_type: Some(n.into()), docs: 1, arrival_ms: Some(at), event_ms: Some(at - (m * 60_000.0) as i64), delay_minutes: Some(m), event_field: None };
+            Reading { types: Some(vec![ty("traffic", 1.0), ty("threat", late), ty("system", 2.0)]), ..reading(d, Some(1.0), at, "syslog-1", "p") }
+        };
+        let mut t = Tracker { interval_ms: Some(2 * 3_600_000), ..Tracker::default() };
+        for k in 0..3 {
+            let at = NOW + k * 2 * 3_600_000;
+            t.apply_run(at, vec![typed("a", at, 46.0 + k as f64 * 7.0), typed("b", at, 95.0 + k as f64 * 7.0), typed("c", at, 1.0)], &Default::default(), 2 * 3_600_000, true, &LogTimeZone::Utc);
+        }
+        let now = NOW + 4 * 3_600_000;
+        assert!(log_type_findings("prod", &t, now).is_empty(), "the field is off: nothing read by it is said");
+        t.last_read = Some(crate::logdelay::collect::RunInfo { log_type: Some(LogTypeField { field: Some("log_type".into()), why: None }), ..Default::default() });
+        let f = findings("prod", &t, NOW, now + 1, now, 2 * 3_600_000, &ClusterFacts::default(), &LogTimeZone::Utc);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!((f[0].step, f[0].devices.clone(), f[0].group.clone()), (Step::LogType, vec!["a".to_string(), "b".to_string()], Some(("logType".to_string(), "threat".to_string()))));
+        assert!(f[0].fix.contains("forwarder input") && f[0].fix.contains("parser") && f[0].fix.contains("not the device or the network"), "{}", f[0].fix);
+        assert_eq!((f[0].evidence["otherTypesOnTime"].clone(), f[0].evidence["worstMinutes"].clone()), (json!(4), json!(109.0)));
+        assert!(log_type_findings("prod", &t, now + 9 * 3_600_000).is_empty(), "not measured since: nothing is said of now");
+        // At a time-zone offset every time: that parser's date filter.
+        let mut z = Tracker { interval_ms: Some(2 * 3_600_000), last_read: t.last_read.clone(), ..Tracker::default() };
+        for k in 0..4 {
+            let at = NOW + k * 2 * 3_600_000;
+            z.apply_run(at, vec![typed("a", at, if k == 0 { 1.0 } else { 60.0 })], &Default::default(), 2 * 3_600_000, true, &LogTimeZone::Utc);
+        }
+        assert!(log_type_findings("prod", &z, NOW + 6 * 3_600_000)[0].fix.contains("date filter"));
     }
 }

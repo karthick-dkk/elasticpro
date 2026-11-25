@@ -286,7 +286,8 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     assert_eq!(run3["solved"], json!(1), "{run3}");
     let hits = srv.hits();
     assert_eq!(hits.iter().filter(|h| h.path.contains("/_search")).count(), 3, "one search per run");
-    assert!(hits.iter().all(|h| h.method == "POST" && h.path.contains("/_search") || h.method == "GET"), "nothing written to the cluster: {:?}",
+    assert_eq!(hits.iter().filter(|h| h.path.contains("/_field_caps")).count(), 3, "and one mapping request (docs/LOGDELAY.md \"Log types\")");
+    assert!(hits.iter().all(|h| h.method == "POST" && (h.path.contains("/_search") || h.path.contains("/_field_caps")) || h.method == "GET"), "nothing written to the cluster: {:?}",
             hits.iter().map(|h| format!("{} {}", h.method, h.path)).collect::<Vec<_>>());
     let search = &hits.iter().find(|h| h.path.contains("/_search")).unwrap().body;
     assert!(search.contains("\"fwd_tag\"") && search.contains("\"Zone\""), "the extras are asked for: {search}");
@@ -340,7 +341,7 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     assert_eq!(empty["kind"], json!("bad_request"));
     let fixes = c.handle(json!({ "type": "LOGDELAY_FIXES", "session": &user })).await;
     assert_eq!(fixes["ok"], json!(true), "{fixes}");
-    assert_eq!(fixes["rules"].as_array().unwrap().len(), 8);
+    assert_eq!(fixes["rules"].as_array().unwrap().len(), 9);
     let findings = fixes["findings"].as_array().unwrap();
     assert!(!findings.is_empty(), "one late device: a finding, if only not enough evidence: {fixes}");
     assert!(findings.iter().all(|f| f["devices"].as_array().unwrap().contains(&json!("fw-1"))), "{fixes}");

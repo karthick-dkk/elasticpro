@@ -5,11 +5,12 @@
 //! Every figure is `summary.rs`'s; this file only lays them out. The mail's tables are
 //! email-safe: `<table>`, inline styles, no script, no external image. A device's state has one
 //! colour everywhere (the owner's rule, 2026-11-24): critical light red, delayed light yellow, on
-//! time light green, another time zone violet, silent and can't measure grey — a light ground
-//! under dark ink, the word always written. Blue, orange and pink stay for what is not a state.
+//! time light green, part delayed white with a yellow edge, another time zone violet, silent and can't
+//! measure grey — a light ground under dark ink, the word always written. Blue, orange and pink stay for what is not a state.
 
 use super::fixes::{Finding, Step};
-use super::levels::{Levels, State};
+use super::levels::{Levels, State, NO_LOG_TYPE};
+use super::state::Episode;
 use super::summary::{self, ClusterInput, DeviceRow, Range};
 use super::time;
 use super::tz;
@@ -26,6 +27,8 @@ pub const RED: &str = "#FBD5D5";
 pub const YELLOW: &str = "#FFF3C4";
 pub const VIOLET: &str = "#E7DDF7";
 pub const GREY: &str = "#E8EAED";
+/// Part delayed: no ground of its own, a yellow edge.
+pub const PART: &str = "#FFFFFF;border:2px solid #E8C547";
 
 /// The ground of a state, in the mail.
 pub fn state_colour(s: State) -> &'static str {
@@ -33,6 +36,7 @@ pub fn state_colour(s: State) -> &'static str {
         State::Critical => RED,
         State::Delay => YELLOW,
         State::NoDelay | State::Little => GREEN,
+        State::PartDelay => PART,
         State::OtherTz => VIOLET,
         State::Silent | State::Unmeasured | State::ClockAhead => GREY,
     }
@@ -48,7 +52,7 @@ fn late_text(c: &Value) -> String {
     if c["notMeasured"].is_string() {
         return "not known".into();
     }
-    format!("{} ({} critical)", n(&c["lateNow"]) as i64, n(&c["critical"]) as i64)
+    format!("{} ({} critical){}", n(&c["lateNow"]) as i64, n(&c["critical"]) as i64, part_text(c))
 }
 
 /// The two lines in words, as the clusters have them: their minutes when every cluster has the
@@ -123,6 +127,14 @@ fn no_delay_line(t: &Value) -> String {
         None => "No delay: not measured".into(),
     }
 }
+
+/// How many devices are counted as they were, their log types not read; empty of none.
+fn unread_text(t: &Value) -> String {
+    match t["typesUnread"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        n => format!("{n} of the devices are counted as when their log types were last read: the last run reads {} log types of a cluster and did not come to theirs.", crate::logdelay::measure::TYPES_PER_RUN),
+    }
+}
 const INK: &str = "#1b1f24";
 const MUTED: &str = "#5b6470";
 const LINE: &str = "#e3e6ea";
@@ -133,7 +145,7 @@ const ZONE_ROWS: usize = 12;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DevicesFilter {
-    /// At the delay level or more now (delay and critical).
+    /// At the delay level or more now (delay and critical), the part delayed included.
     #[default]
     Delayed,
     All,
@@ -151,13 +163,13 @@ impl DevicesFilter {
     }
     pub fn keeps(self, s: State) -> bool {
         match self {
-            DevicesFilter::Delayed => s.late(),
+            DevicesFilter::Delayed => s.late() || s == State::PartDelay,
             DevicesFilter::All => true,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            DevicesFilter::Delayed => "devices at the delay level or more",
+            DevicesFilter::Delayed => "devices at the delay level or more, part delayed included",
             DevicesFilter::All => "all devices",
         }
     }
@@ -286,6 +298,99 @@ fn pct(v: &Value) -> String {
     v.as_f64().map(|p| format!("{p:.1} %")).unwrap_or_else(|| "—".into())
 }
 
+/// Its log types in words, for a row: `1 of 3 log types late: threat`; not read by log types: that.
+fn types_text(r: &DeviceRow) -> String {
+    match &r.types {
+        _ if r.types_unread.is_some() => "not read in the last run".into(),
+        None => "not read by log types".into(),
+        Some(t) if t.late > 0 => t.text(),
+        Some(t) => format!("none of {}{} log types late", t.total, if t.truncated { "+" } else { "" }),
+    }
+}
+
+/// `M of N`, the late log types; not read by log types: that, never 0.
+fn types_late(v: &Value) -> Cell {
+    match (v["late"].as_u64(), v["total"].as_u64()) {
+        (Some(a), Some(b)) => Cell::text(format!("{a} of {b}")),
+        _ => Cell::text("not read"),
+    }
+}
+
+/// A delay period's start and end in words, as `started_solved` has a device's last one.
+fn period_text(e: &Episode, now: i64) -> String {
+    let a = time::when(e.started_ms, now);
+    match (e.solved_ms, &e.ended_why) {
+        (Some(b), _) => format!("{a} → {}", time::when(b, now)),
+        (None, Some(why)) => format!("{a} → not solved ({why})"),
+        (None, None) if e.stale() => format!("{a} → late when last measured {}, not measured since", e.measured_until_ms.map(|t| time::when(t, now)).unwrap_or_default()),
+        (None, None) => format!("{a} → still late"),
+    }
+}
+
+/// Rows the Log types sheet carries at most; what is left out is counted under it.
+const TYPE_ROWS: usize = 200_000;
+
+/// The Log types sheet: one row per delay period of a log type in the range, and — in a report of
+/// all devices — one for each log type without any. Late now first, the worst first. `None`: no
+/// cluster of the report is read by log types.
+fn log_types_sheet(i: &Inputs<'_>) -> Option<Sheet> {
+    let clusters: Vec<&ClusterInput> = i.clusters.iter().filter(|c| c.tracker.has_log_types()).collect();
+    if clusters.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<(bool, f64, Vec<Cell>)> = vec![];
+    for c in clusters {
+        let eps = c.tracker.all_type_episodes(i.now);
+        let mut by: std::collections::HashMap<(&str, Option<&str>), Vec<&Episode>> = Default::default();
+        for e in eps.iter().filter(|e| e.started_ms < i.range.to_ms && e.end_ms(i.now) >= i.range.from_ms) {
+            by.entry((e.device.as_str(), e.log_type.as_deref())).or_default().push(e);
+        }
+        let mut add = |device: &str, name: Option<&str>, now: Option<(&super::state::DeviceState, &super::state::DeviceState)>, mine: &[&Episode]| {
+            let state = now.map(|(d, s)| d.type_state(s));
+            let late = matches!(state, Some(Some(s)) if s.late());
+            let text = match state {
+                None => "not seen for a week".to_string(),
+                Some(None) => "not read in the last run".into(),
+                Some(Some(State::Silent)) => format!("no logs since {}", now.and_then(|(_, s)| s.last_arrival_ms).map(|t| time::when(t, i.now)).unwrap_or_else(|| "—".into())),
+                Some(Some(s)) => s.label().into(),
+            };
+            let delay = now.and_then(|(_, s)| s.last_minutes).filter(|_| matches!(state, Some(Some(s)) if s.measured()));
+            let head = || vec![Cell::text(&c.name), Cell::text(device), Cell::text(name.unwrap_or(NO_LOG_TYPE)), Cell::text(&text), delay.map(Cell::Dec).unwrap_or_else(|| Cell::text("not measured"))];
+            for e in mine {
+                let mut r = head();
+                r.extend([Cell::text(period_text(e, i.now)), Cell::text(time::duration(e.lasted_ms(i.now))), Cell::Dec(e.worst_minutes)]);
+                rows.push((late, e.worst_minutes, r));
+            }
+            if mine.is_empty() && i.options.devices == DevicesFilter::All {
+                let mut r = head();
+                r.extend([Cell::text("—"), Cell::text("—"), Cell::text("—")]);
+                rows.push((late, -1.0, r));
+            }
+        };
+        for (device, d) in &c.tracker.devices {
+            for s in &d.types {
+                let mine = by.remove(&(device.as_str(), s.log_type.as_deref())).unwrap_or_default();
+                add(device, s.log_type.as_deref(), Some((d, s)), &mine);
+            }
+        }
+        for ((device, name), mine) in by {
+            add(device, name, None, &mine);
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
+    let all = rows.len();
+    let mut r = vec![["Cluster", "Device", "Log type", "State", "Delay now (min)", "Delay: started → solved", "Lasted", "Worst (min)"].map(Cell::head).to_vec()];
+    r.extend(rows.into_iter().take(TYPE_ROWS).map(|(_, _, x)| x));
+    if all > TYPE_ROWS {
+        r.push(vec![Cell::text(format!("{TYPE_ROWS} of {all} rows: the rest are not in this sheet"))]);
+    }
+    r.push(vec![Cell::text(format!("{} · {LOG_TYPES_NOTE}", if i.options.devices == DevicesFilter::All { "every log type; one row per delay period in the range" } else { "one row per delay period in the range" }))]);
+    Some(Sheet { name: "Log types".into(), rows: r })
+}
+
+/// What part delayed and the log types' figures mean, said where they are shown.
+pub const LOG_TYPES_NOTE: &str = "A device is late when every one of its measured log types is; with some late and some on time it is part delayed — its own count, in neither the late devices nor No delay. A log type with no logs or no readable event time counts as not late. A device's delay is its worst late log type's.";
+
 /// The line every report carries about the zone step (docs/LOGDELAY.md "Time zones").
 pub const TZ_NOTE: &str = "Delays are shown after each cluster's log time zone is taken out (raw gap − zone offset). Measurements from before a zone was set or detected stay as they were measured.";
 
@@ -341,10 +446,10 @@ fn zone_tag(i: &Inputs<'_>, cluster: &str, device: &str) -> (Option<String>, Opt
 }
 
 /// Devices now by Zone and tag1, over every cluster: devices, late (delay + critical),
-/// critical, silent — the most late first. A device whose logs carry no Zone or tag1 is under
+/// critical, silent, part delayed — the most late first. A device whose logs carry no Zone or tag1 is under
 /// "—" (not known), never left out.
-pub fn by_zone_tag(i: &Inputs<'_>) -> Vec<(String, String, [u64; 4])> {
-    let mut m: std::collections::BTreeMap<(String, String), [u64; 4]> = std::collections::BTreeMap::new();
+pub fn by_zone_tag(i: &Inputs<'_>) -> Vec<(String, String, [u64; 5])> {
+    let mut m: std::collections::BTreeMap<(String, String), [u64; 5]> = std::collections::BTreeMap::new();
     for c in i.clusters {
         for d in c.tracker.devices.values() {
             let k = (super::extra_ci(&d.extras, "Zone").cloned().unwrap_or_else(|| "—".into()), super::extra_ci(&d.extras, "tag1").cloned().unwrap_or_else(|| "—".into()));
@@ -353,9 +458,10 @@ pub fn by_zone_tag(i: &Inputs<'_>) -> Vec<(String, String, [u64; 4])> {
             e[1] += d.state.late() as u64;
             e[2] += (d.state == State::Critical) as u64;
             e[3] += (d.state == State::Silent) as u64;
+            e[4] += (d.state == State::PartDelay) as u64;
         }
     }
-    let mut v: Vec<(String, String, [u64; 4])> = m.into_iter().map(|((z, t), n)| (z, t, n)).collect();
+    let mut v: Vec<(String, String, [u64; 5])> = m.into_iter().map(|((z, t), n)| (z, t, n)).collect();
     v.sort_by(|a, b| b.2[1].cmp(&a.2[1]).then(b.2[0].cmp(&a.2[0])).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
     v
 }
@@ -445,7 +551,8 @@ pub fn build(i: &Inputs<'_>) -> Result<Built, String> {
     top.sort_by(|a, b| b.now_minutes.partial_cmp(&a.now_minutes).unwrap_or(std::cmp::Ordering::Equal));
     top.truncate(i.options.top);
     let t = &fleet["totals"];
-    let headline = format!("{} devices late, {} critical", n(&t["late"]) as i64, n(&t["critical"]) as i64);
+    let part = match n(&t["partDelayed"]) as i64 { 0 => String::new(), p => format!(", {p} part delayed") };
+    let headline = format!("{} devices late, {} critical{part}", n(&t["late"]) as i64, n(&t["critical"]) as i64);
 
     let xlsx = if i.options.xlsx { Some(xlsx::workbook(&sheets(i, &fleet, &rows, &windows, &top))?) } else { None };
     let csv = if i.options.csv { Some(csv(i, &rows).into_bytes()) } else { None };
@@ -475,6 +582,9 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
             vec![Cell::text(format!("Late at the last measurement ({})", ln.at)), int(&t["late"]), Cell::text(pct(&t["pctLate"]))],
             vec![Cell::text(format!("  {}", ln.band)), int(&t["delay"])],
             vec![Cell::text(format!("  {}", ln.over)), int(&t["critical"])],
+            vec![Cell::text("Part delayed (some of its log types late)"), int(&t["partDelayed"]), Cell::text(pct(&t["pctPartDelayed"]))],
+            vec![Cell::text("Log types late"), types_late(&t["logTypes"]), Cell::text(t["logTypes"]["above"].as_u64().map(|a| format!("{a} {}", ln.over)).unwrap_or_default())],
+            vec![Cell::text("Log types not read in the last run, counted as before (devices)"), int(&t["typesUnread"]), Cell::text(unread_text(t))],
             vec![Cell::text("Other time zone"), int(&t["otherTz"]), Cell::text(pct(&t["pctOtherTz"]))],
             vec![Cell::text("Newly late today"), int(&fleet["newlyLateToday"])],
             vec![Cell::text("Solved today"), int(&fleet["solvedToday"])],
@@ -490,7 +600,7 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
         r.push(vec![Cell::Empty]);
         r.push(vec![Cell::head("Cluster"), Cell::head("Time zone"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Today"), Cell::head("No delay"), Cell::head("Delayed"),
                     Cell::head("Critical"), Cell::head("Other time zone"), Cell::head("No delay, previous period"), Cell::head("Silent"), Cell::head("Worst device"), Cell::head("Worst (min)"),
-                    Cell::head("Can't measure"), Cell::head("Levels (min)"), Cell::head("Last read")]);
+                    Cell::head("Can't measure"), Cell::head("Levels (min)"), Cell::head("Last read"), Cell::head("Part delayed"), Cell::head("Log types late")]);
         for c in fleet["byCluster"].as_array().into_iter().flatten() {
             // A cluster whose last run measured nothing has no counts: 0 would read as none.
             let known = |v: &Value| if c["notMeasured"].is_string() { Cell::text("not known") } else { int(v) };
@@ -499,14 +609,17 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                         if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { known(&c["otherTz"]) },
                         Cell::text(pct(&c["belowPctPrevious"])), known(&c["silent"]),
                         Cell::text(c["worst"]["device"].as_str().unwrap_or("—")), c["worst"]["minutes"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty),
-                        known(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now))]);
+                        known(&c["cantMeasure"]), Cell::text(levels_text(&c["levels"])), Cell::text(read_text(c, now)), known(&c["partDelayed"]),
+                        match c["logTypeWhy"].as_str() { Some(why) => Cell::text(why), None if c["notMeasured"].is_string() => Cell::text("not known"), None => types_late(&c["logTypes"]) }]);
         }
         r.push(vec![Cell::Empty]);
         r.push(vec![Cell::text(TZ_NOTE)]);
         r.push(vec![Cell::Empty]);
-        r.push(vec![Cell::head("Zone"), Cell::head("tag1"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Critical"), Cell::head("Silent")]);
+        r.push(vec![Cell::head("Zone"), Cell::head("tag1"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Critical"), Cell::head("Silent"), Cell::head("Part delayed")]);
         for (z, t1, n) in by_zone_tag(i) {
-            r.push(vec![Cell::text(z), Cell::text(t1), Cell::Int(n[0] as f64), Cell::Int(n[1] as f64), Cell::Int(n[2] as f64), Cell::Int(n[3] as f64)]);
+            let mut line = vec![Cell::text(z), Cell::text(t1)];
+            line.extend(n.map(|x| Cell::Int(x as f64)));
+            r.push(line);
         }
         out.push(Sheet { name: "Summary".into(), rows: r });
     }
@@ -521,6 +634,9 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
         head.push(Cell::head("Step"));
         head.push(Cell::head("Likely why"));
         head.push(Cell::head("Fix"));
+        head.push(Cell::head("Log types"));
+        head.push(Cell::head("Delay is of log type"));
+        head.push(Cell::head("Time part delayed"));
         let each = super::fixes::per_device(i.findings);
         let mut r = vec![head];
         for row in rows {
@@ -533,16 +649,17 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                 Some(f) => { line.push(Cell::text(f.step.label())); line.push(Cell::text(&f.why)); line.push(Cell::text(&f.fix)); }
                 None => { line.push(Cell::Empty); line.push(Cell::Empty); line.push(Cell::Empty); }
             }
+            line.extend([Cell::text(types_text(row)), opt_text(&row.delay_log_type), Cell::text(time::duration(row.part_late_ms))]);
             r.push(line);
         }
         r.push(vec![Cell::text(format!("{} rows · {} · grouped by {}", rows.len(), i.options.devices.label(), i.options.group_by))]);
         out.push(Sheet { name: "Devices".into(), rows: r });
     }
     if i.options.has("windows") || i.options.has("lateEvery2h") {
-        let mut r = vec![vec![Cell::head("Window"), Cell::head("Newly late"), Cell::head("Solved"), Cell::head("Still late"), Cell::head("Complete")]];
+        let mut r = vec![vec![Cell::head("Window"), Cell::head("Newly late"), Cell::head("Solved"), Cell::head("Still late"), Cell::head("Complete"), Cell::head("Part delayed")]];
         for w in windows {
             r.push(vec![Cell::text(w["label"].as_str().unwrap_or("")), int(&w["newlyLate"]), int(&w["solved"]), int(&w["stillLate"]),
-                        Cell::text(if w["complete"] == true { "yes" } else { "so far" })]);
+                        Cell::text(if w["complete"] == true { "yes" } else { "so far" }), int(&w["partDelayed"])]);
         }
         r.push(vec![Cell::text(windows_note(&ln))]);
         out.push(Sheet { name: format!("Every {} hours", i.every_hours), rows: r });
@@ -550,16 +667,19 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
     if i.options.has("dayByDay") {
         let mut r = vec![vec![Cell::head("Day"), Cell::head("Devices"), Cell::head("On time"), Cell::head("Delayed"), Cell::head("Critical"),
                               Cell::head("Other time zone"), Cell::head("Clock ahead"), Cell::head("Silent"), Cell::head("Can't measure"), Cell::head("Started"), Cell::head("Solved"),
-                              Cell::head("Late hours"), Cell::head("Median (min)"), Cell::head("Complete"), Cell::head("No delay"), Cell::head("No delay, split")]];
+                              Cell::head("Late hours"), Cell::head("Median (min)"), Cell::head("Complete"), Cell::head("No delay"), Cell::head("No delay, split"),
+                              Cell::head("Part delayed"), Cell::head("Log types late")]];
         for d in fleet["days"].as_array().into_iter().flatten() {
             // On time = measured under the delay line (`onTimeAll`: any old little-band count included).
             r.push(vec![Cell::text(d["day"].as_str().unwrap_or("")), int(&d["devices"]), int(&d["onTimeAll"]), int(&d["delayed"]), int(&d["critical"]),
                         int(&d["otherTz"]), int(&d["clockAhead"]), int(&d["silent"]), int(&d["unmeasured"]), int(&d["started"]), int(&d["solved"]),
                         d["lateHours"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty), d["medianMinutes"].as_f64().map(Cell::Dec).unwrap_or_else(|| Cell::text("not measured")),
-                        Cell::text(if d["complete"] == true { "yes" } else { "so far" }), int(&d["noDelay"]), Cell::text(d["noDelayText"].as_str().unwrap_or(""))]);
+                        Cell::text(if d["complete"] == true { "yes" } else { "so far" }), int(&d["noDelay"]), Cell::text(d["noDelayText"].as_str().unwrap_or("")),
+                        int(&d["partDelayed"]), types_late(&d["logTypes"])]);
         }
         out.push(Sheet { name: "Day by day".into(), rows: r });
     }
+    out.extend(log_types_sheet(i));
     if i.options.has("topDelayed") {
         let mut r = vec![vec![Cell::head("Device"), Cell::head("Cluster"), Cell::head("Zone"), Cell::head("tag1"), Cell::head("Delay now (min)"), Cell::head("Level"), Cell::head("Late since")]];
         for d in top {
@@ -609,6 +729,19 @@ fn about(i: &Inputs<'_>, fleet: &Value) -> crate::report::about::About {
     ];
     a.notes.extend(fleet["byCluster"].as_array().into_iter().flatten()
         .filter_map(|c| Some(format!("{}: {}", c["name"].as_str().unwrap_or(""), c["timeZone"]["windowNote"].as_str()?))));
+    for c in i.clusters {
+        match c.log_type_field() {
+            (None, Some(why)) => a.notes.push(format!("{}: not read by log types ({why})", c.name)),
+            _ if a.notes.iter().any(|x| x == LOG_TYPES_NOTE) => {}
+            _ => a.notes.push(LOG_TYPES_NOTE.into()),
+        }
+        if let Some(t) = c.tracker.type_episodes_cut_ms.filter(|t| *t >= i.range.from_ms) {
+            a.notes.push(format!("{}: log type delay periods that started up to {} are not all kept", c.name, time::when(t, i.now)));
+        }
+        if c.tracker.types_not_kept > 0 {
+            a.notes.push(format!("{}: the last run read {} more log types than are kept; they count in their device's state, and have no row of their own", c.name, c.tracker.types_not_kept));
+        }
+    }
     a.warnings = warnings(fleet, i.now);
     a
 }
@@ -639,7 +772,7 @@ fn csv(i: &Inputs<'_>, rows: &[DeviceRow]) -> String {
     let chosen = columns(i.options);
     cols.extend(chosen.iter().cloned());
     s.push_str(&cols.iter().map(|c| csv_escape(&column_label(c))).collect::<Vec<_>>().join(","));
-    s.push_str(",step,why,fix,last measured,event time field,note\n");
+    s.push_str(",step,why,fix,last measured,event time field,note,log types,delay is of log type,time part delayed\n");
     let each = super::fixes::per_device(i.findings);
     for r in rows {
         let mut line: Vec<String> = vec![];
@@ -661,6 +794,9 @@ fn csv(i: &Inputs<'_>, rows: &[DeviceRow]) -> String {
             note.push(why);
         }
         line.push(csv_escape(&note.join("; ")));
+        line.push(csv_escape(&types_text(r)));
+        line.push(csv_escape(r.delay_log_type.as_deref().unwrap_or("")));
+        line.push(csv_escape(&time::duration(r.part_late_ms)));
         s.push_str(&line.join(","));
         s.push('\n');
     }
@@ -674,7 +810,7 @@ fn esc(s: &str) -> String {
 fn step_colour(s: Step) -> &'static str {
     match s {
         Step::Elasticsearch => BLUE,
-        Step::Forwarder => ORANGE,
+        Step::Forwarder | Step::LogType => ORANGE,
         Step::Parser => PINK,
         Step::DeviceClock | Step::DeviceLink | Step::DeviceTimeZone => GREEN,
         Step::Cluster => BLUE,
@@ -690,7 +826,7 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     let td = format!("padding:6px 8px;border-bottom:1px solid {LINE};font-size:13px;color:{INK};vertical-align:top");
     let th = format!("padding:6px 8px;border-bottom:2px solid {LINE};font-size:12px;color:{MUTED};text-align:left;font-weight:600");
     let tile = |num: String, label: &str, sub: &str, bg: &str| format!(
-        "<td style=\"padding:10px 12px;background:{bg};border-radius:6px;width:25%\"><div style=\"font-size:22px;font-weight:700;color:{INK}\">{}</div>\
+        "<td style=\"padding:10px 12px;background:{bg};border-radius:6px\"><div style=\"font-size:22px;font-weight:700;color:{INK}\">{}</div>\
          <div style=\"font-size:12px;color:{MUTED}\">{}</div><div style=\"font-size:12px;color:{INK}\">{}</div></td>", esc(&num), esc(label), esc(sub));
     let mut h = String::new();
     h.push_str(&format!("<!doctype html><html><body style=\"margin:0;padding:16px;background:#f6f7f9;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:{INK}\">"));
@@ -711,10 +847,16 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         let none = !t["pctNoDelay"].is_number();
         h.push_str(&tile(pct(&t["pctNoDelay"]), "no delay", &format!("{} devices", n(&t["noDelay"]) as i64), if none { GREY } else { GREEN }));
         h.push_str(&tile(pct(&t["pctLate"]), "late", &format!("{} devices · {} delayed ({}) · {} critical ({})", n(&t["late"]) as i64, n(&t["delay"]) as i64, ln.band, n(&t["critical"]) as i64, ln.over), if none { GREY } else { late_colour(n(&t["late"]), n(&t["critical"])) }));
+        if t["logTypes"].is_object() {
+            h.push_str(&tile(format!("{}", n(&t["partDelayed"]) as i64), "part delayed", &format!("{} of {} log types late", n(&t["logTypes"]["late"]) as i64, n(&t["logTypes"]["total"]) as i64), PART));
+        }
         h.push_str(&tile(format!("{}", n(&t["silent"]) as i64), "silent", "no logs for the silence limit", GREY));
         h.push_str("</tr></table>");
         h.push_str(&format!("<div style=\"font-size:13px;margin:6px 0 0\">{}</div>", esc(&no_delay_line(t))));
-        h.push_str(&format!("<div style=\"font-size:11px;color:{MUTED}\">{}</div>", esc(NO_DELAY_NOTE)));
+        h.push_str(&format!("<div style=\"font-size:11px;color:{MUTED}\">{}{}</div>", esc(NO_DELAY_NOTE), if t["logTypes"].is_object() { format!(" {}", esc(LOG_TYPES_NOTE)) } else { String::new() }));
+        if !unread_text(t).is_empty() {
+            h.push_str(&format!("<div style=\"font-size:12px;margin:4px 0 0\">{}</div>", esc(&unread_text(t))));
+        }
         let y = &fleet["yesterday"];
         h.push_str(&format!("<div style=\"font-size:13px;margin:8px 0 0\">Yesterday: {} devices became late, {} were solved{}.</div>",
             n(&y["newlyLate"]) as i64, n(&y["solved"]) as i64,
@@ -750,17 +892,22 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     }
     if i.options.has("lateEvery2h") && !windows.is_empty() {
         let devices = n(&t["devices"]).max(1.0);
+        let any_part = windows.iter().any(|w| n(&w["partDelayed"]) > 0.0);
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">Late devices every {} hours · {}</div>", i.every_hours, esc(&time::short_date(i.range.to.min(time::local_date(i.now))))));
         h.push_str("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">");
         for w in windows {
             let late = n(&w["stillLate"]);
             let p = ((late / devices) * 100.0).clamp(0.0, 100.0).round() as i64;
+            let part = match n(&w["partDelayed"]) {
+                x if x > 0.0 => format!("<td style=\"width:{}%;background:{PART};height:8px;font-size:1px\">&nbsp;</td>", ((x / devices) * 100.0).clamp(1.0, 100.0).round() as i64),
+                _ => String::new(),
+            };
             h.push_str(&format!("<tr><td style=\"width:110px;font-size:12px;color:{MUTED};padding:2px 8px 2px 0\">{}</td><td style=\"padding:2px 0\">\
                 <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>\
-                <td style=\"width:{p}%;background:{YELLOW};height:12px;font-size:1px\">&nbsp;</td><td style=\"background:{GREEN};height:12px;font-size:1px\">&nbsp;</td></tr></table></td>\
-                <td style=\"width:90px;font-size:12px;padding-left:8px\">{} late</td></tr>", esc(w["label"].as_str().unwrap_or("")), late as i64));
+                <td style=\"width:{p}%;background:{YELLOW};height:12px;font-size:1px\">&nbsp;</td>{part}<td style=\"background:{GREEN};height:12px;font-size:1px\">&nbsp;</td></tr></table></td>\
+                <td style=\"width:90px;font-size:12px;padding-left:8px\">{} late{}</td></tr>", esc(w["label"].as_str().unwrap_or("")), late as i64, part_text(w)));
         }
-        h.push_str(&format!("</table><div style=\"font-size:11px;color:{MUTED}\">yellow: measured late ({}) and not solved at the end of the window · green: the rest</div>", esc(&ln.at)));
+        h.push_str(&format!("</table><div style=\"font-size:11px;color:{MUTED}\">yellow: measured late ({}) and not solved at the end of the window{} · green: the rest</div>", esc(&ln.at), if any_part { " · yellow edge: part delayed" } else { "" }));
     }
     if i.options.has("windows") && !windows.is_empty() {
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">Every {} hours · {}</div>", i.every_hours, esc(&time::short_date(i.range.to.min(time::local_date(i.now))))));
@@ -774,19 +921,19 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     if i.options.has("dayByDay") {
         let days: Vec<&Value> = fleet["days"].as_array().map(|a| a.iter().rev().take(7).collect::<Vec<_>>()).unwrap_or_default().into_iter().rev().collect();
         h.push_str("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">Day by day · last 7 days</div>");
-        h.push_str(&format!("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Day</th><th style=\"{th}\">Devices</th><th style=\"{th}\">No delay</th><th style=\"{th}\">Delayed</th><th style=\"{th}\">Critical</th><th style=\"{th}\">Silent</th><th style=\"{th}\">Started</th><th style=\"{th}\">Solved</th></tr>"));
+        h.push_str(&format!("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Day</th><th style=\"{th}\">Devices</th><th style=\"{th}\">No delay</th><th style=\"{th}\">Delayed</th><th style=\"{th}\">Critical</th><th style=\"{th}\">Part delayed</th><th style=\"{th}\">Silent</th><th style=\"{th}\">Started</th><th style=\"{th}\">Solved</th></tr>"));
         for d in &days {
             let dev = n(&d["devices"]).max(1.0);
-            let bar = |v: f64, bg: &str| format!("<span style=\"display:inline-block;width:{}px;height:8px;background:{bg}\"></span>", ((v / dev) * 120.0).round() as i64);
-            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td></tr>",
+            let bar = |v: f64, bg: &str| if v <= 0.0 { String::new() } else { format!("<span style=\"display:inline-block;width:{}px;height:8px;background:{bg}\"></span>", ((v / dev) * 120.0).round() as i64) };
+            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td></tr>",
                 esc(d["day"].as_str().unwrap_or("")), n(&d["devices"]) as i64, n(&d["noDelay"]) as i64, n(&d["delayed"]) as i64, n(&d["critical"]) as i64,
-                n(&d["silent"]) as i64, n(&d["started"]) as i64, n(&d["solved"]) as i64));
-            h.push_str(&format!("<tr><td colspan=\"8\" style=\"padding:0 8px 2px;font-size:1px\">{}{}{}{}{}</td></tr>",
-                bar(n(&d["onTimeAll"]), GREEN), bar(n(&d["silent"]) + n(&d["cantMeasure"]), GREY), bar(n(&d["otherTz"]), VIOLET), bar(n(&d["delayed"]), YELLOW), bar(n(&d["critical"]), RED)));
-            h.push_str(&format!("<tr><td colspan=\"8\" style=\"padding:0 8px 6px;font-size:11px;color:{MUTED}\">{}</td></tr>", esc(d["noDelayText"].as_str().unwrap_or(""))));
+                n(&d["partDelayed"]) as i64, n(&d["silent"]) as i64, n(&d["started"]) as i64, n(&d["solved"]) as i64));
+            h.push_str(&format!("<tr><td colspan=\"9\" style=\"padding:0 8px 2px;font-size:1px\">{}{}{}{}{}{}</td></tr>",
+                bar(n(&d["onTimeAll"]), GREEN), bar(n(&d["silent"]) + n(&d["cantMeasure"]), GREY), bar(n(&d["otherTz"]), VIOLET), bar(n(&d["partDelayed"]), PART), bar(n(&d["delayed"]), YELLOW), bar(n(&d["critical"]), RED)));
+            h.push_str(&format!("<tr><td colspan=\"9\" style=\"padding:0 8px 6px;font-size:11px;color:{MUTED}\">{}</td></tr>", esc(d["noDelayText"].as_str().unwrap_or(""))));
         }
         if days.is_empty() {
-            h.push_str(&format!("<tr><td colspan=\"8\" style=\"{td}\">No day with totals yet.</td></tr>"));
+            h.push_str(&format!("<tr><td colspan=\"9\" style=\"{td}\">No day with totals yet.</td></tr>"));
         }
         h.push_str("</table>");
     }
@@ -828,12 +975,21 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
 /// A late device's delay and level in words, with when it was measured if not lately.
 fn top_delay(d: &DeviceRow, now: i64) -> String {
     let m = d.now_minutes.map(time::minutes).unwrap_or_else(|| "can't measure".into());
-    if d.stale || d.measured_until_ms.is_some() { format!("{m} · {}", summary::state_text(d, now)) } else { format!("{m} · {}", d.state.label()) }
+    if d.stale || d.measured_until_ms.is_some() || d.types_unread.is_some() { format!("{m} · {}", summary::state_text(d, now)) } else { format!("{m} · {}", d.state.label()) }
 }
 
 /// An empty list of late devices: none late, or nothing measured to say so.
-fn none_late(t: &Value) -> &'static str {
-    if n(&t["measured"]) > 0.0 { "No device is late." } else { "No device was measured." }
+fn none_late(t: &Value) -> String {
+    match (n(&t["measured"]) > 0.0, n(&t["partDelayed"]) as i64) {
+        (false, _) => "No device was measured.".into(),
+        (true, 0) => "No device is late.".into(),
+        (true, p) => format!("No device is late with all its log types; {p} part delayed."),
+    }
+}
+
+/// ` · 2 part delayed`, when there are any.
+fn part_text(v: &Value) -> String {
+    match n(&v["partDelayed"]) as i64 { 0 => String::new(), p => format!(" · {p} part delayed") }
 }
 
 fn cap(s: &str) -> String {
@@ -852,6 +1008,12 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     s.push_str(&format!("Summary: {} · no delay {} ({}) · late {} ({}) · delayed, {} {} · critical, {} {} · silent {} · can't measure {}\n{}. {NO_DELAY_NOTE}\n",
         headline, n(&t["noDelay"]) as i64, pct(&t["pctNoDelay"]), n(&t["late"]) as i64, pct(&t["pctLate"]), ln.band, n(&t["delay"]) as i64, ln.over, n(&t["critical"]) as i64,
         n(&t["silent"]) as i64, n(&t["cantMeasure"]) as i64, no_delay_line(t)));
+    if let (Some(a), Some(b)) = (t["logTypes"]["late"].as_u64(), t["logTypes"]["total"].as_u64()) {
+        s.push_str(&format!("Part delayed {} ({}) · log types late {a} of {b}. {LOG_TYPES_NOTE}\n", n(&t["partDelayed"]) as i64, pct(&t["pctPartDelayed"])));
+    }
+    if !unread_text(t).is_empty() {
+        s.push_str(&format!("{}\n", unread_text(t)));
+    }
     s.push_str("By cluster\n");
     for c in fleet["byCluster"].as_array().into_iter().flatten() {
         s.push_str(&format!("  {} · {} · late {} · {}\n", c["name"].as_str().unwrap_or(""), c["noDelayText"].as_str().unwrap_or("no percentage"),
@@ -879,8 +1041,8 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     if i.options.has("dayByDay") {
         s.push_str("Day by day · day: devices / no delay / delayed / critical / silent / started / solved\n");
         for d in fleet["days"].as_array().into_iter().flatten().rev().take(7).collect::<Vec<_>>().into_iter().rev() {
-            s.push_str(&format!("  {}  {} / {} / {} / {} / {} / {} / {} · {}\n", d["day"].as_str().unwrap_or(""), n(&d["devices"]) as i64, n(&d["noDelay"]) as i64,
-                n(&d["delayed"]) as i64, n(&d["critical"]) as i64, n(&d["silent"]) as i64, n(&d["started"]) as i64, n(&d["solved"]) as i64, d["noDelayText"].as_str().unwrap_or("")));
+            s.push_str(&format!("  {}  {} / {} / {} / {} / {} / {} / {}{} · {}\n", d["day"].as_str().unwrap_or(""), n(&d["devices"]) as i64, n(&d["noDelay"]) as i64,
+                n(&d["delayed"]) as i64, n(&d["critical"]) as i64, n(&d["silent"]) as i64, n(&d["started"]) as i64, n(&d["solved"]) as i64, part_text(d), d["noDelayText"].as_str().unwrap_or("")));
         }
         s.push('\n');
     }
@@ -930,7 +1092,7 @@ mod tests {
             let mut extras = BTreeMap::new();
             extras.insert("Zone".to_string(), "dc1".to_string());
             extras.insert("fwd_tag".to_string(), "syslog-1".to_string());
-            Reading { device: d.into(), docs: 50, arrival_ms: Some(at), event_ms: Some(at - (m * 60_000.0) as i64), delay_minutes: Some(m), event_field: Some("event_created".into()), extras }
+            Reading { device: d.into(), docs: 50, arrival_ms: Some(at), event_ms: Some(at - (m * 60_000.0) as i64), delay_minutes: Some(m), event_field: Some("event_created".into()), extras, ..Reading::default() }
         };
         t.apply(now - 4 * H, vec![rd("fw-1", 45.0, now - 4 * H), rd("fw-2", 2.0, now - 4 * H), rd("fw-3", 20.0, now - 4 * H)], &l, 2 * H);
         t.apply(now - 2 * H, vec![rd("fw-1", 94.0, now - 2 * H), rd("fw-2", 2.0, now - 2 * H), rd("fw-3", 20.0, now - 2 * H)], &l, 2 * H);
@@ -947,7 +1109,7 @@ mod tests {
         let mut t = Tracker::default();
         let l = Levels::default();
         let evil = "=HYPERLINK(\"http://x\")<script>alert('1')</script>, \"q\"";
-        let rd = Reading { device: evil.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), event_field: None, extras: BTreeMap::new() };
+        let rd = Reading { device: evil.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), ..Reading::default() };
         t.apply(now, vec![rd], &l, 2 * H);
         let clusters = vec![ClusterInput { id: "prod".into(), name: "<b>Prod</b>".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l, zone: crate::logdelay::tz::LogTimeZone::Detect, tz_hints: vec![] }];
         let r = Range::last_days(now, 7);
@@ -969,7 +1131,7 @@ mod tests {
         let mut t = Tracker::default();
         let l = Levels::default();
         let plus = "+cmd|' /C calc'!A0";
-        let rd = Reading { device: plus.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), event_field: None, extras: BTreeMap::new() };
+        let rd = Reading { device: plus.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), ..Reading::default() };
         t.apply(now, vec![rd], &l, 2 * H);
         let clusters = vec![ClusterInput { id: "prod".into(), name: "Prod".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l, zone: crate::logdelay::tz::LogTimeZone::Detect, tz_hints: vec![] }];
         let r = Range::last_days(now, 7);
@@ -1027,8 +1189,8 @@ mod tests {
             assert!(b.html.contains(wanted), "{wanted} missing from the mail");
         }
         assert!(b.html.contains(&format!("background:{RED}\">1 h 34 min · critical")) || b.html.contains("· critical</td>"), "{}", b.html);
-        assert_eq!([State::Critical, State::Delay, State::NoDelay, State::OtherTz, State::Silent, State::Unmeasured, State::ClockAhead].map(state_colour),
-                   [RED, YELLOW, GREEN, VIOLET, GREY, GREY, GREY]);
+        assert_eq!([State::Critical, State::Delay, State::NoDelay, State::OtherTz, State::Silent, State::Unmeasured, State::ClockAhead, State::PartDelay].map(state_colour),
+                   [RED, YELLOW, GREEN, VIOLET, GREY, GREY, GREY, PART]);
         assert!(b.html.contains("No delay 66.7 % (on time 66.7 % · silent 0 % · can't measure 0 %)") || b.html.contains("No delay 66.7 % (on time 66.7 % · silent 0 % · can&#39;t"), "{}", b.html);
         assert!(b.text.contains("No delay 66.7 % (on time 66.7 % · silent 0 % · can't measure 0 %)") && b.text.contains("Production · No delay"), "{}", b.text);
         assert!(b.text.contains("delayed, 30–60 min 0") && b.text.contains("last run "), "{}", b.text);
@@ -1068,10 +1230,7 @@ mod tests {
         assert_eq!(time_zone_text(&Value::Null), "—");
         let now = chrono::Utc::now().timestamp_millis();
         let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::OtherTz, now_minutes: Some(1.0),
-            raw_gap_minutes: Some(481.0), tz_offset_minutes: Some(480), device_tz_offset: Some(480), cluster_tz_offset: Some(330), median_minutes: None,
-            max_minutes: None, episodes: 0, solved: 0, late_ms: 0, last_started: None, last_solved: None, late_since: None, docs_per_day: None, own_zone: None, last_ended_why: None, last_measured_ms: None, stale: false,
-            measured_until_ms: None, docs_counted: None, docs_counted_hours: None,
-            last_arrival: None, last_event: None, event_field: None, silent_since: None, zone: None, tag1: None, in_last_run: true, extras: BTreeMap::new() };
+            raw_gap_minutes: Some(481.0), tz_offset_minutes: Some(480), device_tz_offset: Some(480), cluster_tz_offset: Some(330), in_last_run: true, ..DeviceRow::default() };
         assert_eq!(device_time_zone(&r), "+08:00");
         assert_eq!(cell_text(&column_cell("rawGap", &r, now)), "481.00");
         r.state = State::Delay; r.tz_offset_minutes = Some(330); r.now_minutes = Some(40.0); r.raw_gap_minutes = Some(370.0);
@@ -1117,10 +1276,7 @@ mod tests {
     fn started_solved_reads_as_the_board_shows_it() {
         let now = chrono::Utc::now().timestamp_millis();
         let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::Critical, now_minutes: Some(94.0),
-            raw_gap_minutes: Some(94.0), tz_offset_minutes: None, device_tz_offset: None, cluster_tz_offset: None, median_minutes: None,
-            max_minutes: None, episodes: 1, solved: 0, late_ms: 0, last_started: Some(now - H), last_solved: None, late_since: Some(now - H), docs_per_day: None, own_zone: None, last_ended_why: None, last_measured_ms: None, stale: false,
-            measured_until_ms: None, docs_counted: None, docs_counted_hours: None,
-            last_arrival: None, last_event: None, event_field: None, silent_since: None, zone: None, tag1: None, in_last_run: true, extras: BTreeMap::new() };
+            raw_gap_minutes: Some(94.0), episodes: 1, last_started: Some(now - H), late_since: Some(now - H), in_last_run: true, ..DeviceRow::default() };
         assert!(started_solved(&r, now).ends_with("→ still late"));
         r.stale = true;
         r.last_measured_ms = Some(now - H);
@@ -1134,5 +1290,55 @@ mod tests {
         r.state = State::Silent;
         r.silent_since = Some(now - 2 * H);
         assert!(started_solved(&r, now).starts_with("no logs since "));
+    }
+
+    #[test]
+    fn the_report_lists_the_log_types_and_counts_part_delayed_apart() {
+        use crate::logdelay::measure::{LogTypeField, TypeReading};
+        let now = chrono::Utc::now().timestamp_millis();
+        let l = Levels::default();
+        let mut t = Tracker { interval_ms: Some(2 * H), ..Tracker::default() };
+        let typed = |d: &str, at: i64, types: &[(&str, f64)]| Reading {
+            device: d.into(), docs: 5, arrival_ms: Some(at), event_ms: Some(at), delay_minutes: Some(types[0].1),
+            types: Some(types.iter().map(|(n, m)| TypeReading { log_type: Some(n.to_string()), docs: 1, arrival_ms: Some(at), event_ms: Some(at), delay_minutes: Some(*m), event_field: None }).collect()),
+            ..Reading::default() };
+        for k in [1, 0] {
+            let at = now - k * 2 * H;
+            t.apply(at, vec![typed("fw-1", at, &[("traffic", 1.0), ("<i>threat</i>", 46.0)]), typed("fw-2", at, &[("traffic", 1.0), ("system", 2.0)])], &l, 2 * H);
+        }
+        t.last_read = Some(crate::logdelay::collect::RunInfo { at: now, devices: 2, complete: true, log_type: Some(LogTypeField { field: Some("log_type".into()), why: None }), ..Default::default() });
+        let key = time::local_day_key(now);
+        let (a, b) = time::day_bounds(time::local_date(now));
+        let daily = [(key.clone(), crate::logdelay::state::daily(&t, &key, a, b, now))].into();
+        let typed_cluster = ClusterInput { id: "prod".into(), name: "Production".into(), tracker: std::sync::Arc::new(t), daily, levels: l, zone: crate::logdelay::tz::LogTimeZone::Utc, tz_hints: vec![] };
+        let mut plain = input(now);
+        plain.name = "Plain".into();
+        let clusters = vec![typed_cluster, plain];
+        let r = Range::last_days(now, 7);
+        let findings = crate::logdelay::fixes::log_type_findings("prod", &clusters[0].tracker, now);
+        let opts = Options::default();
+        let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &findings, options: &opts, extras: &[], app_url: None };
+        let b = build(&i).unwrap();
+        assert_eq!(b.headline, "1 devices late, 1 critical, 1 part delayed");
+        let parts = crate::report::zip::read(b.xlsx.as_ref().unwrap()).unwrap();
+        let all: String = parts.iter().filter(|(n, _)| n.starts_with("xl/")).map(|(_, b)| String::from_utf8_lossy(b).to_string()).collect();
+        for want in ["name=\"Log types\"", "Part delayed (some of its log types late)", "1 of 4", "1 of 2 log types late: &lt;i&gt;threat&lt;/i&gt;", "Log type path", "Plain: not read by log types (mapping not read)", "not read"] {
+            assert!(all.contains(want), "{want}: {all}");
+        }
+        let sheet = log_types_sheet(&i).unwrap();
+        assert_eq!(sheet.rows.len(), 3, "the head, the one period, the note: {:?}", sheet.rows);
+        let cells: Vec<String> = sheet.rows[1].iter().map(cell_text).collect();
+        assert!(cells[..5] == ["Production", "fw-1", "<i>threat</i>", "delayed", "46.00"] && cells[5].ends_with("→ still late") && cells[7] == "46.00", "{cells:?}");
+        let everything = Options { devices: DevicesFilter::All, ..Options::default() };
+        assert_eq!(log_types_sheet(&Inputs { options: &everything, ..i }).unwrap().rows.len(), 6, "every log type");
+        assert!(log_types_sheet(&Inputs { clusters: &clusters[1..], ..i }).is_none(), "no cluster read by them: no sheet of nothing");
+        let csv = String::from_utf8(b.csv.unwrap()).unwrap();
+        assert!(csv.lines().next().unwrap().ends_with(",note,log types,delay is of log type,time part delayed"), "{csv}");
+        let line = csv.lines().find(|l| l.starts_with("fw-1,Production")).unwrap();
+        assert!(line.contains("1 of 2 log types late: <i>threat</i>") && line.contains("part delayed"), "{line}");
+        assert!(!b.html.contains("<i>threat") && b.html.contains("part delayed") && b.html.contains(PART), "{}", b.html);
+        assert!(b.text.contains("Part delayed 1 (20 %)") || b.text.contains("Part delayed 1 (20.0 %)"), "{}", b.text);
+        assert!(b.text.contains("log types late 1 of 4"), "{}", b.text);
+        assert!(!b.text.contains("late 2 ("), "part delayed is no late device: {}", b.text);
     }
 }
