@@ -6,7 +6,7 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur, dtz, hmz } from '../lib/fmt.js';
-import { diskLevel, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
+import { diskLevel, diskLines, DISK_HYSTERESIS, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
 import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
 import { HELD_DATASETS, HELD_MAX_AGE_MS, stampHeld, evaluatedAt } from './alert-held.js';
@@ -2097,18 +2097,23 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   }
   if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
   else if (d.health && d.health.status === 'yellow') add({ key: `${c.id}:health`, level: 'warning', cluster: c, title: `${c.name} health is YELLOW`, detail: `${d.health.unassigned_shards} unassigned shards` });
-  if (d.disk && isFinite(d.disk.percent)) {
-    // With hysteresis (alert-tuning.js diskLevel): raised at the threshold, cleared two
-    // points below it, so a disk at 79.9–80.0% does not open and close on every refresh.
-    const { diskWarnPercent: warn, diskCritPercent: crit } = state.defaults;
-    const lvl = diskLevel(d.disk.percent, diskHeld.get(c.id) || null, warn, crit);
+  const bal = diskBalance(d, d.clusterSettings);
+  // The fullest data node decides (Elasticsearch acts on a node, not on the average); the
+  // cluster's own figure only when it lists no node.
+  const fullest = [...bal.nodes].sort((a, b) => b.pct - a.pct)[0] || null;
+  const diskAverage = d.disk && isFinite(d.disk.percent) ? d.disk.percent : NaN;
+  const diskPct = fullest ? fullest.pct : diskAverage;
+  if (isFinite(diskPct)) {
+    // With hysteresis (alert-tuning.js diskLevel): raised at the line, cleared two points
+    // below it, so a disk at 84.9–85.0% does not open and close on every refresh.
+    const lines = diskLines(state.defaults);
+    const lvl = diskLevel(diskPct, diskHeld.get(c.id) || null, lines);
     // Only a live reading moves the hysteresis: a held evaluation reads it, never writes it.
     if (live) { if (lvl) diskHeld.set(c.id, lvl); else diskHeld.delete(c.id); }
-    if (lvl) add({ key: `${c.id}:disk`, level: lvl, cluster: c, diskPercent: d.disk.percent,
-      title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`,
-      detail: lvl === 'critical'
-        ? (d.disk.percent >= crit ? `Above the critical threshold (${crit}%)` : `Held critical until it falls below ${crit - 2}%`)
-        : (d.disk.percent >= warn ? `Above the warning threshold (${warn}%)` : `Held until it falls below ${warn - 2}%`) });
+    if (lvl) add({ key: `${c.id}:disk`, level: lvl, cluster: c, diskPercent: diskPct, diskNode: fullest ? fullest.name : null, diskAverage,
+      title: `${c.name} disk ${diskPct.toFixed(1)}%${fullest ? ` on ${fullest.name}` : ''}`,
+      detail: (diskPct >= lines[lvl] ? `At or above the ${lvl} line (${lines[lvl]}%)` : `Stays ${lvl} until it falls below ${lines[lvl] - DISK_HYSTERESIS}%`)
+        + (fullest && bal.nodes.length > 1 && isFinite(diskAverage) ? `. Cluster average ${diskAverage.toFixed(1)}%` : '') });
   } else if (live) {
     diskHeld.delete(c.id);
   }
@@ -2120,11 +2125,12 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   const exempt = slmExempt(c);
   if (!exempt && d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
   // Disk balance across data nodes — only meaningful with more than one.
-  const bal = diskBalance(d, d.clusterSettings);
   if (bal.applicable && (bal.verdict === 'critical' || bal.verdict === 'required' || bal.verdict === 'watch')) {
     const act = primaryAction(bal);
     add({ key: `${c.id}:disk-balance`,
-      level: bal.verdict === 'critical' ? 'critical' : 'warning',
+      // Past a node's flood stage, critical; past its high watermark, high: at the default
+      // watermarks (95 / 90) the same lines as the disk rule's.
+      level: bal.verdict === 'critical' ? 'critical' : (bal.causes || []).includes('high') ? 'high' : 'warning',
       cluster: c, balanceCauses: bal.causes || [],
       title: `${c.name}: ${balanceHeadline(bal)}`,
       // One suggestion, named — an alert that only states a problem leaves the reader

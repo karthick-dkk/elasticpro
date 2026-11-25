@@ -50,9 +50,12 @@ export const ALERT_RULES = [
   { id: 'health', page: 'shards', label: 'Cluster health red or yellow', level: 'critical',
     why: 'Red means data is missing; yellow means a replica has nowhere to go.' },
   { id: 'disk', page: 'shards', label: 'Disk usage above threshold', level: 'critical',
-    why: 'Elasticsearch stops allocating shards at the high watermark and stops writing at the flood stage.',
+    why: 'Elasticsearch stops allocating shards at the high watermark and stops writing at the flood stage. The fullest data node decides.',
+    // The words the Zabbix template carries (tools/zabbix-alert-template.mjs), unchanged.
+    zabbixWhy: 'Elasticsearch stops allocating shards at the high watermark and stops writing at the flood stage.',
     thresholds: [
       { key: 'diskWarnPercent', label: 'Warn at', unit: '%', min: 50, max: 99 },
+      { key: 'diskHighPercent', label: 'High at', unit: '%', min: 50, max: 99 },
       { key: 'diskCritPercent', label: 'Critical at', unit: '%', min: 50, max: 99 },
     ] },
   { id: 'disk-balance', page: 'shards', label: 'Disk unevenly spread across nodes', level: 'warning',

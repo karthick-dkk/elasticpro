@@ -1,5 +1,5 @@
 /**
- * The fleet wall's order (docs/PLAY.md "Fleet wall order"): each key largest first, a cluster
+ * The order of Play's Fleet page (docs/PLAY.md "Fleet"): each key largest first, a cluster
  * with no figure after every cluster that has one (never 0), the name as the last tie-break,
  * and the default when a display has nothing usable saved.
  */
@@ -81,9 +81,4 @@ test('the log delay key sorts by the figure the tile prints, not the worst devic
   assert.deepEqual(F.orderFleet(ctx, clusters, ['logDelay']).map((c) => printed(c)), [50, 20, 5]);
   for (const c of clusters) assert.equal(F.fleetFigure(ctx, c, 'logDelay'), printed(c));
   assert.equal(F.tileDelayMinutes({ delay: new Map() }, { id: 'x' }), null);
-});
-
-test('the tile says its delay is the median, on the smallest tiles too', () => {
-  for (const d of ['xl', 'l', 'm']) assert.equal(F.delayWord(d), ' median delay');
-  for (const d of ['s', 'xs']) assert.equal(F.delayWord(d), ' med. delay');
 });

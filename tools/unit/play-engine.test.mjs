@@ -1,7 +1,7 @@
 /**
  * Play's slide engine (ui/js/play/engine.js): zoom steps, dwell, skipping empty slides
- * (never Alerts), pause, the critical takeover and how it lets go, spotlight membership,
- * the stale "as of", the burn-in shift and the spotlight's 7 → 15 → 30 day chart cycle.
+ * (never Fleet), pause, the critical takeover and how it lets go, the stale "as of" and the
+ * burn-in shift.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,32 +21,30 @@ test('zoom moves in the documented steps and stays inside 80 %…150 %', () => {
   assert.equal(E.zoomStep(NaN, 0), 1);
 });
 
-test('dwell: dwellSec, per slide when set, and the spotlight per cluster', () => {
+test('dwell: dwellSec, per slide when set', () => {
   assert.equal(E.dwellMs('fleet', { dwellSec: 20 }), 20000);
   assert.equal(E.dwellMs('fleet', { dwellSec: 20, slideDwell: { fleet: 45 } }), 45000);
-  assert.equal(E.dwellMs('spotlight', { dwellSec: 20, perClusterSec: 13, spotlightCount: 3 }), 39000);
-  assert.equal(E.dwellMs('spotlight', { dwellSec: 20, perClusterSec: 13, spotlightCount: 0 }), 20000);
 });
 
-test('an empty slide is skipped, Alerts never is, and all empty lands on Alerts', () => {
-  const order = ['fleet', 'alerts', 'spotlight', 'delay'];
-  const empty = new Set(['spotlight']);
+test('an empty slide is skipped, Fleet never is, and all empty lands on Fleet', () => {
+  const order = ['backups', 'fleet', 'delay', 'volume'];
+  const empty = new Set(['delay']);
   assert.equal(E.nextSlide(order, 1, 1, (id) => empty.has(id)), 3);
   assert.equal(E.nextSlide(order, 3, -1, (id) => empty.has(id)), 1);
   assert.equal(E.nextSlide(order, 0, 1, () => true), 1);
-  assert.equal(E.nextSlide(['fleet', 'delay'], 0, 1, () => true), 0);
+  assert.equal(E.nextSlide(['backups', 'delay'], 0, 1, () => true), 0);
 });
 
 test('the engine turns after the dwell, holds while paused, and the keys move it', () => {
   const empty = new Set();
-  const en = E.createEngine({ order: ['fleet', 'alerts', 'delay'], now: 0, isEmpty: (id) => empty.has(id), dwellFor: () => 20000 });
+  const en = E.createEngine({ order: ['fleet', 'backups', 'delay'], now: 0, isEmpty: (id) => empty.has(id), dwellFor: () => 20000 });
   assert.equal(en.current, 'fleet');
   assert.equal(en.tick(19000), false);
   assert.equal(en.tick(20000), true);
-  assert.equal(en.current, 'alerts');
+  assert.equal(en.current, 'backups');
   en.togglePause(21000);
   assert.equal(en.tick(90000), false);
-  assert.equal(en.current, 'alerts');
+  assert.equal(en.current, 'backups');
   en.togglePause(100000);                 // 1 s used before the pause; 19 s left
   assert.equal(en.tick(118000), false);
   assert.equal(en.tick(119000), true);
@@ -78,20 +76,6 @@ test('critical takeover: not for what was open already; holds until acknowledged
   assert.equal(off.active, null, 'criticalTakesScreen off');
 });
 
-test('spotlight: joins with a reason, stays until 10 min after the last one cleared', () => {
-  const ten = 600000;
-  let m = E.spotlightMembers(new Map(), new Map([['c1', ['red']], ['c2', []]]), 0, ten);
-  assert.deepEqual([...m.keys()], ['c1']);
-  m = E.spotlightMembers(m, new Map([['c1', ['red']]]), 60000, ten);   // still red a minute later
-  assert.equal(m.get('c1').since, 0);
-  m = E.spotlightMembers(m, new Map([['c1', []]]), 65000, ten);        // cleared
-  assert.equal(m.get('c1').clearing, true);
-  m = E.spotlightMembers(m, new Map(), 60000 + ten - 1, ten);
-  assert.ok(m.has('c1'));
-  m = E.spotlightMembers(m, new Map(), 60000 + ten, ten);
-  assert.ok(!m.has('c1'));
-});
-
 test('stale "as of" is older than two refreshes; nothing at all is "none"', () => {
   assert.equal(E.staleness(0, 1000), 'none');
   assert.equal(E.staleness(1000, 1000 + 120000, { refreshMs: 60000 }), 'fresh');
@@ -106,12 +90,3 @@ test('burn-in moves a few pixels every 10 minutes', () => {
   assert.deepEqual(E.burnShift(E.BURN_IN_MS + 1000), a);
 });
 
-test('spotlight phase: a cluster per perClusterSec, chart 7 d (3 s) → 15 d (5 s) → 30 d (5 s)', () => {
-  const per = 13000;
-  assert.deepEqual(E.spotlightPhase(0, 2, per), { index: 0, days: 7 });
-  assert.deepEqual(E.spotlightPhase(2999, 2, per), { index: 0, days: 7 });
-  assert.deepEqual(E.spotlightPhase(3000, 2, per), { index: 0, days: 15 });
-  assert.deepEqual(E.spotlightPhase(8000, 2, per), { index: 0, days: 30 });
-  assert.deepEqual(E.spotlightPhase(13000, 2, per), { index: 1, days: 7 });
-  assert.deepEqual(E.spotlightPhase(26000, 2, per), { index: 0, days: 7 });
-});

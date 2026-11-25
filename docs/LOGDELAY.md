@@ -579,6 +579,18 @@ Tiles (0.3.62): the same five counts as the fleet's; `started`/`solved` in the c
 `medianNow`/`medianPrevious` are still answered and not drawn. `fixes` = the cluster's findings
 (the head's "i"). Footer: `fields` names.
 
+### `LOGDELAY_BOARD {clusterIds?, days?}` — the half-day board (0.3.94, Play's Log delay slide)
+
+Counts only, no device name, so a display link may send it (`PLAY_READS`). `days` 1–14, default 7.
+`{ok, now, days, scheduled, windows: [{from, to, complete}], clusters: [{id, name, state, lastRunAt,
+levels, devices, onTime, partDelayed, delay, critical, late, silent, cantMeasure, otherTz, newToday,
+solvedToday, windows: [n | null]}]}`. `windows` are the 12 hours (local) of the last `days` days that
+have begun; a cluster's `windows[i]` is the devices late at its last measurement inside that window
+(`measured_late`, the figure of *Late devices over the day*), `null` when nothing was measured there;
+in the running window it is the devices late now. `state`: `ok`, `old` (the last run is past the
+stale rule), `failed` (the last run did not read it), `never`; only `ok` has a figure in the running
+window. `scheduled`: the scheduled measurement is armed.
+
 ### `LOGDELAY_LOGTYPE {clusterId, logType | noType: true, from?, to?}` — Log type board
 
 One log type over the devices that send it (0.3.92): `devices[]` is each device's `series[]` row of

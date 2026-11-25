@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.94
+
+- **Play, drawn again: four pages** (Fleet, Log delay, Backups, Volume and capacity), light colours only, nothing blinks. The pages Alerts and Cluster spotlight are gone; the main menu's Alerts page is unchanged. docs/PLAY.md.
+  - *Fleet*: clusters with a Critical or High problem, open Critical and High alerts, devices by log delay and the five fullest disks; then each problem with what it is, why it matters and since when. One layout for any number of clusters. A new Critical brings Fleet to the screen.
+  - *Log delay*: one graph, the devices still late in each 12 hours of the last 7 days; devices now; the most delayed clusters of each period; every cluster. From the scheduled measurement's record (`LOGDELAY_BOARD`). Part delayed devices count as on time on this page only.
+  - *Backups*: a donut of the clusters by backup state, 14 days, age of the last good backup. *Volume and capacity*: logs per day with the 7-day average, the change per day, the biggest changes per cluster, who sends most, the fullest clusters. "Days until full" is gone.
+  - What is not read, not measured, not final or not known says so.
+- **Since when a problem is open** is kept on the server, one time for every display and browser; a time nobody saw start is "not known". A problem that clears is closed by itself.
+- **Disk levels are one rule everywhere** (alerts, mail, Play): Warning 85 %, **High 90 %**, Critical 95 % of the fullest data node. Shipped until now: Warning 80, Critical 90, against the cluster's average in the alert. New `UI_DISK_HIGH_PERCENT` / `diskHighPercent`. Levels set in config.txt or the clusters file stay as they are.
+- **Retired settings**: `UI_PLAY_NODE_BLINK`, `UI_PLAY_SPOTLIGHT_WHEN`, `UI_PLAY_SPOTLIGHT_LEAVE_MIN`, `UI_PLAY_SPOTLIGHT_SECONDS`. A config.txt that still has them loads, with a warning; saved displays load without the two pages.
+
 ## 0.3.93
 
 - **Zabbix gets the figures of the release that runs.** `deploy.sh --upgrade` moved the images and left the code the Zabbix scrapers run (`ui/`, `tools/`) at the release the install was first made from: alerts, client plan and log delay in Zabbix kept that release's definitions, and items added since (part delayed) never arrived. The core image now carries that code; an upgrade with a scraper in the stack puts it in `deploy/scraper/<version>/` and points `ELASTICPRO_UI_DIR` and `ELASTICPRO_TOOLS_DIR` there, also when the images are already current; `--rollback` goes back. A folder named in those keys by hand is left alone, with a note. `deploy/zabbix/README.md`, *Upgrading*.

@@ -1,5 +1,5 @@
 /**
- * Slide 5, Backups (docs/PLAY.md): one donut of the clusters by backup state
+ * Slide 3, Backups (docs/PLAY.md): one donut of the clusters by backup state
  * (play/snapshots.js backupState), the good and failed clusters per day, and per cluster the
  * last 14 days (the same days the Snapshots page draws), the age of the last good snapshot
  * against the stale window (snapshotStaleHours, 26 h, the window the snapshot alert uses), the

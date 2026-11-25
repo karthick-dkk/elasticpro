@@ -33,17 +33,17 @@ test('scope and slide counts in words', () => {
   assert.equal(P.scopeText({ group: 'Prod' }), 'Host group Prod');
   assert.equal(P.scopeText(['x'], (id) => id.toUpperCase()), 'X');
   assert.equal(P.scopeText(['x', 'y']), '2 chosen');
-  assert.equal(P.slidesText(undefined), '6 of 6');
-  assert.equal(P.slidesText({ slides: [{ id: 'fleet', show: false }] }), '5 of 6');
+  assert.equal(P.slidesText(undefined), '4 of 4');
+  assert.equal(P.slidesText({ slides: [{ id: 'fleet', show: false }] }), '3 of 4');
 });
 
 test('display settings: defaults, order kept, unknown ids dropped, missing slides appended', () => {
-  const d = P.displaySettings({ slides: [{ id: 'backups', show: false, dwellSec: 30 }, { id: 'nope' }, 'fleet'] });
-  assert.deepEqual(d.slides.map((s) => s.id), ['backups', 'fleet', 'alerts', 'spotlight', 'delay', 'volume']);
+  const d = P.displaySettings({ slides: [{ id: 'backups', show: false, dwellSec: 30 }, { id: 'nope' }, { id: 'alerts' }, 'spotlight', 'fleet'] });
+  assert.deepEqual(d.slides.map((s) => s.id), ['backups', 'fleet', 'delay', 'volume']);
   assert.equal(d.slides[0].show, false);
   assert.equal(d.slides[0].dwellSec, 30);
   assert.equal(d.slides[1].dwellSec, 20);
-  assert.deepEqual([d.criticalTakesScreen, d.spotlightAll, d.theme, d.sound, d.zoom], [true, false, 'dark', 'off', null]);
+  assert.deepEqual([d.criticalTakesScreen, d.theme, d.sound, d.zoom], [true, 'dark', 'off', null]);
   assert.equal(P.displaySettings({ zoom: 1.25, theme: 'light', sound: 'chime', criticalTakesScreen: false }).zoom, 1.25);
   assert.equal(P.displaySettings({ zoom: 3 }).zoom, null);
 });
@@ -58,9 +58,7 @@ test('moveSlide swaps neighbours and stops at the ends', () => {
 
 test('watch rules carry the documented defaults', () => {
   const w = P.watchRules(undefined);
-  assert.deepEqual([w.delayYellowFromMin, w.delayRedAboveMin, w.nodeExpected, w.nodeBlink, w.nodeCheckSec], [30, 60, 'seen24h', 'untilBack', 60]);
-  assert.deepEqual(w.spotlight.when, ['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert']);
-  assert.deepEqual([w.spotlight.perClusterSec, w.spotlight.leaveAfterMin, w.spotlight.whenEmpty], [13, 10, 'skip']);
+  assert.deepEqual([w.delayYellowFromMin, w.delayRedAboveMin, w.nodeExpected, w.nodeCheckSec], [30, 60, 'seen24h', 60]);
   assert.equal(P.watchRules({ delayRedAboveMin: 90 }).delayRedAboveMin, 90);
 });
 
@@ -73,28 +71,26 @@ test('watch problems', () => {
 
 test('which fields config.txt locks, and that the save leaves them out', () => {
   // The core's PLAY_CONFIG_GET: `managed` names the keys, `managedFields` maps each locked field to its key.
-  const locked = P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_SPOTLIGHT_WHEN', 'UI_PLAY_EXCLUDE'],
-    managedFields: { 'watch.delayRedAboveMin': 'UI_PLAY_DELAY_RED_MIN', 'watch.spotlight.when': 'UI_PLAY_SPOTLIGHT_WHEN' } });
-  assert.deepEqual([...locked].sort(), ['delayRedAboveMin', 'spotlight.when']);
+  const locked = P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_NODE_EXPECTED', 'UI_PLAY_EXCLUDE'],
+    managedFields: { 'watch.delayRedAboveMin': 'UI_PLAY_DELAY_RED_MIN', 'watch.nodeExpected': 'UI_PLAY_NODE_EXPECTED' } });
+  assert.deepEqual([...locked].sort(), ['delayRedAboveMin', 'nodeExpected']);
   assert.equal(P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN'] }).size, 0, 'the field map is the core\'s managedFields, not a copy kept here');
   const out = P.watchPayload(P.watchRules(), locked);
   assert.equal('delayRedAboveMin' in out, false);
-  assert.equal('when' in out.spotlight, false);
-  assert.equal(out.delayYellowFromMin, 30);
-  assert.equal(out.spotlight.perClusterSec, 13);
-  assert.equal(out.spotlight.whenEmpty, 'skip');
+  assert.equal('nodeExpected' in out, false);
+  assert.deepEqual(out, { delayYellowFromMin: 30, nodeCheckSec: 60 });
   assert.equal(P.lockedFields(null).size, 0);
 });
 
 test('a link made again keeps its name, clusters, addresses, settings and the expiry it has left', () => {
   const now = 1_800_000_000_000;
   const p = P.replacePayload({ id: 'x', name: 'NOC', clusters: { group: 'Prod' }, allowFrom: ['10.0.0.0/8'], expires: { at: now + 2.5 * 86400000 },
-    expiresAt: now + 2.5 * 86400000, settings: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }], theme: 'light', sound: 'chime', zoom: 1.25 } }, now);
+    expiresAt: now + 2.5 * 86400000, settings: { slides: [{ id: 'delay', show: true, dwellSec: 30 }], theme: 'light', sound: 'chime', zoom: 1.25 } }, now);
   assert.equal(p.name, 'NOC');
   assert.deepEqual(p.clusters, { group: 'Prod' });
   assert.deepEqual(p.allowFrom, ['10.0.0.0/8']);
   assert.equal(p.expires, 3);
-  assert.equal(p.settings.slides[0].id, 'alerts');
+  assert.equal(p.settings.slides[0].id, 'delay');
   assert.equal(p.settings.slides[0].dwellSec, 30);
   assert.equal(p.settings.theme, 'light');
   assert.equal(p.settings.zoom, 1.25);

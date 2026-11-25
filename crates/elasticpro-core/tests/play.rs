@@ -235,11 +235,11 @@ async fn a_display_link_shows_play_and_nothing_else() {
     assert_eq!(as_display(&c, &tok, json!({ "type": "PLAY_STATE" }), from).await["zoom"], json!(1.25));
     // Unless the administrator fixes it.
     let set = admin(&c, &s, json!({ "type": "PLAY_LINK_SET", "id": id, "settings": { "zoom": 0.9, "sound": "chime",
-        "slides": [{ "id": "alerts", "show": true, "dwellSec": 30 }, { "id": "fleet", "show": false, "dwellSec": 20 }] } })).await;
+        "slides": [{ "id": "alerts", "show": true, "dwellSec": 30 }, { "id": "volume", "show": true, "dwellSec": 30 }, { "id": "fleet", "show": false, "dwellSec": 20 }] } })).await;
     assert_eq!(set["ok"], json!(true), "{set}");
     let ps = as_display(&c, &tok, json!({ "type": "PLAY_STATE" }), from).await;
     assert_eq!(ps["zoom"], json!(0.9));
-    assert_eq!(ps["settings"]["display"]["slides"][0]["id"], json!("alerts"));
+    assert_eq!(ps["settings"]["display"]["slides"][0]["id"], json!("volume"), "a slide Play no longer has is left out");
 
     // The list says when and from where, never the secret.
     let list = admin(&c, &s, json!({ "type": "PLAY_LINK_LIST" })).await;
@@ -397,7 +397,7 @@ async fn a_node_missing_from_a_nodes_answer_has_left_until_forgotten_and_it_surv
     let st = c.handle(json!({ "type": "PLAY_STATE" })).await;
     assert_eq!(st["nodes"]["c1"]["left"][0]["node"], json!("es-hot-02"), "{st}");
     // Removed on purpose: forgotten, and it stays forgotten across a restart.
-    // The wall acknowledged it (nodeBlink: untilAck); forgetting the node clears that too.
+    // An acknowledgement kept for it; forgetting the node clears that too.
     let a = c.handle(json!({ "type": "ACK_SET", "key": "c1:node-left" })).await;
     assert_eq!(a["ok"], json!(true), "{a}");
     assert!(c.handle(json!({ "type": "ACK_LIST" })).await["acks"].get("c1:node-left").is_some());
@@ -477,13 +477,14 @@ async fn settings_round_trip_and_an_exclusion_needs_a_reason() {
     let ok = admin(&c, &s, json!({ "type": "PLAY_CONFIG_SET", "settings": { "exclude": { "add": { "clusterId": "c2", "reason": "migrating to new hardware" } } } })).await;
     assert_eq!(ok["ok"], json!(true), "{ok}");
     assert_eq!(ok["exclude"][0]["by"], json!("Admin"));
-    let w = admin(&c, &s, json!({ "type": "PLAY_CONFIG_SET", "settings": { "watch": { "delayRedAboveMin": 90, "spotlight": { "when": ["red", "yellow"] } } } })).await;
+    let w = admin(&c, &s, json!({ "type": "PLAY_CONFIG_SET", "settings": { "watch": { "delayRedAboveMin": 90, "nodeCheckSec": 30, "spotlight": { "when": ["red", "yellow"] } } } })).await;
     assert_eq!(w["watch"]["delayRedAboveMin"], json!(90), "{w}");
     assert_eq!(w["watch"]["delayYellowFromMin"], json!(30), "left out, kept");
     // PLAY_STATE leaves the excluded cluster out of everything it names.
     let st = admin(&c, &s, json!({ "type": "PLAY_STATE" })).await;
     assert_eq!(st["excluded"], json!(["c2"]));
-    assert_eq!(st["settings"]["watch"]["spotlight"]["when"], json!(["red", "yellow"]));
+    assert_eq!(st["settings"]["watch"]["nodeCheckSec"], json!(30));
+    assert!(st["settings"]["watch"].get("spotlight").is_none(), "{st}");
     // Only an admin changes them; a user reads them.
     let add = admin(&c, &s, json!({ "type": "USER_ADD", "name": "ula", "password": PASSWORD, "role": "user" })).await;
     assert_eq!(add["ok"], json!(true), "{add}");

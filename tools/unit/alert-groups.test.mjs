@@ -23,7 +23,7 @@ const MIN = 60000;
 const nodes = (rows) => ({ disk: { percent: 90, nodes: rows.map(([node, pct]) => ({ node, 'disk.used': String(pct), 'disk.total': '100' })) } });
 const ctxFor = (over = {}) => ({
   now: NOW,
-  defaults: { diskWarnPercent: 85, diskCritPercent: 90 },
+  defaults: { diskWarnPercent: 85, diskHighPercent: 90, diskCritPercent: 95 },
   data: () => null,
   ackFor: () => null, isAcked: () => false, silenced: () => false,
   ...over,
@@ -65,14 +65,14 @@ test('a snapshot failing since a known time beats the first sighting', () => {
 });
 
 test('disk across nodes lists each node over the warning line, with its own level', () => {
-  const a = alert(clusters.a, 'disk', 'critical', { diskPercent: 90 });
+  const a = alert(clusters.a, 'disk', 'high', { diskPercent: 90 });
   const data = nodes([['es-hot-1', 92], ['es-hot-2', 88], ['es-hot-3', 86], ['es-warm-1', 40]]);
   const [m] = G.mergeAlerts([a], ctxFor({ data: () => data }));
   assert.deepEqual(m.items.map((i) => [i.label, i.value, i.level]),
-    [['es-hot-1', '92%', 'critical'], ['es-hot-2', '88%', 'warning'], ['es-hot-3', '86%', 'warning']]);
+    [['es-hot-1', '92%', 'high'], ['es-hot-2', '88%', 'warning'], ['es-hot-3', '86%', 'warning']]);
   assert.equal(m.count, 'on 3 nodes');
-  assert.equal(m.title, 'Disk usage above 85%');
-  assert.equal(m.level, 'critical');
+  assert.equal(m.title, 'Disk usage above 90%');
+  assert.equal(m.level, 'high');
   assert.match(m.detail, /es-hot-1 92% · es-hot-2 88% · es-hot-3 86%/);
 });
 
@@ -86,7 +86,7 @@ test('a node-level disk alert lists the nodes past the watermarks, and is titled
   const data = nodes([['es-hot-1', 96], ['es-hot-2', 92], ['es-warm-1', 40]]);
   const a = alert(clusters.a, 'disk-balance', 'critical', { title: 'atlas-prod: disk at flood stage on es-hot-1 — indices are read-only' });
   const [m] = G.mergeAlerts([a], ctxFor({ data: () => data }));
-  assert.deepEqual(m.items.map((i) => [i.label, i.value, i.level]), [['es-hot-1', '96%', 'critical'], ['es-hot-2', '92%', 'warning']]);
+  assert.deepEqual(m.items.map((i) => [i.label, i.value, i.level]), [['es-hot-1', '96%', 'critical'], ['es-hot-2', '92%', 'high']]);
   assert.equal(m.count, 'on 2 nodes');
   assert.equal(m.title, 'Disk at flood stage on es-hot-1 — indices are read-only');
 });
@@ -130,7 +130,7 @@ test('acknowledging a merged alert covers its items; a new item re-opens it', ()
 });
 
 test('a node joining an acknowledged disk alert is 1 new since acknowledged', () => {
-  const a = alert(clusters.a, 'disk', 'critical', { diskPercent: 90 });
+  const a = alert(clusters.a, 'disk', 'high', { diskPercent: 90 });
   const rec = { 'a:disk': { acked: true, ackedItems: ['a:disk|es-hot-1', 'a:disk|es-hot-2'] } };
   const before = nodes([['es-hot-1', 92], ['es-hot-2', 88]]);
   assert.equal(G.mergeAlerts([a], ctxFor({ ...acks(rec), data: () => before }))[0].state, 'acked');
@@ -142,7 +142,7 @@ test('a node joining an acknowledged disk alert is 1 new since acknowledged', ()
 
 test('an acknowledgement written before merging still covers what it covered', () => {
   // against the merged key with no item list: everything under it, as it always did
-  const a = alert(clusters.a, 'disk', 'critical', { diskPercent: 90 });
+  const a = alert(clusters.a, 'disk', 'high', { diskPercent: 90 });
   const rec = { 'a:disk': { acked: true, ackedBy: 'old', ackedAt: NOW - 3600000 } };
   const data = nodes([['n1', 92], ['n2', 91], ['n3', 95]]);
   assert.equal(G.mergeAlerts([a], ctxFor({ ...acks(rec), data: () => data }))[0].state, 'acked');

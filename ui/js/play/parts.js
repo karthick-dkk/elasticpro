@@ -1,13 +1,6 @@
-/** The pieces every Play slide is built from: a figure tile, a pill, a list that fits. */
+/** The pieces every Play slide is built from: a donut, words for times, a list that fits. */
 
 import { h } from '../lib/dom.js';
-
-/** A big figure: label over value, an optional line under it. `tone` colours the value. */
-export function kpi(label, value, sub, tone = '') {
-  return h(`div.pl-kpi${tone ? `.${tone}` : ''}`, h('div.pl-k', label), h('div.pl-v', value), sub ? h('div.pl-s', sub) : null);
-}
-
-export const pillEl = (text, tone = 'grey') => h(`span.pl-pill.${tone}`, text);
 
 /** "not measured" / "no data": unknown, said in words and set apart, never a 0. */
 export const unknown = (text = 'no data', title = '') => h('span.pl-unk', { title: title || null }, text);
@@ -76,13 +69,13 @@ export function zoneName(tz) {
   } catch (_) { return tz; }
 }
 
-/** "3 h 12 m" for how long something has been open. */
+/** "2 min", "3 h 12 min", "1 d 3 h": how long something has been open. */
 export function openFor(ms) {
   if (!isFinite(ms) || ms < 0) return '–';
   const m = Math.floor(ms / 60000);
-  if (m < 60) return `${m} m`;
+  if (m < 60) return `${m} min`;
   const hrs = Math.floor(m / 60);
-  if (hrs < 48) return `${hrs} h ${String(m % 60).padStart(2, '0')} m`;
+  if (hrs < 24) return `${hrs} h ${m % 60} min`;
   return `${Math.floor(hrs / 24)} d ${hrs % 24} h`;
 }
 

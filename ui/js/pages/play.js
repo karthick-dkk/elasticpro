@@ -7,7 +7,7 @@
  * (which slide, for how long, what takes the screen) is play/engine.js.
  *
  * What it asks of the core beyond the fleet engine: PLAY_STATE once a minute (settings,
- * excluded clusters, node-left, open-since), ACK_LIST (shared acknowledgements), the shared
+ * excluded clusters, node-left, when each problem opened), ACK_LIST (shared acknowledgements), the shared
  * measurement cache, and the daily volume record. An older core answers none of the Play
  * messages; then Play runs on the defaults, with local acknowledgements and its own
  * measurements, and says what is missing.
@@ -19,39 +19,38 @@ import { h, mount } from '../lib/dom.js';
 import { state, clusters, client, mergedAlerts, invalidateAlerts, watchForPlay, fleetMode,
   datasetFreshness, refreshAll } from '../core/state.js';
 import { isOpen, isHeld, heldByCluster, toObservations } from '../core/alert-groups.js';
+import { diskLines } from '../core/alert-tuning.js';
 import { alertHistory } from '../core/alert-history.js';
 import { isStale } from '../lib/freshness.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { runBounded } from '../core/fleet.js';
-import { volumeReport } from '../core/volume.js';
 import { volumeDaily } from '../core/volume-daily.js';
 import { summarise } from '../core/log-delay.js';
+import { ldBoard } from '../core/logdelay-report.js';
 import { statusFor, loadLevels } from '../core/delay-levels.js';
 import { healthState } from '../core/state.js';
 import { playState, readPlayState, defaultPlayState, shareGet, zoomSet } from '../play/api.js';
-import { loadAcks, isAcked, acksOnServer } from '../core/acks.js';
+import { loadAcks, acksOnServer } from '../core/acks.js';
 import { credentialsKeptOnServer } from '../core/server-credentials.js';
-import { createEngine, zoomStep, ZOOM_STEPS, dwellMs, takeover, spotlightMembers, burnShift, staleness } from '../play/engine.js';
-import { clusterStatus, spotlightReasons } from '../play/status.js';
+import { createEngine, zoomStep, ZOOM_STEPS, dwellMs, takeover, burnShift, staleness } from '../play/engine.js';
+import { clusterStatus } from '../play/status.js';
 import { createMeasurer, MEASURE_EVERY_MS } from '../play/measure.js';
 import { clockText, zoneName } from '../play/parts.js';
 import * as sFleet from '../play/fleet.js';
-import * as sAlerts from '../play/alerts.js';
-import * as sSpotlight from '../play/spotlight.js';
 import * as sLogdelay from '../play/logdelay.js';
 import * as sBackups from '../play/backups.js';
 import * as sVolume from '../play/volume.js';
 import { fullscreen, hintDismissed, dismissHint } from '../core/fullscreen.js';
 
-export const SLIDES = [sFleet, sAlerts, sSpotlight, sLogdelay, sBackups, sVolume];
+export const SLIDES = [sFleet, sLogdelay, sBackups, sVolume];
 const SLIDE = new Map(SLIDES.map((s) => [s.id, s]));
 /** Everything the slides read, Play-watched (watchForPlay) so the core keeps it coming at Play's pace. */
 export const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots', 'snapshots_full', 'indices'];
 const ZOOM_KEY = 'elasticpro.play.zoom';
 const CONTROLS_MS = 5000;
+const BOARD_EVERY_MS = 60 * 1000;
 const VOLUME_EVERY_MS = 10 * 60 * 1000;
 const REPO_EVERY_MS = 10 * 60 * 1000;
-const SPOT_EVERY_MS = 5000;
 
 /* ----------------------------------- state ----------------------------------- */
 
@@ -67,8 +66,6 @@ let support = { play: null, acks: null, volume: null };
 let skew = 0;
 let engine = null;
 let take = null;                  // play/engine.js takeover() state
-let spot = new Map();
-let spotAt = 0;
 let zoom = 1;
 let zoomFromServer = true;
 let lastPhase = '';
@@ -79,7 +76,8 @@ let ctxMemo = { at: 0, ctx: null };
 let ctlUntil = 0;
 const volume = new Map();
 const repoSize = new Map();
-const reports = new WeakMap();
+/** The last LOGDELAY_BOARD answer (the scheduled measurement's record), or null before one. */
+let delayBoard = null;
 let measurer = null;
 const delayMemo = new Map();
 
@@ -144,16 +142,6 @@ function delayOf(id, t) {
   return v;
 }
 
-function reportOf(c) {
-  const d = state.data.get(c.id) || {};
-  const ix = state.indices.get(c.id) || [];
-  const hit = reports.get(c);
-  if (hit && hit.d === d && hit.ix === ix) return hit.r;
-  const r = volumeReport(c, d, ix);
-  reports.set(c, { d, ix, r });
-  return r;
-}
-
 /** Everything the slides read, built at most once a second (and at once after new data). */
 function context(force = false) {
   const now = Date.now();
@@ -166,8 +154,8 @@ function context(force = false) {
   const ids = new Set(list.map((c) => c.id));
   const mine = mergedAlerts().filter((m) => ids.has(m.clusterId));
   const merged = mine.filter((m) => !isHeld(m));
-  // Held under a down cluster (alert-groups.js holdUnreachable): one dimmed line under its
-  // tile and its Alerts row, in no count, never taking the screen (docs/PLAY.md).
+  // Held under a down cluster (alert-groups.js holdUnreachable): one dimmed line on its tile,
+  // in no count, never taking the screen (docs/PLAY.md).
   const held = mine.filter(isHeld);
   const heldBy = heldByCluster(held);
   // Acknowledged or not is mergedAlerts()'s answer (acks.js records, ackedItems per merged
@@ -175,49 +163,29 @@ function context(force = false) {
   const open = merged.filter((m) => isOpen(m));
   const openBy = new Map();
   for (const m of open) (openBy.get(m.clusterId) || openBy.set(m.clusterId, []).get(m.clusterId)).push(m);
+  const lines = diskLines(state.defaults);
   const st = new Map(list.map((c) => [c.id, clusterStatus(c, state.data.get(c.id), {
-    open: openBy.get(c.id) || [], nodes: ps.nodes[c.id] || null, client: client(c.id) })]));
+    alerts: merged.filter((m) => m.clusterId === c.id && (isOpen(m) || m.state === 'acked')), nodes: ps.nodes[c.id] || null,
+    client: client(c.id), lines, hot: take && take.active ? take.active.key : null })]));
   const t = delayT();
   const delay = new Map();
   for (const c of list) { const v = delayOf(c.id, t); if (v) delay.set(c.id, v); }
   const staleMs = (Number(state.defaults.snapshotStaleHours) || 26) * 3600000;
 
-  // The spotlight: who is in it, updated every few seconds (joining and leaving are per display).
-  if (force || now - spotAt >= SPOT_EVERY_MS) {
-    spotAt = now;
-    const reasons = new Map(list.map((c) => [c.id, spotlightReasons(c, state.data.get(c.id), {
-      open: openBy.get(c.id) || [], nodes: ps.nodes[c.id] || null, when: ps.watch.spotlight.when, staleMs, now,
-      logPattern: c.logIndexPattern || state.defaults.logIndexPattern })]));
-    spot = spotlightMembers(spot, reasons, now, ps.watch.spotlight.leaveAfterMin * 60000);
-    for (const id of [...spot.keys()]) if (!ids.has(id)) spot.delete(id);
-  }
-  let order = [...spot.keys()].sort((a, b) => (st.get(b) ? st.get(b).rank : 0) - (st.get(a) ? st.get(a).rank : 0)
-    || String(a).localeCompare(String(b)));
-  // Every cluster in turn: chosen for this display (spotlightAll), or when nothing is wrong (whenEmpty).
-  if (ps.display.spotlightAll || (!order.length && ps.watch.spotlight.whenEmpty === 'everyCluster')) {
-    const inSpot = new Set(order);
-    order = [...order, ...list.map((c) => c.id).filter((id) => !inSpot.has(id))];
-  }
-
   const ctx = {
     now, tz: ps.tz || null, clusters: list, st, open, merged, openBy, held, heldBy,
     data: (id) => state.data.get(id) || null,
     indices: (id) => state.indices.get(id) || null,
-    report: reportOf,
     nodes: (id) => ps.nodes[id] || null,
-    nodeHistory: support.play === true,
     watch: ps.watch, display: ps.display,
     delay, delayT: t, delayNote: delayNote(),
-    repoSize, volume,
-    spot: { members: spot, order },
+    repoSize, volume, delayBoard,
     acked: (m) => (m.state === 'acked' ? { by: m.ackedBy, at: m.ackedAt } : null),
     sharedAcks: acksOnServer() === true,
-    openSince: (m) => Number(ps.openSince[m.key]) || m.since,
-    blink: (id) => {
-      const s = st.get(id);
-      if (!s || !s.left.length || ps.watch.nodeBlink === 'off') return false;
-      return ps.watch.nodeBlink !== 'untilAck' || !isAcked(`${id}:node-left`);
-    },
+    // When the problem began: its own timestamp, else the first time the server saw it open. Not
+    // when this browser first saw it: a TV switched on later must not say "2 min".
+    openSince: (m) => m.startHint || Number(ps.openSince[m.key]) || null,
+    lines,
     staleMs, logPattern: state.defaults.logIndexPattern,
     takeover: take && take.active,
     elapsed: engine ? engine.elapsed(now) : 0,
@@ -238,7 +206,7 @@ function delayNote() {
   return p ? `measured by this screen; not shared: ${p}` : `measured: ${every}`;
 }
 
-/** Whether a slide has anything to show (Alerts always has: "All clear"). */
+/** Whether a slide has anything to show. */
 function isEmptySlide(id) {
   const s = SLIDE.get(id);
   if (!s) return true;
@@ -246,13 +214,11 @@ function isEmptySlide(id) {
 }
 
 function dwellFor(id) {
-  const ctx = context();
-  return dwellMs(id, { dwellSec: ps.display.dwellSec, slideDwell: ps.display.slideDwell, perClusterSec: ps.watch.spotlight.perClusterSec,
-    spotlightCount: ctx.spot.order.length });
+  return dwellMs(id, { dwellSec: ps.display.dwellSec, slideDwell: ps.display.slideDwell });
 }
 
-/** The slide on screen: Alerts while a critical alert holds it, even on a display without Alerts in its rotation. */
-const shownId = () => (take && take.active ? 'alerts' : engine.current);
+/** The slide on screen: Fleet while a critical alert holds it, even on a display without Fleet in its rotation. */
+const shownId = () => (take && take.active ? 'fleet' : engine.current);
 
 const orderOf = () => {
   const o = ps.display.slides.filter((x) => SLIDE.has(x));
@@ -273,8 +239,15 @@ function freshness(slide, ctx) {
       if (!oldest || f.ts < oldest) oldest = f.ts;
       if (f.staleAfterMs ? isStale(f.ts, ctx.now, f.staleAfterMs) : staleness(f.ts, ctx.now, { refreshMs }) === 'stale') stale = true;
     }
-    if (slide.id === 'delay') {
-      // The full check is the oldest part of a measurement (the late list is re-checked between).
+  }
+  if (slide.id === 'delay' && delayBoard) {
+    // The slide says when a cluster was last read in its own row; the header speaks only when the
+    // record itself could not be read lately.
+    oldest = delayBoard.now;
+    stale = staleness(oldest, serverNow(), { refreshMs: BOARD_EVERY_MS }) === 'stale';
+  } else if (slide.id === 'delay') {
+    // No record read: Play's own measurement; its full check is the oldest part of it.
+    for (const c of ctx.clusters) {
       const d = ctx.delay.get(c.id);
       const at = d && (d.fullAt || d.measuredAt);
       if (!at) { missing = true; continue; }
@@ -350,14 +323,14 @@ function paintHead(ctx) {
   const cur = SLIDE.get(shownId()) || SLIDES[0];
   if (els.title.textContent !== cur.title) els.title.textContent = cur.title;
   mount(els.chips, ...headerChips(ctx), cur.id === 'fleet'
-    ? h('span.pl-hchip', { title: `Fleet wall order (Config-Management › Play): ${sFleet.orderTitle(ps.display.fleetOrder)}` }, `Order: ${sFleet.orderText(ps.display.fleetOrder)}`) : null);
+    ? h('span.pl-hchip', { title: `Fleet order (Config-Management › Play): ${sFleet.orderTitle(ps.display.fleetOrder)}` }, `Order: ${sFleet.orderText(ps.display.fleetOrder)}`) : null);
   els.root.classList.toggle('takeover', !!(take && take.active));
   // dots: one per slide in the order; a skipped one is dim
   const order = engine.order;
   if (els.dots.childElementCount !== order.length) mount(els.dots, ...order.map((id) => h('i', { title: (SLIDE.get(id) || {}).title || id })));
   [...els.dots.children].forEach((d, i) => {
     d.classList.toggle('on', i === engine.index);
-    d.classList.toggle('empty', order[i] !== 'alerts' && isEmptySlide(order[i]));
+    d.classList.toggle('empty', order[i] !== 'fleet' && isEmptySlide(order[i]));
   });
   paintClock(ctx);
 }
@@ -366,7 +339,8 @@ function paintClock(ctx) {
   if (!els || !engine) return;
   const cur = SLIDE.get(shownId()) || SLIDES[0];
   const f = freshness(cur, ctx);
-  const txt = f.oldest ? `last fetched ${clockText(f.oldest, ctx.tz)}` : 'no data';
+  const own = cur.headText ? cur.headText(ctx) : '';
+  const txt = own ? own : cur.id === 'delay' && delayBoard && !f.stale ? '' : f.oldest ? `last fetched ${clockText(f.oldest, ctx.tz)}` : 'no data';
   if (els.fetched.textContent !== txt) els.fetched.textContent = txt;
   els.fetched.classList.toggle('stale', !!(f.oldest && f.stale));
   els.fetched.classList.toggle('none', !f.oldest);
@@ -419,7 +393,7 @@ function exit() {
   if (onExit) onExit();
 }
 
-/** The one-second beat: takeover, turning the slide, the spotlight's phase, the clock. */
+/** The one-second beat: takeover, turning the slide, a paged slide's part, the clock. */
 function tick() {
   if (!host || !host.isConnected) { onLeave(); return; }
   const now = Date.now();
@@ -441,7 +415,7 @@ function tick() {
   if (holding && now - lastAckPoll > 10000 && support.acks !== false) { lastAckPoll = now; pollAcks(); }
   let moved = false;
   if (holding) {
-    if (before !== holding.key) { engine.show('alerts', now); moved = true; }
+    if (before !== holding.key) { engine.show('fleet', now); moved = true; }
   } else if (before) {
     engine.next(now); moved = true;
   } else {
@@ -516,6 +490,15 @@ async function loadVolume() {
     volume.set(c.id, res && res.ok ? { at: Date.now(), reply: res } : { at: Date.now(), reply: null, error: (res && res.message) || 'no answer' });
   }, { limit: 2 });
   draw();
+}
+
+async function loadDelayBoard() {
+  if (isSnapshotMode()) return;
+  const ids = visible().map((c) => c.id);
+  if (!ids.length) return;
+  const res = await ldBoard({ clusterIds: ids, days: sLogdelay.DAYS });
+  // A failed read keeps the last answer: its own time says how old it is (freshness).
+  if (res && res.ok) { delayBoard = res; draw(); }
 }
 
 async function loadRepoSizes() {
@@ -598,6 +581,8 @@ export function render(el) {
     every(minute, Math.max(15, Math.min(60, ps.watch.nodeCheckSec)) * 1000);
     later(loadVolume, 1500);
     every(loadVolume, VOLUME_EVERY_MS);
+    later(loadDelayBoard, 1000);
+    every(loadDelayBoard, BOARD_EVERY_MS);
     later(loadRepoSizes, 2500);
     every(loadRepoSizes, REPO_EVERY_MS);
     later(() => measurer && measurer.cycle(), 4000);
@@ -629,6 +614,7 @@ export function onLeave() {
   host = null;
   ctxMemo = { at: 0, ctx: null };
   delayMemo.clear();
+  delayBoard = null;
   document.documentElement.classList.remove('play');
 }
 
@@ -641,5 +627,5 @@ export async function _poll() {
 
 /** For the checks: what the page holds now. */
 export function _debug() {
-  return { engine, take, spot, zoom, ps, support, timers: timers.size, listeners: listeners.length, display };
+  return { engine, take, zoom, ps, support, timers: timers.size, listeners: listeners.length, display };
 }

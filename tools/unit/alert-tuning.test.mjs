@@ -18,19 +18,23 @@ const A = (family, level, extra = {}) => ({ key: `p1:${family}${extra.suffix || 
 const fams = (list) => list.map((a) => a.key.split(':').slice(1).join(':')).sort();
 
 test('disk hysteresis: raised at the threshold, cleared two points below it', () => {
-  assert.equal(T.diskLevel(79.9, null, 80, 90), null);
-  assert.equal(T.diskLevel(80.0, null, 80, 90), 'warning');
-  assert.equal(T.diskLevel(79.9, 'warning', 80, 90), 'warning', 'no flap at 79.9 once raised');
-  assert.equal(T.diskLevel(78.1, 'warning', 80, 90), 'warning');
-  assert.equal(T.diskLevel(77.9, 'warning', 80, 90), null, 'clears below 78');
-  assert.equal(T.diskLevel(90, 'warning', 80, 90), 'critical');
-  assert.equal(T.diskLevel(88.5, 'critical', 80, 90), 'critical', 'held critical down to 88');
-  assert.equal(T.diskLevel(87.9, 'critical', 80, 90), 'warning');
-  assert.equal(T.diskLevel(NaN, 'critical', 80, 90), null, 'unknown is not a level');
+  const L = { warning: 85, high: 90, critical: 95 };
+  assert.equal(T.diskLevel(84.9, null, L), null);
+  assert.equal(T.diskLevel(85.0, null, L), 'warning');
+  assert.equal(T.diskLevel(84.9, 'warning', L), 'warning', 'no flap at 84.9 once raised');
+  assert.equal(T.diskLevel(83.1, 'warning', L), 'warning');
+  assert.equal(T.diskLevel(82.9, 'warning', L), null, 'clears below 83');
+  assert.equal(T.diskLevel(90, 'warning', L), 'high');
+  assert.equal(T.diskLevel(88.5, 'high', L), 'high', 'held high down to 88');
+  assert.equal(T.diskLevel(87.9, 'high', L), 'warning');
+  assert.equal(T.diskLevel(95, 'high', L), 'critical');
+  assert.equal(T.diskLevel(93.5, 'critical', L), 'critical', 'held critical down to 93');
+  assert.equal(T.diskLevel(92.9, 'critical', L), 'high');
+  assert.equal(T.diskLevel(NaN, 'critical', L), null, 'unknown is not a level');
 });
 
 test('a node at the flood stage is one row: the cluster average is folded into it', () => {
-  const out = T.tuneAlerts([A('disk', 'warning', { diskPercent: 84.2 }), A('disk-balance', 'critical', { balanceCauses: ['flood'] }), A('health', 'warning')]);
+  const out = T.tuneAlerts([A('disk', 'warning', { diskPercent: 91, diskAverage: 84.2 }), A('disk-balance', 'critical', { balanceCauses: ['flood'] }), A('health', 'warning')]);
   assert.deepEqual(fams(out), ['disk-balance', 'health']);
   const bal = out.find((a) => a.key === 'p1:disk-balance');
   assert.equal(bal.level, 'critical'); assert.match(bal.detail, /Cluster average 84\.2%/);

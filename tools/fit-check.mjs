@@ -182,7 +182,7 @@ const playFit = () => {
   if (slide.scrollHeight > slide.clientHeight + 1) issues.push(`slide is ${slide.scrollHeight} tall in ${slide.clientHeight}`);
   if (slide.scrollWidth > slide.clientWidth + 1) issues.push(`slide is ${slide.scrollWidth} wide in ${slide.clientWidth}`);
   const name = (e) => `${e.tagName.toLowerCase()}${typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}`;
-  for (const el of document.querySelectorAll('.pl-head, .pl-kpi, .pl-tile, .pl-arow, .pl-half, .pl-chart, .pl-fact, .pl-nodes, .pl-vtable, .pl-aside, .pl-strip, .pl-chips')) {
+  for (const el of document.querySelectorAll('.pl-head, .pl-panel, .pl-ft, .pl-fhead')) {
     const r = el.getBoundingClientRect();
     if (!r.width || !r.height) continue;
     if (r.left < -1 || r.top < -1 || r.right > cw + 1 || r.bottom > ch + 1) issues.push(`${name(el)} spans x ${Math.round(r.left)}..${Math.round(r.right)}, y ${Math.round(r.top)}..${Math.round(r.bottom)}`);

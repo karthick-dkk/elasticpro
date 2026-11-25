@@ -61,7 +61,7 @@ export const GAP = { min: 30, max: 600, def: 60 };
  */
 export const PLAY_FIELDS = [
   { key: 'healthSec', label: 'Health', covers: 'health', min: 60, max: 3600, def: 300 },
-  { key: 'nodesSec', label: 'Nodes & disk', covers: 'nodes — the node-left blink and disk', min: 60, max: 3600, def: 300 },
+  { key: 'nodesSec', label: 'Nodes & disk', covers: 'nodes — a node that left, and disk', min: 60, max: 3600, def: 300 },
   { key: 'lifecycleSec', label: 'SLM & ILM', covers: 'policies, ilm_errors, ilm_assign', min: 900, max: 86400, def: 14400 },
   { key: 'snapshotsSec', label: 'Snapshots', covers: 'snapshots, snapshots_full', min: 600, max: 86400, def: 7200 },
   { key: 'indicesSec', label: 'Index list', covers: 'indices', min: 300, max: 86400, def: 3600 },

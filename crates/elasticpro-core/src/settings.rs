@@ -135,6 +135,7 @@ const SPECS: &[Spec] = &[
     spec("UI_REFRESH_SECONDS", Kind::Int(5, 3600), To::Direct),
     spec("UI_REQUEST_TIMEOUT_MS", Kind::Int(1000, 600_000), To::Direct),
     spec("UI_DISK_WARN_PERCENT", Kind::Int(1, 100), To::Direct),
+    spec("UI_DISK_HIGH_PERCENT", Kind::Int(1, 100), To::Direct),
     spec("UI_DISK_CRIT_PERCENT", Kind::Int(1, 100), To::Direct),
     spec("UI_SNAPSHOT_STALE_HOURS", Kind::Int(1, 24 * 90), To::Direct),
     spec("UI_LOG_INDEX_PATTERN", Kind::Text, To::Direct),
@@ -216,11 +217,7 @@ const SPECS: &[Spec] = &[
     spec("UI_PLAY_DELAY_YELLOW_MIN", Kind::Int(1, 1440), To::Direct),
     spec("UI_PLAY_DELAY_RED_MIN", Kind::Int(1, 1440), To::Direct),
     spec("UI_PLAY_NODE_EXPECTED", Kind::Enum(&["seen24h", "pinned"]), To::Direct),
-    spec("UI_PLAY_NODE_BLINK", Kind::Enum(&["untilBack", "untilAck", "off"]), To::Direct),
     spec("UI_PLAY_NODE_CHECK_SECONDS", Kind::Int(10, 3600), To::Direct),
-    spec("UI_PLAY_SPOTLIGHT_WHEN", Kind::Text, To::Direct),
-    spec("UI_PLAY_SPOTLIGHT_LEAVE_MIN", Kind::Int(1, 1440), To::Direct),
-    spec("UI_PLAY_SPOTLIGHT_SECONDS", Kind::Int(5, 120), To::Direct),
     spec("UI_PLAY_EXCLUDE", Kind::Text, To::Direct),
 ];
 
@@ -231,6 +228,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("UI_REFRESH_SECONDS", "refreshIntervalSec"),
     ("UI_REQUEST_TIMEOUT_MS", "requestTimeoutMs"),
     ("UI_DISK_WARN_PERCENT", "diskWarnPercent"),
+    ("UI_DISK_HIGH_PERCENT", "diskHighPercent"),
     ("UI_DISK_CRIT_PERCENT", "diskCritPercent"),
     ("UI_SNAPSHOT_STALE_HOURS", "snapshotStaleHours"),
     ("UI_LOG_INDEX_PATTERN", "logIndexPattern"),
@@ -280,6 +278,10 @@ pub const ZABBIX_LINK_FIELDS: &[(&str, &str)] = &[
 /// Keys `deploy.sh` reads from the same file. Known, so not "unknown"; the core ignores them.
 const DEPLOY_KEYS: &[&str] = &["LISTEN_PORT", "ALLOWED_DOMAINS", "ALLOWED_UI_IPS", "RATE_EXEMPT_IPS", "CORE_MEM_LIMIT"];
 
+/// Keys earlier releases had (deploy.sh RETIRED_CONFIG_KEYS is the same list). A copied
+/// config.txt still names them: blank they are passed over, set they are said to do nothing.
+const RETIRED_KEYS: &[&str] = &["UI_PLAY_NODE_BLINK", "UI_PLAY_SPOTLIGHT_WHEN", "UI_PLAY_SPOTLIGHT_LEAVE_MIN", "UI_PLAY_SPOTLIGHT_SECONDS"];
+
 /// Managed values only, already validated and in canonical form (`true`/`false`, plain
 /// decimal, lower-case enum).
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -304,6 +306,12 @@ impl Settings {
                 continue;
             };
             let (key, value) = (key.trim(), unquote(value.trim()));
+            if RETIRED_KEYS.contains(&key) {
+                if !value.is_empty() && unknown.insert(key.to_string()) {
+                    s.warnings.push(format!("key {key} (line {}) is no longer used, ignored", n + 1));
+                }
+                continue;
+            }
             let Some(sp) = SPECS.iter().find(|sp| sp.key == key) else {
                 if !DEPLOY_KEYS.contains(&key) && unknown.insert(key.to_string()) {
                     s.warnings.push(format!("unknown key {key:?} (line {}), ignored", n + 1));
@@ -534,10 +542,6 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
         },
         "UI_REPORT_BRANCH_DEFAULT" if v.chars().count() > 60 => Err("at most 60 characters".into()),
         "UI_REPORT_SHEETS" => crate::report::schedule::check_sheets(&crate::report::schedule::comma_list(&v)).map(|_| v),
-        "UI_PLAY_SPOTLIGHT_WHEN" => match crate::play::settings::spotlight_when_problem(&v) {
-            None => Ok(v),
-            Some(why) => Err(why),
-        },
         "UI_PLAY_EXCLUDE" => {
             let ids = crate::play::settings::comma_list(&v);
             if ids.is_empty() {

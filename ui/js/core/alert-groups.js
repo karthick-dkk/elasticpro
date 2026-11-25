@@ -25,6 +25,7 @@
 
 import { ruleById } from './alert-rules.js';
 import { levelRank, worstLevel, countLevels } from './alert-levels.js';
+import { diskLevel, diskLines } from './alert-tuning.js';
 import { ruleOf } from './zabbix-alerts.js';
 import { compareNames } from '../lib/cluster-order.js';
 import { diskBalance } from './disk-balance.js';
@@ -79,21 +80,21 @@ export function itemsOf(a, ctx = {}) {
   const defaults = ctx.defaults || {};
   switch (fam) {
     case 'disk': {
-      const warn = Number(defaults.diskWarnPercent), crit = Number(defaults.diskCritPercent);
-      const hot = Number.isFinite(warn) ? diskNodes(d).filter((n) => n.pct >= warn) : [];
+      const lines = diskLines(defaults);
+      const hot = diskNodes(d).map((n) => ({ ...n, level: diskLevel(n.pct, null, lines) })).filter((n) => n.level);
       if (hot.length) {
-        return hot.map((n) => ({ id: `${a.key}|${n.name}`, label: n.name, value: pctText(n.pct),
-          level: Number.isFinite(crit) && n.pct >= crit ? 'critical' : 'warning', alertKey: a.key, node: n.name }));
+        return hot.map((n) => ({ id: `${a.key}|${n.name}`, label: n.name, value: pctText(n.pct), level: n.level, alertKey: a.key, node: n.name }));
       }
+      if (a.diskNode) return [one(a, a.diskNode, Number.isFinite(a.diskPercent) ? pctText(a.diskPercent) : '', { id: `${a.key}|${a.diskNode}`, node: a.diskNode })];
       return [one(a, 'cluster average', Number.isFinite(a.diskPercent) ? `${a.diskPercent.toFixed(1)}%` : '')];
     }
     case 'disk-balance': {
       // The nodes the verdict rests on (past the flood stage, past the high watermark), from
       // the same reading the alert was raised from.
       const bal = d ? diskBalance(d, d.clusterSettings) : null;
-      const flagged = bal && bal.applicable
-        ? [...(bal.aboveFlood || []).map((n) => ({ n, level: 'critical' })), ...(bal.aboveHigh || []).map((n) => ({ n, level: 'warning' }))]
-        : [];
+      const lines = diskLines(defaults);
+      const flag = (list, level) => (list || []).map((n) => ({ n, level: worst(level, diskLevel(n.pct, null, lines) || level) }));
+      const flagged = bal && bal.applicable ? [...flag(bal.aboveFlood, 'critical'), ...flag(bal.aboveHigh, 'high')] : [];
       if (flagged.length) {
         return flagged.map(({ n, level }) => ({ id: `${a.key}|${n.name}`, label: n.name, value: pctText(n.pct), level, alertKey: a.key, node: n.name }));
       }
@@ -158,8 +159,12 @@ function countText(fam, items, merged) {
 /** The merged alert's title: the rule's own name, with the live figure where the rule has one. */
 function titleFor(fam, rule, members, ctx) {
   if (fam === 'disk') {
-    const warn = Number((ctx.defaults || {}).diskWarnPercent);
-    return Number.isFinite(warn) ? `Disk usage above ${warn}%` : 'Disk usage above threshold';
+    const lines = diskLines(ctx.defaults);
+    const pct = members.reduce((m, a) => (Number.isFinite(a.diskPercent) && a.diskPercent > m ? a.diskPercent : m), -1);
+    if (pct < 0) return 'Disk usage above threshold';
+    const level = diskLevel(pct, null, lines);
+    // Held by the hysteresis just under its line: say the figure, not that it is above it.
+    return level ? `Disk usage above ${lines[level]}%` : `Disk usage ${pctText(pct)}`;
   }
   if (fam === 'health') {
     const red = members.some((m) => /RED/.test(m.title || ''));
@@ -191,7 +196,7 @@ function coveredBy(rec, itemId) {
  * @param {Array} list  what alerts() raised (after tuning)
  * @param {object} ctx
  *   data(clusterId) → the cluster's state.data entry | null
- *   defaults        → { diskWarnPercent, diskCritPercent, … }
+ *   defaults        → { diskWarnPercent, diskHighPercent, diskCritPercent, … }
  *   ackFor(key)     → acknowledgement record
  *   isAcked(key)    → bool
  *   silenced(alert) → bool

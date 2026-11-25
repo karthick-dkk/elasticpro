@@ -44,15 +44,13 @@ export const playLinkSet = (id, settings) => send({ type: 'PLAY_LINK_SET', id, s
 /* -------------------------------- vocabulary --------------------------------- */
 
 export const SLIDES = [
-  { id: 'fleet', label: 'Fleet wall' },
-  { id: 'alerts', label: 'Alerts' },
-  { id: 'spotlight', label: 'Cluster spotlight' },
+  { id: 'fleet', label: 'Fleet' },
   { id: 'delay', label: 'Log delay' },
   { id: 'backups', label: 'Backups' },
   { id: 'volume', label: 'Volume and capacity' },
 ];
 /**
- * What the fleet wall can be ordered by (docs/PLAY.md "Fleet wall order"), the words the
+ * What Fleet can be ordered by (docs/PLAY.md "Fleet order"), the words the
  * Config › Play selects use. The core's FLEET_KEYS is the same list.
  */
 export const FLEET_KEYS = [
@@ -74,24 +72,10 @@ export const DWELL = [20, 10, 30, 60];
 export const ZOOMS = [[null, '100 % · the TV keeps what was last set on it'], [0.8, '80 %'], [0.9, '90 %'], [1.1, '110 %'], [1.25, '125 %'], [1.5, '150 %']];
 export const EXPIRES = [['permanent', 'Permanent (until revoked)'], ['90', 'After 90 days'], ['30', 'After 30 days'], ['365', 'After 1 year']];
 
-export const SPOTLIGHT_WHEN = [
-  { id: 'red', label: 'Red health', on: true },
-  { id: 'nodeLeft', label: 'A node left the cluster', on: true },
-  { id: 'slmFailed', label: 'SLM failed or no good snapshot in 26 h', on: true },
-  { id: 'storage', label: 'Storage past the high watermark (90 %)', on: true },
-  { id: 'unreachable', label: 'Cluster not answering', on: true },
-  { id: 'criticalAlert', label: 'Any open critical alert', on: true },
-  { id: 'ilmError', label: 'ILM step in error on a log index', on: false },
-  { id: 'yellow', label: 'Yellow health', on: false },
-];
-
-export const WATCH_DEFAULTS = {
-  delayYellowFromMin: 30, delayRedAboveMin: 60, nodeExpected: 'seen24h', nodeBlink: 'untilBack', nodeCheckSec: 60,
-  spotlight: { when: SPOTLIGHT_WHEN.filter((w) => w.on).map((w) => w.id), perClusterSec: 13, leaveAfterMin: 10, whenEmpty: 'skip' },
-};
+export const WATCH_DEFAULTS = { delayYellowFromMin: 30, delayRedAboveMin: 60, nodeExpected: 'seen24h', nodeCheckSec: 60 };
 
 /**
- * The set of watch-field paths config.txt manages ("delayRedAboveMin", "spotlight.when", …),
+ * The set of watch-field paths config.txt manages ("delayRedAboveMin", …),
  * from PLAY_CONFIG_GET's `managedFields` — `{"watch.delayRedAboveMin": "UI_PLAY_DELAY_RED_MIN"}`,
  * the core's own map of field to key, so the page never keeps a second copy of it.
  */
@@ -149,7 +133,7 @@ export function scopeText(clusters, names = (x) => x) {
   return 'All';
 }
 
-/** Slides shown, for the table: "5 of 6". */
+/** Slides shown, for the table: "3 of 4". */
 export function slidesText(settings) {
   const s = displaySettings(settings).slides;
   return `${s.filter((x) => x.show).length} of ${s.length}`;
@@ -171,7 +155,6 @@ export function displaySettings(raw) {
   return {
     slides,
     criticalTakesScreen: r.criticalTakesScreen !== false,
-    spotlightAll: r.spotlightAll === true,
     theme: r.theme === 'light' ? 'light' : 'dark',
     sound: r.sound === 'chime' ? 'chime' : 'off',
     zoom: ZOOMS.some(([z]) => z === r.zoom) ? r.zoom : null,
@@ -209,7 +192,7 @@ export function moveSlide(slides, i, dir) {
 export function settingsPayload(s) {
   const d = displaySettings(s);
   return { slides: d.slides.map((x) => ({ id: x.id, show: x.show, dwellSec: x.dwellSec })), criticalTakesScreen: d.criticalTakesScreen,
-    spotlightAll: d.spotlightAll, theme: d.theme, sound: d.sound, zoom: d.zoom, fleetOrder: d.fleetOrder };
+    theme: d.theme, sound: d.sound, zoom: d.zoom, fleetOrder: d.fleetOrder };
 }
 
 /* ------------------------------- watch rules --------------------------------- */
@@ -217,21 +200,13 @@ export function settingsPayload(s) {
 /** The reply's watch block with defaults under it. */
 export function watchRules(raw) {
   const w = raw || {};
-  const sp = w.spotlight || {};
   const d = WATCH_DEFAULTS;
   const pick = (v, def) => (v === undefined || v === null || v === '' ? def : v);
   return {
     delayYellowFromMin: Number(pick(w.delayYellowFromMin, d.delayYellowFromMin)),
     delayRedAboveMin: Number(pick(w.delayRedAboveMin, d.delayRedAboveMin)),
     nodeExpected: pick(w.nodeExpected, d.nodeExpected),
-    nodeBlink: pick(w.nodeBlink, d.nodeBlink),
     nodeCheckSec: Number(pick(w.nodeCheckSec, d.nodeCheckSec)),
-    spotlight: {
-      when: Array.isArray(sp.when) ? sp.when.slice() : d.spotlight.when.slice(),
-      perClusterSec: Number(pick(sp.perClusterSec, d.spotlight.perClusterSec)),
-      leaveAfterMin: Number(pick(sp.leaveAfterMin, d.spotlight.leaveAfterMin)),
-      whenEmpty: pick(sp.whenEmpty, d.spotlight.whenEmpty),
-    },
   };
 }
 
@@ -241,7 +216,6 @@ export function watchProblems(w) {
   if (!(w.delayYellowFromMin >= 1)) out.push('Yellow delay starts at 1 minute or more.');
   else if (!(w.delayRedAboveMin > w.delayYellowFromMin)) out.push('Red delay must be above the yellow one.');
   if (!(w.nodeCheckSec >= 10)) out.push('Check nodes at least every 10 seconds.');
-  if (!(w.spotlight.perClusterSec >= 3)) out.push('A cluster shows for at least 3 seconds.');
   return out;
 }
 
@@ -251,11 +225,7 @@ export function watchProblems(w) {
  */
 export function watchPayload(w, locked = new Set()) {
   const out = {};
-  ['delayYellowFromMin', 'delayRedAboveMin', 'nodeExpected', 'nodeBlink', 'nodeCheckSec'].forEach((k) => { if (!locked.has(k)) out[k] = w[k]; });
-  const sp = {};
-  ['when', 'perClusterSec', 'leaveAfterMin'].forEach((k) => { if (!locked.has(`spotlight.${k}`)) sp[k] = w.spotlight[k]; });
-  sp.whenEmpty = w.spotlight.whenEmpty;
-  out.spotlight = sp;
+  ['delayYellowFromMin', 'delayRedAboveMin', 'nodeExpected', 'nodeCheckSec'].forEach((k) => { if (!locked.has(k)) out[k] = w[k]; });
   return out;
 }
 

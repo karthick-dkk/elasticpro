@@ -26,17 +26,15 @@ async function send(msg) {
 
 /** The watch rules' defaults (docs/PLAY.md "Play settings"), used until the core says otherwise. */
 export const WATCH_DEFAULTS = Object.freeze({
-  delayYellowFromMin: 30, delayRedAboveMin: 60, nodeExpected: 'seen24h', nodeBlink: 'untilBack', nodeCheckSec: 60,
-  spotlight: Object.freeze({ when: Object.freeze(['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert']),
-    perClusterSec: 13, leaveAfterMin: 10, whenEmpty: 'skip' }),
+  delayYellowFromMin: 30, delayRedAboveMin: 60, nodeExpected: 'seen24h', nodeCheckSec: 60,
 });
 /** A display's own settings, defaulted. */
 export const DISPLAY_DEFAULTS = Object.freeze({
-  slides: Object.freeze(['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume']),
-  dwellSec: 20, criticalTakesScreen: true, spotlightAll: false, theme: 'dark', sound: 'off', zoom: null,
+  slides: Object.freeze(['fleet', 'delay', 'backups', 'volume']),
+  dwellSec: 20, criticalTakesScreen: true, theme: 'dark', sound: 'off', zoom: null,
 });
-/** The six slide ids, as Config › Play names them. */
-export const SLIDE_IDS = Object.freeze(['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume']);
+/** The slide ids, as Config › Play names them. Others (a page taken out in 0.3.94) are left out when read. */
+export const SLIDE_IDS = Object.freeze(['fleet', 'delay', 'backups', 'volume']);
 
 /**
  * A display's slides: `[{id, show, dwellSec}]` (or plain ids), in its order. Hidden ones are
@@ -67,22 +65,14 @@ const num = (v, d) => (typeof v === 'number' && isFinite(v) && v > 0 ? v : d);
 export function readPlayState(res) {
   const s = (res && res.settings) || {};
   const w = { ...(s.watch || {}) };
-  for (const k of ['delayYellowFromMin', 'delayRedAboveMin', 'nodeExpected', 'nodeBlink', 'nodeCheckSec', 'spotlight']) {
+  for (const k of ['delayYellowFromMin', 'delayRedAboveMin', 'nodeExpected', 'nodeCheckSec']) {
     if (w[k] === undefined && s[k] !== undefined) w[k] = s[k];
   }
-  const sp = w.spotlight || {};
   const watch = {
     delayYellowFromMin: num(w.delayYellowFromMin, WATCH_DEFAULTS.delayYellowFromMin),
     delayRedAboveMin: num(w.delayRedAboveMin, WATCH_DEFAULTS.delayRedAboveMin),
     nodeExpected: w.nodeExpected || WATCH_DEFAULTS.nodeExpected,
-    nodeBlink: ['untilBack', 'untilAck', 'off'].includes(w.nodeBlink) ? w.nodeBlink : WATCH_DEFAULTS.nodeBlink,
     nodeCheckSec: num(w.nodeCheckSec, WATCH_DEFAULTS.nodeCheckSec),
-    spotlight: {
-      when: Array.isArray(sp.when) ? sp.when.map(String) : [...WATCH_DEFAULTS.spotlight.when],
-      perClusterSec: num(sp.perClusterSec, WATCH_DEFAULTS.spotlight.perClusterSec),
-      leaveAfterMin: num(sp.leaveAfterMin, WATCH_DEFAULTS.spotlight.leaveAfterMin),
-      whenEmpty: ['skip', 'allHealthy', 'everyCluster'].includes(sp.whenEmpty) ? sp.whenEmpty : WATCH_DEFAULTS.spotlight.whenEmpty,
-    },
   };
   const d = s.display || s.thisDisplay || s.defaultDisplay || {};
   const dwellSec = num(d.dwellSec, DISPLAY_DEFAULTS.dwellSec);
@@ -93,7 +83,6 @@ export function readPlayState(res) {
     slideDwell: sl ? sl.dwell : {},
     dwellSec,
     criticalTakesScreen: d.criticalTakesScreen !== false,
-    spotlightAll: !!d.spotlightAll,
     fleetOrder: readFleetOrder(d.fleetOrder),
     theme: d.theme || DISPLAY_DEFAULTS.theme,
     sound: d.sound === 'chime' || d.sound === true ? 'chime' : 'off',

@@ -254,7 +254,7 @@ export const SETTING_INDEX = Object.freeze([
   ['data', 'schedule', 'Log delay fields', 'ldc-f-device', 'device arrival event time extra columns src_hostname'],
   ['data', 'schedule', 'Log delay report', 'ldc-r-to', 'report generator mail schedule columns xlsx csv'],
   ['play', 'play', 'Display links', '', 'tv new display link revoke'],
-  ['play', 'play', 'Watch rules', 'pl-yellow', 'delay colours spotlight'],
+  ['play', 'play', 'Watch rules', 'pl-yellow', 'delay colours nodes'],
   ['play', 'play', 'Excluded clusters', '', 'leave out of play'],
   ['system', 'defaults', 'Read-only', 'ce-ro', 'write protection defaults'],
   ['system', 'defaults', 'Auto-refresh', 'ce-ar', 'defaults'],

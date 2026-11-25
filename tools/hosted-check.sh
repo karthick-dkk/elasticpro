@@ -44,7 +44,7 @@ check "no header is refused"        "$(post $B -d '{"type":"CONFIG_READ"}' | fie
 # user's on the clusters they see, the levels and fields an admin's — and every one needs a
 # caller. Roles (user reads, operator refused the settings, limited admin refused SET) are
 # proved in-process (tests/logdelay.rs).
-for t in LOGDELAY_SUMMARY LOGDELAY_CLUSTER LOGDELAY_DEVICE LOGDELAY_LOGTYPE LOGDELAY_SEARCH LOGDELAY_FIXES LOGDELAY_SETTINGS_GET LOGDELAY_SETTINGS_SET; do
+for t in LOGDELAY_SUMMARY LOGDELAY_CLUSTER LOGDELAY_DEVICE LOGDELAY_LOGTYPE LOGDELAY_SEARCH LOGDELAY_FIXES LOGDELAY_BOARD LOGDELAY_SETTINGS_GET LOGDELAY_SETTINGS_SET; do
   check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","clusterId":"x","device":"d","name":"d","settings":{"levels":{"delayFrom":30}}}' | field kind)" "unauthenticated"
 done
 check "the log delay report kind needs a caller" "$(post $B -d '{"type":"REPORT_RUN","kind":"log_delay","clusterIds":["x"]}' | field kind)" "unauthenticated"

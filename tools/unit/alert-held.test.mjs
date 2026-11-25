@@ -220,7 +220,7 @@ test('the bell: a held alert that appears only during the outage (a threshold mo
   const said = [];
   const pass = () => notify.announceNewAlerts({ notify: (m) => said.push(m), now: Date.now() });
   notify.resetAnnounced();
-  state.defaults = { ...DEFAULTS, diskWarnPercent: 98, diskCritPercent: 99 };   // 95 %: no disk alert, hysteresis included
+  state.defaults = { ...DEFAULTS, diskWarnPercent: 98, diskHighPercent: 98.5, diskCritPercent: 99 };   // 95 %: no disk alert, hysteresis included
   applyFleetEntry('c1', cluster({ age: MIN }));
   pass();
   assert.ok(!S.openAlertsNow().some((m) => m.family === 'disk'));

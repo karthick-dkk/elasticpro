@@ -2,6 +2,7 @@
 
 Developer contract. The approved design is the canvas "ElasticPro Play" (boards 1 to 9).
 This file says what each part does and where each figure comes from; the build follows it.
+The pages were drawn again in 0.3.94 (four: Fleet, Log delay, Backups, Volume and capacity).
 
 ## Principle
 
@@ -47,17 +48,17 @@ be read says "no data" / "not measured", never 0.
 
 ### Slide engine
 
-- Slides in the display's order; each stays `dwellSec` (default 20). Cluster spotlight stays
-  `perClusterSec × clusters in it` (default 13 s each). A thin bar shows time left; dots show
-  position. A slide with nothing to show is skipped, except Alerts ("All clear").
+- Slides in the display's order; each stays `dwellSec` (default 20). A thin bar shows time left;
+  dots show position. A slide with nothing to show is skipped, except Fleet.
 - Keys / TV remote: ← → change slide, Space pauses, + / − zoom. A mouse move shows the
   controls for 5 s.
 - **Zoom** − / + in the top bar, 80 %…150 % in steps (0.8, 0.9, 1, 1.1, 1.25, 1.5). Everything
   below the bar is laid out again at that size (no scroll bar). Remembered per display:
   saved with the display's settings on the server (display link) or in localStorage (a person).
   Config can fix it per display.
-- **Critical takeover** (default on): a newly opened critical alert jumps to Alerts with a red
-  top bar and holds it until that alert is acknowledged (shared acks, below) or 5 min pass.
+- **Critical takeover** (default on): a newly opened critical alert brings Fleet to the screen with a
+  dark yellow top bar, its cluster first, and holds it until that alert clears, is acknowledged
+  (shared acks, below) or 5 min pass. High never takes the screen.
 - Burn-in: the picture shifts a few px every 10 min. Stale: a figure older than 2× its
   refresh turns its "as of" amber; no answer at all = "no data".
 - Header right side: "last fetched HH:MM:SS" (oldest of the slide's sources) and the IST
@@ -65,98 +66,94 @@ be read says "no data" / "not measured", never 0.
 - **Excluded clusters** (Config › Play, with a reason) are left out of every slide, count and
   total on every display. The rest of ElasticPro still shows them.
 
-### Slides (canvas boards 2 to 7)
+### Slides
 
-1. **Fleet wall**: a tile per visible cluster, in the display's **fleet wall order** (below). By
-   default worst first — by tone first (red: anything critical, red health, not answering > orange:
-   High > yellow > no data > green), then health and how much is open within a tone (`status.js`
-   `rank`, which the spotlight's order reads too): name, status line, nodes x/y, fullest
-   disk %, cluster log delay, open alerts, and **delayed devices** as three counts
-   (green < 30 min, yellow 30–60 min inclusive, red > 60 min). A cluster with a node that left
-   **blinks every 3 s** until the node is back (or is forgotten). A tile is red (critical),
-   orange (High: its worst open alert is High — the status word reads "High"), yellow or green,
-   and red and orange tiles blink (see Blinks below). Top strip: clusters by status (red, not
-   answering, high, yellow, green, no data — the tiles' own colours), open alerts
-   (critical/high/warning), node left (count + newest), delayed devices
-   (30–60 / > 60), fullest disk. Status line = health word + worst reason + where, e.g.
-   "Red · disk 91 % on es-hot-03" — composed once in `ui/js/play/status.js` from existing
-   pieces (`healthState`, `diskBalance().fullest`, the open alert of highest severity).
-   A cluster that is not answering has one dimmed line under its tile for the alerts **held**
-   behind it (worked out from its last cached data, see HANDBOOK "Unreachable clusters and
-   held alerts"): "2 older alerts held, not current · as of 14:02" — the same words as the
-   Alerts page (`heldLine`, `core/alert-groups.js`). Never in the tile's alert count or the strip.
-2. **Alerts**: `mergedAlerts()` open alerts, critical first, then high, then warning, then
-   newest; severity (CRIT red, HIGH orange, WARN yellow), title, cluster · detail, open for,
-   acknowledged by. Side: open now (critical, high, warning, acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none. Held
-   alerts are not rows: the unreachable row carries the same dimmed held line as the tile.
-   They are never counted and never take the screen. When the cluster answers again, one that
-   this display already showed open before the outage does not take the screen a second time;
-   one it was never shown (the TV was switched on during the outage, or the alert appeared only
-   while held) takes it as any new critical alert does (a High alert never takes the screen) — held keys are kept in what the display
-   has seen, never added to it. "Open for" runs on from before the outage (held keys go with
+1. **Fleet** (0.3.94): what is wrong now, one layout for any number of clusters. Four figures:
+   clusters with a Critical or High problem, open Critical and High alerts (as the Alerts page
+   counts them, acknowledged ones left out), devices by log delay (the Log delay slide's own rows,
+   "31 of 32 clusters"), and the fullest data node of each of the five fullest clusters at or past the High disk line. Then the
+   clusters with a problem: three large, four half as high, the rest first among the small tiles;
+   Critical before High, and within a level the **fleet order** (below). Each says the problem, why
+   it matters, since when and "+N more". Every other cluster is a small tile (fullest disk, late
+   devices of all its devices). A figure not read says "not read"; with no problem the page says so.
+   A cluster's problems (`status.js clusterStatus`) are its open or acknowledged Critical and High
+   merged alerts, and three facts that hold with no alert: not answering and red health
+   (Critical), a node that left (High). Silenced alerts and warnings are not problems here.
+   A cluster that is not answering has one dimmed line for the alerts **held** behind it (worked
+   out from its last cached data, see HANDBOOK "Unreachable clusters and held alerts"): "2 older
+   alerts held, not current · as of 14:02", the same words as the Alerts page (`heldLine`,
+   `core/alert-groups.js`). They are in no count and never take the screen. When the cluster
+   answers again, one this display already showed open before the outage does not take the screen
+   a second time; one it was never shown does, as any new critical alert: held keys are kept in
+   what the display has seen, never added to it. Their times run on (held keys go with
    `PLAY_STATE.open`).
-3. **Cluster spotlight**: clusters with a **critical problem** join automatically and leave
-   10 min after their last one clears (per display). Critical problem (Config tick boxes,
-   defaults on): red health, a node left, SLM failed or no good snapshot in 26 h (not for
-   ULM clusters with SLM not used), a node past the high watermark (90 %), not answering, an
-   open critical alert. Off by default: ILM step error, yellow health. Worst first;
-   "In the spotlight" chips (name, why, since). Per cluster: total events, disk used, heap,
-   open alerts, volume 7-day avg; nodes table (disk bar, heap, CPU); **volume per day chart
-   cycling 7 d (3 s) → 15 d (5 s) → 30 d (5 s)** with a dashed average; Lifecycle (ILM / SLM
-   Running pills); last good snapshot; backup size; delayed devices (> 30 min, > 60 min,
-   worst); volume yesterday vs the 7 days before it; indices per day (yesterday's count and size).
-   Empty spotlight: the slide is skipped.
-4. **Log delay**: devices sending logs, No delay (on time + silent + can't measure, with its split),
-   30–60, > 60 min, worst device; "Top 10 devices
-   by delay" (device, cluster, delay, last event, peak 24 h, status); "Top 10 clusters by
-   delay" (delay, devices > 30 min).
-5. **Backups**: a donut of the clusters by backup state, each cluster in one group: last run
+2. **Log delay** (0.3.94): the scheduled measurement's record (`LOGDELAY_BOARD`, docs/LOGDELAY.md),
+   all clusters of the display together, no single device. Top half: one line, the devices still
+   late (late − solved) in each 12 hours of the last 7 days — a period that is over holds the
+   devices late at its last measurement, the last point is now. A period nobody measured is a gap
+   ("not measured"); one where fewer clusters were measured than now says how many. Under it: all
+   devices now (donut) with today's new, solved and late now; the three most delayed clusters of
+   each of the last six periods; every cluster (16 a page) with late, new and solved.
+   **Part delayed devices count as on time on this slide** (owner, 2026-11-25): the Log Delay page
+   and the reports keep them apart. Silent devices are blue, also when they were late before. A
+   cluster whose last run failed, is old (`Tracker::stale_after`) or never ran is in no figure of
+   now and its row says when it was read. With no record at all (the scheduled measurement is off)
+   the devices now are Play's own measurement, today's figures read "–" and the graph says why.
+3. **Backups** (0.3.94): a donut of the clusters by backup state, each cluster in one group: last run
    failed or partial, late (no good snapshot in 26 h), no repository set up, not read, ULM, good.
    A cluster is *not read* when its missing good snapshot may be in a repository that could not
    be read. Good and failed clusters per day, 14 days. Per cluster (problems first, 14 a page):
    the last 14 days (`availability()`, the days the Snapshots page draws; striped = none listed:
    no run, or removed by retention), age of the last good backup against the 26 h line, data
    inside up to, backup size. ULM clusters with SLM not used read "ULM · s3 <bucket>".
-6. **Volume and capacity**: yesterday (all clusters) vs the 7 days before it, average per day, month so
-   far, shortest disk runway; per cluster yesterday / 7-day avg / change; days of disk left
-   (total size). From the 0.3.45 record (`VOLUME_MONTHLY_ALL` / `VOLUME_DAILY`).
+4. **Volume and capacity** (0.3.94): the daily volume record of every cluster (`VOLUME_DAILY`, 30
+   days), finished days only. Logs per day of all clusters, 14 days, with the 7-day average; the
+   change of each day against the day before, over the clusters that have both days; the biggest
+   changes per cluster of the last day, in size; who sends most; the eight clusters that use most
+   of their disk. A sum over fewer clusters than the display has says how many ("30 of 32
+   clusters"), the average is drawn only where every cluster of the bar has one, a missing day is
+   "not known". A day read less than 24 hours after it ended is drawn, as the Reports page draws
+   it, and said to be "not final". There is no "days until full".
 
-### Blinks
+### Retired in 0.3.94 (owner, 2026-11-25)
 
-Play only, by a CSS class on the element (`ui/css/app.css`, "Blinks"), never a timer; only
-the background changes, in two steps a cycle, so nothing moves and the CPU barely notices.
-Under `prefers-reduced-motion: reduce` every blink is a steady highlight in the same colour.
+The slides Alerts and Cluster spotlight, every blink, and the settings `nodeBlink`, `spotlight`
+(`UI_PLAY_NODE_BLINK`, `UI_PLAY_SPOTLIGHT_WHEN`, `_LEAVE_MIN`, `_SECONDS`) and `spotlightAll`. A saved
+file, a display's slides or a config.txt that still names them loads as before: the retired part
+is left out (`play/settings.rs drop_retired`, `settings.rs RETIRED_KEYS`, a warning when the key has a
+value). The Alerts page of the main menu is untouched.
 
-| Where | When | Class | Rate |
-|---|---|---|---|
-| Fleet wall tile | a node left (Config › Play › node blink) — **wins over the others** | `pl-blink` | 3 s |
-| Fleet wall tile | critical: tone red (red health, not answering, a critical alert, a node past its high watermark) | `blink-crit` (red) | 1.2 s |
-| Fleet wall tile | High: tone orange (worst open alert High, nothing critical) | `blink-high` (orange) | 2.4 s |
-| Spotlight nodes table | a node whose disk is at or past the high watermark (`nodeDiskCritical`, the same test as the tile's red): red bar at the left of the row, the row blinks; every other row keeps a transparent bar of the same width | `tr.blink-crit` | 1.2 s |
-| Log delay, Top 10 clusters | the cluster's median delay is red — `classify` CRITICAL, over the red line (60 min) | `tr.blink-crit` | 1.2 s |
-| Volume, Days of disk left | the runway is red — under 7 days (`RUNWAY_RED_DAYS`, the slide's own red line) | `td.blink-crit` | 1.2 s |
+### Colours
 
-`play/status.js tileBlink` picks a tile's one class; `spotlight.js nodeRowBlink`,
-`logdelay.js delayRowBlink` and `volume.js runwayBlink` the others — each from the definition
-the slide already colours by, so a blink never disagrees with the colour under it.
+Light only, on the dark background: strong yellow = Critical, failed, over the critical delay;
+light yellow = late; blue = High, silent, ULM; green = fine; grey = unknown. The word is always
+written beside the colour. Nothing blinks or moves.
+
+### Since when
+
+The server keeps when each problem opened, one record for every display and browser
+(`<data>/play/open-since.json`): the first time any of them showed it open. `openSince` holds a key
+only when that time is **known**: a display had been telling the server about that cluster for at
+least 10 min, with no gap over 3 min, before the problem appeared. Otherwise the wall says
+"since: not known". An alert with its own start (an SLM policy's first failure) uses that. A
+problem seen open by nobody for 3 min is closed and forgotten without a click; the same problem
+later is a new one.
 
 ### Where each figure comes from (all existing unless marked NEW)
 
 | Figure | Source |
 |---|---|
 | health, nodes, unassigned | `health` dataset → `healthState()` |
-| disk per node, fullest | `nodes` dataset → `diskBalance()` |
-| heap / CPU per node | `nodes` dataset raw columns (colours as overview.js) |
+| disk per node, fullest; its level | `nodes` dataset → `diskBalance()`; `core/alert-tuning.js diskLevel` (Warning 85, High 90, Critical 95 by default: `UI_DISK_WARN_PERCENT`, `_HIGH_`, `_CRIT_`) |
 | open alerts, severity, merged | `alerts()` → `mergedAlerts()` |
 | acknowledged by / since | NEW shared acks (core) |
-| open since | `alert-history.js`, plus NEW: kept on the server per display so a reload keeps it |
+| since when | the alert's own start, else `openSince` (the server's, "Since when" above) |
 | cluster log delay, delayed devices, top devices | `measureDelay()` + `summarise()` + `classify()` (thresholds from Play watch rules, default 30/60), in two tiers per cluster — a full check every 2 h, the late devices every 15 min (below) — **shared through the core cache** so N TVs measure once |
 | node left | NEW core node-name history (24 h) |
 | last good snapshot, failures in 24 h | snapshot rows (`d.snapshots`): NEW small helpers in `ui/js/play/snapshots.js` (filter by status / end time) |
 | backup size | `measureRepoBytes()` result **shared through the core cache** (written by whoever measured it: Volume page, scraper); "not measured" when none |
-| total events, indices per day, volume, 7-day avg, month | volume record (`VOLUME_DAILY` cards and rows; total events = Σ docs of the record's live days) |
-| days of disk left | `volumeReport()` (`liveSufficientDays`), as the Volume page shows it |
-| ILM / SLM Running | `policies` dataset (as the Overview pills) |
+| volume per day, 7-day avg | volume record (`VOLUME_DAILY` rows: `finishedDays`, `dayBasis`) |
+| disk used of a cluster | `nodes` dataset → `disk.percent`, as the Clusters page |
 
 **The one new cluster load:** device-delay measurement (Log Delay › Live Watch's query, 24 h window,
 terms on the device field) runs per cluster **only while a Play display is open**, in two
@@ -173,7 +170,7 @@ fetches at once only what it never had. Nothing on the wall decides an age itsel
 | What | Every (shipped) | config.txt |
 |---|---|---|
 | health | 5 min | `POLL_PLAY_HEALTH_SECONDS` |
-| nodes (node-left blink, disk) | 5 min | `POLL_PLAY_NODES_SECONDS` |
+| nodes (a node that left, disk) | 5 min | `POLL_PLAY_NODES_SECONDS` |
 | SLM / ILM (`policies`, `ilm_errors`, `ilm_assign`) | 4 h | `POLL_PLAY_LIFECYCLE_SECONDS` |
 | snapshots (`snapshots`, `snapshots_full`) | 2 h | `POLL_PLAY_SNAPSHOTS_SECONDS` |
 | index list (`indices`) | 1 h | `POLL_PLAY_INDICES_SECONDS` |
@@ -224,7 +221,7 @@ late; none when none is) — about 54–58, from about 95.
   (`PLAY_EXCHANGE {secret}`, no session needed) for a session cookie whose caller is
   `display:<name>` with role User for reads, **scope `play_only`** and the link's cluster
   scope. A `play_only` caller may send only `PLAY_READS` (FLEET_STATE, CLUSTER_DATASET,
-  EVENTS_TICKET, REFRESH of watched datasets, VOLUME_DAILY/MONTHLY/MONTHLY_ALL,
+  EVENTS_TICKET, REFRESH of watched datasets, VOLUME_DAILY/MONTHLY/MONTHLY_ALL, LOGDELAY_BOARD,
   SILENCE_LIST, ACK_LIST, PLAY_STATE, PLAY_SHARE_GET/PUT, PING, CONFIG_VIEW, ES only for the
   delay-measurement `_search` and `_field_caps`) — everything else is refused
   (`forbidden`, "a display link only shows Play"). Read-only always (`Writes::decide` never
@@ -257,12 +254,9 @@ late; none when none is) — about 54–58, from about 95.
 ### Play settings
 
 - `<data>/play.json` `{watch: {delayYellowFromMin: 30, delayRedAboveMin: 60, nodeExpected:
-  "seen24h"|"pinned", nodeBlink: "untilBack"|"untilAck"|"off", nodeCheckSec: 60, spotlight:
-  {when: [red, nodeLeft, slmFailed, storage, unreachable, criticalAlert], perClusterSec: 13,
-  leaveAfterMin: 10, whenEmpty: "skip"|"allHealthy"|"everyCluster"}}, exclude: [{clusterId,
-  reason, by, at}], displays: {<linkId>: {slides, dwellSec, criticalTakesScreen, theme, sound,
+  "seen24h"|"pinned", nodeCheckSec: 60}, exclude: [{clusterId, reason, by, at}], displays: {<linkId>: {slides, dwellSec, criticalTakesScreen, theme, sound,
   zoom, fleetOrder}}, defaultDisplay: {…}}`.
-- **Fleet wall order** (`fleetOrder`, per display; Config › Play › Edit): one to three distinct
+- **Fleet order** (`fleetOrder`, per display; Config › Play › Edit): one to three distinct
   keys, default `["critical", "logDelay", "volume"]`, an old file without it reads as the
   default, and a person opening Play without a display link uses the default. Each key sorts
   **largest first** (`name`: A to Z); the next key breaks a tie and the cluster name breaks the
@@ -270,11 +264,11 @@ late; none when none is) — about 54–58, from about 95.
 
   | Key | Figure (one definition, reused) |
   |---|---|
-  | `critical` | The status rank of `play/status.js` (health, node left, critical and other open alerts, disk past high watermark) |
-  | `logDelay` | The delay shown on the tile, "2 min median delay" (the median of the cluster's measured devices, not its worst; "med. delay" on the two smallest tiles): `tileDelayMinutes`, called by the tile and the sort |
-  | `volume` | Volume used yesterday: the Volume slide's "Yesterday" for the cluster |
+  | `critical` | The status rank of `play/status.js` (Critical, High, then warnings and yellow health, no data, nothing) |
+  | `logDelay` | The median delay of the cluster's measured devices, not its worst: `tileDelayMinutes` |
+  | `volume` | Volume used yesterday: the record's "Yesterday" card of the cluster (`cardsOf`) |
   | `disk` | The fullest disk %: `status.fullest`, the tile's disk figure |
-  | `alerts` | The open alert count on the tile |
+  | `alerts` | The cluster's open alerts |
   | `name` | The cluster name, A to Z |
 
   **Unknown last**: a cluster with no figure for a key (log delay not measured, no volume
@@ -283,8 +277,7 @@ late; none when none is) — about 54–58, from about 95.
 - `PLAY_CONFIG_GET` (User: reads; Admin sees links) / `PLAY_CONFIG_SET` (Admin). Exclude needs
   a non-empty reason. config.txt keys lock fields ("managed by config.txt"):
   `UI_PLAY_ENABLED`, `UI_PLAY_DELAY_YELLOW_MIN`, `UI_PLAY_DELAY_RED_MIN`,
-  `UI_PLAY_NODE_EXPECTED`, `UI_PLAY_NODE_BLINK`, `UI_PLAY_NODE_CHECK_SECONDS`,
-  `UI_PLAY_SPOTLIGHT_WHEN`, `UI_PLAY_SPOTLIGHT_LEAVE_MIN`, `UI_PLAY_SPOTLIGHT_SECONDS`,
+  `UI_PLAY_NODE_EXPECTED`, `UI_PLAY_NODE_CHECK_SECONDS`,
   `UI_PLAY_EXCLUDE` (comma list of cluster ids; reason "set in config.txt").
 
 ### Node-name history

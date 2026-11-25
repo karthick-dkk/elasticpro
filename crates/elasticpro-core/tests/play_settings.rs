@@ -14,9 +14,9 @@ const PASSWORD: &str = "correct-horse-battery";
 
 #[tokio::test]
 async fn config_txt_locks_play_fields_and_can_switch_links_off() {
-    let txt = Settings::parse("UI_PLAY_ENABLED=false\nUI_PLAY_DELAY_YELLOW_MIN=20\nUI_PLAY_NODE_BLINK=untilack\nUI_PLAY_EXCLUDE=c9\n\
-                               UI_PLAY_SPOTLIGHT_WHEN=red, purple\n");
-    assert_eq!(txt.warnings().len(), 1, "a spotlight name that does not exist is dropped: {:?}", txt.warnings());
+    let txt = Settings::parse("UI_PLAY_ENABLED=false\nUI_PLAY_DELAY_YELLOW_MIN=20\nUI_PLAY_NODE_EXPECTED=PINNED\nUI_PLAY_EXCLUDE=c9\n\
+                               UI_PLAY_SPOTLIGHT_WHEN=red\nUI_PLAY_NODE_BLINK=\nUI_PLAY_NODE_CHECK_SECONDS=1\n");
+    assert_eq!(txt.warnings().len(), 2, "a value out of range is dropped and a retired key that is set is named (a blank one is not): {:?}", txt.warnings());
     settings::init_with(txt);
     let dir = TempDir::new("play-locks");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
@@ -33,9 +33,9 @@ async fn config_txt_locks_play_fields_and_can_switch_links_off() {
     };
 
     let g = call(json!({ "type": "PLAY_CONFIG_GET" })).await;
-    assert_eq!(g["managed"], json!(["UI_PLAY_ENABLED", "UI_PLAY_DELAY_YELLOW_MIN", "UI_PLAY_NODE_BLINK", "UI_PLAY_EXCLUDE"]), "{g}");
+    assert_eq!(g["managed"], json!(["UI_PLAY_ENABLED", "UI_PLAY_DELAY_YELLOW_MIN", "UI_PLAY_NODE_EXPECTED", "UI_PLAY_EXCLUDE"]), "{g}");
     assert_eq!(g["watch"]["delayYellowFromMin"], json!(20));
-    assert_eq!(g["watch"]["nodeBlink"], json!("untilAck"), "kept in the option's own spelling");
+    assert_eq!(g["watch"]["nodeExpected"], json!("pinned"), "kept in the option's own spelling");
     assert_eq!(g["exclude"], json!([{ "clusterId": "c9", "reason": "set in config.txt", "by": "config.txt", "at": 0, "managed": true }]));
     assert_eq!(g["managedFields"]["watch.delayYellowFromMin"], json!("UI_PLAY_DELAY_YELLOW_MIN"));
     assert_eq!(g["linksEnabled"], json!(false));

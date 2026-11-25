@@ -125,6 +125,9 @@ SUPPORT_KEYS="ELASTICPRO_NGINX_IMAGE ELASTICPRO_REDIS_IMAGE"
 # Never pulled or moved; an upgrade that takes the db out of the compose file moves the key from
 # .env to <key>_PREVIOUS, so --rollback, which brings the old file back, runs the same image.
 RETIRED_KEYS="ELASTICPRO_DB_IMAGE"
+# config.txt keys earlier releases had (the core's settings.rs RETIRED_KEYS): blank they are
+# passed over, set they are said to do nothing.
+RETIRED_CONFIG_KEYS="UI_PLAY_NODE_BLINK UI_PLAY_SPOTLIGHT_WHEN UI_PLAY_SPOTLIGHT_LEAVE_MIN UI_PLAY_SPOTLIGHT_SECONDS"
 # The image a key stands for now: .env when it says, else the default in docker-compose.yml.
 image_of() {
   local v; v=$(env_get "$1")
@@ -581,6 +584,7 @@ UI_AUTO_REFRESH bool
 UI_REFRESH_SECONDS int 5 3600
 UI_REQUEST_TIMEOUT_MS int 1000 600000
 UI_DISK_WARN_PERCENT int 1 100
+UI_DISK_HIGH_PERCENT int 1 100
 UI_DISK_CRIT_PERCENT int 1 100
 UI_SNAPSHOT_STALE_HOURS int 1 2160
 UI_LOG_INDEX_PATTERN text
@@ -646,11 +650,7 @@ UI_PLAY_ENABLED bool
 UI_PLAY_DELAY_YELLOW_MIN int 1 1440
 UI_PLAY_DELAY_RED_MIN int 1 1440
 UI_PLAY_NODE_EXPECTED enum seen24h,pinned
-UI_PLAY_NODE_BLINK enum untilBack,untilAck,off
 UI_PLAY_NODE_CHECK_SECONDS int 10 3600
-UI_PLAY_SPOTLIGHT_WHEN text
-UI_PLAY_SPOTLIGHT_LEAVE_MIN int 1 1440
-UI_PLAY_SPOTLIGHT_SECONDS int 5 120
 UI_PLAY_EXCLUDE text
 LISTEN_PORT deploy
 ALLOWED_DOMAINS deploy
@@ -705,18 +705,6 @@ cfg_check() {
       case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. @timestamp"; return 1 ;; esac ;;
     UI_VOLUME_COLLECT_AT|UI_REPORT_AT|UI_REPORT_INDICES_AT|UI_REPORT_HOSTS_AT|UI_REPORT_LOGDELAY_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
-    # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).
-    UI_PLAY_SPOTLIGHT_WHEN)
-      lower=$(printf '%s' "$v" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
-      if [ "$lower" != none ]; then
-        [ -n "$(printf '%s' "$lower" | tr -d ',')" ] || { echo "names nothing (use none for an empty list)"; return 1; }
-        while IFS= read -r item; do
-          case ",red,nodeleft,slmfailed,storage,unreachable,criticalalert,ilmerror,yellow," in
-            *",$(printf '%s' "$item" | tr 'A-Z' 'a-z'),"*) ;;
-            *) echo "\"$item\" is not one of red, nodeLeft, slmFailed, storage, unreachable, criticalAlert, ilmError, yellow"; return 1 ;;
-          esac
-        done < <(cfg_list "$v")
-      fi ;;
     UI_PLAY_EXCLUDE)
       [ -n "$(cfg_list "$v")" ] || { echo "names no cluster id"; return 1; } ;;
     # The core checks these properly (settings.rs check_text); here, the mistakes worth
@@ -764,6 +752,9 @@ config_validate() {
       \"*\"|\'*\') [ "${#val}" -lt 2 ] || val=${val:1:${#val}-2} ;;
     esac
     val=$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    case " $RETIRED_CONFIG_KEYS " in
+      *" $key "*) [ -z "$val" ] || say "  ! $CONFIG line $n: $key is no longer used, ignored" >&2; continue ;;
+    esac
     case $known in
       *" $key "*) ;;
       *) say "  ! $CONFIG line $n: unknown key $key — ignored (see $CONFIG_EXAMPLE for the keys)" >&2; continue ;;

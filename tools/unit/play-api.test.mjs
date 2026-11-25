@@ -27,15 +27,14 @@ test('PLAY_STATE: the documented shape is read, and an empty reply is the defaul
   const d = A.defaultPlayState();
   assert.equal(d.watch.delayYellowFromMin, 30);
   assert.equal(d.watch.delayRedAboveMin, 60);
-  assert.deepEqual(d.watch.spotlight.when, ['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert']);
-  assert.deepEqual(d.display.slides, ['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume']);
+  assert.deepEqual(d.display.slides, ['fleet', 'delay', 'backups', 'volume']);
   assert.equal(d.display.criticalTakesScreen, true);
   assert.equal(d.excluded.size, 0);
 
   const r = A.readPlayState({ ok: true, now: 1793000000000,
     settings: {
       watch: { delayYellowFromMin: 20, delayRedAboveMin: 45, nodeBlink: 'off', spotlight: { when: ['red', 'yellow'], perClusterSec: 10, leaveAfterMin: 5, whenEmpty: 'everyCluster' } },
-      display: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }, { id: 'fleet', show: false }, { id: 'delay', show: true }, { id: 'nope' }],
+      display: { slides: [{ id: 'alerts', show: true }, { id: 'spotlight', show: true }, { id: 'backups', show: true, dwellSec: 30 }, { id: 'fleet', show: false }, { id: 'delay', show: true }, { id: 'nope' }],
         criticalTakesScreen: false, spotlightAll: true, zoom: null, sound: 'off' },
     },
     // The core's PLAY_STATE: `zoom` at the top is what this display shows at (its TV's last − / +).
@@ -43,13 +42,11 @@ test('PLAY_STATE: the documented shape is read, and an empty reply is the defaul
     excluded: ['c9', { clusterId: 'c8', reason: 'lab' }], nodes: { c1: { expected: ['a', 'b'], present: ['a'], left: [{ node: 'b', since: 1 }] } },
     openSince: { 'c1:disk': 5 } });
   assert.equal(r.watch.delayYellowFromMin, 20);
-  assert.equal(r.watch.nodeBlink, 'off');
-  assert.equal(r.watch.spotlight.whenEmpty, 'everyCluster');
-  assert.deepEqual(r.display.slides, ['alerts', 'delay'], 'hidden and unknown slides are left out, in the display’s order');
-  assert.equal(r.display.slideDwell.alerts, 30);
+  assert.equal('nodeBlink' in r.watch || 'spotlight' in r.watch, false, 'what an older core still sends is not read');
+  assert.deepEqual(r.display.slides, ['backups', 'delay'], 'hidden, unknown and taken-out slides are left out, in the display’s order');
+  assert.equal(r.display.slideDwell.backups, 30);
   assert.equal(r.display.slideDwell.delay, 20);
   assert.equal(r.display.criticalTakesScreen, false);
-  assert.equal(r.display.spotlightAll, true);
   assert.equal(r.display.zoom, null);
   assert.equal(r.display.lastZoom, 1.25);
   assert.equal(r.display.zoomFixed, false);
