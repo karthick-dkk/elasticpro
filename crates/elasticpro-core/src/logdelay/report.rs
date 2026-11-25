@@ -379,7 +379,7 @@ fn log_types_sheet(i: &Inputs<'_>) -> Option<Sheet> {
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)));
     let all = rows.len();
-    let mut r = vec![["Cluster", "Device", "Log type", "State", "Delay now (min)", "Delay: started → solved", "Lasted", "Worst (min)"].map(Cell::head).to_vec()];
+    let mut r = vec![["Cluster", "Device", "Log type", "State", "Delay now (min)", "Delay: started → solved", "Lasted (start to end, time not measured included)", "Worst (min)"].map(Cell::head).to_vec()];
     r.extend(rows.into_iter().take(TYPE_ROWS).map(|(_, _, x)| x));
     if all > TYPE_ROWS {
         r.push(vec![Cell::text(format!("{TYPE_ROWS} of {all} rows: the rest are not in this sheet"))]);

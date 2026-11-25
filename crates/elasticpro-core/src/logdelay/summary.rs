@@ -8,7 +8,7 @@
 use super::fixes::Finding;
 use super::levels::{Levels, State, LOG_TYPE_FIELD, NO_LOG_TYPE};
 use super::measure::MAPPING_NOT_READ;
-use super::state::{percentile, Daily, DeviceState, Episode, LogTypes, Point, Tracker, TYPE_RECENT_MS};
+use super::state::{late_in, measured_spans, percentile, Daily, DeviceState, Episode, LogTypes, Point, Tracker, TYPE_RECENT_MS};
 use super::time;
 use super::tz::{self, LogTimeZone};
 use chrono::NaiveDate;
@@ -407,6 +407,8 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
     let last_measured = Tracker::last_measured(d);
     let cluster_offset = c.cluster_offset(now);
     let measured = d.state.measured();
+    // Late time, part late time and the percentages are of the time it was measured.
+    let spans = if mine.is_empty() && d.types_since_ms.is_none() { vec![] } else { measured_spans(d.recent.iter(), c.tracker.stale_after(), r.from_ms, r.to_ms, now) };
     let mut row = DeviceRow {
         device: name.to_string(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
         now_minutes: if measured { d.last_minutes } else { None },
@@ -416,7 +418,7 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
         own_zone: d.home.filter(|h| !h.same_as_cluster()).map(|h| h.zone),
         median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
         episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
-        late_ms: mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum(),
+        late_ms: if mine.is_empty() { 0 } else { mine.iter().map(|e| late_in(e, &spans, now)).sum() },
         last_started: last.map(|e| e.started_ms), last_solved: last.and_then(|e| e.solved_ms),
         late_since: d.open.as_ref().map(|e| e.started_ms),
         last_ended_why: last.and_then(|e| e.ended_why.clone()),
@@ -432,7 +434,7 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
         extras: d.extras.clone(), state_text: String::new(),
         types: (c.tracker.has_log_types() && (d.types_since_ms.is_some() || d.types_unread)).then(|| TypesRow::of(d)),
         types_unread: (c.tracker.has_log_types() && d.types_unread).then_some(unread),
-        part_late_ms: part_late_ms(d, c.tracker.stale_after(), r, now),
+        part_late_ms: part_late_ms(d, &spans),
         delay_log_type: d.late_types().first().filter(|_| d.by_types).map(|s| s.type_label()),
     };
     row.state_text = state_text(&row, now);
@@ -441,11 +443,11 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
 
 /// How long the device was part delayed within the range: the stretches measured that began with
 /// a part-delayed reading.
-fn part_late_ms(d: &DeviceState, stale_after: i64, r: &Range, now: i64) -> i64 {
+fn part_late_ms(d: &DeviceState, spans: &[(i64, i64, State)]) -> i64 {
     if d.types_since_ms.is_none() {
         return 0;
     }
-    measured_spans(d, stale_after, r, now).iter().filter(|(_, _, s)| *s == State::PartDelay).map(|(a, b, _)| b - a).sum()
+    spans.iter().filter(|(_, _, s)| *s == State::PartDelay).map(|(a, b, _)| b - a).sum()
 }
 
 /// Whether a device sent logs in its cluster's last run: read by it (not silent), at its time.
@@ -547,8 +549,8 @@ pub struct AtMeasurement {
 }
 
 /// The devices late at the measurement taken inside `[from, to)`: each device by its last
-/// reading inside the window. `None` when no device has a reading there — the window was not
-/// measured, and nothing earlier is carried into it (the old heat map did, so rows repeated).
+/// reading inside the window. `None` when no device's delay was measured there — no run, or every
+/// device silent — and nothing earlier is carried into it (the old heat map did, so rows repeated).
 pub fn measured_late(trackers: &[&Tracker], from: i64, to: i64) -> Option<AtMeasurement> {
     let mut seen = false;
     let mut at = AtMeasurement { late: 0, critical: 0, part: 0 };
@@ -556,7 +558,7 @@ pub fn measured_late(trackers: &[&Tracker], from: i64, to: i64) -> Option<AtMeas
         for d in t.devices.values() {
             // Points are chronological: skip the ones after the window, take the first inside it.
             let Some(p) = d.recent.iter().rev().skip_while(|p| p.t >= to).take_while(|p| p.t >= from).next() else { continue };
-            seen = true;
+            seen = seen || d.recent.iter().rev().skip_while(|p| p.t >= to).take_while(|p| p.t >= from).any(|p| p.m.is_some() && !p.s.cant_measure());
             match p.s {
                 State::Delay => at.late += 1,
                 State::Critical => { at.late += 1; at.critical += 1 }
@@ -830,6 +832,9 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
         let mine = eps.remove(&s.log_type).unwrap_or_default();
         let kept_from = s.recent.iter().next().map_or(i64::MAX, |p| p.t);
         let points: Vec<Point> = older.points.get(&s.log_type).into_iter().flatten().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).filter(|p| in_range(p.t)).collect();
+        let all: Vec<Point> = older.points.get(&s.log_type).into_iter().flatten().copied().filter(|p| p.t < kept_from).chain(s.recent.iter()).collect();
+        let spans = measured_spans(all.iter().copied(), c.tracker.stale_after(), i64::MIN, i64::MAX, now);
+        let in_spans: Vec<(i64, i64, State)> = spans.iter().map(|(a, b, x)| ((*a).max(r.from_ms), (*b).min(r.to_ms), *x)).filter(|(a, b, _)| b > a).collect();
         let state = d.type_state(s);
         let delay = s.last_minutes.filter(|_| s.state.measured());
         let last = Tracker::last_measured(s).or_else(|| points.iter().rev().find(|p| p.m.is_some() && !p.s.cant_measure()).map(|p| p.t));
@@ -853,9 +858,9 @@ fn series(c: &ClusterInput, name: &str, d: &DeviceState, older: &OlderTypes, r: 
             "logType": s.type_name(), "noType": s.no_type, "state": s.state, "stateText": text,
             "delayMinutes": delay, "rawGap": s.last_raw_minutes.filter(|_| s.state.measured()), "eventField": s.event_field,
             "lastArrival": s.last_arrival_ms, "lastEvent": s.last_event_ms, "docs": s.docs,
-            "episodes": mine.iter().map(|e| period_json(e, now)).collect::<Vec<_>>(),
+            "episodes": mine.iter().map(|e| { let mut v = period_json(e, now); v["measuredMs"] = json!(late_in(e, &spans, now)); v }).collect::<Vec<_>>(),
             "points": points.iter().map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect::<Vec<_>>(),
-            "lateMs": mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum::<i64>(),
+            "lateMs": mine.iter().map(|e| late_in(e, &in_spans, now)).sum::<i64>(),
             "lastMeasuredMs": last, "stale": stale,
         })));
     }
@@ -895,9 +900,11 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     let silences: Vec<Value> = c.tracker.silences.iter().chain(c.tracker.open_silences()).filter(|s| s.device == name && s.from_ms < r.to_ms && s.to_ms.unwrap_or(now) >= r.from_ms)
         .map(|s| json!({ "from": s.from_ms, "to": s.to_ms, "burstDocs": s.burst_docs, "burstMinutes": s.burst_minutes })).collect();
     // The percentage is of the time it was measured, and of nothing else.
-    let spans = measured_spans(d, c.tracker.stale_after(), r, now);
+    let spans = measured_spans(d.recent.iter(), c.tracker.stale_after(), r.from_ms, r.to_ms, now);
     let measured_ms: i64 = spans.iter().map(|(a, b, _)| b - a).sum();
-    let late_measured: i64 = eps.iter().map(|e| spans.iter().map(|(a, b, _)| e.overlap_ms(*a, *b, now)).sum::<i64>()).sum();
+    let late_measured: i64 = eps.iter().map(|e| late_in(e, &spans, now)).sum();
+    // A period is as long as from its start to its end; how much of that was measured is said beside it.
+    let all_spans = measured_spans(d.recent.iter(), c.tracker.stale_after(), i64::MIN, i64::MAX, now);
     let mut v = json!({
         "device": name, "cluster": c.id, "clusterName": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(),
         "label": r.label(), "now": now, "everyHours": every_hours, "levels": c.levels,
@@ -911,13 +918,15 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
         "periods": eps.iter().map(|e| {
             let mut v = period_json(e, now);
             v["beforeLogTypes"] = json!(d.types_since_ms.is_some_and(|t| e.started_ms < t));
+            v["measuredMs"] = json!(late_in(e, &all_spans, now));
+            v["spans"] = json!(spans.iter().map(|(a, b, _)| ((*a).max(e.started_ms), (*b).min(e.end_ms(now)))).filter(|(a, b)| b > a).map(|(a, b)| json!([a, b])).collect::<Vec<_>>());
             v
         }).collect::<Vec<_>>(),
         "silences": silences,
         "insights": {
             "peak": peak.map(|(t, m)| json!({ "minutes": m, "at": t })),
             "average": average.map(|a| json!({ "minutes": a, "measurements": measured.len() })),
-            "longest": longest.map(|e| json!({ "lastedMs": e.lasted_ms(now), "started": e.started_ms, "solved": e.solved_ms })),
+            "longest": longest.map(|e| json!({ "lastedMs": e.lasted_ms(now), "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "endedWhy": e.ended_why, "measuredMs": late_in(e, &all_spans, now) })),
             "solvedIn": solve_avg.map(|ms| json!({ "averageMs": ms, "solved": solved.len() })),
             "lateMostOften": most,
         },
@@ -931,6 +940,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     v["measuredUntilMs"] = json!(row.measured_until_ms);
     v["stale"] = json!(row.stale);
     v["stateText"] = json!(row.state_text);
+    v["staleAfterMs"] = json!(c.tracker.stale_after());
     v["types"] = json!(row.types);
     v["typesUnread"] = json!(row.types_unread);
     v["partLateMs"] = json!(row.part_late_ms);
@@ -988,22 +998,6 @@ fn state_as_read(r: &DeviceRow, now: i64) -> String {
             None => r.state.label().to_string(),
         },
     }
-}
-
-/// The stretches of the range a device was measured over, with its state at their start: from one
-/// measurement to the next, at most `stale_after` of it, and from the last one to now while that
-/// still speaks for now.
-fn measured_spans(d: &DeviceState, stale_after: i64, r: &Range, now: i64) -> Vec<(i64, i64, State)> {
-    let at: Vec<(i64, State)> = d.recent.iter().filter(|p| p.m.is_some() && !p.s.cant_measure()).map(|p| (p.t, p.s)).collect();
-    let end = r.to_ms.min(now);
-    at.iter().enumerate().map(|(i, (t, s))| {
-        let to = match at.get(i + 1) {
-            Some((next, _)) => (*next).min(t + stale_after),
-            None if now - t <= stale_after => now,
-            None => *t,
-        };
-        ((*t).max(r.from_ms), to.min(end), *s)
-    }).filter(|(a, b, _)| b > a).collect()
 }
 
 /// `*` and `?` wildcards, case-insensitive, whole value.

@@ -48,7 +48,7 @@ import { download, toCsv } from '../lib/fmt.js';
 import {
   LD_COLOURS as C, lastRunChange, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
   minutesText, durationText, whenText, pctText, countText,
-  stateText, rowStateText, typesNotRead, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
+  stateText, rowStateText, typesNotRead, noDelayOf, noDelaySplit, noDelayOfText, shareText, eventFieldsText, measuredAge, staleText, lateTime, logsADay, axisTicks, byTimeLate, filterRows, deviceGraph, periodBands, lastedText, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery,
   lateGridRows, lateAtWindow, windowHeads, windowsPerDay, gridShade, gridHue, vsText, GRID_WORST, dayText,
   scheduleOf, fixItem, NO_CLUSTER_FIX_TEXT, timeZoneCell, matchesZone, tileCounts, bands, sharedLevels, rowLate, dayChartDays,
@@ -582,7 +582,7 @@ function lateGrid(res, b) {
       const label = c.w && c.w.label ? c.w.label : `${heads[c.i]}:00`;
       if (c.state === 'future') { kids.push(h('td.ld-gc.ld-g-fut', { title: `${label} · not begun yet` })); continue; }
       if (c.state === 'pending') { kids.push(h('td.ld-gc.ld-g-pend', { title: `${r.name} · ${label} · pending — this window has not ended and has no reading yet${finite(r.nextAt) && r.nextAt > Date.now() ? `; next measurement about ${hm(r.nextAt)}` : ''}` })); continue; }
-      if (c.state === 'missing') { kids.push(h('td.ld-gc.ld-g-na', { title: `${r.name} · ${label} · not measured — no run in this window (never a copy of an earlier one)` }, '·')); continue; }
+      if (c.state === 'missing') { kids.push(h('td.ld-gc.ld-g-na', { title: `${r.name} · ${label} · not measured — no run, or no logs from any device, in this window (never a copy of an earlier one)` }, '·')); continue; }
       const shade = gridShade(c.v, r.worst);
       const hue = gridHue(c.w, c.v);
       const open = () => openAtWindow(r.id, c.w);
@@ -603,7 +603,7 @@ function lateGrid(res, b) {
     h('div.ld-foot.ld-g-legend',
       h('span', 'Strength = this cluster’s own scale (its worst window is strongest), so a quiet cluster’s rise still shows'),
       h('span.ld-key', h('i.ld-g-key.ld-gs-0'), '0'), h('span.ld-key', h('i.ld-g-key.ld-gs-3.ld-gs-late'), b.late), h('span.ld-key', h('i.ld-g-key.ld-gs-3.ld-gs-crit'), `some ${b.high.toLowerCase()}`),
-      h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run in that window'),
+      h('span.ld-key', h('i.ld-g-key.ld-g-na'), 'not measured — no run, or no logs from any device'),
       h('span.ld-key', h('i.ld-g-key.ld-g-pend'), 'pending — the window in progress, no reading yet')),
   ];
 }
@@ -1050,7 +1050,7 @@ function devicesView(clusterId, narrow = false, openDevice = null) {
     ? rows.find((r) => r.device === openDevice && r.cluster === clusterId) : null;
   if (pinned) shown = [pinned, ...shown];
   // Beside a device board the state and its log types come first: the list is narrow.
-  const keys = withTypes(!narrow ? FLEET_COLS : anyTypes ? ['device', 'state', 'now', 'zone', 'tag1'] : ['device', 'zone', 'tag1', 'state', 'now'], res.devices);
+  const keys = withTypes(!narrow ? FLEET_COLS : anyTypes ? ['device', 'state', 'now'] : ['device', 'zone', 'tag1', 'state', 'now'], res.devices);
   const narrowed = !!(S.devFilter || S.devState !== 'all' || S.devZone || S.devTag);
   const noneYet = allNever(res.byCluster);
   const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${S.devSet}|${S.tz}|${sortSig(sorts.devices)}|${narrow}|${pinned ? openDevice : ''}`, () => [
@@ -1234,15 +1234,13 @@ function graphCard(res, lv, every, age) {
   // Not solved: what is known of it ends at the last measurement.
   const openText = age.stale && age.at !== null ? staleText(age.at, res.now) : age.at !== null ? `still late at ${whenText(age.at, res.now)}` : 'still late';
   const H = 220;
-  const g = deviceGraph(res.points, { fromMs: lo, toMs: hi, height: H, levels: lv });
+  const g = deviceGraph(res.points, { fromMs: lo, toMs: hi, height: H, levels: lv, gapMs: res.staleAfterMs });
   const y = (m) => g.Y(m);
   const line = (m, colour) => (finite(m) && m <= g.scaleMax ? h('div.ld-hline', { style: { top: `${y(m)}px`, borderTopColor: colour } }) : null);
-  const bandsEls = (res.periods || []).map((p) => {
-    const b = periodBand(p, g.lo, g.hi, until);
-    if (!b) return null;
+  const bandsEls = (res.periods || []).flatMap((p) => periodBands(p, g.lo, g.hi, until).map((b) => {
     return h(`div.ld-band${b.critical ? '.ld-band-crit' : ''}`, { title: `${whenText(p.started, res.now)} → ${p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? `${whenText(p.ended, res.now)} (${p.endedWhy || 'ended'})` : openText}, worst ${minutesText(p.worstMinutes)}`,
       style: { left: `${b.left}%`, width: `${b.width}%` } });
-  });
+  }));
   const tail = age.stale && age.at !== null && age.at < g.hi
     ? h('div.ld-tail', { title: `not measured after ${whenText(age.at, res.now)}`, style: { left: `${Math.max(0, ((age.at - g.lo) / (g.hi - g.lo || 1)) * 100)}%` } }) : null;
   const dotW = g.dots.length > 120 ? 3 : 6;
@@ -1261,7 +1259,7 @@ function graphCard(res, lv, every, age) {
   const ticks = axisTicks(g.lo, g.hi);
   const scale = [[g.scaleMax, `${g.scaleMax} min`], [lv.criticalOver, String(lv.criticalOver)], [lv.delayFrom, String(lv.delayFrom)], [0, '0']]
     .filter(([m]) => finite(m) && m <= g.scaleMax);
-  return card('Delay over time', `each point is one ${every ? `${every}-hour ` : ''}measurement · shaded bands are delays, from start to solve`,
+  return card('Delay over time', `each point is one ${every ? `${every}-hour ` : ''}measurement · shaded: late, where it was measured`,
     [h('div.ld-graph',
       h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))),
       h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, tail, line(lv.criticalOver, C.critLine), line(lv.delayFrom, C.delayLine), pic)),
@@ -1276,11 +1274,11 @@ function graphCard(res, lv, every, age) {
 function graphInsights(res, age, openText) {
   const until = age.at !== null ? age.at : res.now;
   const ins = res.insights || {};
-  const longestMs = !ins.longest ? null : !finite(ins.longest.solved) && age.stale && finite(ins.longest.started) ? Math.max(0, until - ins.longest.started) : ins.longest.lastedMs;
+  const longestMs = !ins.longest ? null : !finite(ins.longest.solved) && !finite(ins.longest.ended) && age.stale && finite(ins.longest.started) ? Math.max(0, until - ins.longest.started) : ins.longest.lastedMs;
   const cell = (label, value, sub) => h('div.ld-ins', h('div.muted', label), h('b', value), sub ? h('span', ` ${sub}`) : null);
   return h('div.ld-insights.ld-3',
     cell('Peak', minutesText(ins.peak && ins.peak.minutes, 'not known'), ins.peak && finite(ins.peak.at) ? whenText(ins.peak.at, res.now) : null),
-    cell('Longest delay', longestMs === null ? 'not known' : longestMs === 0 ? 'one measurement' : durationText(longestMs), ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : openText}` : null),
+    cell('Longest delay', longestMs === null ? 'not known' : longestMs === 0 ? 'one measurement' : lastedText(longestMs, ins.longest.measuredMs), ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : finite(ins.longest.ended) ? `${whenText(ins.longest.ended, res.now)} (not solved: ${ins.longest.endedWhy || 'ended'})` : openText}` : null),
     cell('Late most often', ins.lateMostOften ? ins.lateMostOften.label : 'not known', ins.lateMostOften ? `${ins.lateMostOften.count} of ${ins.lateMostOften.of} delays began then` : null));
 }
 
@@ -1292,7 +1290,9 @@ function periodsCard(res, every, age) {
   return B.get('dev1:periods', `${objId(res)}|${sortSig(sorts.periods)}`, () => {
     const typed = Array.isArray(res.series) && res.series.length > 0;
     const all = typed ? typeDelays(res, age) : (res.periods || []);
-    const cols = typed ? 10 : 9;
+    // The columns that say something: "Looks like" only where a delay has a pattern.
+    const looks = all.some((p) => p.pattern);
+    const cols = (typed ? 9 : 8) + (looks ? 1 : 0);
     const rows = sorts.periods.apply(all.slice().sort((a, b) => (b.started || 0) - (a.started || 0)), {
       logType: { type: 'text', value: (p) => p.typeLabel },
       started: { type: 'date', value: (p) => p.started },
@@ -1310,11 +1310,11 @@ function periodsCard(res, every, age) {
       return h(`tr${p.solved ? '' : '.ld-open'}`,
         typed ? h(`td.ld-type-name${p.whole ? '.muted' : ''}`, { title: p.typeLabel }, p.typeLabel) : null,
         h('td', whenText(p.started, res.now)),
-        h('td', p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? h('span.muted', `${whenText(p.ended, res.now)} · ${p.endedWhy || 'ended, not solved'}`)
+        h('td', p.solved ? whenText(p.solved, res.now) : finite(p.ended) ? h('span.muted.ld-ended', `${whenText(p.ended, res.now)} · ${p.endedWhy || 'ended, not solved'}`)
           : statePill(p.lastState || p.worstState || 'critical', own.stale && own.at !== null ? `not solved · last measured ${whenText(own.at, res.now).replace(/^today /, '')}` : 'still late')),
-        h('td.num', p.solved || finite(p.ended) ? durationText(p.lastedMs) : own.stale && own.at !== null ? `${durationText(Math.max(0, own.at - p.started))} to the last measurement` : `${durationText(p.lastedMs)} so far`),
+        h('td.num', p.solved || finite(p.ended) ? lastedText(p.lastedMs, p.measuredMs) : own.stale && own.at !== null ? `${durationText(Math.max(0, own.at - p.started))} to the last measurement` : `${lastedText(p.lastedMs, p.measuredMs)} so far`),
         h('td.num', minutesText(p.worstMinutes)), h('td', stateText(p.worstState)),
-        h('td', p.pattern ? p.pattern : h('span.muted', '—')),
+        looks ? h('td', p.pattern ? p.pattern : h('span.muted', '—')) : null,
         h('td', zone === null ? h('span.muted', '—') : String(zone)), h('td', tag1 === null ? h('span.muted', '—') : String(tag1)),
         h('td.num', countText(p.measurements)));
     });
@@ -1322,8 +1322,8 @@ function periodsCard(res, every, age) {
     return card('Every delay', typed ? 'each log type’s delays, and the whole device’s (every log type late at once) · started = first measurement at the delay level or later · solved = first measurement back under it'
       : 'started = first measurement at the delay level or later · solved = first measurement back under it',
       [h('div.tbl-wrap', h('table.tbl#ld-periods',
-        sortHead(sorts.periods, [...(typed ? [['logType', 'Log type']] : []), ['started', 'Started'], ['solved', 'Solved'], ['lasted', 'Lasted', 1], ['worst', 'Worst delay', 1], ['state', 'Worst state'], ['pattern', 'Looks like'],
-          ['zone', 'zone'], ['tag1', 'tag1'], ['measurements', 'Measurements', 1]]),
+        sortHead(sorts.periods, [...(typed ? [['logType', 'Log type']] : []), ['started', 'Started'], ['solved', 'Solved'], ['lasted', 'Lasted', 1], ['worst', 'Worst delay', 1], ['state', 'Worst state'], ...(looks ? [['pattern', 'Looks like']] : []),
+          ['zone', 'zone'], ['tag1', 'tag1'], ['measurements', 'Runs', 1]]),
         h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: cols }, empty('No delay in this period.')))])))),
       footer(`A start or solve time is accurate to the ${every ? `${every}-hour ` : ''}measurement. `,
         typed && finite(res.seriesPeriodsFromMs) ? `Delays of single log types that started up to ${whenText(res.seriesPeriodsFromMs, res.now)} are not all kept. ` : '',

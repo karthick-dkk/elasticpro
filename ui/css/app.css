@@ -3272,7 +3272,8 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-part-fill { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--state-late) 72%, var(--state-late-ink)); }
 .ld .ld-cl-part, .ld .ld-part-ms { font-weight: 400; white-space: nowrap; }
 .ld td.ld-types-cell, .ld td.ld-type-name { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ld .ld-split-list td.ld-types-cell { max-width: 84px; }
+.ld .ld-split-list td.ld-types-cell { max-width: 62px; }
+.ld .ld-ended { white-space: normal; }
 .ld-type-chips { display: flex; flex-wrap: wrap; gap: 5px 6px; padding-bottom: 4px; }
 .ld-type-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; max-width: 260px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
 .ld-type-chip[aria-pressed="true"] { background: var(--surface-2); color: var(--text-primary); }
