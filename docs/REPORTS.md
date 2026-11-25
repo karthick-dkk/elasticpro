@@ -206,8 +206,8 @@ server-side settings (admins edit, everyone plans).
 
 ## Zabbix modules
 
-The menu entry `elasticpro.volume` is labelled **Reports** (embed module `Module::PAGES`),
-modules patch release after 2.1.18. The action name stays, so links keep working.
+The menu entry **Reports** is `elasticpro.reports` since modules 2.1.21 (embed module `Module::PAGES`).
+`elasticpro.volume`, the entry until then, still opens the page, so links keep working.
 
 ## Tests
 

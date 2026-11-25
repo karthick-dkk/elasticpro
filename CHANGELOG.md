@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.93
+
+- **Zabbix gets the figures of the release that runs.** `deploy.sh --upgrade` moved the images and left the code the Zabbix scrapers run (`ui/`, `tools/`) at the release the install was first made from: alerts, client plan and log delay in Zabbix kept that release's definitions, and items added since (part delayed) never arrived. The core image now carries that code; an upgrade with a scraper in the stack puts it in `deploy/scraper/<version>/` and points `ELASTICPRO_UI_DIR` and `ELASTICPRO_TOOLS_DIR` there, also when the images are already current; `--rollback` goes back. A folder named in those keys by hand is left alone, with a note. `deploy/zabbix/README.md`, *Upgrading*.
+- **Zabbix modules 2.1.21**: templates, master template, menu and widgets brought up to 0.3.92 (part delayed, log types late; Log Delay, Reports and Jobs in the Zabbix menu). After the upgrade: import the three templates again (log delay, alerts, client plan) and press **Write master template** once.
+
 ## 0.3.92
 
 - **Log Delay: one log type's delay graph, per device.** A log type in *By log type* opens its own board: delay over time with a line per device (worst six, the rest to choose from the worst 40), every device that sends it (state, delay now, event and arrival time, delays, time late, last delay) and a CSV. The figures are the device page's own. A log type's measurements are kept 8 days; what is older is not drawn and it says so. `LOGDELAY_LOGTYPE`.

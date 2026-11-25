@@ -28,6 +28,9 @@
 # way back). An image already on this machine under that name is used as it is (release tags
 # are never moved).
 #
+# With a Zabbix scraper in the stack (zabbix/compose.plan.yml, zabbix/compose.scraper.yml), --upgrade
+# also brings its code — ui/ and tools/, out of the core image — to the release (0.3.93).
+#
 # The script itself (0.3.79): --upgrade first fetches the target release's own deploy.sh (from
 # ELASTICPRO_RELEASE_URL, like the compose file below), checks it parses, puts it in place — this
 # one kept as deploy.sh.previous — and runs it with the same options, so a release's changes to
@@ -339,6 +342,82 @@ compose_undo() {
 }
 # A deploy that did not change the compose file: --rollback must not put an older one back.
 compose_forget() { [ ! -f "$COMPOSE_MARK" ] || run rm -f "$COMPOSE_MARK"; }
+
+# --- the Zabbix scrapers' code (0.3.93) ----------------------------------------------------
+# zabbix/compose.plan.yml and zabbix/compose.scraper.yml run the app's own modules (ui/, tools/)
+# under node, mounted from this install's folders. An --upgrade moved the images and left those
+# folders at the release the install came from, so Zabbix went on getting that release's figures.
+# The core image carries both (/app/ui, /app/tools); an upgrade with a scraper in the stack copies
+# them to scraper/<version>/ and points ELASTICPRO_UI_DIR and ELASTICPRO_TOOLS_DIR there. A folder
+# the operator named in those keys is theirs and is left alone.
+SCRAPER_DIRS=scraper
+SCRAPER_KEYS="ELASTICPRO_UI_DIR:ui ELASTICPRO_TOOLS_DIR:tools"
+SCRAPER=        # the version to bring in; empty for nothing to do
+scraper_services() { { docker compose config --services 2>/dev/null | grep -xE 'plan-scraper|scraper' || true; } | tr '\n' ' '; }
+scraper_have() { [ -f "$SCRAPER_DIRS/$1/ui/js/core/state.js" ] && [ -f "$SCRAPER_DIRS/$1/tools/elasticpro-scrape.mjs" ]; }
+# Is there anything to bring in for TARGET ($1)?
+scraper_plan() {
+  local svc pair v want=0
+  svc=$(scraper_services); [ -n "$svc" ] || return 0
+  for pair in $SCRAPER_KEYS; do
+    v=$(env_get "${pair%%:*}")
+    case $v in
+      ""|"../${pair#*:}"|"./$SCRAPER_DIRS/"*) ;;
+      *) say "! ${pair%%:*}=$v: the Zabbix scraper (${svc% }) runs the code in that folder — bring it to $1 yourself, or remove the line from .env"; return 0 ;;
+    esac
+    [ "$v" = "./$SCRAPER_DIRS/$1/${pair#*:}" ] || want=1
+  done
+  scraper_have "$1" || want=1
+  [ "$want" = 1 ] || return 0
+  SCRAPER=$1
+  say "   Zabbix scraper (${svc% }): its code comes to $1 with the images"
+}
+# Copies TARGET's ($1) code out of the core image ($2). Not in the image (a release before 0.3.93):
+# nothing changes, with a note.
+scraper_fetch() {
+  local id new=$SCRAPER_DIRS/.new
+  [ -n "$SCRAPER" ] || return 0
+  if [ "$DRY" = 1 ]; then say "  would: copy ui and tools out of $2 to $SCRAPER_DIRS/$1"; return 0; fi
+  if ! scraper_have "$1"; then
+    rm -rf "$new"; mkdir -p "$new"
+    if ! id=$(docker create "$2" 2>/dev/null) || ! docker cp "$id:/app/ui" "$new/ui" >/dev/null 2>&1 \
+       || ! docker cp "$id:/app/tools" "$new/tools" >/dev/null 2>&1 || [ ! -f "$new/tools/elasticpro-scrape.mjs" ]; then
+      [ -z "${id:-}" ] || docker rm "$id" >/dev/null 2>&1 || true
+      rm -rf "$new"; SCRAPER=
+      say "! the Zabbix scraper's code could not be taken from $2 — it keeps the code it has, and Zabbix that code's figures (deploy/zabbix/README.md, Upgrading)"
+      return 0
+    fi
+    docker rm "$id" >/dev/null 2>&1 || true
+    chmod -R a+rX "$new"
+    rm -rf "${SCRAPER_DIRS:?}/$1"; mv "$new" "$SCRAPER_DIRS/$1"
+  fi
+  # The automation scraper's file named the folders outright until 0.3.93.
+  if grep -q '^ *- \.\./ui:/app/ui:ro$' zabbix/compose.scraper.yml 2>/dev/null; then
+    cp -p zabbix/compose.scraper.yml "zabbix/compose.scraper.yml.bak-$(date +%Y%m%d-%H%M%S)"
+    sed -i.tmp -e 's|^\( *- \)\.\./ui:/app/ui:ro$|\1${ELASTICPRO_UI_DIR:-../ui}:/app/ui:ro|' \
+      -e 's|^\( *- \)\.\./tools:/app/tools:ro$|\1${ELASTICPRO_TOOLS_DIR:-../tools}:/app/tools:ro|' zabbix/compose.scraper.yml && rm -f zabbix/compose.scraper.yml.tmp
+  fi
+}
+# .env names the new folders; the old values are kept for --rollback. (Not the env_set of a dry run: it says so itself.)
+scraper_env() {
+  local pair key old
+  [ -n "$SCRAPER" ] || return 0
+  for pair in $SCRAPER_KEYS; do
+    key=${pair%%:*}; old=$(env_get "$key")
+    env_set "${key}_PREVIOUS" "${old:-../${pair#*:}}"
+    env_set "$key" "./$SCRAPER_DIRS/$1/${pair#*:}"
+  done
+}
+# Code of versions neither running nor the one --rollback goes to is removed.
+scraper_tidy() {
+  local d keep
+  [ -d "$SCRAPER_DIRS" ] || return 0
+  keep=" $(env_get ELASTICPRO_UI_DIR) $(env_get ELASTICPRO_UI_DIR_PREVIOUS) "
+  for d in "$SCRAPER_DIRS"/[0-9]*.[0-9]*.[0-9]*; do
+    [ -d "$d" ] || continue
+    case $keep in *" ./$d/ui "*) ;; *) rm -rf -- "$d" ;; esac
+  done
+}
 
 # --- config.txt: the one settings file ----------------------------------------------------
 # config.txt.example is the single definition of the keys (and the rules, in its header);
@@ -888,6 +967,12 @@ if [ "$ROLLBACK" = 1 ]; then
     if [ -n "$now" ]; then env_set "${key}_PREVIOUS" "$now"; else env_del "${key}_PREVIOUS"; fi
     STACK=1
   done
+  # The Zabbix scraper's code goes back with the core it came with.
+  for pair in $SCRAPER_KEYS; do
+    key=${pair%%:*}; old=$(env_get "${key}_PREVIOUS"); [ -n "$old" ] || continue
+    say "   Zabbix scraper ${pair#*:}: $(env_get "$key") → $old"
+    now=$(env_get "$key"); env_set "$key" "$old"; env_set "${key}_PREVIOUS" "${now:-../${pair#*:}}"; STACK=1
+  done
   # The compose file goes back too; the one in place now is kept, and named, so a second
   # --rollback goes forward again — as the images do.
   if [ -f "$COMPOSE_MARK" ]; then
@@ -1012,11 +1097,12 @@ if [ -n "$UPGRADE" ]; then
   # A compose file without the worker, or still with the db: the release's comes in too (or,
   # without the worker, the script stops here, nothing changed, and says why).
   compose_plan "$TARGET" "$NOW"
+  scraper_plan "$TARGET"
   # A db container the compose file no longer has (the file came by git or rsync): this restart
   # takes it away too.
   LEFTOVER_DB=0
   [ "$DROP_DB" = 1 ] || ! db_leftover || { LEFTOVER_DB=1; say "   a db container (PostgreSQL) is still there, but deploy/$COMPOSE no longer has the service — the restart removes it"; }
-  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ] && [ "$LEFTOVER_DB" = 0 ]; then
+  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ] && [ "$LEFTOVER_DB" = 0 ] && [ -z "$SCRAPER" ]; then
     apply_config keep
     say "✓ already on $TARGET — nothing else to do (the core was not restarted: deploy.sh --apply-config does that)"
     exit 0
@@ -1031,6 +1117,7 @@ if [ -n "$UPGRADE" ]; then
     say "   pulling $img"
     run docker pull -q "$img" >/dev/null || fail "$img is not published (or cannot be pulled) — nothing changed"
   done
+  scraper_fetch "$TARGET" "$REG/elasticpro-core:$TARGET"
   # After the pulls, so a release that is not published leaves everything as it was; before
   # the .env backup, so the way back keeps the port and memory limit config.txt asks for.
   apply_config keep
@@ -1055,6 +1142,8 @@ if [ -n "$UPGRADE" ]; then
     env_set "${key}_PREVIOUS" "$(image_of "$key")"
     env_set "$key" "$img"
   done
+  for item in $SCRAPER_KEYS; do env_del "${item%%:*}_PREVIOUS"; done
+  scraper_env "$TARGET"
   # The db's image key leaves .env with the db; --rollback puts it back with the old file.
   if [ "$DROP_DB" = 1 ]; then
     for key in $RETIRED_KEYS; do
@@ -1076,6 +1165,7 @@ if [ -n "$UPGRADE" ]; then
   if wait_healthy; then
     say "✓ ElasticPro $TARGET is running and healthy"
     sync_nginx
+    scraper_tidy
     say "  .env before this upgrade: $BACKUP${COMPOSE_BACKUP:+   ·   $COMPOSE before: $COMPOSE_BACKUP}   ·   undo: deploy/deploy.sh --rollback"
     docker compose ps
     admin_report
@@ -1115,7 +1205,7 @@ fi
 env_set ELASTICPRO_IMAGE "$IMAGE"
 # This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx,
 # nor its compose file.
-for key in $SUPPORT_KEYS $RETIRED_KEYS; do env_del "${key}_PREVIOUS"; done
+for key in $SUPPORT_KEYS $RETIRED_KEYS ELASTICPRO_UI_DIR ELASTICPRO_TOOLS_DIR; do env_del "${key}_PREVIOUS"; done
 compose_forget
 say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || app_services)"
 # shellcheck disable=SC2046

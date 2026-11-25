@@ -186,6 +186,10 @@ core is not healthy in time it puts the previous `.env` back and restarts on it.
 version needs `--force`. `--dry-run` shows the plan. The images come from `karthickdk02/` unless
 `ELASTICPRO_REGISTRY` names another namespace.
 
+With a Zabbix scraper in the stack, its code moves too (0.3.93): from the core image to
+`deploy/scraper/<version>/`, named in `.env` by `ELASTICPRO_UI_DIR` and `ELASTICPRO_TOOLS_DIR`.
+What is left to do in Zabbix itself is in [zabbix/README.md](zabbix/README.md), *Upgrading*.
+
 ### Upgrading to 0.3.54 or later: the compose file
 
 From 0.3.54 the stack runs a second container, the report worker (below), and that needs the
