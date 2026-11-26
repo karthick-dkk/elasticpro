@@ -2,7 +2,7 @@
 
 ## 0.3.99
 
-- **Dialogs fit a phone.** Every dialog was 96 % of the screen wide inside a 20 px margin, so on a phone its right edge ran about 20 px past the screen (seen on the log availability map at 390 px). A dialog now takes the space inside the margin, up to its usual width; nothing changes on a desktop. `tools/fit-check.mjs --sizes 390 --only dialogs` measures every dialog at phone width.
+- **Dialogs fit a phone.** Every dialog was 96 % of the screen wide inside a 20 px margin, so on a phone its right edge ran about 20 px past the screen (seen on the log availability map at 390 px). A dialog now takes the space inside the margin, up to its usual width. Measured in Chromium and WebKit: every dialog width the app uses fits at 390 px, and from 1040 px wide every dialog is exactly as wide as before; in a narrower window a dialog wider than the window keeps its 20 px margin (at 1024 px with a classic scrollbar the widest, 980 px, is 969 px). `tools/fit-check.mjs --sizes 390 --only dialogs` measures every dialog at phone width.
 
 ## 0.3.98
 
