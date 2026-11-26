@@ -29,5 +29,6 @@ test('custom dates are named; an open end says so', () => {
 
 test('a preset reads as before; a query alone names no range', () => {
   assert.equal(emptyDetail({ query: 'x', range: '24h' }, { from: 1, to: 2 }), 'Query "x" in the last 24h — widen the time range or clear the query');
-  assert.equal(emptyDetail({ query: 'x', range: 'custom' }, null), 'Query "x" — widen the time range or clear the query');
+  // No window (Custom without dates, or no time field): nothing to widen.
+  assert.equal(emptyDetail({ query: 'x', range: 'custom' }, null), 'Query "x" — clear the query');
 });

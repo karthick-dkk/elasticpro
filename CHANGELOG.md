@@ -3,7 +3,7 @@
 ## 0.3.100
 
 - **Indices › Documents opens on Custom, with no dates: every document in the indices, newest first.** It opened on the last 24 hours (or the range last picked, kept in the browser), so a daily index from an earlier day showed "No documents match". 15m, 1h, 24h and 7d are still there; one picked holds for that view only and is not carried to the next index.
-- When nothing matches, the note says what narrowed the search: a custom range is named with its dates ("between … and …"). It said "The indices matched hold no documents" whenever no query was typed, also when custom dates had left everything out.
+- When nothing matches, the note says what narrowed the search: a custom range is named with its dates ("between … and …"). It said "The indices matched hold no documents" whenever no query was typed, also when custom dates had left everything out. With no time range (Custom without dates) it says only "clear the query", and a field's values say "No values", not "No values in this range". Pressing Custom with no dates searches at once, so a preset's result is never left on screen under it.
 
 ## 0.3.99
 

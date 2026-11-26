@@ -53,7 +53,9 @@ const DEFAULT_RANGE = 'custom';
  */
 export function emptyDetail(st, win) {
   if (!st.query && !win) return 'The indices matched hold no documents';
-  const when = !win ? '' : st.range !== 'custom' ? ` in the last ${st.range}`
+  // No window: the search already covers all time, so there is no range to widen.
+  if (!win) return `Query "${st.query}" — clear the query`;
+  const when = st.range !== 'custom' ? ` in the last ${st.range}`
     : ` between ${win.from != null ? dt(win.from) : 'the oldest'} and ${win.to != null ? dt(win.to) : 'the newest'}`;
   return `Query "${st.query || '*'}"${when} — widen the time range or clear the query`;
 }
@@ -159,7 +161,9 @@ export function documentsView(cluster, target, { onBack } = {}) {
           ...D.RANGES.map((r) => h('button.btn.sm', {
             type: 'button', 'aria-pressed': st.range === r.id ? 'true' : 'false', dataset: { range: r.id },
             title: r.id === 'custom' ? 'A range of your own' : `The last ${r.label} by ${st.timeField}`,
-            onclick: () => { if (st.range !== r.id) { st.range = r.id; if (r.id !== 'custom') run(); else drawTop(); } },
+            // Custom with no dates is "everything": search at once, so a preset's result never stays
+            // on screen under it. With dates set, Apply searches, as before.
+            onclick: () => { if (st.range !== r.id) { st.range = r.id; if (r.id !== 'custom' || (st.custom.from == null && st.custom.to == null)) run(); else drawTop(); } },
           }, r.label)))
       : null;
     const toLocal = (ms) => (ms == null ? '' : new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16));
@@ -203,7 +207,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
         items.push(h('div.docs-vals',
           vals.loading ? h('span.muted', 'Counting…') : null,
           vals.error ? h('span', { style: { color: 'var(--critical-ink)' } }, vals.error) : null,
-          !vals.loading && !vals.error && !vals.list.length ? h('span.muted', 'No values in this range') : null,
+          !vals.loading && !vals.error && !vals.list.length ? h('span.muted', windowNow() ? 'No values in this range' : 'No values') : null,
           ...vals.list.map((v) => h('button.docs-val', { type: 'button', title: `Add ${f.aggField}:"${v.value}" to the search`,
             // The field the count came from: a text field's value narrows by its .keyword, exactly.
             onclick: () => { st.query = D.addTerm(st.query, f.aggField, v.value); drawTop(); run(); } },
