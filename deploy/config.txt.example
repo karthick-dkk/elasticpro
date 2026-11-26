@@ -200,8 +200,9 @@ UI_AUTO_REFRESH=
 UI_REFRESH_SECONDS=
 # Elasticsearch request timeout, ms (1000-600000).
 UI_REQUEST_TIMEOUT_MS=
-# Disk used on a cluster's fullest data node, percent: Warning from (default 85), High from
-# (90), Critical from (95). The same in Play, on the Alerts page and in the mail.
+# Disk used on a cluster's fullest data node, percent: High from (default 80), Critical from
+# (90). A Warning line below them is set only here or in Config (none by default). The same in
+# Play, on the Alerts page and in the mail.
 UI_DISK_WARN_PERCENT=
 UI_DISK_HIGH_PERCENT=
 UI_DISK_CRIT_PERCENT=

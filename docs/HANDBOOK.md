@@ -479,7 +479,7 @@ repeats another or by saying more about one:
 | Many field-volume spikes on a cluster | one row per field/term | one row with the count |
 | A reading older than its dataset allows | shown as current | same level, detail says how old |
 
-Rules: the disk alert is on the fullest data node, Warning 85, High 90, Critical 95 % (one definition,
+Rules: the disk alert is on the fullest data node, High 80, Critical 90 % (no Warning line unless one is set) (one definition,
 `diskLevel`: alerts, mail, Play), with hysteresis (raised at a line, lowered 2 points below it); a snapshot
 repository is critical when two or more runs in a row failed with at least one `FAILED`
 (one bad night or `PARTIAL`-only runs are a warning); a master re-election is critical
@@ -492,9 +492,9 @@ counts, filters or colours by level reads it there:
 
 | Level | Colour | Rules |
 |---|---|---|
-| **Critical** | red | cluster not answering; health red; a data node's disk at 95 % or more (`diskCritPercent`), a node past the flood stage; disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
-| **High** | orange (`--high`; on Play light blue, with the word) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`); a data node's disk at 90 % or more (`diskHighPercent`, 0.3.94), a node past its high watermark |
-| **Warning** | yellow | everything else: health yellow, a data node's disk at 85 % or more (`diskWarnPercent`), disk balance, shard data not in the index list, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
+| **Critical** | red | cluster not answering; health red; a data node's disk at 90 % or more (`diskCritPercent`), a node past the flood stage; disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
+| **High** | orange (`--high`; on Play light blue, with the word) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`); a data node's disk at 80 % or more (`diskHighPercent`; 90 in 0.3.94), a node past its high watermark |
+| **Warning** | yellow | everything else: health yellow, a data node's disk at the Warning line when one is set (`diskWarnPercent`, none by default), disk balance, shard data not in the index list, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
 
 Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
 High; `heap` is new, High. An automation rule can be set to raise at any of the three. The

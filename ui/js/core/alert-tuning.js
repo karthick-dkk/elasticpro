@@ -39,6 +39,9 @@ export const DISK_HYSTERESIS = 2;
  * Fleet page all read it. Lines out of order (a Warning kept at 92 from before there was a High
  * line of 90) leave no room for High: it is not used, rather than raised below Warning.
  */
+/** The lowest disk line there is (Warning, else High, else Critical); NaN when none is set. */
+export const firstDiskLine = (lines) => [lines.warning, lines.high, lines.critical].find(Number.isFinite) ?? NaN;
+
 export function diskLines(defaults = {}) {
   const line = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
   const warning = line(defaults.diskWarnPercent), critical = line(defaults.diskCritPercent), high = line(defaults.diskHighPercent);

@@ -33,9 +33,10 @@ defaults:
   autoRefresh: false
   refreshIntervalSec: 30        # how often, when auto-refresh is on
   requestTimeoutMs: 15000
-  diskWarnPercent: 85
-  diskHighPercent: 90
-  diskCritPercent: 95
+  # Disk levels of the fullest data node: High 80, Critical 90. diskWarnPercent adds a
+  # Warning line below them (none by default).
+  diskHighPercent: 80
+  diskCritPercent: 90
   snapshotStaleHours: 26        # alert if no successful SLM snapshot within this window
   maxLogRows: 200
 

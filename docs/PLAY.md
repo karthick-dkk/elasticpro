@@ -149,7 +149,7 @@ say a problem of it opened earlier than it did.
 | Figure | Source |
 |---|---|
 | health, nodes, unassigned | `health` dataset → `healthState()` |
-| disk per node, fullest; its level | `nodes` dataset → `diskBalance()`; `core/alert-tuning.js diskLevel` (Warning 85, High 90, Critical 95 by default: `UI_DISK_WARN_PERCENT`, `_HIGH_`, `_CRIT_`) |
+| disk per node, fullest; its level | `nodes` dataset → `diskBalance()`; `core/alert-tuning.js diskLevel` (High 80, Critical 90 by default, no Warning line; `UI_DISK_HIGH_PERCENT`, `_CRIT_`, and `UI_DISK_WARN_PERCENT` to add one) |
 | open alerts, severity, merged | `alerts()` → `mergedAlerts()` |
 | acknowledged by / since | NEW shared acks (core) |
 | since when | failing snapshots: the first failed run; else `openSince` (the server's, "Since when" above) |

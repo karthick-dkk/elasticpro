@@ -86,3 +86,18 @@ test('open = neither acknowledged nor silenced; counts by level from one place',
   assert.deepEqual(open.map((a) => a.key), ['p1:disk']);
   assert.deepEqual(T.alertCounts(list), { total: 3, critical: 1, high: 0, warning: 2 });
 });
+
+test('the shipped disk levels: High 80, Critical 90, no Warning line (0.3.96)', async () => {
+  const C = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/config.js')).href);
+  const lines = T.diskLines(C.DEFAULTS);
+  assert.ok(Number.isNaN(lines.warning));
+  assert.deepEqual([lines.high, lines.critical], [80, 90]);
+  assert.deepEqual([79.9, 80, 89.9, 90].map((p) => T.diskLevel(p, null, lines)), [null, 'high', 'high', 'critical']);
+  assert.equal(T.firstDiskLine(lines), 80);
+  // A config saved before 0.3.94 (Warning 80, Critical 90, no High): High is the line at 80.
+  const old = T.diskLines({ ...C.DEFAULTS, diskWarnPercent: 80, diskCritPercent: 90 });
+  assert.equal(T.diskLevel(85, null, old), 'high');
+  // An empty Warning in Alert triggers is no line, over a saved one.
+  const AR = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/alert-rules.js')).href);
+  assert.equal(AR.effectiveDefaults({ ...C.DEFAULTS, diskWarnPercent: 75 }, { disk: { thresholds: { diskWarnPercent: null } } }).diskWarnPercent, null);
+});
