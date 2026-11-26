@@ -30,6 +30,21 @@ const utcToday = () => new Date().toISOString().slice(0, 10);
 const DAY = 86400000;
 export const addDay = (iso, n = 1) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
 
+/**
+ * A real calendar day 'YYYY-MM-DD'. An index name can carry anything that looks like a date
+ * (2026.13.45, 9999.12.31): only a day that exists is on the map, so a bad name can neither
+ * break the walk over the days nor stretch it over millennia.
+ */
+export function realDay(d) {
+  if (typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  const t = Date.parse(`${d}T00:00:00Z`);
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === d;
+}
+
+/** How far the map reaches from today; days beyond are counted apart (`outside`), not drawn. */
+export const MAP_YEARS_BACK = 10;
+export const MAP_DAYS_AHEAD = 366;
+
 /** States nothing can be restored from (snapshot-restorable.js NOTHING): not on the map. */
 const NOTHING = new Set(['IN_PROGRESS', 'FAILED', 'INCOMPATIBLE', 'ABORTED']);
 
@@ -43,7 +58,7 @@ const NOTHING = new Set(['IN_PROGRESS', 'FAILED', 'INCOMPATIBLE', 'ABORTED']);
 export function trailingGap(indices, today = utcToday()) {
   if (!Array.isArray(indices)) return null;
   let newest = null;
-  for (const r of indices) if (r && r.day && r.day <= today && (newest === null || r.day > newest)) newest = r.day;
+  for (const r of indices) if (r && realDay(r.day) && r.day <= today && (newest === null || r.day > newest)) newest = r.day;
   if (!newest) return { newest: null, days: null, stale: false };
   const days = spanDaysIso(newest, today) - 1;
   return { newest, days, stale: days > STALE_GAP_DAYS };
@@ -70,11 +85,21 @@ export function trailingGapText(g) {
  */
 export function logAvailability({ indices, data, dayOf, ulm = false, today = utcToday() }) {
   if (!Array.isArray(indices)) return null;
+  const lo = addDay(today, -Math.round(MAP_YEARS_BACK * 365.25)), hi = addDay(today, MAP_DAYS_AHEAD);
+  const outside = { before: new Set(), after: new Set() };
+  // A day the map can draw; one outside the window is remembered apart and named.
+  const onMap = (day) => {
+    if (!realDay(day)) return false;
+    if (day < lo) { outside.before.add(day); return false; }
+    if (day > hi) { outside.after.add(day); return false; }
+    return true;
+  };
   const live = new Map();
-  let undated = 0;
+  let undated = 0, badDates = 0;
   for (const r of indices) {
-    if (r && r.day) live.set(r.day, (live.get(r.day) || 0) + 1);
-    else undated++;
+    if (!r || !r.day) { undated++; continue; }
+    if (!realDay(r.day)) { badDates++; continue; }
+    if (onMap(r.day)) live.set(r.day, (live.get(r.day) || 0) + 1);
   }
 
   // Backups: per day, how many successful snapshots hold it; how many partial ones name it,
@@ -101,7 +126,7 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
         snapshots++;
         const whole = st === 'SUCCESS' && !(Number(s.failed) > 0);
         if (whole) {
-          for (const day of new Set(s.indexNames.map(dayOf).filter(Boolean))) ok.set(day, (ok.get(day) || 0) + 1);
+          for (const day of new Set(s.indexNames.map(dayOf).filter(onMap))) ok.set(day, (ok.get(day) || 0) + 1);
           continue;
         }
         if (st !== 'SUCCESS' && st !== 'PARTIAL') continue;
@@ -110,7 +135,7 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
         const seen = new Map();
         for (const n of s.indexNames) {
           const day = dayOf(n);
-          if (!day) continue;
+          if (!onMap(day)) continue;
           const v = seen.get(day) || 'restorable';
           seen.set(day, !goodSet ? 'unsure' : goodSet.has(n) ? v : 'failed');
         }
@@ -168,7 +193,9 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
   return {
     today, from, to, stateOf, describe,
     months: from ? monthRows(from, to, today, stateOf) : [],
-    counts, ahead, undated, unknown, snapshots,
+    counts, ahead, undated, badDates, unknown, snapshots,
+    outside: { before: outside.before.size, after: outside.after.size, window: { from: lo, to: hi },
+      first: outside.before.size ? [...outside.before].sort()[0] : null, last: outside.after.size ? [...outside.after].sort().pop() : null },
     held: liveHeldDays(indices, d, today),
     gap: trailingGap(indices, today),
     backup: restorableRange(rows),
@@ -180,7 +207,7 @@ const daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
 /**
  * Month rows, oldest first: `{kind: 'month', ym, cells: [{day, state}]}` with one cell per
  * calendar day (state 'out' before `from`), or `{kind: 'gap', from, to, state, days}` for two
- * or more months running in which every day is 'none' (or every day 'unknown') — a stray
+ * or more months running in which every day is 'none' (or every day 'unknown', or 'future') — a stray
  * index two years back does not take two years of grey rows.
  */
 export function monthRows(from, to, today, stateOf) {
@@ -200,7 +227,7 @@ export function monthRows(from, to, today, stateOf) {
   }
   const uniform = (r) => {
     const s = new Set(r.cells.filter((c) => c.state !== 'out').map((c) => c.state));
-    return s.size === 1 && (s.has('none') || s.has('unknown')) ? [...s][0] : null;
+    return s.size === 1 && (s.has('none') || s.has('unknown') || s.has('future')) ? [...s][0] : null;
   };
   const rows = [];
   for (let i = 0; i < out.length;) {

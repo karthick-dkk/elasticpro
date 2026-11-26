@@ -12,7 +12,7 @@
 import { h, mount } from '../lib/dom.js';
 import { state, bus, fetchIndices, fetchSnapshots, parseIndexName } from '../core/state.js';
 import { clusterKind } from '../core/cluster-kind.js';
-import { logAvailability, trailingGap, trailingGapText } from '../core/log-availability.js';
+import { logAvailability, trailingGap, trailingGapText, MAP_YEARS_BACK } from '../core/log-availability.js';
 import { leftOutShort, spanDaysIso } from '../core/volume.js';
 import { plural } from '../lib/fmt.js';
 import { modal } from './modal.js';
@@ -134,7 +134,7 @@ function grid(av, pick) {
   const rows = [h('div.lm-row.lm-head', h('span.lm-ym'), ...HEAD.map((n) => h('span.lm-dn', n === 1 || n % 5 === 0 ? String(n) : '')))];
   for (const r of av.months) {
     if (r.kind === 'gap') {
-      const what = r.state === 'none' ? 'no live index and no backup' : 'no live index; backups not known';
+      const what = r.state === 'none' ? 'no live index and no backup' : r.state === 'future' ? 'after today' : 'no live index; backups not known';
       rows.push(h('div.lm-row.lm-gaprow', h('span.lm-ym', r.from), h(`span.lm-gap.lm-${r.state}`, `${r.from} → ${r.to} · ${what} · ${plural(r.days, 'day')}`)));
       continue;
     }
@@ -152,6 +152,9 @@ function notes(av) {
   const out = [];
   for (const u of av.unknown) out.push(u);
   if (av.ahead) out.push(`${plural(av.ahead, 'day')} dated after today ${av.today} (an index name with a future date, often a device clock).`);
+  if (av.outside.before) out.push(`${plural(av.outside.before, 'day')} dated before ${av.outside.window.from} (the oldest ${av.outside.first}) are not drawn: the map reaches ${MAP_YEARS_BACK} years back.`);
+  if (av.outside.after) out.push(`${plural(av.outside.after, 'day')} dated after ${av.outside.window.to} (the latest ${av.outside.last}) are not drawn.`);
+  if (av.badDates) out.push(`${plural(av.badDates, 'live index', 'live indices')} carry a date that does not exist and are not on the map.`);
   if (av.undated) out.push(`${plural(av.undated, 'live index', 'live indices')} with no date in the name are not on the map.`);
   out.push(`From ${av.from} to ${av.to}: ${plural(spanDaysIso(av.from, av.to), 'day')}. Days are read from the dates in index names, not from when snapshots ran.`);
   return h('ul.lm-notes.muted', ...out.map((t) => h('li', t)));

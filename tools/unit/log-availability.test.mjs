@@ -145,3 +145,32 @@ test('nothing to draw while the index list is unread; undated indices are counte
   const av = A.logAvailability({ indices: [{ index: '.kibana', day: null }, ...idx([TODAY])], data: { repos: [], reposRead: true }, dayOf, today: TODAY });
   assert.equal(av.undated, 1);
 });
+
+test('a date that does not exist, or one far away, cannot stretch or break the map', () => {
+  assert.equal(A.realDay('2026-02-29'), false);
+  assert.equal(A.realDay('2028-02-29'), true);
+  assert.equal(A.realDay('2026-13-45'), false);
+  const indices = [...idx(['2026-11-20', '2026-13-45', '2026-02-30']), { index: 'a', day: '9999-12-31' }, { index: 'b', day: '0001-01-01' }];
+  const t0 = Date.now();
+  const av = A.logAvailability({
+    indices,
+    data: data([snap('s', 'SUCCESS', ['2026-11-21', '9999-01-01', '2026-04-31'])]),
+    dayOf, today: TODAY,
+  });
+  assert.ok(Date.now() - t0 < 1000, 'the walk stays inside the window');
+  assert.equal(av.from, '2026-11-20');
+  assert.equal(av.to, TODAY);
+  assert.equal(av.badDates, 2);
+  assert.equal(av.outside.after, 2, '9999-12-31 live, 9999-01-01 in a snapshot');
+  assert.equal(av.outside.before, 1);
+  assert.equal(av.outside.first, '0001-01-01');
+  assert.equal(av.outside.last, '9999-12-31');
+  assert.equal(av.stateOf('2026-11-21'), 'ok');
+  assert.deepEqual(A.trailingGap([{ day: '2026-02-30' }, ...idx(['2026-11-20'])], TODAY), { newest: '2026-11-20', days: 6, stale: false });
+});
+
+test('empty months after today fold into one line', () => {
+  const av = A.logAvailability({ indices: idx(['2026-11-25', '2027-04-02']), data: { repos: [], reposRead: true }, dayOf, today: TODAY });
+  const fut = av.months.find((r) => r.kind === 'gap' && r.state === 'future');
+  assert.deepEqual(fut && [fut.from, fut.to], ['2026-12', '2027-03']);
+});
