@@ -176,8 +176,14 @@ function bigTile(ctx, c, dev, hot) {
     h('div.pl-ftf',
       h('span.pl-dim', 'Disk'), s.fullest ? track(s.fullest.pct, diskTone(s.fullest.pct, ctx.lines), fullFrom(ctx.lines)) : h('span'),
       s.fullest ? h('span', `${pct(s.fullest.pct)} · fullest of ${s.fullest.of}`) : unknown('not read'),
-      h('span.pl-dim', 'Devices'), total ? h('span.pl-fbar', h('i.green', { style: { width: w(dev.onTime + dev.partDelayed) } }), h('i.yellow', { style: { width: w(dev.delay) } }), h('i.red', { style: { width: w(dev.critical) } })) : h('span'),
-      dev && dev.state === 'ok' ? h('span', `${dev.onTime + dev.partDelayed} on time · ${dev.late} late${dev.at ? ` · checked ${clockText(dev.at, ctx.tz, { seconds: false })}` : ''}`) : unknown('delay not read')));
+      h('span.pl-dim', 'Devices'), total ? h('span.pl-fbar', dev.onTime === null ? null : h('i.green', { style: { width: w(dev.onTime + dev.partDelayed) } }), h('i.yellow', { style: { width: w(dev.delay) } }), h('i.red', { style: { width: w(dev.critical) } })) : h('span'),
+      dev && dev.state === 'ok' ? h('span', devText(dev, ctx)) : unknown('delay not read')));
+}
+
+/** A card's devices: on time and late; of a reading that counts only the late ones (onTime null), late of all. */
+export function devText(dev, ctx) {
+  const at = dev.at ? ` · checked ${clockText(dev.at, ctx.tz, { seconds: false })}` : '';
+  return dev.onTime === null ? `${dev.late} late of ${dev.devices}${at}` : `${dev.onTime + dev.partDelayed} on time · ${dev.late} late${at}`;
 }
 
 function halfTile(ctx, c, hot) {

@@ -203,4 +203,13 @@ test('a Fleet card takes the devices of the reading its log delay alert rests on
   assert.equal(dev.get('a').late, 1, 'the record\'s own row stays');
   assert.deepEqual([dev.get('b').state, dev.get('b').devices, dev.get('b').late, dev.get('b').onTime, dev.get('b').at], ['ok', 7, 3, 4, 5]);
   assert.equal(dev.get('c').state, 'never', 'no reading: still not read');
+  assert.equal(F.devText(dev.get('b'), { tz: 'UTC' }), '4 on time · 3 late · checked 00:00');
+});
+
+test('a card from the server\'s run, which counts only the late devices, says late of all and no on time (0.3.95)', async () => {
+  const D = await import(url('ui/js/core/delay-levels.js'));
+  const run = D.serverRun({ lastRunAt: 3600000, devices: 40, delay: 3, critical: 1, partDelayed: 2 });
+  const dev = F.cardDevices({ clusters: [{ id: 'b', name: 'B' }], delayReading: () => run }, [{ id: 'b', state: 'failed' }]).get('b');
+  assert.deepEqual([dev.devices, dev.late, dev.onTime, dev.silent, dev.otherTz], [40, 4, null, null, null]);
+  assert.equal(F.devText(dev, { tz: 'UTC' }), '4 late of 40 · checked 01:00');
 });

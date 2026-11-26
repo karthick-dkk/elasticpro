@@ -36,11 +36,18 @@ function boardRows(ctx) {
   return ctx.clusters.map((c) => by.get(c.id)).filter(Boolean);
 }
 
-/** One cluster's row from a measurement's summary, when there is no record: nothing of today is known. */
+/**
+ * One cluster's row from a measurement's summary, when there is no record: nothing of today is known.
+ * A summary of the server's run (delay-levels.js serverRun) carries only the late counts: then
+ * `onTime`, `silent`, `cantMeasure` and `otherTz` are null — not known, never 0.
+ */
 export function measuredRow(c, summary) {
-  const n = (k) => ((summary.by || {})[k] || 0);
-  return { id: c.id, name: c.name, state: 'ok', devices: summary.devices, onTime: n('OK'), partDelayed: n('PART_DELAY'), delay: n('DELAYED'), critical: n('CRITICAL'),
-    late: n('DELAYED') + n('CRITICAL'), silent: n('NO_DATA'), cantMeasure: n('ERROR') + n('CLOCK_AHEAD') + n('UNKNOWN'), otherTz: n('OTHER_TZ'), newToday: null, solvedToday: null, levels: null };
+  const by = summary.by || {};
+  const n = (k) => (by[k] || 0);
+  const full = typeof by.OK === 'number';
+  const known = (v) => (full ? v : null);
+  return { id: c.id, name: c.name, state: 'ok', devices: summary.devices, onTime: known(n('OK')), partDelayed: n('PART_DELAY'), delay: n('DELAYED'), critical: n('CRITICAL'),
+    late: n('DELAYED') + n('CRITICAL'), silent: known(n('NO_DATA')), cantMeasure: known(n('ERROR') + n('CLOCK_AHEAD') + n('UNKNOWN')), otherTz: known(n('OTHER_TZ')), newToday: null, solvedToday: null, levels: null };
 }
 
 /** Every cluster on the display, most late first, then by name; one not read now goes last. */
