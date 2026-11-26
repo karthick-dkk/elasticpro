@@ -17,7 +17,7 @@ import { FLEET_KEYS, readFleetOrder } from '../core/play-config.js';
 import { donut, unknown, fitRows, openFor, clockText } from './parts.js';
 import { HEALTH_WORD } from './status.js';
 import { ownStart } from './opened.js';
-import { delayRows, delayTotals, levelWords } from './logdelay.js';
+import { delayRows, delayTotals, levelWords, delayParts, measuredRow } from './logdelay.js';
 import { cardsOf } from './volume.js';
 
 export const id = 'fleet';
@@ -176,8 +176,14 @@ function bigTile(ctx, c, dev, hot) {
     h('div.pl-ftf',
       h('span.pl-dim', 'Disk'), s.fullest ? track(s.fullest.pct, diskTone(s.fullest.pct, ctx.lines), fullFrom(ctx.lines)) : h('span'),
       s.fullest ? h('span', `${pct(s.fullest.pct)} · fullest of ${s.fullest.of}`) : unknown('not read'),
-      h('span.pl-dim', 'Devices'), total ? h('span.pl-fbar', h('i.green', { style: { width: w(dev.onTime + dev.partDelayed) } }), h('i.yellow', { style: { width: w(dev.delay) } }), h('i.red', { style: { width: w(dev.critical) } })) : h('span'),
-      dev && dev.state === 'ok' ? h('span', `${dev.onTime + dev.partDelayed} on time · ${dev.late} late`) : unknown('delay not read')));
+      h('span.pl-dim', 'Devices'), total ? h('span.pl-fbar', dev.onTime === null ? null : h('i.green', { style: { width: w(dev.onTime + dev.partDelayed) } }), h('i.yellow', { style: { width: w(dev.delay) } }), h('i.red', { style: { width: w(dev.critical) } })) : h('span'),
+      dev && dev.state === 'ok' ? h('span', devText(dev, ctx)) : unknown('delay not read')));
+}
+
+/** A card's devices: on time and late; of a reading that counts only the late ones (onTime null), late of all. */
+export function devText(dev, ctx) {
+  const at = dev.at ? ` · checked ${clockText(dev.at, ctx.tz, { seconds: false })}` : '';
+  return dev.onTime === null ? `${dev.late} late of ${dev.devices}${at}` : `${dev.onTime + dev.partDelayed} on time · ${dev.late} late${at}`;
 }
 
 function halfTile(ctx, c, hot) {
@@ -220,8 +226,7 @@ function top(ctx, rows) {
     h('div.pl-panel', h('div.pl-ph', 'Open Critical and High alerts'),
       donut([{ n: a.critical, label: 'Critical', tone: 'red' }, { n: a.high, label: 'High', tone: 'orange' }], { total: a.critical + a.high, label: 'open' })),
     h('div.pl-panel', h('div.pl-ph', 'Devices by log delay', h('small', `${t.clusters} of ${total} clusters`)),
-      t.clusters ? donut([{ n: t.onTime, label: 'On time', tone: 'green' }, { n: t.late, label: one ? `Late, ${one[1]} min or more` : 'Late', tone: 'yellow' },
-        { n: t.grey, label: 'Silent or can’t measure', tone: 'blue' }, ...(t.otherTz ? [{ n: t.otherTz, label: 'Other time zone, not late', tone: 'grey' }] : [])],
+      t.clusters ? donut(delayParts(t, words, { oneLate: one ? `Late, ${one[1]} min or more` : 'Late' }),
       { total: t.devices, label: t.devices === 1 ? 'device' : 'devices' }) : unknown('not measured')),
     h('div.pl-panel', h('div.pl-ph', `Disk at ${fullFrom(ctx.lines)} % or more, ${FULLEST} fullest clusters`,
       h('small', disks.read < total ? `${disks.list.length} of ${disks.read} read, ${total - disks.read} not read` : `${disks.list.length} of ${total}`)),
@@ -233,9 +238,25 @@ function top(ctx, rows) {
 /** Columns of the small tiles, so a fleet of any size fits one screen. */
 const columns = (n) => (n <= 6 ? 6 : n <= 27 ? 9 : n <= 50 ? 10 : n <= 72 ? 12 : 14);
 
+/**
+ * Each cluster's devices for its card: its row of the scheduled record (delayRows), or, where that
+ * has none read lately, the reading the cluster's log-delay alert rests on (state.js
+ * delayReadingOf), with its time: a card never says "not read" beside an alert that read it.
+ */
+export function cardDevices(ctx, rows) {
+  const dev = new Map(rows.map((r) => [r.id, r]));
+  for (const c of ctx.clusters) {
+    const r = dev.get(c.id);
+    if (r && r.state === 'ok') continue;
+    const read = ctx.delayReading ? ctx.delayReading(c.id) : null;
+    if (read && read.summary) dev.set(c.id, { ...measuredRow(c, read.summary), at: read.at });
+  }
+  return dev;
+}
+
 export function render(ctx) {
   const rows = delayRows(ctx);
-  const dev = new Map(rows.map((r) => [r.id, r]));
+  const dev = cardDevices(ctx, rows);
   const { bad, rest, hot } = splitFleet(ctx);
   const isHot = (c) => !!hot && ctx.st.get(c.id).problems.some((p) => p.key === hot);
   const big = bad.slice(0, BIG), half = bad.slice(BIG, BIG + HALF), over = bad.slice(BIG + HALF);

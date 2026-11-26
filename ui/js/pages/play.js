@@ -17,7 +17,7 @@
 
 import { h, mount } from '../lib/dom.js';
 import { state, clusters, client, mergedAlerts, invalidateAlerts, watchForPlay, fleetMode,
-  datasetFreshness, coverage, refreshAll } from '../core/state.js';
+  datasetFreshness, coverage, refreshAll, delayReadingOf } from '../core/state.js';
 import { isOpen, isHeld, heldByCluster, toObservations } from '../core/alert-groups.js';
 import { diskLines } from '../core/alert-tuning.js';
 import { noteReads, openReport, openKey } from '../play/opened.js';
@@ -188,6 +188,9 @@ function context(force = false) {
     // When the server saw the problem open at this level (play/opened.js). Not when this browser
     // first saw it: a TV switched on later must not say "2 min".
     openSince: (p) => Number(ps.openSince[openKey(p)]) || null,
+    // The log-delay reading the cluster's alert rests on (state.js delayReadingOf), for a card the
+    // scheduled record does not cover.
+    delayReading: (id) => delayReadingOf(id),
     serverNow,
     lines,
     staleMs, logPattern: state.defaults.logIndexPattern,
@@ -407,7 +410,7 @@ function tick() {
     // What this browser has seen of each alert — the shell records it only when it announces.
     try { if (alertHistory.observe(toObservations(mergedAlerts()), now)) invalidateAlerts(); } catch (_) { /* a convenience */ }
     noteReads(readSince, ctx.clusters.map((c) => c.id), [...DATASETS, 'log-delay'], (id, ds) => (ds === 'log-delay'
-      ? !!(ctx.delay.get(id) && ctx.delay.get(id).summary) : coverage([id], [ds]).read === 1), now);
+      ? !!delayReadingOf(id, now) : coverage([id], [ds]).read === 1), now);
   }
   const crit = ctx.open.filter((m) => m.level === 'critical');
   const before = take && take.active ? take.active.key : null;
