@@ -7393,6 +7393,10 @@ if (viaFleet) {
   const titleText = () => (doc.querySelector('.pl-title') || {}).textContent || '';
   const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
   const viewText = () => (doc.getElementById('view') || {}).textContent || '';
+  // The mock's fullest node is at 91 %: Critical on the shipped lines (High 80, Critical 90, 0.3.96).
+  // These checks are about a node that left and the heap, so the disk is kept a High problem here.
+  const defaultsWas = st.state.defaults;
+  st.state.defaults = { ...defaultsWas, diskWarnPercent: null, diskHighPercent: 90, diskCritPercent: 95 };
   try {
     // No warm-up here: the check drives the takeover a few seconds after opening.
     pPlay.configure({ display: false, onExit: () => app.go('overview'), warmMs: 0 });
@@ -7557,6 +7561,7 @@ if (viaFleet) {
     ok(after.timers === 0 && after.listeners === 0, `play: leaving kept ${after.timers} timer(s) and ${after.listeners} listener(s)`);
   } finally {
     globalThis.fetch = realFetch;
+    st.state.defaults = defaultsWas;
     if (doc.documentElement.classList.contains('play')) await go('overview');
     await core({ type: 'PLAY_CONFIG_SET', settings: { exclude: { remove: hidden.id } } });
   }
