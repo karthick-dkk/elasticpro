@@ -722,6 +722,25 @@ pub fn data_node_disk(nodes: &Value, alloc: Option<&Value>) -> (Option<u64>, Opt
     (total, used, free, Some(n))
 }
 
+/// Days with no index that end a run of days (owner, 2026-11-26): ui/js/core/volume.js
+/// STALE_GAP_DAYS, the same number. A gap of more than this separates the run that counts
+/// from older days.
+pub const STALE_GAP_DAYS: i64 = 7;
+
+/// The first day of the run of days that reaches the newest one: going back from the newest
+/// day, the run ends at a gap of more than STALE_GAP_DAYS days with none. The same rule as
+/// ui/js/core/volume.js currentRun. None when there are no days.
+pub fn current_run_start(days: &[NaiveDate]) -> Option<NaiveDate> {
+    let mut v = days.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    let mut i = v.len().checked_sub(1)?;
+    while i > 0 && (v[i] - v[i - 1]).num_days() - 1 <= STALE_GAP_DAYS {
+        i -= 1;
+    }
+    Some(v[i])
+}
+
 /// What the capacity document is made of, gathered by the core.
 pub struct CapacityInputs<'a> {
     pub cluster: &'a str,
@@ -731,7 +750,8 @@ pub struct CapacityInputs<'a> {
     pub nodes: Option<&'a Value>,
     pub alloc: Option<&'a Value>,
     pub nodes_fetched_at: Option<u64>,
-    /// The oldest day of the daily record still `live` (its indices are there).
+    /// The first day of the current run of days the daily record still has `live` (its
+    /// indices are there): current_run_start, so stray old days before a long gap are not it.
     pub oldest_live: Option<NaiveDate>,
     /// The cluster's entry in the config file: `liveRetention`, `snapshotRetention`,
     /// `backupCapacity` as a person typed them.
@@ -756,7 +776,8 @@ fn typed(entry: Option<&Value>, keys: &[&str]) -> Value {
 /// The capacity stream's document: measurements and settings as typed, never a verdict.
 pub fn capacity_doc(i: &CapacityInputs<'_>) -> Value {
     let (total, used, free, nodes) = i.nodes.map(|n| data_node_disk(n, i.alloc)).unwrap_or((None, None, None, None));
-    let held = i.oldest_live.map(|d| (i.day - d).num_days().max(0));
+    // Both ends counted, as the Capacity page counts them (ui/js/core/volume.js liveHeldDays).
+    let held = i.oldest_live.map(|d| (i.day - d).num_days().max(0) + 1);
     let ulm = i.meta.map(|m| m.ulm.bucket.trim()).filter(|b| !b.is_empty());
     json!({
         "clusterId": i.cluster, "clusterName": i.name, "day": day_key(i.day),
@@ -1810,13 +1831,14 @@ impl Core {
         };
         let (oldest_live, last7) = match &self.volume.store {
             Some(store) => {
-                let mut oldest = None;
+                // Every day the record still has live, so the run that reaches the newest one
+                // can be found (current_run_start): stray old days before a long gap are not
+                // what the cluster keeps.
+                let mut live = Vec::new();
                 for m in store.months(cluster) {
-                    if let Some(d) = store.read_month(cluster, &m).days.values().filter(|d| d.live).filter_map(|d| parse_day(&d.day)).min() {
-                        oldest = Some(d);
-                        break;
-                    }
+                    live.extend(store.read_month(cluster, &m).days.values().filter(|d| d.live).filter_map(|d| parse_day(&d.day)));
                 }
+                let oldest = current_run_start(&live);
                 let week = store.days_between(cluster, today - Duration::days(7), today - Duration::days(1));
                 (oldest, week.into_iter().map(|d| (d.day.clone(), d.event_bytes)).collect())
             }
@@ -2193,7 +2215,7 @@ mod tests {
             last7: vec![("2026-11-03".into(), Some(5)), ("2026-11-02".into(), None)], now_ms: 1,
         });
         assert_eq!(doc["dataNodeDiskTotal"], json!(10));
-        assert_eq!(doc["liveRetentionHeldDays"], json!(30));
+        assert_eq!(doc["liveRetentionHeldDays"], json!(31), "10-05 → 11-04, both ends counted, as the Capacity page counts");
         assert_eq!(doc["liveRetentionPolicy"], json!("30d"));
         assert_eq!(doc["snapshotRetention"], Value::Null, "not set is null");
         assert_eq!(doc["backupCapacity"], json!("2 TB"));
@@ -2202,6 +2224,24 @@ mod tests {
         for verdict in ["requiredLive", "shortfall", "buffer", "fits"] {
             assert!(!doc.to_string().to_ascii_lowercase().contains(&verdict.to_ascii_lowercase()), "no verdict in the store: {verdict}");
         }
+    }
+
+    #[test]
+    fn live_retention_starts_at_the_current_run_not_at_a_stray_old_day() {
+        let d = |s: &str| parse_day(s).unwrap();
+        // The reported case: one day of indices on 2025-05-03, then every day from 2026-10-01.
+        let mut days = vec![d("2025-05-03")];
+        let mut t = d("2026-10-01");
+        while t <= d("2026-11-26") {
+            days.push(t);
+            t += Duration::days(1);
+        }
+        assert_eq!(current_run_start(&days), Some(d("2026-10-01")));
+        // More than 7 empty days split; 7 do not (ui/js/core/volume.js currentRun, same cases).
+        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-09")]), Some(d("2026-11-01")));
+        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-10")]), Some(d("2026-11-10")));
+        assert_eq!(current_run_start(&[d("2026-11-10"), d("2026-11-01"), d("2026-11-10")]), Some(d("2026-11-10")), "order and duplicates");
+        assert_eq!(current_run_start(&[]), None);
     }
 
     #[test]

@@ -62,7 +62,7 @@ test('a pattern somebody wrote is used exactly as written', () => {
 
 test('coveredDays over the seven names: 23 → 29, seven days, none missing', () => {
   const c = coveredDays(WEEK, LEGACY_INDEX_RE);
-  assert.deepEqual(c, { coverFrom: '2026-09-23', coverTo: '2026-09-29', coverDays: 7, datedIndices: 7, missingDays: 0 });
+  assert.deepEqual(c, { coverFrom: '2026-09-23', coverTo: '2026-09-29', coverDays: 7, datedIndices: 7, missingDays: 0, leftDays: null });
 });
 
 test('coveredDays counts a gap inside the span as missing, and ignores undated names', () => {

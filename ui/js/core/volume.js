@@ -113,9 +113,13 @@ export function volumeSettings(cluster = {}) {
 export function dailyVolume(indices, cluster = {}) {
   const cfg = volumeSettings(cluster);
   const t = today();
+  // Only the run of days that reaches today counts (liveRun): an island of old indices
+  // before a long gap is not what the cluster keeps, and is reported apart as leftOut.
+  const run = liveRun(indices, t);
+  const keep = new Set(run.days);
   const byDay = new Map();
   for (const r of indices || []) {
-    if (!r.day || r.day >= t) continue;             // skip undated and today's partial index
+    if (!r.day || r.day >= t || !keep.has(r.day)) continue;   // skip undated, today's partial index, left-out days
     const v = byDay.get(r.day) || { bytes: 0, missing: 0 };
     // A closed or red index reports no size: not counted, and said in the basis.
     if (typeof r.size === 'number') v.bytes += r.size; else v.missing++;
@@ -142,6 +146,7 @@ export function dailyVolume(indices, cluster = {}) {
     daysCovered: days.length,
     oldestDay: days.length ? days[days.length - 1].day : null,
     newestDay: days.length ? days[0].day : null,
+    leftOut: run.left,
     perDay,
     avg7,
     windowDays: window7.length,
@@ -287,6 +292,7 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null,
     liveLogsFrom: vol.oldestDay,
     liveLogsTo: vol.newestDay,
     liveLogsDays: vol.daysCovered,
+    liveLogsLeftOut: vol.leftOut,
 
     repoGB,
     repoSummary: repos.length
@@ -311,6 +317,7 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null,
     snapshotDataTo: snapWindow.dataTo,
     snapshotDataDays: snapWindow.dataDays,
     snapshotDataHeld: snapWindow.dataHeld,
+    snapshotDataLeftOut: snapWindow.dataLeftOut,
     snapshotsUnread: snapWindow.unread,
   };
 }
@@ -376,14 +383,14 @@ export function diskLastsDays(disk, perDayBytes) {
 const utcToday = () => new Date().toISOString().slice(0, 10);
 
 /**
- * Days of live indices the cluster holds now: from the oldest dated live index to today
- * (both counted), or the ILM delete age when no index name carries a date.
- * `{days, from, source: 'indices'|'ILM'}` or null.
+ * Days of live indices the cluster holds now: from the first day of the current run of
+ * dated live indices (liveRun) to today, both counted, or the ILM delete age when no index
+ * name carries a date. `{days, from, source: 'indices'|'ILM', left}` or null; `left` is the
+ * older days not counted (currentRun), null when there are none.
  */
 export function liveHeldDays(indices, data = {}, today = utcToday()) {
-  let oldest = null;
-  for (const r of indices || []) if (r && r.day && r.day <= today && (oldest === null || r.day < oldest)) oldest = r.day;
-  if (oldest) return { days: spanDaysIso(oldest, today), from: oldest, source: 'indices' };
+  const run = liveRun(indices, today);
+  if (run.from) return { days: spanDaysIso(run.from, today), from: run.from, source: 'indices', left: run.left };
   const ilm = data && data.appliedIlm ? parseRetention(data.appliedIlm.deleteAfter) : null;
   return ilm ? { days: ilm.days, from: null, source: 'ILM' } : null;
 }
@@ -449,36 +456,60 @@ function slmRetention(data) {
 
 function snapshotWindow(data) {
   let from = null, to = null, count = 0;
-  let dataFrom = null, dataTo = null, unread = 0, whole = true;
-  const held = new Set();
+  const all = [];
   for (const list of Object.values(data.snapshots || {})) {
     for (const s of list || []) {
       if (!s.start) continue;
       count++;
+      all.push(s);
       if (from === null || s.start < from) from = s.start;
       if (to === null || s.start > to) to = s.start;
-      // Two different questions. `start` is when the snapshot ran; coverFrom/coverTo are
-      // the days of logs inside it, read from the dates in its index names. A snapshot
-      // taken this morning can hold ninety days of data, so the second is the one that
-      // says how far back the backup actually reaches. Only what can be restored counts
-      // (snapshot-restorable.js): the row's days are already those.
-      if (restorableIndices(s) === null) { unread++; continue; }
-      if (Array.isArray(s.days)) for (const d of s.days) held.add(d); else if (s.coverFrom) whole = false;
-      if (s.coverFrom && (dataFrom === null || s.coverFrom < dataFrom)) dataFrom = s.coverFrom;
-      if (s.coverTo && (dataTo === null || s.coverTo > dataTo)) dataTo = s.coverTo;
     }
   }
+  // Two different questions. `start` is when the snapshot ran; the data range is the days
+  // of logs inside them, read from the dates in their index names (restorableRange).
+  const r = restorableRange(all);
   const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : null);
   return {
     from: day(from), to: day(to), count,
     days: spanDays(from, to),
-    dataFrom, dataTo,
-    dataDays: spanDaysIso(dataFrom, dataTo),
-    // How many of those days some snapshot holds (null when a row does not carry its days),
-    // and how many snapshots could not be read for their indices.
-    dataHeld: dataFrom && whole ? held.size : null,
-    unread,
+    dataFrom: r.from, dataTo: r.to, dataDays: r.days, dataHeld: r.held, dataLeftOut: r.left,
+    unread: r.unread,
   };
+}
+
+/**
+ * How far back the snapshots can restore: the days of logs inside them, read from the dates
+ * in the index names each one can give back (snapshot-restorable.js restorableIndices: a
+ * failed, partial or running snapshot's lost indices are not counted). A snapshot taken this
+ * morning can hold ninety days of data, so this, not when they ran, says how far back the
+ * backup reaches. One definition for the Capacity sheet and the Snapshots page.
+ *
+ * Over every day some snapshot holds, only the run that reaches the newest counts
+ * (currentRun); older days before a long gap are `left`. `{from, to, days, held, missing,
+ * left, unread, unknown}`: `days` the span, both ends counted; `held` how many of those days
+ * some snapshot holds, null when a row does not carry its days (the range is then the plain
+ * oldest-to-newest of the rows and nothing can be left out); `unread` how many snapshots'
+ * indices are not known.
+ */
+export function restorableRange(snaps) {
+  let from = null, to = null, unread = 0, whole = true;
+  const seen = [];
+  for (const s of snaps || []) {
+    if (restorableIndices(s) === null) { unread++; continue; }
+    if (!s.coverFrom) continue;
+    if (from === null || s.coverFrom < from) from = s.coverFrom;
+    if (to === null || s.coverTo > to) to = s.coverTo;
+    if (Array.isArray(s.days)) seen.push(...s.days); else whole = false;
+  }
+  let left = null, held = null;
+  if (from && whole) {
+    const run = currentRun(seen);
+    ({ from, to, left } = run);
+    held = run.days.length;
+  }
+  const days = spanDaysIso(from, to);
+  return { from, to, days, held, missing: held === null ? null : days - held, left, unread, unknown: unread > 0 };
 }
 
 /* --------------------------------- presentation -------------------------------- */
@@ -503,6 +534,64 @@ export function spanDays(fromMs, toMs) {
 export function spanDaysIso(fromDay, toDay) {
   if (!fromDay || !toDay) return 0;
   return spanDays(Date.parse(`${fromDay}T00:00:00Z`), Date.parse(`${toDay}T00:00:00Z`));
+}
+
+/**
+ * Days with no index that end a run (owner, 2026-11-26). Retention is counted from when
+ * the logs are really there: five stray indices from 2025-05-03 followed by nothing until
+ * 2026-10-01 do not make the cluster or a backup hold logs "from 2025-05-03". A gap of
+ * more than this many days separates the run that counts from older days, which are
+ * reported apart (leftOutText) and never hidden. A missed day or a weekend stays one run.
+ * crates/elasticpro-core/src/history_store.rs STALE_GAP_DAYS is the same number.
+ */
+export const STALE_GAP_DAYS = 7;
+
+/**
+ * The run of days that reaches the newest one: walk back from the newest day and stop at
+ * the first gap of more than `gap` days with no index. The one definition behind Live
+ * retention, the oldest index day, each snapshot's "covers" and the backup range.
+ *
+ * `{from, to, days, left}`: `days` the kept days, ascending; `left` the older days not
+ * counted, `{days, from, to, list, gapDays}` (gapDays = days with no index between the
+ * newest left-out day and `from`), or null when nothing is left out.
+ */
+export function currentRun(days, gap = STALE_GAP_DAYS) {
+  const list = [...new Set(days || [])].filter((d) => typeof d === 'string' && d).sort();
+  if (!list.length) return { from: null, to: null, days: [], left: null };
+  let i = list.length - 1;
+  while (i > 0 && spanDaysIso(list[i - 1], list[i]) - 2 <= gap) i--;
+  const kept = list.slice(i);
+  const left = i ? { days: i, from: list[0], to: list[i - 1], list: list.slice(0, i), gapDays: spanDaysIso(list[i - 1], list[i]) - 2 } : null;
+  return { from: kept[0], to: kept[kept.length - 1], days: kept, left };
+}
+
+/**
+ * currentRun over the dated live indices up to `today` (later days are not counted), with
+ * how many indices sit on the left-out days. Shared by Live retention and the daily volume,
+ * so the column and the sheet's "Oldest index day" cannot start on different days.
+ */
+export function liveRun(indices, today = utcToday()) {
+  const dated = (indices || []).filter((r) => r && r.day && r.day <= today);
+  const run = currentRun(dated.map((r) => r.day));
+  if (run.left) {
+    const old = new Set(run.left.list);
+    run.left.indices = dated.filter((r) => old.has(r.day)).length;
+  }
+  return run;
+}
+
+/** The short visible marker beside a range that has days left out: "+1 older day left out". '' when none. */
+export function leftOutShort(left) {
+  return left ? `+${plural(left.days, 'older day')} left out` : '';
+}
+
+/** "5 indices on 1 older day (2025-05-03) left out: 515 days with no index before 2026-10-01". '' when none. */
+export function leftOutText(left, from) {
+  if (!left) return '';
+  const days = plural(left.days, 'older day');
+  const what = Number.isFinite(left.indices) ? `${plural(left.indices, 'index', 'indices')} on ${days}` : days;
+  const when = left.days === 1 ? left.from : `${left.from} → ${left.to}`;
+  return `${what} (${when}) left out: ${plural(left.gapDays, 'day')} with no index before ${from || 'the current run'}`;
 }
 
 export const gb = (v) => (gbDigits(v) === null ? '–' : `${gbDigits(v)} GB`);
@@ -601,9 +690,16 @@ export const SHEET_COLUMNS = [
     get: (r) => r.vol.daysCovered || null,
     note: (r) => (r.liveLogsFrom ? `${r.liveLogsFrom} → ${r.liveLogsTo}` : 'no dated indices'),
     help: 'How many days of dated indices are on the cluster right now — what it actually holds, which is not always '
-        + 'what the policy says it should.' },
+        + `what the policy says it should. Counted over the current run only (older days before a gap of more than ${STALE_GAP_DAYS} days are left out).` },
   { group: 'Indices kept on the cluster', label: 'Oldest index day', kind: 'text', get: (r) => r.liveLogsFrom,
-    help: 'The earliest day found in the index names on the cluster.' },
+    note: (r) => leftOutShort(r.liveLogsLeftOut),
+    help: 'The first day of the current run of dated indices: going back from the newest day, the run ends at a gap of '
+        + `more than ${STALE_GAP_DAYS} days with no index. Older days are not counted; the storage plan sheet names them (Older index days left out).` },
+  { group: 'Indices kept on the cluster', label: 'Older index days left out', unit: 'days', kind: 'num',
+    get: (r) => (r.liveLogsFrom ? (r.liveLogsLeftOut ? r.liveLogsLeftOut.days : 0) : null),
+    note: (r) => (r.liveLogsLeftOut ? leftOutText(r.liveLogsLeftOut, r.liveLogsFrom) : r.liveLogsFrom ? 'none' : 'no dated indices'),
+    help: `Days of indices older than a gap of more than ${STALE_GAP_DAYS} days with no index: stray old indices, not `
+        + 'what the cluster keeps. They are still on the cluster; they are not counted in the days held.' },
   { group: 'Indices kept on the cluster', label: 'Newest index day', kind: 'text', get: (r) => r.liveLogsTo,
     help: 'The latest day found in the index names on the cluster.' },
 
@@ -660,11 +756,17 @@ export const SHEET_COLUMNS = [
   // restore from" really asks. Read from the dates in the index names, not from when
   // the snapshot ran.
   { group: 'Backups (snapshots)', label: 'Oldest index day backed up', kind: 'text', get: (r) => r.snapshotDataFrom,
-    note: (r) => (r.snapshotDataFrom ? 'earliest day of indices that can be restored from any snapshot'
+    note: (r) => (r.snapshotDataFrom ? ['first day of the current run of days that can be restored', leftOutShort(r.snapshotDataLeftOut)].filter(Boolean).join(' · ')
                                      : 'no snapshot with dated indices that can be restored was read'),
-    help: 'The earliest day of data that can be restored from any snapshot, read from the dates in the index names it '
-        + 'contains. Failed and running snapshots, and indices with a failed shard, are not counted. '
-        + 'This is not the date the snapshot ran.' },
+    help: 'The first day of data that can be restored, read from the dates in the index names the snapshots contain: '
+        + `going back from the newest day, the run ends at a gap of more than ${STALE_GAP_DAYS} days that no snapshot holds. `
+        + 'Failed and running snapshots, and indices with a failed shard, are not counted. This is not the date the snapshot ran.' },
+  { group: 'Backups (snapshots)', label: 'Older backed-up days left out', unit: 'days', kind: 'num',
+    get: (r) => (r.snapshotDataFrom && r.snapshotDataHeld !== null ? (r.snapshotDataLeftOut ? r.snapshotDataLeftOut.days : 0) : null),
+    note: (r) => (r.snapshotDataLeftOut ? leftOutText(r.snapshotDataLeftOut, r.snapshotDataFrom)
+      : !r.snapshotDataFrom ? 'unknown' : r.snapshotDataHeld === null ? 'not known' : 'none'),
+    help: `Days that some snapshot holds, older than a gap of more than ${STALE_GAP_DAYS} days that no snapshot holds. `
+        + 'They can still be restored; they are not counted in the backup range.' },
   { group: 'Backups (snapshots)', label: 'Newest index day backed up', kind: 'text', get: (r) => r.snapshotDataTo,
     help: 'The latest day of data that can be restored from any snapshot.' },
   { group: 'Backups (snapshots)', label: 'Days of indices backed up', unit: 'days', kind: 'num',

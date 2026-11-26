@@ -15,7 +15,7 @@ import { bytes, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, fetchIndices, ensureFullSnapshots, demandDataset, fleetMode, isOnDemand, clusterRev } from '../core/state.js';
 import { runBounded } from '../core/fleet.js';
 import { card, snapshotStatusByKey } from '../pages/common.js';
-import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, measureRepoBytes, repoMeasureText, liveHeldDays, parseRetention } from '../core/volume.js';
+import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, measureRepoBytes, repoMeasureText, liveHeldDays, parseRetention, leftOutText, leftOutShort } from '../core/volume.js';
 import { utcDay } from '../core/volume-daily.js';
 import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
@@ -127,10 +127,13 @@ export function capacityDefs(rows = []) {
     { key: 'buffered', label: bufferLabel(rows), num: true, title: 'Per day × (1 + volumeHeadroomPercent ÷ 100)',
       cell: (r) => (r.plan.buffered === null ? waitingSize(r) : h('span', { title: `+${r.plan.headroomPercent}%` }, bytes(r.plan.buffered))),
       csv: (r) => gbCell(r.plan.buffered), csvLabel: gb },
-    { key: 'liveRetention', label: 'Live retention', group: GROUP_LIVE, title: 'Days of live indices held now: from the oldest live index, or the ILM delete age',
+    { key: 'liveRetention', label: 'Live retention', group: GROUP_LIVE, title: 'Days of live indices held now: from the first day of the current run of dated indices (older days before a gap of more than 7 days are left out and named), or the ILM delete age',
       cell: (r) => (r.held === undefined ? loading()
         : r.held === null ? amber('not measured', 'No index name carries a date and no ILM delete phase applies')
-          : h('span', { title: r.held.source === 'ILM' ? 'ILM delete age' : `oldest live index day ${r.held.from}` }, `${plural(Math.round(r.held.days), 'day')}${r.held.source === 'ILM' ? ' (ILM)' : ''}`)),
+          : h('span', { title: r.held.source === 'ILM' ? 'ILM delete age'
+              : [`live indices from ${r.held.from} to today`, leftOutText(r.held.left, r.held.from)].filter(Boolean).join('\n') },
+            `${plural(Math.round(r.held.days), 'day')}${r.held.source === 'ILM' ? ' (ILM)' : ''}`,
+            r.held.left ? h('span.muted', ` · ${leftOutShort(r.held.left)}`) : null)),
       csv: (r) => (r.held ? Math.round(r.held.days) : null), csvLabel: (n) => `${n} (days)`, sortType: 'number' },
     { key: 'livePolicy', label: 'Live retention policy', group: GROUP_LIVE, title: 'Set on the cluster by a person (Edit cluster › Live retention)',
       cell: (r) => (r.plan.livePolicy ? String(r.cluster.liveRetention) : amber('not set', 'Set liveRetention on the cluster')),

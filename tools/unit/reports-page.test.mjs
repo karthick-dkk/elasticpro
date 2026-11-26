@@ -170,8 +170,12 @@ test('a Storage plan row never guesses: not set, not measured, ULM', () => {
   assert.equal(VOL.storagePlanRow({ perDay: 10 * GB }).buffered, 13 * GB);
 });
 
-test('live retention held now: oldest dated index to today, else the ILM delete age', () => {
-  assert.deepEqual(VOL.liveHeldDays([{ day: '2026-10-22' }, { day: '2026-11-04' }, { index: 'x' }], {}, TODAY), { days: 14, from: '2026-10-22', source: 'indices' });
+test('live retention held now: first day of the current run to today, else the ILM delete age', () => {
+  // 10-28 → 11-04: six days with no index, still one run (the gap must be MORE than 7 days).
+  assert.deepEqual(VOL.liveHeldDays([{ day: '2026-10-28' }, { day: '2026-11-04' }, { index: 'x' }], {}, TODAY), { days: 8, from: '2026-10-28', source: 'indices', left: null });
+  // 10-22 → 11-04: twelve days with no index, so 10-22 is left out, and named.
+  const split = VOL.liveHeldDays([{ day: '2026-10-22' }, { day: '2026-11-04' }], {}, TODAY);
+  assert.deepEqual([split.days, split.from, split.left.days, split.left.from, split.left.gapDays, split.left.indices], [1, '2026-11-04', 1, '2026-10-22', 12, 1]);
   assert.deepEqual(VOL.liveHeldDays([], { appliedIlm: { deleteAfter: '30d' } }, TODAY), { days: 30, from: null, source: 'ILM' });
   assert.equal(VOL.liveHeldDays([], {}, TODAY), null);
 });

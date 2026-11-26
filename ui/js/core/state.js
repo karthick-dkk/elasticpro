@@ -26,7 +26,7 @@ import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled, HEAP_HI
 // a page asking every cluster something at once is a simultaneous aggregation against
 // each one, and the clusters this app watches are the ones already under load.
 import { runBounded } from './fleet.js';
-import { spanDaysIso } from './volume.js';
+import { spanDaysIso, currentRun } from './volume.js';
 import { restorableIndices, failedIndexNames, LISTING_SIZE } from './snapshot-restorable.js';
 import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
@@ -810,7 +810,7 @@ export function snapshotRowsCat(rows) {
     // than empty — the page says so instead of showing a misleading blank.
     indexNames: null,
     failedIndices: null,
-    coverFrom: null, coverTo: null, coverDays: 0, missingDays: 0, days: [],
+    coverFrom: null, coverTo: null, coverDays: 0, missingDays: 0, leftDays: null, days: [],
     successful: Number(r.successful_shards) || 0,
     failed: Number(r.failed_shards) || 0,
     total: Number(r.total_shards) || 0,
@@ -881,20 +881,26 @@ export function coveredDays(names, reSrc) {
 }
 
 function daysIn(names, reSrc) {
-  let from = null, to = null, dated = 0;
-  const seen = new Set();
+  let dated = 0;
+  const perDay = new Map();
   for (const n of names || []) {
     const parsed = parseIndexName(n, reSrc).day;
     if (!parsed) continue;
     const day = internDay(parsed);
     dated++;
-    seen.add(day);
-    if (from === null || day < from) from = day;
-    if (to === null || day > to) to = day;
+    perDay.set(day, (perDay.get(day) || 0) + 1);
   }
-  const span = spanDaysIso(from, to);
+  const seen = new Set(perDay.keys());
+  // The cover is the run of days that reaches the newest (volume.js currentRun): a few stray
+  // old indices before a long gap do not make the snapshot reach back to them. They are
+  // still in `seen` (and so in `days`) — restorable, and counted apart as leftDays.
+  const run = currentRun([...seen]);
+  const span = spanDaysIso(run.from, run.to);
+  const left = run.left ? { days: run.left.days, from: run.left.from, to: run.left.to, gapDays: run.left.gapDays,
+    indices: run.left.list.reduce((n, d) => n + perDay.get(d), 0) } : null;
   // Days inside the span that no index in the snapshot carries: a gap in what it holds.
-  return { coverFrom: from, coverTo: to, coverDays: span, datedIndices: dated, missingDays: span - seen.size, seen };
+  return { coverFrom: run.from, coverTo: run.to, coverDays: span, datedIndices: dated,
+    missingDays: span - run.days.length, leftDays: left, seen };
 }
 
 /**
@@ -1375,7 +1381,7 @@ function parseListing(entry, repo, reSrc) {
   return { rows, at, source: verbose ? 'verbose' : 'cat', totals: verbose ? totalsOf(a) : { whole: true } };
 }
 
-const COVERAGE = ['indexNames', 'failedIndices', 'coverFrom', 'coverTo', 'coverDays', 'datedIndices', 'missingDays', 'days'];
+const COVERAGE = ['indexNames', 'failedIndices', 'coverFrom', 'coverTo', 'coverDays', 'datedIndices', 'missingDays', 'leftDays', 'days'];
 
 /**
  * One repository's rows from the two listings the core keeps: `snapshots` (_cat, every

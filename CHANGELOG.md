@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.97
+
+- **Retention counts from when the logs are really there.** Five stray indices dated 2025-05-03, then nothing until 2026-10-01, made Capacity say live logs "from 2025-05-03 to today". Now a range starts at the run of days that reaches the newest: going back from the newest day, a gap of more than 7 days with no index ends it. Live retention (Capacity), the Volume sheet's oldest index day and days held, each snapshot's *Data inside covers*, the repository span and the oldest index day backed up all start there. Older days are named, never dropped: "+1 older day left out", and "5 indices on 1 older day (2025-05-03) left out: 515 days with no index before 2026-10-01" in the tooltip and the snapshot evidence. New Volume sheet rows *Older index days left out* and *Older backed-up days left out*; snapshot CSV columns `data_left_out_days`, `data_left_out`. A snapshot still holds the older days and can restore them.
+- **History store, `capacity`:** `liveRetentionOldestDay` follows the same rule, and `liveRetentionHeldDays` counts both ends as the Capacity page does (it was one day fewer).
+- The Repositories view and the Volume sheet now take the backup range from one function (`restorableRange`); they had separate copies of it.
+
 ## 0.3.96
 
 - **Disk alerts: High at 80 %, Critical at 90 %, no Warning line** (the fullest data node, as before; alerts, mail and Play). Shipped in 0.3.94: Warning 85, High 90, Critical 95. A Warning line can still be set (`UI_DISK_WARN_PERCENT`, Config › Defaults, Alert triggers); its field may now be left empty for none. Levels already saved stay as they are: a config that saved Warning 80 / Critical 90 (the defaults before 0.3.94) now reads High 80 / Critical 90, since High is checked before a Warning at the same line. Play's Fleet lists disks from 80 %; Volume's white line is the lowest line set.

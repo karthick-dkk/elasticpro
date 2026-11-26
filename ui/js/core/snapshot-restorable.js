@@ -81,7 +81,7 @@ export function snapshotCover(s) {
   const ok = restorableIndices(s);
   if (ok === null) return { kind: 'unknown', text: 'unknown', note };
   if (NOTHING.has(snapStatus(s))) return { kind: 'none', text: note.split(':')[0], note };
-  if (s.coverFrom) return { kind: 'span', text: spanText(s.coverFrom, s.coverTo, s.coverDays, s.missingDays), note };
+  if (s.coverFrom) return { kind: 'span', text: spanText(s.coverFrom, s.coverTo, s.coverDays, s.missingDays), note, left: s.leftDays || null };
   return { kind: 'undated', text: '–', note };
 }
 
