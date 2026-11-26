@@ -10,7 +10,9 @@ export function modal(title, sub, bodyNodes, actions, { width = '640px', cls = '
     const overlay = h(/\bdrawer\b/.test(cls) ? 'div.modal-overlay.drawer-overlay' : 'div.modal-overlay',
       { onclick: (e) => { if (e.target === overlay) done(null); } });
     // cls may name several classes ('evidence drawer'); a class token cannot hold a space.
-    const dialog = h(cls ? `div.modal.${cls.trim().split(/\s+/).join('.')}` : 'div.modal', { role: 'dialog', 'aria-modal': 'true', style: { maxWidth: width, width: '96vw' } });
+    // 100% of the overlay's padded box, not 96vw: with the overlay's 20px padding 96vw ran past a
+    // phone's edge (about 20px at 390px wide). The width option is the most it may take.
+    const dialog = h(cls ? `div.modal.${cls.trim().split(/\s+/).join('.')}` : 'div.modal', { role: 'dialog', 'aria-modal': 'true', style: { maxWidth: width, width: '100%' } });
     const msg = h('div.modal-msg');
     function done(v) { window.removeEventListener('keydown', onKey, true); overlay.remove(); resolve(v); }
     // On the window and in the capture phase, so Escape reaches the open dialog before any

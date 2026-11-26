@@ -72,10 +72,12 @@ const PAGE_FILTER = arg('--pages', '');
 // Play is a wall display: 1080p is its baseline and 4K must look the same. `--pages play` alone
 // measures it at those two; `--sizes 1920,3840` names them for any run.
 const PLAY_ONLY = arg('--pages', '') === 'play';
-const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280, 800, true], [1920, 1080, false], [3840, 2160, false]]
+// A phone (390x844) only when named, `--sizes 390 --only dialogs`: every dialog must fit it
+// (0.3.99 — modal() was 96vw inside the overlay's 20px padding); wide pages are not asked to.
+const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280, 800, true], [1920, 1080, false], [3840, 2160, false], [390, 844, false]]
   .filter(([w, , framed]) => (arg('--sizes', '')
     ? arg('--sizes', '').split(',').includes(framed ? 'f' : String(w))
-    : PLAY_ONLY ? w >= 1920 : w < 1920));
+    : PLAY_ONLY ? w >= 1920 : w >= 1024 && w < 1920));
 const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, Config-Management's pages and tabs. */
 const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button, #view .cm-seg button';

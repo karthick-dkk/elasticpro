@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.99
+
+- **Dialogs fit a phone.** Every dialog was 96 % of the screen wide inside a 20 px margin, so on a phone its right edge ran about 20 px past the screen (seen on the log availability map at 390 px). A dialog now takes the space inside the margin, up to its usual width. Measured in Chromium and WebKit: every dialog width the app uses fits at 390 px, and from 1040 px wide every dialog is exactly as wide as before; in a narrower window a dialog wider than the window keeps its 20 px margin (at 1024 px with a classic scrollbar the widest, 980 px, is 969 px). `tools/fit-check.mjs --sizes 390 --only dialogs` measures every dialog at phone width.
+
 ## 0.3.98
 
 - **Log availability map.** A small ▦ button on the Clusters page's expanded row (Snapshot repositories), the Overview (SLM card) and Reports › Capacity & retention (beside the cluster name) opens a map with one cell per day, from the oldest day any index or snapshot names to today: **green** a live index carries the day (also when a snapshot holds it), **blue** only in successful snapshots, **red** only in partial snapshots, **grey** neither live nor backed up. Hover or tap a day for what is there; the hover names both live and backup. Where not every snapshot could be read (a cut listing, the light listing, a repository not read, snapshots switched off, ULM on: its S3 archive is not seen here), days with no live index are hatched *not known*, never grey, and the reason is listed. Long empty stretches fold into one line ("2025-06 → 2026-09 · no live index and no backup · 487 days"). Live retention and the backed-up range above the map are the Capacity figures.

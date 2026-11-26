@@ -3767,6 +3767,4 @@ tr.slow-task > td { vertical-align: top; }
 .lm-pick-t { margin: 0; font: 12px var(--mono); white-space: pre-wrap; }
 .lm-notes { margin: 0; padding-left: 18px; font-size: 12px; }
 .lm-msg { margin: 0; }
-/* modal() sets an inline 96vw width, which with the overlay's 20px padding runs past a phone's edge. */
-.modal.lm-modal { width: 100% !important; }
 @media (max-width: 520px) { .lm-row { grid-template-columns: 46px repeat(31, minmax(0, 1fr)); gap: 1px; } .lm-gaprow { grid-template-columns: 46px 1fr; } .lm-ym { font-size: 10px; white-space: nowrap; } .lm-c { height: 12px; } }
