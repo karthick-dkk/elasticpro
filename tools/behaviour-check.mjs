@@ -9844,6 +9844,8 @@ async function backToList() {
   const menuItems = () => [...doc.querySelectorAll('.menu-pop button')].map(itemLabel);
   const callerBefore = st.state.caller;
   try { for (const k of ['elasticpro.indices.perPage', 'elasticpro.docs.perPage', 'elasticpro.docs.range']) window.localStorage.removeItem(k); } catch (_) { /* no storage */ }
+  // A range kept by an earlier release must not decide where the view opens (0.3.100: always Custom).
+  try { window.localStorage.setItem('elasticpro.docs.range', '24h'); } catch (_) { /* no storage */ }
   // On the fixture's first cluster (earlier sections leave an unreachable one selected), with its list read.
   const c = st.clusters().find((x) => x.url === config.clusters[0].url) || st.clusters()[0];
   st.state.selected = c.id;
@@ -9923,7 +9925,9 @@ async function backToList() {
   ok(!/10,000/.test(view().textContent), 'documents: a 10,000 figure is shown for a count Elasticsearch finished');
   const ranges = [...view().querySelectorAll('.docs-ranges button[data-range]')].map((b) => b.dataset.range);
   ok(ranges.join(',') === '15m,1h,24h,7d,custom', `documents: the time range buttons are ${ranges.join(',')}`);
-  ok(!!view().querySelector('.docs-ranges button[data-range="24h"][aria-pressed="true"]'), 'documents: 24h is not the range opened on');
+  // 0.3.100 (owner): Custom with no dates, whatever was picked before — not 24h, not a remembered preset.
+  ok(!!view().querySelector('.docs-ranges button[data-range="custom"][aria-pressed="true"]'), 'documents: Custom is not the range opened on');
+  ok(!!view().querySelector('#docs-from') && view().querySelector('#docs-from').value === '' && view().querySelector('#docs-to').value === '', 'documents: Custom opens with dates filled in');
   ok(!!view().querySelector('#docs-refresh') && view().querySelector('#docs-refresh').textContent.trim() === '↻', 'documents: the reload is not an icon');
   ok(!!view().querySelector('#docs-table thead th') && view().querySelector('#docs-table thead th').textContent === '@timestamp', 'documents: the first column is not the time field');
   if (firstRows) {

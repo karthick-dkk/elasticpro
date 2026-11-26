@@ -42,15 +42,26 @@ export function pageSizePref(key, sizes) {
 }
 
 const DOC_SIZE = pageSizePref('elasticpro.docs.perPage', D.DOC_PAGE_SIZES);
-const RANGE_KEY = 'elasticpro.docs.range';
-const DEFAULT_RANGE = '24h';
+// Every opening starts on Custom with no dates: the whole of the indices, newest first (owner,
+// 2026-11-26). A daily index from last month opened on "last 24h" showed nothing. A preset picked
+// here holds for this view only; it is not carried to the next index.
+const DEFAULT_RANGE = 'custom';
+
+/**
+ * Why the table is empty, in words that are true: "the indices hold no documents" only when
+ * nothing narrowed the search (no query, no time window); otherwise what did.
+ */
+export function emptyDetail(st, win) {
+  if (!st.query && !win) return 'The indices matched hold no documents';
+  const when = !win ? '' : st.range !== 'custom' ? ` in the last ${st.range}`
+    : ` between ${win.from != null ? dt(win.from) : 'the oldest'} and ${win.to != null ? dt(win.to) : 'the newest'}`;
+  return `Query "${st.query || '*'}"${when} — widen the time range or clear the query`;
+}
 
 /** One instance per (cluster, target): the Indices page keeps it between its redraws. */
 export function documentsView(cluster, target, { onBack } = {}) {
-  let remembered = DEFAULT_RANGE;
-  try { remembered = window.localStorage.getItem(RANGE_KEY) || DEFAULT_RANGE; } catch (_) { /* default */ }
   const st = {
-    query: '', range: D.RANGES.some((r) => r.id === remembered) ? remembered : DEFAULT_RANGE, custom: { from: null, to: null },
+    query: '', range: DEFAULT_RANGE, custom: { from: null, to: null },
     page: 0, perPage: DOC_SIZE.get(),
     fields: null, fieldsError: null, timeField: null,
     hits: [], hitsFrom: 0, total: null, loading: false, error: null, searched: false,   // hitsFrom: the `from` the hits on screen were read at
@@ -148,7 +159,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
           ...D.RANGES.map((r) => h('button.btn.sm', {
             type: 'button', 'aria-pressed': st.range === r.id ? 'true' : 'false', dataset: { range: r.id },
             title: r.id === 'custom' ? 'A range of your own' : `The last ${r.label} by ${st.timeField}`,
-            onclick: () => { if (st.range !== r.id) { st.range = r.id; try { window.localStorage.setItem(RANGE_KEY, r.id); } catch (_) { /* fine */ } if (r.id !== 'custom') run(); else drawTop(); } },
+            onclick: () => { if (st.range !== r.id) { st.range = r.id; if (r.id !== 'custom') run(); else drawTop(); } },
           }, r.label)))
       : null;
     const toLocal = (ms) => (ms == null ? '' : new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16));
@@ -244,7 +255,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
       h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: tf ? 5 : 4 },
         st.error ? h('div.banner.err', { style: { margin: 0 } }, h('div', h('div.ttl', 'Search failed'), h('div.mono', st.error)))
           : st.loading ? h('div.muted', { style: { padding: '8px' } }, 'Searching…')
-          : empty('No documents match', { detail: st.query || (tf && st.range !== 'custom') ? `Query "${st.query || '*'}"${tf ? ` in the last ${st.range}` : ''} — widen the time range or clear the query` : 'The indices matched hold no documents' })))]))));
+          : empty('No documents match', { detail: emptyDetail(st, tf ? windowNow() : null) })))]))));
     const slice = { page: st.loading ? Math.min(Math.floor(from / st.perPage), pg.pages - 1) : st.page, pages: pg.pages, total: tl.value, first, last };
     mount(main,
       h('div#docs-meta.docs-meta', { role: 'status' }, meta || ''),

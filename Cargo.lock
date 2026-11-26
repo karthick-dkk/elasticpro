@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "elasticpro-core"
-version = "0.3.99"
+version = "0.3.100"
 dependencies = [
  "aes-gcm 0.10.3",
  "axum",

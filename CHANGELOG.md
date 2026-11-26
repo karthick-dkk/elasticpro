@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.100
+
+- **Indices › Documents opens on Custom, with no dates: every document in the indices, newest first.** It opened on the last 24 hours (or the range last picked, kept in the browser), so a daily index from an earlier day showed "No documents match". 15m, 1h, 24h and 7d are still there; one picked holds for that view only and is not carried to the next index.
+- When nothing matches, the note says what narrowed the search: a custom range is named with its dates ("between … and …"). It said "The indices matched hold no documents" whenever no query was typed, also when custom dates had left everything out.
+
 ## 0.3.99
 
 - **Dialogs fit a phone.** Every dialog was 96 % of the screen wide inside a 20 px margin, so on a phone its right edge ran about 20 px past the screen (seen on the log availability map at 390 px). A dialog now takes the space inside the margin, up to its usual width. Measured in Chromium and WebKit: every dialog width the app uses fits at 390 px, and from 1040 px wide every dialog is exactly as wide as before; in a narrower window a dialog wider than the window keeps its 20 px margin (at 1024 px with a classic scrollbar the widest, 980 px, is 969 px). `tools/fit-check.mjs --sizes 390 --only dialogs` measures every dialog at phone width.
