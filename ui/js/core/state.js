@@ -1980,6 +1980,13 @@ export function setDelaySummary(clusterId, summary, at = Date.now()) {
 export function delaySummaryFor(clusterId) { return delaySummaries.get(clusterId) || null; }
 
 /**
+ * The log-delay reading the cluster's alert rests on now (delayReading below): `{summary, at, server}`,
+ * or null when nothing measured it lately. One definition for the alert, Play's Fleet card and
+ * whether Play has been watching it (play/opened.js).
+ */
+export function delayReadingOf(clusterId, now = Date.now()) { return delayReading(clusterId, now); }
+
+/**
  * What the log-delay alert rests on: the newest of the browser's measurement and the server's last
  * run (delay-levels.js serverRunOf) — an older one never replaces it, even once the newest is too
  * old to say anything. `{summary, at, server, levels, failed}`, or null: nothing measured, or the

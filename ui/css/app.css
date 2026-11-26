@@ -2129,7 +2129,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-ftw small { font-weight: 400; color: var(--tv-text-2); font-size: .75em; }
 .pl-fty { color: #d5dae1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-ft.big .pl-fty { white-space: normal; font-size: 1.1em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; flex: none; }
-.pl-ftf { margin-top: auto; display: grid; grid-template-columns: 4em minmax(0, 1fr) 12.5em; gap: .4em .8em; align-items: center; white-space: nowrap; }
+.pl-ftf { margin-top: auto; display: grid; grid-template-columns: 4em minmax(4em, 1fr) minmax(12.5em, max-content); gap: .4em .8em; align-items: center; white-space: nowrap; }
 .pl-fbar { display: flex; height: .8em; gap: 2px; border-radius: .3em; overflow: hidden; background: #222931; }
 /* a down cluster's held alerts: one dimmed line, never a count */
 .pl-theld { font-size: .9em; color: var(--tv-muted); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
@@ -3733,3 +3733,5 @@ tr.slow-task > td { vertical-align: top; }
 /* Log Delay: the ↻ Measure again button beside a figure that is not measured (icon only, row height kept). */
 .ld .btn.sm.ld-measure { height: 22px; min-width: 22px; padding: 0 5px; line-height: 1; font-size: 13px; vertical-align: middle; }
 .ld .ld-kpi .ld-measure { margin-top: 2px; align-self: flex-start; }
+/* Log delay's donut is narrow: a long part name takes a second line instead of being cut. */
+.pl-ld .pl-lg span { white-space: normal; line-height: 1.15; }

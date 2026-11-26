@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.95
+
+- **Play, Fleet: a card no longer says "delay not read" beside an open log delay alert.** Where the scheduled log delay measurement does not cover a cluster, its card shows the devices from the reading the alert rests on, with when it was checked ("34 on time · 4 late · checked 23:26").
+- **Play, since when: a log delay problem's time is known only while its measurement is current.** A measurement that had stopped (failed, or not run for hours) still counted as watched, so a problem found by the next one could say "1 min" though it may have opened during the gap. Now a reading out of date is a break, as for every other dataset. A break of up to 3 minutes is not one (the server's own rule): a measurement due at the end of its interval no longer makes every problem it finds "not known".
+- **Play, Log delay: "Other time zone, not late"** takes a second line instead of being cut, and is grey as on Fleet; the device donuts of both pages have one definition.
+
 ## 0.3.94
 
 - **Play, drawn again: four pages** (Fleet, Log delay, Backups, Volume and capacity), light colours only, nothing blinks. The pages Alerts and Cluster spotlight are gone; the main menu's Alerts page is unchanged. docs/PLAY.md.

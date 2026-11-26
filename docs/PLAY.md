@@ -136,7 +136,8 @@ The server keeps when each problem opened, one record for every display and brow
 that becomes Critical opens again as Critical. `openSince` holds it only when that time is **known**:
 a display had been telling the server about that cluster for at least 10 min with no gap over 3 min,
 and that display had been reading the data the problem comes from for at least 10 min without a
-break (`play/opened.js`). Otherwise the wall says "since: not known". Snapshots that fail say
+break over 3 min (`play/opened.js`). For log delay that data is the reading the cluster's alert rests
+on (`state.js delayReadingOf`); one out of date is not being read. Otherwise the wall says "since: not known". Snapshots that fail say
 "failing 3 d", from the first failed run. An acknowledged, silenced or held problem stays open and
 keeps its time. One seen open by nobody for 3 min is closed and forgotten without a click; the same
 problem later is a new one. Durations are against the server's clock. At most 200 problems per
@@ -152,6 +153,7 @@ say a problem of it opened earlier than it did.
 | open alerts, severity, merged | `alerts()` → `mergedAlerts()` |
 | acknowledged by / since | NEW shared acks (core) |
 | since when | failing snapshots: the first failed run; else `openSince` (the server's, "Since when" above) |
+| a Fleet card's devices | its row of the scheduled record; where that has none read lately, the reading its log delay alert rests on, with its time |
 | cluster log delay, delayed devices, top devices | `measureDelay()` + `summarise()` + `classify()` (thresholds from Play watch rules, default 30/60), in two tiers per cluster — a full check every 2 h, the late devices every 15 min (below) — **shared through the core cache** so N TVs measure once |
 | node left | NEW core node-name history (24 h) |
 | last good snapshot, failures in 24 h | snapshot rows (`d.snapshots`): NEW small helpers in `ui/js/play/snapshots.js` (filter by status / end time) |

@@ -36,10 +36,10 @@ function boardRows(ctx) {
   return ctx.clusters.map((c) => by.get(c.id)).filter(Boolean);
 }
 
-/** One cluster's row from Play's own measurement, when there is no record: nothing of today is known. */
-function measuredRow(c, d) {
-  const n = (k) => (d.summary.by[k] || 0);
-  return { id: c.id, name: c.name, state: 'ok', devices: d.summary.devices, onTime: n('OK'), partDelayed: n('PART_DELAY'), delay: n('DELAYED'), critical: n('CRITICAL'),
+/** One cluster's row from a measurement's summary, when there is no record: nothing of today is known. */
+export function measuredRow(c, summary) {
+  const n = (k) => ((summary.by || {})[k] || 0);
+  return { id: c.id, name: c.name, state: 'ok', devices: summary.devices, onTime: n('OK'), partDelayed: n('PART_DELAY'), delay: n('DELAYED'), critical: n('CRITICAL'),
     late: n('DELAYED') + n('CRITICAL'), silent: n('NO_DATA'), cantMeasure: n('ERROR') + n('CLOCK_AHEAD') + n('UNKNOWN'), otherTz: n('OTHER_TZ'), newToday: null, solvedToday: null, levels: null };
 }
 
@@ -48,9 +48,24 @@ export function delayRows(ctx) {
   const by = recorded(ctx) ? new Map(boardRows(ctx).map((r) => [r.id, r])) : null;
   return ctx.clusters.map((c) => {
     const d = ctx.delay.get(c.id);
-    const r = by ? by.get(c.id) : d && d.summary ? measuredRow(c, d) : null;
+    const r = by ? by.get(c.id) : d && d.summary ? measuredRow(c, d.summary) : null;
     return r ? { ...r, name: c.name } : { id: c.id, name: c.name, state: 'never' };
   }).sort((a, b) => (b.state === 'ok') - (a.state === 'ok') || (b.late || 0) - (a.late || 0) || (b.critical || 0) - (a.critical || 0) || collate(a, b));
+}
+
+/**
+ * The parts of a devices donut, one definition for Fleet and Log delay: `t` delayTotals(), `words`
+ * levelWords(). The two late parts are named by the lines they are over; `oneLate`, a label, puts
+ * them together as one (Fleet).
+ */
+export function delayParts(t, words, { oneLate = '' } = {}) {
+  return [
+    { n: t.onTime, label: 'On time', tone: 'green' },
+    ...(oneLate ? [{ n: t.late, label: oneLate, tone: 'yellow' }]
+      : [{ n: t.delay, label: words.delay, tone: 'yellow' }, { n: t.critical, label: words.critical, tone: 'red' }]),
+    { n: t.grey, label: 'Silent or can’t measure', tone: 'blue' },
+    ...(t.otherTz ? [{ n: t.otherTz, label: 'Other time zone, not late', tone: 'grey' }] : []),
+  ];
 }
 
 /** The devices now, over the clusters read; `today` null when no record says. */
@@ -174,13 +189,7 @@ export function render(ctx) {
         : h('div.pl-ldnone', unknown(ctx.delayBoard && ctx.delayBoard.scheduled === false
           ? 'Not recorded: the scheduled log delay measurement is off (Config-Management › Log delay)' : 'Not recorded yet'))),
     h('div.pl-panel', h('div.pl-ph', 'All devices now', t.clusters < rows.length ? h('small', `${t.clusters} of ${rows.length} clusters`) : null),
-      t.clusters ? donut([
-        { n: t.onTime, label: 'On time', tone: 'green' },
-        { n: t.delay, label: words.delay, tone: 'yellow' },
-        { n: t.critical, label: words.critical, tone: 'red' },
-        { n: t.grey, label: 'Silent, can’t measure', tone: 'blue' },
-        ...(t.otherTz ? [{ n: t.otherTz, label: 'Other time zone, not late', tone: 'blue' }] : []),
-      ], { total: t.devices, label: t.devices === 1 ? 'device' : 'devices' }) : unknown('no cluster was read lately'),
+      t.clusters ? donut(delayParts(t, words), { total: t.devices, label: t.devices === 1 ? 'device' : 'devices' }) : unknown('no cluster was read lately'),
       h('div.pl-ldtoday', h('span.pl-dim', 'Today'), h('span', num(t.newToday, 'yellow'), ' new'), h('span', num(t.solvedToday, 'green'), ' solved'),
         h('span', t.clusters ? h('b', String(t.late)) : unknown('–'), ' late now'))),
     h('div.pl-panel', h('div.pl-ph', 'Most delayed clusters, each 12 h', h('small', 'devices late')),

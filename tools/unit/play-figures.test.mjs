@@ -194,3 +194,13 @@ test('volume: disks over the whole cluster, fullest first, only those read', () 
   assert.match(none.textContent, /needs 0\.3/);
   assert.equal(V.byteTop(1.92 * 1024 * GB), 2.5 * 1024 * GB);
 });
+
+test('a Fleet card takes the devices of the reading its log delay alert rests on where the scheduled record has none (0.3.95)', () => {
+  const L = { clusters: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }] };
+  const rows = [{ id: 'a', name: 'A', state: 'ok', devices: 10, onTime: 9, partDelayed: 0, late: 1 }, { id: 'b', name: 'B', state: 'stale' }, { id: 'c', name: 'C', state: 'never' }];
+  const read = { b: { at: 5, summary: { devices: 7, by: { OK: 4, DELAYED: 2, CRITICAL: 1 } } } };
+  const dev = F.cardDevices({ ...L, delayReading: (id) => read[id] || null }, rows);
+  assert.equal(dev.get('a').late, 1, 'the record\'s own row stays');
+  assert.deepEqual([dev.get('b').state, dev.get('b').devices, dev.get('b').late, dev.get('b').onTime, dev.get('b').at], ['ok', 7, 3, 4, 5]);
+  assert.equal(dev.get('c').state, 'never', 'no reading: still not read');
+});
