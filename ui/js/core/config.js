@@ -39,9 +39,11 @@ export const DEFAULTS = {
   // optional: a plain daily index (logstash-2026.09.23) is dated too.
   indexNameRegex: '^(?<prefix>[a-z0-9_.-]*?logstash)(?:-(?<source>.+))?-(?<date>\\d{4}[.\\-]\\d{2}[.\\-]\\d{2})$',
   timeField: '@timestamp',
-  diskWarnPercent: 85,
-  diskHighPercent: 90,
-  diskCritPercent: 95,
+  // Disk levels of the fullest data node (alert-tuning.js diskLines): High 80, Critical 90, no
+  // Warning line (owner, 2026-11-26). A Warning line can be set; null or empty means none.
+  diskWarnPercent: null,
+  diskHighPercent: 80,
+  diskCritPercent: 90,
   // Capacity planning defaults, overridable per cluster. Empty means "not stated" —
   // the volume report then says so rather than assuming a number.
   liveRetention: '',

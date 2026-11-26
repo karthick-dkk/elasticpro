@@ -11,7 +11,7 @@
 
 import { h, svg } from '../lib/dom.js';
 import { bytes } from '../lib/fmt.js';
-import { diskLevel } from '../core/alert-tuning.js';
+import { diskLevel, firstDiskLine } from '../core/alert-tuning.js';
 import { cardValue, dayBasis, basisOf, shortDay, utcDay, finishedDays, BASIS_LABEL, NEEDS_VERSION } from '../core/volume-daily.js';
 import { unknown } from './parts.js';
 
@@ -145,7 +145,7 @@ function perDay(days, all, basisWord) {
 
 function diskPanel(ctx) {
   const disk = diskList(ctx);
-  const line = ctx.lines.warning;
+  const line = firstDiskLine(ctx.lines);
   // The level of a disk is its fullest node's, on every page; the bar is the whole cluster.
   const nodeOf = (c, d) => { const s = ctx.st && ctx.st.get(c.id); return s && s.fullest ? s.fullest.pct : d.percent; };
   return h('div.pl-panel', h('div.pl-ph', 'Top clusters by disk used', h('small', disk.read ? `${disk.read < ctx.clusters.length ? `${disk.read} of ${ctx.clusters.length} read` : 'all'}: ${Math.round((disk.used / disk.total) * 100)} %, ${bytes(disk.used)} of ${bytes(disk.total)}` : '')),

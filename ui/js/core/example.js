@@ -40,9 +40,9 @@ defaults:
   # Which cluster the app opens on: last-selected (default, remembered per browser) or all.
   defaultScope: last-selected
   requestTimeoutMs: 15000
-  diskWarnPercent: 85
-  diskHighPercent: 90
-  diskCritPercent: 95
+  # disk levels of the fullest data node: High 80, Critical 90; diskWarnPercent adds a Warning line
+  diskHighPercent: 80
+  diskCritPercent: 90
   snapshotStaleHours: 26        # alert if no successful SLM snapshot within this window
   maxLogRows: 200
 

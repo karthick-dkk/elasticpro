@@ -820,7 +820,8 @@ function alertRulesCard() {
                   id: `al-th-${r.id}-${t.key}`, type: 'number', min: String(t.min), max: String(t.max), disabled: !admin || lockedT,
                   'data-label': `${r.label}: ${t.label}`,
                   value: String((lockedT ? undefined : (s.thresholds && s.thresholds[t.key])) ?? state.defaults[t.key] ?? ''),
-                  title: lockedT ? MANAGED_NOTE : `${t.min}–${t.max}${t.unit}`,
+                  title: lockedT ? MANAGED_NOTE : `${t.min}–${t.max}${t.unit}${t.optional ? '; empty: none' : ''}`,
+                  placeholder: t.optional ? 'none' : null,
                 }),
                 h('span.muted', t.unit),
                 lockedT ? lockMark() : null);
@@ -879,9 +880,10 @@ async function saveAlertRules() {
     for (const t of r.thresholds || []) {
       const el = host.querySelector(`#al-th-${r.id}-${t.key}`);
       if (!el || el.disabled) continue;
+      if (t.optional && String(el.value).trim() === '') { typed[t.key] = null; continue; }
       const v = Number(el.value);
-      if (!isFinite(v) || v < t.min || v > t.max) {
-        toast(`${t.label} must be between ${t.min} and ${t.max}${t.unit}`, 'warn');
+      if (String(el.value).trim() === '' || !isFinite(v) || v < t.min || v > t.max) {
+        toast(`${t.label} must be between ${t.min} and ${t.max}${t.unit}${t.optional ? ', or empty for none' : ''}`, 'warn');
         try { el.focus(); } catch (_) { /* jsdom */ }
         return false;
       }

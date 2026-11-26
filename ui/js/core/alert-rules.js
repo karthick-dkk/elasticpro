@@ -21,7 +21,8 @@ import { managedDefaults } from './managed.js';
  * read it, so the two cannot send the same alert to different places.
  *
  * @typedef {{ id:string, page:string, label:string, why:string, level:'critical'|'high'|'warning',
- *             thresholds?: Array<{key:string,label:string,unit:string,min:number,max:number}>, zabbixWhy?:string }} AlertRule
+ *             thresholds?: Array<{key:string,label:string,unit:string,min:number,max:number,optional?:boolean}>, zabbixWhy?:string }} AlertRule
+ * An `optional` threshold may be left empty: null, no line (the disk Warning, since 0.3.96).
  */
 
 /**
@@ -54,7 +55,7 @@ export const ALERT_RULES = [
     // The words the Zabbix template carries (tools/zabbix-alert-template.mjs), unchanged.
     zabbixWhy: 'Elasticsearch stops allocating shards at the high watermark and stops writing at the flood stage.',
     thresholds: [
-      { key: 'diskWarnPercent', label: 'Warn at', unit: '%', min: 50, max: 99 },
+      { key: 'diskWarnPercent', label: 'Warn at', unit: '%', min: 50, max: 99, optional: true },
       { key: 'diskHighPercent', label: 'High at', unit: '%', min: 50, max: 99 },
       { key: 'diskCritPercent', label: 'Critical at', unit: '%', min: 50, max: 99 },
     ] },
@@ -219,6 +220,7 @@ export function effectiveDefaults(defaults, settings) {
     for (const t of rule.thresholds || []) {
       const v = s.thresholds[t.key];
       if (typeof v === 'number' && isFinite(v) && v >= t.min && v <= t.max) out[t.key] = v;
+      else if (v === null && t.optional) out[t.key] = null;
     }
   }
   return { ...out, ...managedDefaults() };

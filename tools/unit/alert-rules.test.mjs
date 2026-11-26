@@ -74,10 +74,13 @@ test('retuning a threshold changes the effective default', () => {
 
 test('a threshold outside its range is ignored, not applied', () => {
   const base = { diskWarnPercent: 80 };
-  for (const bad of [0, 5, 100, 250, -1, NaN, 'eighty', null]) {
+  for (const bad of [0, 5, 100, 250, -1, NaN, 'eighty']) {
     const out = ar.effectiveDefaults(base, { disk: { thresholds: { diskWarnPercent: bad } } });
     assert.equal(out.diskWarnPercent, 80, `${String(bad)} should have been refused`);
   }
+  // null is "no line" only for an optional threshold (the disk Warning, 0.3.96); never for another.
+  assert.equal(ar.effectiveDefaults(base, { disk: { thresholds: { diskWarnPercent: null } } }).diskWarnPercent, null);
+  assert.equal(ar.effectiveDefaults({ diskCritPercent: 90 }, { disk: { thresholds: { diskCritPercent: null } } }).diskCritPercent, 90);
 });
 
 test('settings for a rule that no longer exists are ignored', () => {

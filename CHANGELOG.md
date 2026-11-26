@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.96
+
+- **Disk alerts: High at 80 %, Critical at 90 %, no Warning line** (the fullest data node, as before; alerts, mail and Play). Shipped in 0.3.94: Warning 85, High 90, Critical 95. A Warning line can still be set (`UI_DISK_WARN_PERCENT`, Config › Defaults, Alert triggers); its field may now be left empty for none. Levels already saved stay as they are: a config that saved Warning 80 / Critical 90 (the defaults before 0.3.94) now reads High 80 / Critical 90, since High is checked before a Warning at the same line. Play's Fleet lists disks from 80 %; Volume's white line is the lowest line set.
+
 ## 0.3.95
 
 - **Play, Fleet: a card no longer says "delay not read" beside an open log delay alert.** Where the scheduled log delay measurement does not cover a cluster, its card shows the devices from the reading the alert rests on, with when it was checked ("34 on time · 4 late · checked 23:26"); a run of the server's counts only the late devices, and then the card says so ("4 late of 40 · checked 23:26"), with no on-time figure.
