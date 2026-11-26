@@ -112,8 +112,9 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
   const repos = Array.isArray(d.repos) ? d.repos : [];
   if (d.switchedOff && d.switchedOff.snapshots) unknown.push('Snapshots are switched off for this cluster (Edit cluster › Collection).');
   else if (!reposRead(d)) unknown.push('The repository list has not been read yet.');
-  else if (!repos.length && ulm) unknown.push('Backups go to S3 through ULM, which this map cannot see.');
   else {
+    // ULM archives to S3 whatever is registered here: a day in no snapshot is not "no backup".
+    if (ulm) unknown.push(repos.length ? 'Logs are also archived to S3 through ULM, which this map cannot see.' : 'Backups go to S3 through ULM, which this map cannot see.');
     for (const rp of repos) {
       const l = repoListing(d, rp);
       if (!l.rows) { unknown.push(`Repository ${rp.name}: snapshots ${l.why}.`); continue; }
@@ -126,7 +127,9 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
         snapshots++;
         const whole = st === 'SUCCESS' && !(Number(s.failed) > 0);
         if (whole) {
-          for (const day of new Set(s.indexNames.map(dayOf).filter(onMap))) ok.set(day, (ok.get(day) || 0) + 1);
+          // The row's own days (state.js restorableDays, the same regex) when it carries them.
+          const days = Array.isArray(s.days) ? s.days : s.indexNames.map(dayOf);
+          for (const day of new Set(days.filter(onMap))) ok.set(day, (ok.get(day) || 0) + 1);
           continue;
         }
         if (st !== 'SUCCESS' && st !== 'PARTIAL') continue;
@@ -148,7 +151,7 @@ export function logAvailability({ indices, data, dayOf, ulm = false, today = utc
         }
       }
     }
-    if (unreadNames) unknown.push(`${plural(unreadNames, 'snapshot')}: index names not read (the light listing names none). Refresh the Snapshots page to read them.`);
+    if (unreadNames) unknown.push(`${plural(unreadNames, 'snapshot')}: index names not read (the light listing names none). Refreshing the Snapshots page reads them, up to the newest 500 per repository.`);
   }
 
   const stateOf = (day) => {

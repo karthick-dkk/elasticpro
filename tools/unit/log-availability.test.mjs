@@ -174,3 +174,17 @@ test('empty months after today fold into one line', () => {
   const fut = av.months.find((r) => r.kind === 'gap' && r.state === 'future');
   assert.deepEqual(fut && [fut.from, fut.to], ['2026-12', '2027-03']);
 });
+
+test('ULM on: a day in no snapshot is not known, also with a repository registered (review 0.3.98)', () => {
+  const av = A.logAvailability({ indices: idx(['2026-11-20']), data: data([snap('s', 'SUCCESS', ['2026-11-10'])]), dayOf, ulm: true, today: TODAY });
+  assert.equal(av.stateOf('2026-11-10'), 'ok');
+  assert.equal(av.stateOf('2026-11-15'), 'unknown', 'never "no backup" while ULM may hold it');
+  assert.match(av.unknown.join(' '), /also archived to S3 through ULM/);
+  assert.equal(av.counts.none, 0);
+});
+
+test('a whole snapshot is read from its own days when the row carries them', () => {
+  const row = { ...snap('s', 'SUCCESS', ['2026-11-10']), days: ['2026-11-11'] };
+  const av = A.logAvailability({ indices: [], data: data([row]), dayOf, today: TODAY });
+  assert.equal(av.stateOf('2026-11-11'), 'ok');
+});

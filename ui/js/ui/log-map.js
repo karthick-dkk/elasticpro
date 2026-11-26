@@ -10,6 +10,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
+import { objId } from '../lib/keyed.js';
 import { state, bus, fetchIndices, fetchSnapshots, parseIndexName } from '../core/state.js';
 import { clusterKind } from '../core/cluster-kind.js';
 import { logAvailability, trailingGap, trailingGapText, MAP_YEARS_BACK } from '../core/log-availability.js';
@@ -32,32 +33,36 @@ export function logMapButton(c, opts = {}) {
   }, ICON);
 }
 
+/** ULM archives to S3 whenever it is on, snapshots expected or not: the map cannot see S3. */
 function ulmOf(c) {
-  try { const k = clusterKind(c); return !!(k.ulm && k.ulm.enabled && !k.slmExpected); } catch (_) { return false; }
+  try { const k = clusterKind(c); return !!(k.ulm && k.ulm.enabled); } catch (_) { return false; }
 }
 
-/** Ask for what the map needs and is missing: the index list, the listing with index names. */
+/**
+ * Ask for what the map needs: the index list every time (the trailing gap must not be a day old;
+ * with the fleet cache a fresh list is answered at once), and the listing with index names
+ * when it is missing.
+ */
 async function ensure(c, note) {
   const d = state.data.get(c.id) || {};
   const jobs = [];
-  if (!state.indices.get(c.id)) {
-    jobs.push(fetchIndices(c.id, '*').catch((e) => note(`Index list: ${e && e.message ? e.message : 'could not be read'}`)));
-  }
+  jobs.push(fetchIndices(c.id, '*').catch((e) => note('indices', `Index list: ${e && e.message ? e.message : 'could not be read'}`)));
   const repos = Array.isArray(d.repos) ? d.repos : [];
   const lacking = repos.some((rp) => {
     const rows = d.snapshots && d.snapshots[rp.name];
     return !Array.isArray(rows) || rows.some((s) => !Array.isArray(s.indexNames));
   });
   if (lacking && !(d.switchedOff && d.switchedOff.snapshots)) {
-    jobs.push(fetchSnapshots(c.id, { force: false }).catch((e) => note(`Snapshots: ${e && e.message ? e.message : 'could not be read'}`)));
+    jobs.push(fetchSnapshots(c.id, { force: false }).catch((e) => note('snapshots', `Snapshots: ${e && e.message ? e.message : 'could not be read'}`)));
   }
   await Promise.all(jobs);
 }
 
 export function openLogMap(c) {
   const body = h('div.lm');
-  const problems = [];
-  let av = null;
+  // Problems by what failed; one is dropped once that data is held after all (a push after a timeout).
+  const problems = new Map();
+  let av = null, settled = false, sig = null;
   const pickLine = h('div.lm-pick', { 'aria-live': 'polite' }, h('span.muted', 'Hover or tap a day for what is there.'));
   // Hover shows one day's detail without computing the map again (a fleet's listing is big).
   const pick = (day, btn) => {
@@ -67,18 +72,25 @@ export function openLogMap(c) {
     mount(pickLine, h('pre.lm-pick-t', av.describe(day)));
   };
   const draw = () => {
+    const indices = state.indices.get(c.id) || null;
+    const d = state.data.get(c.id) || {};
+    // A failed read stays said until a newer list arrives; an older one still held does not clear it.
+    const failed = problems.get('indices');
+    if (failed && indices && objId(indices) !== failed.held) problems.delete('indices');
+    // A push that changed nothing the map reads leaves the grid (and the day under the mouse) alone.
+    // Listings are replaced per repository in place, so each one is in the signature.
+    const repos = Array.isArray(d.repos) ? d.repos : [];
+    const next = [objId(indices), objId(d), objId(d.repos), objId(d.snapshotTotals), d.reposRead, !!(d.switchedOff && d.switchedOff.snapshots),
+      ...repos.map((rp) => `${objId(d.snapshots && d.snapshots[rp.name])}${rp.error || ''}`), [...problems.values()].map((p) => p.text).join('|'), settled].join(':');
+    if (next === sig) return;
+    sig = next;
     const reSrc = c.indexNameRegex;
-    av = logAvailability({
-      indices: state.indices.get(c.id) || null,
-      data: state.data.get(c.id) || {},
-      dayOf: (n) => parseIndexName(n, reSrc).day,
-      ulm: ulmOf(c),
-    });
-    mount(body, ...view(av, problems, pickLine, pick));
+    av = logAvailability({ indices, data: d, dayOf: (n) => parseIndexName(n, reSrc).day, ulm: ulmOf(c) });
+    mount(body, ...view(av, [...problems.values()].map((p) => p.text), pickLine, pick, settled));
   };
   const offs = [bus.on('indices', (id) => { if (id === c.id) draw(); }), bus.on('data', (id) => { if (id === c.id) draw(); })];
   draw();
-  ensure(c, (t) => { problems.push(t); draw(); }).then(draw);
+  ensure(c, (what, text) => { problems.set(what, { text, held: objId(state.indices.get(c.id) || null) }); draw(); }).then(() => { settled = true; draw(); });
   modal(`Log availability · ${c.name}`, 'One cell per day (UTC). A day with a live index is green, also when a snapshot holds it.',
     [body], (ctx) => [h('button.btn', { type: 'button', onclick: () => ctx.done(null) }, 'Close')],
     { width: '780px', cls: 'lm-modal' })
@@ -90,12 +102,12 @@ const LEGEND = [
   ['ok', 'Only in successful snapshots'],
   ['partial', 'Only in partial snapshots'],
   ['none', 'No index (live or backup)'],
-  ['unknown', 'Not known: backups not fully read'],
+  ['unknown', 'Not known (why: below the map)'],
 ];
 
-function view(av, problems, pickLine, pick) {
+function view(av, problems, pickLine, pick, settled) {
   const errs = problems.length ? h('div.banner.warn.lm-msg', problems.join(' · ')) : null;
-  if (!av) return [errs, h('p.muted', 'Reading the index list…')];
+  if (!av) return [errs, h('p.muted', settled ? 'The index list could not be read, so there is no map to draw.' : 'Reading the index list…')];
   if (!av.from) {
     return [errs, h('p.muted', 'No live index and no snapshot carries a date in its name, so there is no day to show.'),
       av.undated ? h('p.muted', `${plural(av.undated, 'index', 'indices')} with no date in the name.`) : null];
@@ -120,7 +132,8 @@ function summary(av) {
   const b = av.backup;
   const backLine = b.from
     ? h('span', `${b.from} → ${b.to}`, b.held !== null ? h('span.muted', ` · ${b.held} of ${plural(b.days, 'day')} held`) : null,
-      b.left ? h('span.muted', ` · ${leftOutShort(b.left)}`) : null, b.unread ? h('span.muted', ` · ${plural(b.unread, 'snapshot')} not read`) : null)
+      b.left ? h('span.muted', ` · ${leftOutShort(b.left)}`) : null, b.unread ? h('span.muted', ` · ${plural(b.unread, 'snapshot')} not read`) : null,
+      av.unknown.length ? h('span.muted', ' (part read)') : null)
     : h('span.muted', av.unknown.length ? 'not known' : av.snapshots ? 'no restorable index carries a date' : 'no snapshot');
   return h('div.lm-sum',
     h('div', h('b', 'Live retention '), liveLine, gapLine ? [' · ', gapLine] : null),

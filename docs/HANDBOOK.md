@@ -777,7 +777,7 @@ hover names both). **Blue**: no live index, a successful snapshot holds it. **Re
 successful snapshot, a partial snapshot names it (the hover says whether that day's indices failed or
 are restorable). **Grey**: nothing. **Hatched**: no live index and not every snapshot could be read
 (a listing cut at 500, the light `_cat` listing, a repository not read, snapshots switched off, ULM
-without a repository) — never grey. Two or more months of grey (or of hatched) fold into one line.
+on, whose S3 archive the map cannot see) — never grey. Two or more months of grey (or of hatched) fold into one line.
 Live retention and the backed-up range above the map are the Capacity figures (`liveHeldDays`,
 `restorableRange`). The **trailing gap** — days since the newest live index up to today, days dated
 ahead not counted — is shown there, and past 7 days (`STALE_GAP_DAYS`) the button turns amber with
