@@ -39,6 +39,7 @@ import { LEVEL_TONE } from '../core/alert-levels.js';
 import { nodeRates, recordReading } from '../core/node-rates.js';
 import { ldSummary, periodQuery, whenText, countText, LD_COLOURS, noDelaySplit, shareText, partText } from '../core/logdelay-report.js';
 import { empty, usageBar } from './common.js';
+import { logMapButton } from '../ui/log-map.js';
 import { usageLevel } from '../core/nodes-shards.js';
 import { figureWhy, HIDDEN_NOTE } from '../core/index-figures.js';
 import {
@@ -294,7 +295,7 @@ function draw() {
         P.get('r-devices', `${objId(ldRead.get(c.id))}|${c.id}|${Math.floor(Date.now() / 60000)}`, () => devicesCard(c, ldRead.get(c.id) || null)),
         P.get('r-pressure', rateSig(rates, 'searchLatencyMs', 'rejected', 'breakerTrips', 'searchQueue', 'writeQueue', 'why'), () => pressureCard(rates))),
       h('div.ov-row.ov-lifecycle',
-        P.get('slm', `${rev}|${objId(d.slm)}|${objId(d.slmStatus)}|${snapSig}|${objId(c)}|${objId(state.defaults)}`, () => slmCardEl(c, d)),
+        P.get('slm', `${rev}|${objId(d.slm)}|${objId(d.slmStatus)}|${snapSig}|${objId(c)}|${objId(state.defaults)}|${objId(state.indices.get(c.id) || null)}`, () => slmCardEl(c, d)),
         P.get('ilm', `${rev}|${objId(c)}|${objId(idx)}|${objId(state.defaults)}|${Math.floor(Date.now() / 3600000)}`, () => ilmCardEl(c, d, idx))),
       h('div.ov-row.ov-bottom',
         nodesPanel(c, d),
@@ -543,7 +544,8 @@ function slmCardEl(c, d) {
     const bits = [s.at ? whenText(s.at) : null, s.durationMs !== null ? dur(s.durationMs) : null, s.indices !== null ? `${num(s.indices)} ${s.indices === 1 ? 'index' : 'indices'}` : null].filter(Boolean);
     line = h('span', statusDot(s.status === 'Success' ? 'ok' : 'bad', (s.headline || s.status).toLowerCase()), ' ', h('span', { title: s.at ? `${ago(s.at)} · ${dt(s.at)}` : null }, bits.join(' · ')));
   }
-  return lifecycleCard('slm', 'SLM', s.pill, s.kind === 'ok' ? [s.failed.length ? s.failed.join(', ') : s.policy, s.part ? `takes ${s.takes}` : null].filter(Boolean).join(' · ') : s.policy, link, line);
+  // The log availability map: which days are live, which only in snapshots (ui/log-map.js).
+  return lifecycleCard('slm', 'SLM', s.pill, s.kind === 'ok' ? [s.failed.length ? s.failed.join(', ') : s.policy, s.part ? `takes ${s.takes}` : null].filter(Boolean).join(' · ') : s.policy, [logMapButton(c), link], line);
 }
 
 function ilmCardEl(c, d, idx) {

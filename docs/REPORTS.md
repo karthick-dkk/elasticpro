@@ -107,7 +107,7 @@ snapshot / backup**) over the headers, hidden when a reorder mixes the two group
 
 | Column | Definition |
 |---|---|
-| Cluster | always first, cannot be hidden |
+| Cluster | always first, cannot be hidden. The ▦ button beside the name opens the log availability map (docs/HANDBOOK.md); it is amber when the newest live index is more than 7 days old |
 | Per day | event_logsize per day, 7-day average |
 | 30% buffer | per day × (1 + `volumeHeadroomPercent`/100), default 30 |
 | Live retention | days of live indices held now: from the first day of the current run of dated indices to today, both counted (a gap of more than 7 days with no index ends the run; older days are named beside it, "+1 older day left out"; the walk starts at the newest day up to today, so an index dated ahead does not move it), or the ILM delete age. The CSV adds *Live retention from* and *Live retention older days left out* |

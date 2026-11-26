@@ -26,6 +26,7 @@ import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout }
 import { layoutTable, layoutCsv, layoutSortCols } from './table.js';
 import { tableSort, sortTh } from '../lib/table-sort.js';
 import { amber, muted, tag, loading, diskBar, gbCell } from './cells.js';
+import { logMapButton } from '../ui/log-map.js';
 
 const TABLE = 'capacity';
 const ui = { view: 'plan', measuring: new Set() };
@@ -121,7 +122,9 @@ const waitingSize = (r) => (r.record ? amber('not measured', 'No event_logsize i
 export function capacityDefs(rows = []) {
   const gb = (n) => `${n} (GB)`;
   return [
-    { key: 'cluster', label: 'Cluster', locked: true, cell: (r) => h('b', r.cluster.name), csv: (r) => r.cluster.name },
+    // The log availability map beside the name (ui/log-map.js): amber when the newest live index
+    // is more than 7 days old, the gap at the new end that Live retention does not count.
+    { key: 'cluster', label: 'Cluster', locked: true, cell: (r) => h('span.rp-cl', h('b', r.cluster.name), ' ', logMapButton(r.cluster)), csv: (r) => r.cluster.name },
     { key: 'perDay', label: 'Per day', num: true, title: `event_logsize per day, ${RATE_DAYS}-day average`,
       cell: (r) => (r.plan.perDay === null ? waitingSize(r) : bytes(r.plan.perDay)), csv: (r) => gbCell(r.plan.perDay), csvLabel: gb },
     { key: 'buffered', label: bufferLabel(rows), num: true, title: 'Per day × (1 + volumeHeadroomPercent ÷ 100)',

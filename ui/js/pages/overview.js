@@ -37,6 +37,7 @@ import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, pro
 import { sumKnown } from '../core/index-figures.js';
 import { repoOverview, spanTitle } from '../core/snapshot-evidence.js';
 import { leftOutShort } from '../core/volume.js';
+import { logMapButton } from '../ui/log-map.js';
 import { repoListing, cutText, spanText, reposRead, noRepository } from '../core/snapshot-restorable.js';
 // Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
 import * as board from './cluster-overview.js';
@@ -1545,9 +1546,9 @@ function repoSection(c, d) {
   if (policiesRead(c.id) && noRepository(d)) {
     return h('div.cl-sec.cl-sec-bar', { 'data-section': 'repo' },
       h('span.cl-sec-chev', { 'aria-hidden': 'true' }, '▸'), h('b', 'Snapshot repositories'), h('span.muted.cl-sec-sub', 'None registered'),
-      h('span.cl-sec-links', snapshotsLink, docLink(DOCS.repos, 'Register a repository')));
+      h('span.cl-sec-links', logMapButton(c), snapshotsLink, docLink(DOCS.repos, 'Register a repository')));
   }
-  if (!repos.length) return h('div.cl-sec', { 'data-section': 'repo' }, secHead('Snapshot repositories', 'not read yet'));
+  if (!repos.length) return h('div.cl-sec', { 'data-section': 'repo' }, secHead('Snapshot repositories', 'not read yet', h('span.cl-sec-links', logMapButton(c))));
   const cols = detailShown(prefs, 'repo');
   const cache = sizeCacheFor(c);
   const mayRestore = roleMayWrite() && !isSnapshotMode();
@@ -1597,7 +1598,7 @@ function repoSection(c, d) {
     return h('tr', ...cols.map((col) => cell[col.id]()));
   });
   return h('div.cl-sec', { 'data-section': 'repo' },
-    secHead('Snapshot repositories', String(repos.length), h('span.cl-sec-links', snapshotsLink)),
+    secHead('Snapshot repositories', String(repos.length), h('span.cl-sec-links', logMapButton(c), snapshotsLink)),
     table(cols.map((col) => ({ label: col.label, num: col.num })), trs));
 }
 

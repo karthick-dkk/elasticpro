@@ -3735,3 +3735,36 @@ tr.slow-task > td { vertical-align: top; }
 .ld .ld-kpi .ld-measure { margin-top: 2px; align-self: flex-start; }
 /* Log delay's donut is narrow: a long part name takes a second line instead of being cut. */
 .pl-ld .pl-lg span { white-space: normal; line-height: 1.15; }
+
+/* ---------------- log availability map (ui/log-map.js, core/log-availability.js) ---------------- */
+.lm-btn { min-width: 24px; padding: 1px 5px; font-size: 13px; line-height: 1.2; vertical-align: middle; }
+.lm-btn.lm-stale { border-color: var(--warning); background: var(--warning-bg); color: var(--warning-ink); }
+.lm { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.lm-sum { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.lm-warn { color: var(--warning-ink); }
+.lm-bad { color: var(--critical-ink); }
+.lm-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.lm-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.lm-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.lm-grid { display: flex; flex-direction: column; gap: 2px; max-height: 52vh; overflow-y: auto; overflow-x: hidden; }
+.lm-row { display: grid; grid-template-columns: 58px repeat(31, minmax(0, 1fr)); gap: 2px; align-items: center; }
+.lm-gaprow { grid-template-columns: 58px 1fr; }
+.lm-ym { font: 11px var(--mono); color: var(--text-secondary); }
+.lm-dn { font-size: 10px; color: var(--text-muted); text-align: center; }
+.lm-c { display: block; height: 16px; min-width: 0; padding: 0; border: 0; border-radius: 3px; cursor: pointer; }
+.lm-c.lm-out { background: transparent; cursor: default; }
+.lm-live, .lm-sw.lm-live { background: var(--state-ok); }
+.lm-ok, .lm-sw.lm-ok { background: var(--chart-info); }
+.lm-partial, .lm-sw.lm-partial { background: var(--state-crit); }
+.lm-none, .lm-sw.lm-none { background: var(--border); }
+.lm-unknown, .lm-sw.lm-unknown { background: repeating-linear-gradient(45deg, var(--border) 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1px var(--border); }
+.lm-future { background: transparent; box-shadow: inset 0 0 0 1px var(--grid); }
+.lm-c.lm-today { box-shadow: inset 0 0 0 2px var(--text-primary); }
+.lm-c.lm-picked, .lm-c:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lm-gap { display: block; font-size: 11px; padding: 1px 6px; border-radius: 3px; color: var(--text-secondary); }
+.lm-gap.lm-none { background: var(--grid); }
+.lm-pick { min-height: 54px; font-size: 12px; }
+.lm-pick-t { margin: 0; font: 12px var(--mono); white-space: pre-wrap; }
+.lm-notes { margin: 0; padding-left: 18px; font-size: 12px; }
+.lm-msg { margin: 0; }
+@media (max-width: 520px) { .lm-row { grid-template-columns: 44px repeat(31, minmax(0, 1fr)); gap: 1px; } .lm-gaprow { grid-template-columns: 44px 1fr; } .lm-c { height: 12px; } }

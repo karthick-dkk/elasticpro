@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.98
+
+- **Log availability map.** A small ▦ button on the Clusters page's expanded row (Snapshot repositories), the Overview (SLM card) and Reports › Capacity & retention (beside the cluster name) opens a map with one cell per day, from the oldest day any index or snapshot names to today: **green** a live index carries the day (also when a snapshot holds it), **blue** only in successful snapshots, **red** only in partial snapshots, **grey** neither live nor backed up. Hover or tap a day for what is there; the hover names both live and backup. Where not every snapshot could be read (a cut listing, the light listing, a repository not read, snapshots switched off), days with no live index are hatched *not known*, never grey, and the reason is listed. Long empty stretches fold into one line ("2025-06 → 2026-09 · no live index and no backup · 487 days"). Live retention and the backed-up range above the map are the Capacity figures.
+- **A long gap at the new end is flagged.** The map says how many days since the newest live index ("No live index for 24 days (newest 2026-11-02)"); past 7 days the button turns amber with that text, wherever it is shown. Live retention still counts to today, as before.
+
 ## 0.3.97
 
 - **Retention counts from when the logs are really there.** Five stray indices dated 2025-05-03, then nothing until 2026-10-01, made Capacity say live logs "from 2025-05-03 to today". Now a range starts at the run of days that reaches the newest: going back from the newest day, a gap of more than 7 days with no index ends it. Live retention (Capacity), the Volume sheet's oldest index day and days held, each snapshot's *Data inside covers*, the repository span and the oldest index day backed up all start there. Older days are named, never dropped: "+1 older day left out", and "5 indices on 1 older day (2025-05-03) left out: 515 days with no index before 2026-10-01" in the tooltip and the snapshot evidence. New Volume sheet rows *Older index days left out* and *Older backed-up days left out*; snapshot CSV columns `data_left_out_days`, `data_left_out`. A snapshot still holds the older days and can restore them.
