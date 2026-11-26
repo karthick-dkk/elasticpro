@@ -547,7 +547,7 @@ export function spanDaysIso(fromDay, toDay) {
 export const STALE_GAP_DAYS = 7;
 
 /**
- * The run of days that reaches the newest one: walk back from the newest day and stop at
+ * The run of days that reaches the newest one: walk back from the newest day up to today and stop at
  * the first gap of more than `gap` days with no index. The one definition behind Live
  * retention, the oldest index day, each snapshot's "covers" and the backup range.
  *
@@ -555,10 +555,16 @@ export const STALE_GAP_DAYS = 7;
  * counted, `{days, from, to, list, gapDays}` (gapDays = days with no index between the
  * newest left-out day and `from`), or null when nothing is left out.
  */
-export function currentRun(days, gap = STALE_GAP_DAYS) {
+export function currentRun(days, gap = STALE_GAP_DAYS, today = utcToday()) {
   const list = [...new Set(days || [])].filter((d) => typeof d === 'string' && d).sort();
   if (!list.length) return { from: null, to: null, days: [], left: null };
+  // The walk starts at the newest day up to today: an index dated ahead (a device with a
+  // wrong clock) must not become the "current run" and push the real days out. Days after
+  // today stay in the run, stretching it forward as they always have; when every day is
+  // ahead, the newest is the anchor.
   let i = list.length - 1;
+  while (i > 0 && list[i] > today) i--;
+  if (list[i] > today) i = list.length - 1;
   while (i > 0 && spanDaysIso(list[i - 1], list[i]) - 2 <= gap) i--;
   const kept = list.slice(i);
   const left = i ? { days: i, from: list[0], to: list[i - 1], list: list.slice(0, i), gapDays: spanDaysIso(list[i - 1], list[i]) - 2 } : null;
@@ -688,7 +694,8 @@ export const SHEET_COLUMNS = [
     note: (r) => `(per day + ${headroomPct(r)}%) × 90 days`, help: 'Log volume per day, plus the configured headroom, × 90.' },
   { group: 'Indices kept on the cluster', label: 'Days of indices held now', unit: 'days', kind: 'num',
     get: (r) => r.vol.daysCovered || null,
-    note: (r) => (r.liveLogsFrom ? `${r.liveLogsFrom} → ${r.liveLogsTo}` : 'no dated indices'),
+    note: (r) => (r.liveLogsFrom ? `${r.liveLogsFrom} → ${r.liveLogsTo}`
+      : r.liveLogsLeftOut ? 'the current run is only today, not a whole day yet' : 'no dated indices'),
     help: 'How many days of dated indices are on the cluster right now — what it actually holds, which is not always '
         + `what the policy says it should. Counted over the current run only (older days before a gap of more than ${STALE_GAP_DAYS} days are left out).` },
   { group: 'Indices kept on the cluster', label: 'Oldest index day', kind: 'text', get: (r) => r.liveLogsFrom,
@@ -696,7 +703,7 @@ export const SHEET_COLUMNS = [
     help: 'The first day of the current run of dated indices: going back from the newest day, the run ends at a gap of '
         + `more than ${STALE_GAP_DAYS} days with no index. Older days are not counted; the storage plan sheet names them (Older index days left out).` },
   { group: 'Indices kept on the cluster', label: 'Older index days left out', unit: 'days', kind: 'num',
-    get: (r) => (r.liveLogsFrom ? (r.liveLogsLeftOut ? r.liveLogsLeftOut.days : 0) : null),
+    get: (r) => (r.liveLogsLeftOut ? r.liveLogsLeftOut.days : r.liveLogsFrom ? 0 : null),
     note: (r) => (r.liveLogsLeftOut ? leftOutText(r.liveLogsLeftOut, r.liveLogsFrom) : r.liveLogsFrom ? 'none' : 'no dated indices'),
     help: `Days of indices older than a gap of more than ${STALE_GAP_DAYS} days with no index: stray old indices, not `
         + 'what the cluster keeps. They are still on the cluster; they are not counted in the days held.' },

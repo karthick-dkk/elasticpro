@@ -1728,17 +1728,17 @@ await go('reports');
       ok(f && /^reports-storage-plan-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,Per day (GB),30% buffer (GB),Live retention (days)'),
         `reports capacity: the Storage plan CSV header is ${f && f.text.split('\n')[0]}`);
     }
-    // The switch: Every parameter (38) and Client plan (17), from the same report columns.
+    // The switch: Every parameter (40: 0.3.97 added the two left-out rows) and Client plan (17), from the same report columns.
     const seg = (re) => [...doc.querySelectorAll('.rp-bar .seg .btn')].find((b) => re.test(b.textContent));
-    ok(!!seg(/^Plan$/) && !!seg(/^Every parameter \(38\)$/) && !!seg(/^Client plan \(17\)$/), 'reports capacity: the Plan / Every parameter / Client plan switch is missing');
+    ok(!!seg(/^Plan$/) && !!seg(/^Every parameter \(40\)$/) && !!seg(/^Client plan \(17\)$/), 'reports capacity: the Plan / Every parameter / Client plan switch is missing');
     if (seg(/^Every parameter/)) {
       seg(/^Every parameter/).click();
       await settleFor(250);
       const h = sheetHeaders();
-      ok(h.length === 38 && h.some((x) => x.startsWith('Current live storage store upto')), `reports capacity: Every parameter has ${h.length} columns`);
+      ok(h.length === 40 && h.some((x) => x.startsWith('Current live storage store upto')), `reports capacity: Every parameter has ${h.length} columns`);
       btnIn(doc.getElementById('view'), 'Export CSV').click();
       const full = files.at(-1);
-      ok(full && /^reports-every-parameter-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name) && full.text.split('\n')[0].split(',').length === 39,
+      ok(full && /^reports-every-parameter-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name) && full.text.split('\n')[0].split(',').length === 41,
         `reports capacity: the full export is "${full && full.name}" with ${full && full.text.split('\n')[0].split(',').length} headers`);
       seg(/^Client plan/).click();
       await settleFor(250);

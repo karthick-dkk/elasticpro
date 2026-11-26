@@ -730,11 +730,16 @@ pub const STALE_GAP_DAYS: i64 = 7;
 /// The first day of the run of days that reaches the newest one: going back from the newest
 /// day, the run ends at a gap of more than STALE_GAP_DAYS days with none. The same rule as
 /// ui/js/core/volume.js currentRun. None when there are no days.
-pub fn current_run_start(days: &[NaiveDate]) -> Option<NaiveDate> {
+///
+/// The walk starts at the newest day up to `today`: an index dated ahead (a device with a
+/// wrong clock) must not become the run and push the real days out. When every day is ahead,
+/// the newest is the anchor, as in currentRun.
+pub fn current_run_start(days: &[NaiveDate], today: NaiveDate) -> Option<NaiveDate> {
     let mut v = days.to_vec();
     v.sort_unstable();
     v.dedup();
-    let mut i = v.len().checked_sub(1)?;
+    let last = v.len().checked_sub(1)?;
+    let mut i = v.iter().rposition(|d| *d <= today).unwrap_or(last);
     while i > 0 && (v[i] - v[i - 1]).num_days() - 1 <= STALE_GAP_DAYS {
         i -= 1;
     }
@@ -1838,7 +1843,7 @@ impl Core {
                 for m in store.months(cluster) {
                     live.extend(store.read_month(cluster, &m).days.values().filter(|d| d.live).filter_map(|d| parse_day(&d.day)));
                 }
-                let oldest = current_run_start(&live);
+                let oldest = current_run_start(&live, today);
                 let week = store.days_between(cluster, today - Duration::days(7), today - Duration::days(1));
                 (oldest, week.into_iter().map(|d| (d.day.clone(), d.event_bytes)).collect())
             }
@@ -2236,12 +2241,17 @@ mod tests {
             days.push(t);
             t += Duration::days(1);
         }
-        assert_eq!(current_run_start(&days), Some(d("2026-10-01")));
+        let today = d("2026-11-26");
+        assert_eq!(current_run_start(&days, today), Some(d("2026-10-01")));
         // More than 7 empty days split; 7 do not (ui/js/core/volume.js currentRun, same cases).
-        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-09")]), Some(d("2026-11-01")));
-        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-10")]), Some(d("2026-11-10")));
-        assert_eq!(current_run_start(&[d("2026-11-10"), d("2026-11-01"), d("2026-11-10")]), Some(d("2026-11-10")), "order and duplicates");
-        assert_eq!(current_run_start(&[]), None);
+        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-09")], today), Some(d("2026-11-01")));
+        assert_eq!(current_run_start(&[d("2026-11-01"), d("2026-11-10")], today), Some(d("2026-11-10")));
+        assert_eq!(current_run_start(&[d("2026-11-10"), d("2026-11-01"), d("2026-11-10")], today), Some(d("2026-11-10")), "order and duplicates");
+        assert_eq!(current_run_start(&[], today), None);
+        // An index dated ahead (wrong clock) is not the run: the real days still count.
+        days.push(d("2026-12-10"));
+        assert_eq!(current_run_start(&days, today), Some(d("2026-10-01")), "a future day does not push the run out");
+        assert_eq!(current_run_start(&[d("2026-12-10"), d("2026-12-11")], today), Some(d("2026-12-10")), "every day ahead: newest anchors");
     }
 
     #[test]

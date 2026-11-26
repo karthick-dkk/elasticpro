@@ -134,7 +134,12 @@ export function capacityDefs(rows = []) {
               : [`live indices from ${r.held.from} to today`, leftOutText(r.held.left, r.held.from)].filter(Boolean).join('\n') },
             `${plural(Math.round(r.held.days), 'day')}${r.held.source === 'ILM' ? ' (ILM)' : ''}`,
             r.held.left ? h('span.muted', ` · ${leftOutShort(r.held.left)}`) : null)),
-      csv: (r) => (r.held ? Math.round(r.held.days) : null), csvLabel: (n) => `${n} (days)`, sortType: 'number' },
+      csv: (r) => (r.held ? Math.round(r.held.days) : null), csvLabel: (n) => `${n} (days)`, sortType: 'number',
+      // What the cell names beside the number, so the export does not hide it (one text: leftOutText).
+      csvExtra: [
+        { label: 'Live retention from', csv: (r) => (r.held ? (r.held.source === 'ILM' ? 'ILM delete age' : r.held.from) : null) },
+        { label: 'Live retention older days left out', csv: (r) => (r.held && r.held.source !== 'ILM' ? (r.held.left ? leftOutText(r.held.left, r.held.from) : 'none') : null) },
+      ] },
     { key: 'livePolicy', label: 'Live retention policy', group: GROUP_LIVE, title: 'Set on the cluster by a person (Edit cluster › Live retention)',
       cell: (r) => (r.plan.livePolicy ? String(r.cluster.liveRetention) : amber('not set', 'Set liveRetention on the cluster')),
       csv: (r) => (r.plan.livePolicy ? String(r.cluster.liveRetention) : 'not set') },

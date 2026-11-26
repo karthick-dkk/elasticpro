@@ -5,7 +5,7 @@
  * follows the columns on screen").
  *
  * A def: `{ key, label, num?, locked?, hidden?, group?, title?, cell(row) → Node|string,
- * csv(row) → string|number|null, csvLabel?, sortType?, sortValue(row)?, sort? }`.
+ * csv(row) → string|number|null, csvLabel?, csvExtra?: [{label, csv(row)}], sortType?, sortValue(row)?, sort? }`.
  *
  * Sorting (lib/table-sort.js): pass `sort` (a tableSort()) and the rows already in its order —
  * `sort.apply(rows, layoutSortCols(defs))`, after any filter — so the CSV, written from the
@@ -63,14 +63,17 @@ export function layoutCsv(defs, layout, rows) {
   const byKey = new Map(defs.map((d) => [d.key, d]));
   const cols = visibleColumns(defs, layout).map((c) => ({ ...c, def: byKey.get(c.key) }));
   const label = (c) => (c.def.csvLabel ? c.def.csvLabel(c.name) : c.name);
-  const headers = cols.map(label);
+  // A column's csvExtra ([{label, csv}]) adds export-only columns right after it: what the
+  // cell says beside its number (a tooltip, a muted note) still reaches the CSV.
+  const out = cols.flatMap((c) => [{ header: label(c), get: c.def.csv }, ...(c.def.csvExtra || []).map((x) => ({ header: x.label, get: x.csv }))]);
+  const headers = out.map((x) => x.header);
   return {
     headers,
     rows: rows.map((r) => {
       const o = {};
-      cols.forEach((c, i) => {
-        const v = c.def.csv ? c.def.csv(r) : null;
-        o[headers[i]] = v === undefined ? null : v;
+      out.forEach((x) => {
+        const v = x.get ? x.get(r) : null;
+        o[x.header] = v === undefined ? null : v;
       });
       return o;
     }),

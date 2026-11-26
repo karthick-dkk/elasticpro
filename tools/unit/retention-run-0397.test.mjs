@@ -124,3 +124,30 @@ test('the backup range across snapshots: a 2025 snapshot is left out of the rang
   assert.deepEqual([b.from, b.held, b.left], ['2025-04-28', null, null]);
   assert.equal(col('Older backed-up days left out').get(V.volumeReport({ name: 'c' }, { snapshots: { repo: bare } }, [])), null);
 });
+
+test('an index dated ahead (a device with a wrong clock) does not become the run and push the real days out', () => {
+  const ahead = [...RUN, '2026-12-10'];
+  const run = V.currentRun(ahead, V.STALE_GAP_DAYS, TODAY);
+  assert.deepEqual([run.from, run.to, run.left], ['2026-10-01', '2026-12-10', null], 'the walk starts at the newest day up to today');
+  assert.deepEqual([V.currentRun(['2026-12-10', '2026-12-11'], V.STALE_GAP_DAYS, TODAY).from], ['2026-12-10'], 'every day ahead: the newest anchors');
+  // A snapshot with the real days and one far-future index: the cover still starts 2026-10-01.
+  const c = S.coveredDays([...RUN.map(name), 'logstash-2099.01.01'], S.LEGACY_INDEX_RE);
+  assert.deepEqual([c.coverFrom, c.coverTo, c.leftDays], ['2026-10-01', '2099-01-01', null]);
+  const rows = S.snapshotRowsVerbose({ snapshots: [snap('s', [...RUN, '2099-01-01'])] });
+  const r = E.recoverableRange(rows);
+  assert.deepEqual([r.from, r.left], ['2026-10-01', null], 'the backup range too');
+  // Live: days after today are not live retention at all (liveRun), stray old days still left out.
+  const h = V.liveHeldDays([...LIVE, { index: 'logstash-2099.01.01', day: '2099-01-01', size: 1 }], {}, TODAY);
+  assert.deepEqual([h.from, h.days, h.left.days], ['2026-10-01', 57, 1]);
+});
+
+test('a current run that is only today: the sheet still names the left-out days and does not say "no dated indices"', () => {
+  const today = iso(Date.now());
+  const idx = [...STRAY, { index: 'logstash-today', day: today, size: 1 }];
+  const rep = V.volumeReport({ name: 'c' }, {}, idx);
+  const col = (label) => V.SHEET_COLUMNS.find((c) => c.label === label);
+  assert.equal(rep.liveLogsFrom, null, 'today is not a whole day yet (dailyVolume)');
+  assert.equal(col('Older index days left out').get(rep), 1);
+  assert.match(col('Older index days left out').note(rep), /^5 indices on 1 older day \(2025-05-03\) left out/);
+  assert.equal(col('Days of indices held now').note(rep), 'the current run is only today, not a whole day yet');
+});

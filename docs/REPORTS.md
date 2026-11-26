@@ -110,7 +110,7 @@ snapshot / backup**) over the headers, hidden when a reorder mixes the two group
 | Cluster | always first, cannot be hidden |
 | Per day | event_logsize per day, 7-day average |
 | 30% buffer | per day × (1 + `volumeHeadroomPercent`/100), default 30 |
-| Live retention | days of live indices held now: from the first day of the current run of dated indices to today, both counted (a gap of more than 7 days with no index ends the run; older days are named beside it, "+1 older day left out"), or the ILM delete age |
+| Live retention | days of live indices held now: from the first day of the current run of dated indices to today, both counted (a gap of more than 7 days with no index ends the run; older days are named beside it, "+1 older day left out"; the walk starts at the newest day up to today, so an index dated ahead does not move it), or the ILM delete age. The CSV adds *Live retention from* and *Live retention older days left out* |
 | Live retention policy | `liveRetention` set on the cluster by a person, shown as typed; *not set* in amber |
 | Live disk (data nodes) | horizontal bar used/total, **bold %** next to the bar, label "4.75 TB of 5.20 TB, 0.45 TB avail"; red > 90 %, amber > 80 %, blue |
 | Required live disk | per day × policy days × buffer; *needs a policy* when no policy |
