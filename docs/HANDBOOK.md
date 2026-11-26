@@ -769,6 +769,21 @@ was read and is empty. Only the newest 500 snapshots are listed: the page says "
 availability days before the oldest listed are *not read*. Days are the server's days; today is *so
 far*, not missing. "In no snapshot" is said only when every listing was read whole.
 
+**Log availability map** (0.3.98, `core/log-availability.js`, `ui/log-map.js`): the ▦ button on the
+Clusters page's expanded row (Snapshot repositories), the Overview (SLM card) and Reports › Capacity &
+retention (beside the cluster name) opens one cell per UTC day, from the oldest day any live index or
+snapshot names to today. **Green**: a live index carries the day (also when a snapshot holds it; the
+hover names both). **Blue**: no live index, a successful snapshot holds it. **Red**: no live index, no
+successful snapshot, a partial snapshot names it (the hover says whether that day's indices failed or
+are restorable). **Grey**: nothing. **Hatched**: no live index and not every snapshot could be read
+(a listing cut at 500, the light `_cat` listing, a repository not read, snapshots switched off, ULM
+on, whose S3 archive the map cannot see) — never grey. Two or more months of grey (or of hatched) fold into one line.
+Live retention and the backed-up range above the map are the Capacity figures (`liveHeldDays`,
+`restorableRange`). The **trailing gap** — days since the newest live index up to today, days dated
+ahead not counted — is shown there, and past 7 days (`STALE_GAP_DAYS`) the button turns amber with
+"No live index for N days (newest …)". Opening the map reads the index list and the snapshot listing
+with index names when they are missing; it never writes.
+
 **SLM** (`core/lifecycle-errors.js`): green only when every policy that takes log indices succeeded
 at its last run; otherwise "1 of 2 failed · name". "takes logstash-*" only when the policy's pattern
 contains the whole log pattern; else "takes part of". The Clusters CSV's *covers log indices* is

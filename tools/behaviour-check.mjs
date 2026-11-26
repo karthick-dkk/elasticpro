@@ -1727,6 +1727,29 @@ await go('reports');
       const f = files.at(-1);
       ok(f && /^reports-storage-plan-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,Per day (GB),30% buffer (GB),Live retention (days)'),
         `reports capacity: the Storage plan CSV header is ${f && f.text.split('\n')[0]}`);
+      // The log availability map (0.3.98): a button beside the cluster name opens a day-per-cell map.
+      const mapBtn = panel('Storage plan').querySelector('td[data-col="cluster"] button.lm-btn');
+      ok(!!mapBtn, 'reports capacity: no log availability button beside the cluster name');
+      ok(!f || !/▦/.test(f.text), 'reports capacity: the map button leaked into the CSV');
+      if (mapBtn) {
+        mapBtn.click();
+        const grid = await waitFor(() => doc.querySelector('.modal.lm-modal .lm-grid'), 'log map: the dialog did not draw its grid', 8000);
+        const m = doc.querySelector('.modal.lm-modal');
+        if (grid && m) {
+          ok(['Live index', 'Only in successful snapshots', 'Only in partial snapshots', 'No index (live or backup)'].every((t) => m.querySelector('.lm-legend').textContent.includes(t)),
+            `log map: the legend reads "${m.querySelector('.lm-legend').textContent}"`);
+          ok(/Live retention/.test(m.querySelector('.lm-sum').textContent) && /Backed up/.test(m.querySelector('.lm-sum').textContent), 'log map: the summary lines are missing');
+          const green = m.querySelector('.lm-c.lm-live');
+          ok(!!green, 'log map: no green day although the fixture has dated live indices');
+          if (green) {
+            green.dispatchEvent(new window.MouseEvent('mouseenter'));
+            ok(/Live: \d+ ind/.test(m.querySelector('.lm-pick').textContent), `log map: hovering a green day says "${m.querySelector('.lm-pick').textContent}"`);
+          }
+          ok(m.querySelectorAll('.lm-c.lm-today').length === 1, 'log map: today is not marked once');
+        }
+        if (m) { m.querySelector('.modal-head button').click(); await settleFor(50); }
+        ok(!doc.querySelector('.modal.lm-modal'), 'log map: the dialog did not close');
+      }
     }
     // The switch: Every parameter (40: 0.3.97 added the two left-out rows) and Client plan (17), from the same report columns.
     const seg = (re) => [...doc.querySelectorAll('.rp-bar .seg .btn')].find((b) => re.test(b.textContent));
