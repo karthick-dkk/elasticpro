@@ -161,7 +161,7 @@ zabbix_export:
           key: 'elasticpro.plan[live.from]'
           value_type: CHAR
           trends: '0'
-          description: 'The earliest day found in the index names on the cluster.'
+          description: 'The first day of the current run of dated indices: going back from the newest day, the run ends at a gap of more than 7 days with no index. Older days are not counted; the storage plan sheet names them (Older index days left out).'
           tags:
             - tag: column
               value: '09'
@@ -245,7 +245,7 @@ zabbix_export:
           key: 'elasticpro.plan[backup.from]'
           value_type: CHAR
           trends: '0'
-          description: 'The earliest day of data that can be restored from any snapshot, read from the dates in the index names it contains. Failed and running snapshots, and indices with a failed shard, are not counted. This is not the date the snapshot ran.'
+          description: 'The first day of data that can be restored, read from the dates in the index names the snapshots contain: going back from the newest day, the run ends at a gap of more than 7 days that no snapshot holds. Failed and running snapshots, and indices with a failed shard, are not counted. This is not the date the snapshot ran.'
           tags:
             - tag: column
               value: '15'

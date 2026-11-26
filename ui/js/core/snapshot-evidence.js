@@ -13,7 +13,7 @@
 
 import { toCsv, csvEscape } from '../lib/fmt.js';
 import { compareNullLast } from '../lib/sort-order.js';
-import { spanDaysIso } from './volume.js';
+import { restorableRange, leftOutText } from './volume.js';
 import { restorableIndices, snapStatus, reposRead, repoListing } from './snapshot-restorable.js';
 
 export const NO_DATE = 'no date in name';
@@ -103,7 +103,8 @@ export function coverLine(cover, { named = true, note = '' } = {}) {
   if (!cover || !cover.coverFrom) return 'covers no dated days — no index name in this snapshot carries a date';
   const days = cover.coverDays === 1 ? '1 day' : `${cover.coverDays} days`;
   const miss = cover.missingDays === 1 ? '1 missing day' : `${cover.missingDays || 0} missing days`;
-  return `covers ${cover.coverFrom} → ${cover.coverTo} (${days}, ${miss})`;
+  const left = cover.leftDays ? `; ${leftOutText(cover.leftDays, cover.coverFrom)}` : '';
+  return `covers ${cover.coverFrom} → ${cover.coverTo} (${days}, ${miss})${left}`;
 }
 
 /**
@@ -215,29 +216,12 @@ export function safeUrl(u) {
 /* ------------------------- the repositories overview ------------------------- */
 
 /**
- * Across every snapshot in the repository, the span of log days that can be restored from it.
- *
- * Distinct from when the snapshots ran: read from the dates in the index names each snapshot
- * can give back (core/snapshot-restorable.js restorableIndices: a failed, partial or running
- * snapshot's lost indices are not counted). `days` is the span, both ends counted; `held` is
- * how many of those days some snapshot holds and `missing` the rest — null when a row does
- * not carry its days. `unknown` is true when some snapshot's indices are not known.
+ * Across every snapshot in the repository, the span of log days that can be restored from it:
+ * volume.js restorableRange, the same figure the Capacity sheet shows (older days before a
+ * long gap are `left`, not counted).
  */
 export function recoverableRange(snaps) {
-  let from = null, to = null, whole = true, unknown = false;
-  const seen = new Set();
-  for (const s of snaps || []) {
-    const ok = restorableIndices(s);
-    if (ok === null) { unknown = true; continue; }
-    if (!s.coverFrom) continue;
-    if (from === null || s.coverFrom < from) from = s.coverFrom;
-    if (to === null || s.coverTo > to) to = s.coverTo;
-    if (Array.isArray(s.days)) for (const d of s.days) seen.add(d);
-    else whole = false;
-  }
-  const days = spanDaysIso(from, to);
-  const held = from && whole ? seen.size : null;
-  return { from, to, days, held, missing: held === null ? null : days - held, unknown };
+  return restorableRange(snaps);
 }
 
 /**
@@ -263,6 +247,7 @@ export function spanTitle(span, cut = '') {
   return [
     span.missing === null ? `${span.days} day(s) from the first to the last, gaps not known`
       : `${span.held} of ${span.days} day(s) can be restored` + (span.missing ? `: ${span.missing} day(s) inside this span are in no snapshot` : ''),
+    span.left ? leftOutText(span.left, span.from) : '',
     'Only indices that can be restored: failed shards, failed and running snapshots are not counted',
     span.unknown ? 'Some snapshots were not read in full and are not in this figure' : '',
     cut ? `Only the ${cut} snapshots were read` : '',

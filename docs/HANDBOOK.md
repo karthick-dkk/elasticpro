@@ -753,7 +753,17 @@ evidence rows, availability, the newest index day backed up (Clusters, Volume sh
 verify before a delete and *free live indices* all use it. A span with days missing says so
 ("15 → 22 Nov · 4 of 8 days"). Snapshot CSV: `data_days` is the number of index days that can be
 restored, `data_missing_days` the days inside the span that cannot, `data_note` why (in progress,
-"partial: N of M indices", failed, not known). A repository that could not be read, or not yet, is
+"partial: N of M indices", failed, not known).
+
+**Where a range starts** (0.3.97, `core/volume.js currentRun`, the one rule): going back from the
+newest day, a run of days ends at a gap of **more than 7 days** with no index (`STALE_GAP_DAYS`).
+Live retention, the Volume sheet's oldest index day and days held, each snapshot's *Data inside
+covers*, the repository's Data span and the backup range start at that run. Older days are
+named beside it, never dropped: "+1 older day left out", and in the tooltip and evidence "5 indices
+on 1 older day (2025-05-03) left out: 515 days with no index before 2026-10-01"; the Volume sheet has
+*Older index days left out* and *Older backed-up days left out*, the snapshot CSV
+`data_left_out_days` and `data_left_out`. A snapshot still holds those days and can restore them.
+The history store's `liveRetentionOldestDay` follows the same rule (`history_store::current_run_start`). A repository that could not be read, or not yet, is
 *not known* with the reason, never "0" or "no snapshots"; "no repository" is said only when the list
 was read and is empty. Only the newest 500 snapshots are listed: the page says "newest 500 of N", and
 availability days before the oldest listed are *not read*. Days are the server's days; today is *so

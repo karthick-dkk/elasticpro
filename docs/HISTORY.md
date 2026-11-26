@@ -186,8 +186,10 @@ refused as malformed (`mapper_parsing_exception`, `document_parsing_exception`,
   scheduled daily run, written after that run only): `dataNodeDiskTotal/Used/Free, dataNodes,
   dataNodeDiskAt` (fleet cache `nodes` dataset: rows whose `node.role` has `d s h w c f`, each
   figure from `_cat/allocation` for the node else `_cat/nodes`; any unreadable data node makes
-  that sum `null`), `liveRetentionHeldDays` (days from the record's oldest `live` day to the
-  document's day) and `liveRetentionOldestDay`, `liveRetentionPolicy`, `snapshotRetention`,
+  that sum `null`), `liveRetentionHeldDays` (days from the first day of the record's current run of `live` days to
+  the document's day, both counted, since 0.3.97; until then the document's day was not counted)
+  and `liveRetentionOldestDay` (that first day: going back from the newest `live` day, the run ends
+  at a gap of more than 7 days, `history_store::current_run_start`; stray older days are not it), `liveRetentionPolicy`, `snapshotRetention`,
   `backupCapacity` (the cluster's config entry, as typed, else `null`), `repositoryBytes` (always
   `null`: the core does not measure a repository), `clusterType`, `ulmBucket` (Config ›
   cluster type), `perDayEventBytes7d` (the record's last seven finished days as

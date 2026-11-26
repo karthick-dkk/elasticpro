@@ -115,7 +115,8 @@ export function snapshotPage(snaps, { text = '', page = 0, perPage = SNAPSHOT_PA
  *
  * The data columns count only what can be restored (core/snapshot-restorable.js).
  * `data_days` is the span from data_from to data_to, both ends counted; `data_missing_days`
- * how many days inside it the snapshot does not hold; `data_note` says what is not counted.
+ * how many days inside it the snapshot does not hold; `data_left_out_days` / `data_left_out`
+ * older days it also holds before a long gap, not in the span; `data_note` says what is not counted.
  */
 export function snapshotCsvRows(snaps, listing = null) {
   const iso = (ms) => (ms ? new Date(Number(ms)).toISOString() : '');
@@ -129,6 +130,10 @@ export function snapshotCsvRows(snaps, listing = null) {
       data_to: known ? (s.coverTo || '') : 'unknown',
       data_days: known ? (s.coverDays || 0) : '',
       data_missing_days: known ? (s.missingDays || 0) : '',
+      // Older days the snapshot also holds, before a gap of more than STALE_GAP_DAYS: not in
+      // data_from..data_to (volume.js currentRun), and never dropped from the record.
+      data_left_out_days: known ? (s.leftDays ? s.leftDays.days : 0) : '',
+      data_left_out: known && s.leftDays ? (s.leftDays.days === 1 ? s.leftDays.from : `${s.leftDays.from} → ${s.leftDays.to}`) : '',
       data_note: [restorableNote(s), cut ? `list: ${cut}` : ''].filter(Boolean).join('; '),
       successful_shards: s.successful, failed_shards: s.failed, total_shards: s.total,
     };

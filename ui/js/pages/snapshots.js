@@ -26,6 +26,7 @@ import { slmExempt, ulmLabel, ULM_WHY, clusterKindRev } from '../core/cluster-ki
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { isOff, offText } from '../core/collection.js';
 import { listingTitle, listingEmptyText, repoOverview, openRepo, spanTitle, repoEmptyFacts } from '../core/snapshot-evidence.js';
+import { leftOutShort, leftOutText } from '../core/volume.js';
 import { repoListing, cutText, spanText, snapshotCover, availability, reposRead, noRepository } from '../core/snapshot-restorable.js';
 import { serverZoneName } from '../core/es.js';
 import { browserZone } from '../core/log-range.js';
@@ -456,7 +457,7 @@ function repoTable(c, d, repos) {
     const notKnown = l.why === 'not read yet' ? l.why : l.why === 'switched off' ? 'Off' : 'not known';
     const span = !l.rows ? unknown(notKnown)
       : o.span.from ? h('span', { title: spanTitle(o.span, cutText(l)) },
-          spanText(o.span.from, o.span.to, o.span.days, o.span.missing), o.span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
+          spanText(o.span.from, o.span.to, o.span.days, o.span.missing), o.span.left ? h('span.muted', ` · ${leftOutShort(o.span.left)}`) : null, o.span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
       : o.span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices, or the failed shards of a partial snapshot were not read' }, 'unknown')
       : h('span.muted', { title: o.count ? 'No index that can be restored from these snapshots carries a date in its name' : 'No snapshots' }, '–');
     return h('tr', { style: { cursor: 'pointer' }, 'data-repo': r.name,
@@ -591,10 +592,12 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
       // ninety days of daily indices, and that span is what says how far back it reaches.
       cover: () => {
         const v = snapshotCover(s);
-        const title = { span: `${s.coverDays - s.missingDays} of ${s.coverDays} day(s) can be restored${s.missingDays ? '; the others inside the span are not in this snapshot' : ''}`,
+        const title = { span: `${s.coverDays - s.missingDays} of ${s.coverDays} day(s) can be restored${s.missingDays ? '; the others inside the span are not in this snapshot' : ''}`
+          + (v.left ? `\n${leftOutText(v.left, s.coverFrom)}` : ''),
           undated: 'No index that can be restored carries a date in its name', none: v.note, unknown: v.note }[v.kind];
         return h('td.nowrap', { style: { fontSize: '11.5px' } },
           h(v.kind === 'span' ? 'span' : 'span.muted', { title: v.kind === 'span' && v.note ? `${title}\n${v.note}` : title }, v.text),
+          v.kind === 'span' && v.left ? h('span.muted', ` · ${leftOutShort(v.left)}`) : null,
           v.kind === 'span' && v.note ? h('span.muted', ` · ${v.note}`) : null);
       },
       shards: () => h('td.num', `${num(s.successful)}/${num(s.total)}`),

@@ -36,6 +36,7 @@ import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, pro
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
 import { sumKnown } from '../core/index-figures.js';
 import { repoOverview, spanTitle } from '../core/snapshot-evidence.js';
+import { leftOutShort } from '../core/volume.js';
 import { repoListing, cutText, spanText, reposRead, noRepository } from '../core/snapshot-restorable.js';
 // Clusters › Overview, the page's other section (#/clusters/overview): one cluster on one screen.
 import * as board from './cluster-overview.js';
@@ -1574,7 +1575,7 @@ function repoSection(c, d) {
       // The days of log data inside the snapshots, read from the dates in their index names (not when they ran).
       // A listing that names no indices (_cat) cannot say: unknown, never "none".
       covered: () => h('td', unlisted ? unlisted() : span.from
-        ? h('span', { title: spanTitle(span, cutText(l)) }, spanText(span.from, span.to, span.days, span.missing), span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
+        ? h('span', { title: spanTitle(span, cutText(l)) }, spanText(span.from, span.to, span.days, span.missing), span.left ? h('span.muted', ` · ${leftOutShort(span.left)}`) : null, span.unknown || l.cut ? h('span.muted', ' (part read)') : null)
         : span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices. The Snapshots page reads them in full.' }, 'unknown')
         : h('span.muted', { title: snaps.length ? 'No index that can be restored from these snapshots carries a date in its name' : 'No snapshots' }, '–')),
       last: () => h('td', unlisted ? unlisted() : newest
