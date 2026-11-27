@@ -268,10 +268,19 @@ async function initTheme() {
   applyTheme(t || 'system');
   applyMenuPosition(m);
 }
-/** Paint a theme. Saving it is savePref's (the account and this browser's copy). */
+/**
+ * Paint a theme. Saving it is savePref's (the account and this browser's copy).
+ *
+ * "System" is no longer offered (the owner, 0.3.101: the switch is Light and Dark). Someone who
+ * never chose, or chose System in an older release, gets the computer's light or dark as it is at
+ * page load, painted as that theme: the page always names a theme the switch knows. Nothing is
+ * saved for them; their first press of the switch is their choice.
+ */
+const osTheme = () => {
+  try { return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; } catch (_) { return 'light'; }
+};
 function applyTheme(t) {
-  if (!t || t === 'system') document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', t);
+  document.documentElement.setAttribute('data-theme', !t || t === 'system' ? osTheme() : t);
 }
 /**
  * The themes, in the order Your settings lists them.
@@ -281,14 +290,13 @@ function applyTheme(t) {
  * third one later.
  */
 const THEMES = [
-  { id: 'system',    label: '\u25D2 System' },
   { id: 'light',     label: '\u25CB Light' },
   { id: 'dark',      label: '\u25D1 Dark' },
   { id: 'dark-blue', label: '\u25D5 Dark blue' },
   { id: 'warm',      label: '\u25D0 Warm' },
 ];
-/** The theme on screen: the root's data-theme, 'system' when none. */
-const themeNow = () => document.documentElement.getAttribute('data-theme') || 'system';
+/** The theme on screen: the root's data-theme (applyTheme always sets one). */
+const themeNow = () => document.documentElement.getAttribute('data-theme') || osTheme();
 /**
  * Choose a theme \u2014 Your settings and the footer's button both come here, so there is one way a
  * theme is painted and kept: applied at once, saved with the account when the core keeps
@@ -301,26 +309,23 @@ function setTheme(value) {
   savePref('theme', value || null).then((p) => { prefs = p; }).catch((e) => toast(`Not kept: ${e.message}`, 'warn', 5000));
 }
 /**
- * The footer's theme cycle (the owner, 2026-11-15): Light \u2192 Dark \u2192 System, one icon each \u2014 sun,
- * moon, half-circle. A theme outside the cycle (Dark blue, Warm, from Your settings) goes to Light next.
+ * The footer's theme switch: Light \u2194 Dark, a sun and a moon (the owner, 0.3.101; System was the
+ * third step until then). A theme outside it (Dark blue, Warm, from Your settings) goes to Light next.
  */
 const SVG_HEAD = '<svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">';
 const THEME_SVG = {
   light: `${SVG_HEAD}<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>`,
   dark: `${SVG_HEAD}<path d="M20.5 14.2A8.5 8.5 0 1 1 9.8 3.5a6.8 6.8 0 0 0 10.7 10.7z"/></svg>`,
-  system: `${SVG_HEAD}<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>`,
+  other: `${SVG_HEAD}<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>`,
 };
 const THEME_CYCLE = [
   { id: 'light', name: 'Light', icon: THEME_SVG.light },
   { id: 'dark', name: 'Dark', icon: THEME_SVG.dark },
-  { id: 'system', name: 'System', icon: THEME_SVG.system },
 ];
 function themeStep(id) {
   const i = THEME_CYCLE.findIndex((t) => t.id === id);
-  const cur = i >= 0 ? THEME_CYCLE[i] : { id, name: (THEMES.find((t) => t.id === id) || { label: id }).label.replace(/^\S+\s/, ''), icon: THEME_SVG.system };
-  const next = THEME_CYCLE[(i + 1) % THEME_CYCLE.length];
-  const after = THEME_CYCLE[(i + 2) % THEME_CYCLE.length];
-  return { cur, next, after };
+  const cur = i >= 0 ? THEME_CYCLE[i] : { id, name: (THEMES.find((t) => t.id === id) || { label: id }).label.replace(/^\S+\s/, ''), icon: THEME_SVG.other };
+  return { cur, next: THEME_CYCLE[(i + 1) % THEME_CYCLE.length] };
 }
 
 
@@ -329,7 +334,7 @@ function themeStep(id) {
  * Left, the theme, and which cluster the app opens on. Applied at once.
  */
 function yourSettings(anchor) {
-  const theme = document.documentElement.getAttribute('data-theme') || 'system';
+  const theme = themeNow();
   openYourSettings(anchor, {
     prefs: { menu: menuPosition, theme, opensOn: prefs.source && prefs.source.opensOn !== 'default' ? prefs.opensOn : '' },
     supported: prefs.supported,
@@ -533,8 +538,8 @@ function renderShell() {
 }
 
 /**
- * The footer (the owner, 2026-11-15), three columns: the theme button (one icon, cycling Light →
- * Dark → System — the same setting Your settings keeps), "ElasticPro <version>" (the core's
+ * The footer (the owner, 2026-11-15), three columns: the theme button (one icon, switching Light ↔
+ * Dark — the same setting Your settings keeps), "ElasticPro <version>" (the core's
  * version from PING, the figure the About dialog and Config-Management's About card show), and
  * the repository (ui/about.js REPO, the one place it is written; a new tab). In the flow after the
  * page's content — never fixed. Inside Zabbix the theme follows the Zabbix user's, so the button
@@ -565,10 +570,10 @@ function paintFooter(root = document) {
   if (el && el.textContent !== t) el.textContent = t;
   const btn = root.querySelector('#app-foot-theme');
   if (!btn) return;
-  const { cur, next, after } = themeStep(themeNow());
-  const label = `Theme: ${cur.name} (click for ${next.name}, then ${after.name})`;
+  const { cur, next } = themeStep(themeNow());
+  const label = `Theme: ${cur.name} (click for ${next.name})`;
   if (btn.dataset.theme !== cur.id) btn.innerHTML = cur.icon;
-  if (btn.getAttribute('aria-label') !== label) { btn.setAttribute('aria-label', label); btn.title = `Theme: ${cur.name} · click for ${next.name}, then ${after.name}`; btn.dataset.theme = cur.id; }
+  if (btn.getAttribute('aria-label') !== label) { btn.setAttribute('aria-label', label); btn.title = `Theme: ${cur.name} · click for ${next.name}`; btn.dataset.theme = cur.id; }
 }
 
 /**
@@ -822,7 +827,7 @@ function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
   const page = PAGES.find((p) => p.id === currentPage) || PAGES[0];
-  const theme = document.documentElement.getAttribute('data-theme') || 'system';
+  const theme = themeNow();
   resolveSelection(page);
   // The evidence layout (core/evidence.js): this page is about to be photographed for one
   // client, so the bar carries the brand, the page, THIS cluster and its health, and

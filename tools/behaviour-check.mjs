@@ -355,7 +355,7 @@ await go('shards');
     `shards: expected a Move button on each of the 2 started shards per cluster (${2 * shown}), found ${moves}`);
 
   // The node half: one line per node, the id and the IP as columns of their own.
-  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Shards', 'Uptime']) {
+  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Used', 'Free', 'Total', 'Shards', 'Uptime']) {
     ok(heads.includes(col), `shards: the node table has no "${col}" column, saw ${heads.join(', ')}`);
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
@@ -369,11 +369,13 @@ await go('shards');
         `nodes: the Node ID column is not the short id with the whole id as its tooltip (${n1.children[1].textContent.trim()})`);
       ok(n1.children[2].textContent.trim() === '10.0.0.1', `nodes: the IP column reads ${n1.children[2].textContent.trim()}`);
       ok(!n1.children[0].querySelector('div'), 'nodes: the name cell still stacks the IP under the name');
-      // Compact (0.3.71): "91% · N GB free" in the cell, the sizes in its tooltip; the shard count its own column.
-      ok(/^91%\s*\S.* free$/.test(n1.children[9].textContent.trim()) && !/shards/.test(n1.children[9].textContent)
-        && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
-        `nodes: the disk cell is not "91% · free" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
-      ok(n1.children[10].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[10].textContent.trim()}", not node-1's 38`);
+      // The disk bar and its share, then Used, Free and Total as columns of their own (the owner,
+      // 0.3.101); node-1 in the fixture: 91 of 100 GB (decimal) used, shown in GiB-based units.
+      ok(n1.children[9].textContent.trim() === '91%' && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
+        `nodes: the disk cell is not "91%" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
+      const sizes = [10, 11, 12].map((i) => n1.children[i].textContent.trim());
+      ok(sizes.join(' | ') === '84.8 GB | 8.38 GB | 93.1 GB', `nodes: Used | Free | Total read ${sizes.join(' | ')}, not 84.8 GB | 8.38 GB | 93.1 GB`);
+      ok(n1.children[13].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[13].textContent.trim()}", not node-1's 38`);
     }
   }
 
@@ -2080,6 +2082,9 @@ await go('shards');
     `shards: the nodes pane is at position ${merged ? cards.indexOf(merged) : -1}, expected the top`);
   // And it holds both halves — the node table and what the cluster is busy doing.
   ok(merged && /Uptime/.test(merged.textContent), 'shards: the merged pane lost the node table');
+  // One row of three (the owner, 0.3.101): Shard allocation, Query pressure, Disk & dangling indices.
+  const rowTitles = cards[1] && cards[1].closest('.ns-row') ? [...cards[1].closest('.ns-row').children].map((x) => (x.querySelector('header h2') || {}).textContent) : [];
+  ok(rowTitles.join(' | ') === 'Shard allocation | Query pressure | Disk & dangling indices', `shards: the row of cards is ${rowTitles.join(' | ') || 'missing'}, not allocation, pressure and disk together`);
   ok(cards[1] && cards[1].closest('.ns-row') && (cards[1].querySelector('header h2') || {}).textContent === 'Shard allocation'
      && cards[2] && (cards[2].querySelector('header h2') || {}).textContent === 'Query pressure',
     `shards: the second row is not Shard allocation beside Query pressure (${titles.join(' | ')})`);
@@ -8583,6 +8588,16 @@ await settleFor(300);
         ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.to === to7 && m.from !== from7 && m.maxDevices === 2000), 'log delay: the tiles no longer read the page’s 1 h range');
         const head = g('ld-sum-days').closest('section').querySelector('header').textContent;
         ok(/Last 7 days · \d+ \w{3} – \d+ \w{3}/.test(head), `log delay: Day by day's header reads "${head}"`);
+        // The figures on each measured bar (0.3.101) are the tooltip's: Delay = 30–60 min + above 60 min, No delay its count.
+        for (const bar of g('ld-sum-days').querySelectorAll('.ld-day')) {
+          const lab = bar.querySelector('.ld-day-lab');
+          if (bar.classList.contains('ld-gap')) { ok(!lab, `log delay: the gap day ${bar.dataset.day} has figures written on it`); continue; }
+          const n = (t) => Number(t.replace(/,/g, ''));
+          const m = /No delay ([\d,]+) .*?, ([\d,]+) at [^,]+, ([\d,]+) /.exec(bar.title);
+          const want = m ? [`Delay ${(n(m[2]) + n(m[3])).toLocaleString('en-US')}`, `No delay ${m[1]}`].join(' | ') : '?';
+          const got = lab ? [...lab.children].map((x) => x.textContent).join(' | ') : 'none';
+          ok(got === want, `log delay: ${bar.dataset.day}'s bar reads "${got}", its tooltip says "${want}" (${bar.title})`);
+        }
       }
       // A 30-day custom range: 30 bars, a day without totals a gap, the ticks every one its own date.
       g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);
@@ -9523,21 +9538,23 @@ await settleFor(300);
     ok(!/Karthick|licence|MIT|admin|operator/i.test(words), `footer (${id}): carries an author, a licence or a role: "${f.textContent}"`);
     ok(!f.style.position && (f.getAttribute('style') || '') === '', `footer (${id}): positioned inline (${f.getAttribute('style')})`);
   }
-  // The theme button: one icon, cycling Light → Dark → System through the app's own theme setting.
+  // The theme button (the owner, 0.3.101): one icon, switching Light ↔ Dark; no System step.
   await go('overview');
   const btn = doc.getElementById('app-foot-theme');
   ok(!!btn && !!btn.querySelector('svg') && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
   if (btn) {
-    const was = doc.documentElement.getAttribute('data-theme') || 'system';
+    // The page in this harness may not carry data-theme yet (boot's theme step is not what is
+    // under test here); the button must still name Light or Dark, never System.
+    const was = doc.documentElement.getAttribute('data-theme') || (/Theme: Dark/.test(btn.getAttribute('aria-label') || '') ? 'dark' : 'light');
+    ok(/^Theme: (Light|Dark) \(click for (Dark|Light)\)$/.test(btn.getAttribute('aria-label') || ''), `footer: before any press the button reads "${btn.getAttribute('aria-label')}", not Light or Dark`);
     const seen = [];
-    for (let i = 0; i < 3; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme') || 'system'); }
-    const start = ['light', 'dark', 'system'].indexOf(was) >= 0 ? ['light', 'dark', 'system'].indexOf(was) : -1;
-    const want = [0, 1, 2].map((k) => ['light', 'dark', 'system'][(start + 1 + k) % 3]);
-    ok(seen.join(',') === want.join(','), `footer: the theme cycle went ${seen.join(' → ')} from ${was}, expected ${want.join(' → ')}`);
-    ok(doc.getElementById('app-foot-theme') === btn, 'footer: cycling the theme rebuilt the button under the pointer');
-    ok(/Theme: System/.test(btn.getAttribute('aria-label')) && btn.dataset.theme === 'system', `footer: after the cycle the button says ${btn.getAttribute('aria-label')}`);
-    // Back where it was (System), as the app keeps it.
-    while ((doc.documentElement.getAttribute('data-theme') || 'system') !== was) { btn.click(); await settleFor(50); }
+    for (let i = 0; i < 4; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme')); }
+    const other = was === 'dark' ? 'light' : 'dark';
+    const want = [other, was, other, was];
+    ok(seen.join(',') === want.join(','), `footer: the theme switch went ${seen.join(' → ')} from ${was}, expected ${want.join(' → ')}`);
+    ok(doc.getElementById('app-foot-theme') === btn, 'footer: switching the theme rebuilt the button under the pointer');
+    const lbl = btn.getAttribute('aria-label') || '';
+    ok(!/System|then/.test(lbl) && lbl === `Theme: ${was === 'dark' ? 'Dark' : 'Light'} (click for ${was === 'dark' ? 'Light' : 'Dark'})`, `footer: after the switch the button says ${lbl}`);
   }
   ok(!!doc.querySelector('#view .ov-board') || true, '');
 }
@@ -9981,15 +9998,52 @@ async function backToList() {
     }
   }
 
-  // 5. A row opens the document on the right; the ⋯ menu is read-only for every role (Edit and Delete
-  //    were removed in 0.3.72 at the owner's request): Copy JSON and Open in REST, nothing that writes.
+  // 5. Resting the pointer on a row for two seconds previews the document (0.3.101); not sooner,
+  //    and it goes when the pointer leaves.
   const row = docRows()[0];
+  if (row) {
+    row.dispatchEvent(new window.MouseEvent('mouseenter'));
+    await settleFor(900);
+    ok(!doc.querySelector('.docs-peek'), 'documents: the row preview showed before two seconds');
+    await settleFor(1400);
+    const peek = doc.querySelector('.docs-peek');
+    ok(!!peek && !!peek.querySelector('pre.json') && peek.textContent.includes(row.dataset.id), 'documents: two seconds on a row did not preview that document');
+    row.dispatchEvent(new window.MouseEvent('mouseleave'));
+    await settleFor(400);
+    ok(!doc.querySelector('.docs-peek'), 'documents: the preview stayed after the pointer left the row');
+  }
+  // 6. A row opens the document in a large dialog: JSON or Fields (each field with its copy), Copy,
+  //    REST, full screen; Escape closes it. The ⋯ menu is read-only for every role (Edit and Delete
+  //    were removed in 0.3.72 at the owner's request): Copy JSON and Open in REST, nothing that writes.
   if (row) { row.click(); await settleFor(150); }
-  ok(!!view().querySelector('.docs-detail:not([hidden]) pre.json'), 'documents: a row click did not open the document on the right');
-  ok(!!row && view().querySelector('.docs-detail .docs-id') && view().querySelector('.docs-detail .docs-id').textContent.includes(row.dataset.id), 'documents: the detail does not name the _id');
+  const dlg = doc.querySelector('.modal.docs-doc');
+  ok(!!dlg && !!dlg.querySelector('pre.json'), 'documents: a row click did not open the document dialog');
+  ok(!!row && !!dlg && dlg.querySelector('.modal-head h2').textContent.includes(row.dataset.id), 'documents: the dialog does not name the _id');
+  ok(!view().querySelector('.docs-detail'), 'documents: the narrow pane on the right is still drawn');
+  if (dlg) {
+    ok(/1100px/.test(dlg.style.maxWidth), `documents: the dialog is ${dlg.style.maxWidth} wide at most, not the large 1100px`);
+    ok(dlg.querySelector('#docs-doc-copy').textContent === 'Copy JSON', `documents: the JSON view's copy reads ${dlg.querySelector('#docs-doc-copy').textContent}`);
+    dlg.querySelector('.docs-doc-seg button[data-view="fields"]').click(); await settleFor(50);
+    const frows = [...dlg.querySelectorAll('.docs-doc-fields tr')];
+    ok(frows.length > 0 && frows.every((r) => r.querySelector('button[aria-label^="Copy the value of"]')), `documents: the Fields view has ${frows.length} rows, not every one with its copy`);
+    ok(dlg.querySelector('#docs-doc-copy').textContent === 'Copy fields', `documents: the Fields view's copy reads ${dlg.querySelector('#docs-doc-copy').textContent}`);
+    const fullBtn = dlg.querySelector('#docs-doc-full');
+    fullBtn.click(); await settleFor(50);
+    ok(dlg.classList.contains('full') && dlg.parentElement.classList.contains('docs-doc-full') && fullBtn.getAttribute('aria-pressed') === 'true', 'documents: Full screen did not take the whole window');
+    fullBtn.click(); await settleFor(50);
+    ok(!dlg.classList.contains('full'), 'documents: Exit full screen left it full');
+    dlg.querySelector('.docs-doc-seg button[data-view="json"]').click(); await settleFor(50);
+    fullBtn.click(); await settleFor(50);
+    window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settleFor(100);
+    ok(!doc.querySelector('.modal.docs-doc'), 'documents: Escape did not close the document (full screen)');
+    ok(!view().querySelector('#docs-table tr[aria-selected="true"]'), 'documents: the row stays selected after the dialog closed');
+  }
   for (const role of ['operator', 'admin']) {
     st.state.caller = { name: role, role };
-    if (row) { row.querySelector('.menu-trigger').click(); await settleFor(100); }
+    // The rows were rebuilt when the dialog opened and closed: the first row as it is now.
+    const now = docRows()[0];
+    if (now) { now.querySelector('.menu-trigger').click(); await settleFor(100); }
     const items = menuItems();
     ok(items.includes('Copy JSON') && items.includes('Open in REST'), `documents: an ${role}'s ⋯ menu lacks Copy JSON / Open in REST (${items.join(', ')})`);
     ok(!items.some((t) => /Edit|Delete/.test(t)), `documents: an ${role}'s ⋯ menu offers ${items.filter((t) => /Edit|Delete/.test(t)).join(', ')}`);

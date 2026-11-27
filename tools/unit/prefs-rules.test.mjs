@@ -18,10 +18,11 @@ test('the choice lists are the core\'s, one definition each side', () => {
   assert.deepEqual(R.MENUS, list('MENUS'));
   assert.deepEqual(R.THEMES, list('THEMES'));
   assert.deepEqual(R.OPENS_ON, list('OPENS_ON'));
-  // And the themes are the ones app.js draws.
+  // And the themes are the ones app.js draws — all but System, which the core still keeps for
+  // accounts that saved it but the UI no longer offers (the owner, 0.3.101).
   const app = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
   const drawn = [...app.matchAll(/\{ id: '([a-z-]+)',\s+label: '[^']*' \}/g)].map((m) => m[1]);
-  assert.deepEqual(drawn, R.THEMES);
+  assert.deepEqual(drawn, R.THEMES.filter((t) => t !== 'system'));
 });
 
 test('an answer is read defensively: unset stays null, an unknown spelling is null, no answer is unsupported', () => {
