@@ -340,8 +340,8 @@ function block(c) {
 
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
     nodesCard(c, d),
-    h('div.ns-row', allocationCard(c, all, d), pressureCard(c)),
-    diskCard(c, d),
+    // One row of three (the owner, 0.3.101): Shard allocation, Query pressure, Disk & dangling indices.
+    h('div.ns-row', allocationCard(c, all, d), pressureCard(c), diskCard(c, d)),
     shardsCard(c, d, all, raw)]);
 }
 

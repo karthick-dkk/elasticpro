@@ -2082,6 +2082,9 @@ await go('shards');
     `shards: the nodes pane is at position ${merged ? cards.indexOf(merged) : -1}, expected the top`);
   // And it holds both halves — the node table and what the cluster is busy doing.
   ok(merged && /Uptime/.test(merged.textContent), 'shards: the merged pane lost the node table');
+  // One row of three (the owner, 0.3.101): Shard allocation, Query pressure, Disk & dangling indices.
+  const rowTitles = cards[1] && cards[1].closest('.ns-row') ? [...cards[1].closest('.ns-row').children].map((x) => (x.querySelector('header h2') || {}).textContent) : [];
+  ok(rowTitles.join(' | ') === 'Shard allocation | Query pressure | Disk & dangling indices', `shards: the row of cards is ${rowTitles.join(' | ') || 'missing'}, not allocation, pressure and disk together`);
   ok(cards[1] && cards[1].closest('.ns-row') && (cards[1].querySelector('header h2') || {}).textContent === 'Shard allocation'
      && cards[2] && (cards[2].querySelector('header h2') || {}).textContent === 'Query pressure',
     `shards: the second row is not Shard allocation beside Query pressure (${titles.join(' | ')})`);

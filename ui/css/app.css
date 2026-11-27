@@ -1004,11 +1004,20 @@ a.arow-cluster:hover { text-decoration: underline; }
 .use-num { font-variant-numeric: tabular-nums; font-size: 11.5px; min-width: 34px; text-align: right; white-space: nowrap; flex: none; }
 
 
-/* Nodes & shards: the Shard allocation / Query pressure row, and the tiles both are built from
-   (pages/common.js edgeTile): one 22 px number over a small upper-case label, a 3 px colour edge. */
-.ns-row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 10px; align-items: stretch; }
-@media (max-width: 980px) { .ns-row { grid-template-columns: 1fr; } }
-.ns-row > .card { margin: 0; }
+/* Nodes & shards: Shard allocation, Query pressure and Disk & dangling indices in one row of three
+   (the owner, 0.3.101; it was two over one), and the tiles they are built from (pages/common.js
+   edgeTile): one 22 px number over a small upper-case label, a 3 px colour edge. Narrower windows:
+   two and the disk under them (below 1100 px), then one column (below 760 px). In a third of the width the allocation counts
+   stack beside the gauge, the pressure tiles go two by two, and the dangling line goes under the ring. */
+.ns-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
+.ns-row > .card { margin: 0; min-width: 0; }
+.ns-row .ns-compact .ns-alloc { flex-wrap: wrap; }
+.ns-row .ns-compact .ns-alloc-tiles { grid-template-columns: minmax(0, 1fr); gap: 4px; flex: 1 1 110px; }
+.ns-row .ns-compact .ns-pressure { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ns-row .ns-disk-dangling { flex-basis: 100%; }
+.ns-row .ns-disk-dangling .ns-nodes { overflow-x: auto; }
+@media (max-width: 1099px) { .ns-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ns-row > .card:nth-child(3) { grid-column: 1 / -1; } }
+@media (max-width: 760px) { .ns-row { grid-template-columns: minmax(0, 1fr); } }
 .edge-tile { border-left: 3px solid var(--border-strong); padding: 2px 0 2px 10px; display: grid; gap: 1px; min-width: 0; }
 .edge-tile > .v { font-size: 22px; font-weight: 680; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .edge-tile > .k { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
