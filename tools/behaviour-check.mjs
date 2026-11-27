@@ -355,7 +355,7 @@ await go('shards');
     `shards: expected a Move button on each of the 2 started shards per cluster (${2 * shown}), found ${moves}`);
 
   // The node half: one line per node, the id and the IP as columns of their own.
-  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Shards', 'Uptime']) {
+  for (const col of ['Node', 'Node ID', 'IP', 'Roles', 'Version', 'Heap', 'RAM', 'CPU', 'Load 1m/5m', 'Disk', 'Used', 'Free', 'Total', 'Shards', 'Uptime']) {
     ok(heads.includes(col), `shards: the node table has no "${col}" column, saw ${heads.join(', ')}`);
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
@@ -369,11 +369,13 @@ await go('shards');
         `nodes: the Node ID column is not the short id with the whole id as its tooltip (${n1.children[1].textContent.trim()})`);
       ok(n1.children[2].textContent.trim() === '10.0.0.1', `nodes: the IP column reads ${n1.children[2].textContent.trim()}`);
       ok(!n1.children[0].querySelector('div'), 'nodes: the name cell still stacks the IP under the name');
-      // Compact (0.3.71): "91% · N GB free" in the cell, the sizes in its tooltip; the shard count its own column.
-      ok(/^91%\s*\S.* free$/.test(n1.children[9].textContent.trim()) && !/shards/.test(n1.children[9].textContent)
-        && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
-        `nodes: the disk cell is not "91% · free" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
-      ok(n1.children[10].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[10].textContent.trim()}", not node-1's 38`);
+      // The disk bar and its share, then Used, Free and Total as columns of their own (the owner,
+      // 0.3.101); node-1 in the fixture: 91 of 100 GB (decimal) used, shown in GiB-based units.
+      ok(n1.children[9].textContent.trim() === '91%' && /of .* used · .* free/.test((n1.children[9].querySelector('[title]') || {}).title || ''),
+        `nodes: the disk cell is not "91%" with the sizes in its tooltip (${n1.children[9].textContent.trim()})`);
+      const sizes = [10, 11, 12].map((i) => n1.children[i].textContent.trim());
+      ok(sizes.join(' | ') === '84.8 GB | 8.38 GB | 93.1 GB', `nodes: Used | Free | Total read ${sizes.join(' | ')}, not 84.8 GB | 8.38 GB | 93.1 GB`);
+      ok(n1.children[13].textContent.trim() === '38', `nodes: the Shards column reads "${n1.children[13].textContent.trim()}", not node-1's 38`);
     }
   }
 

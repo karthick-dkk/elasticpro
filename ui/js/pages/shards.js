@@ -475,7 +475,8 @@ function loadBody(c) {
  * 32 px line per node — name, the short node id (the whole id is its tooltip), IP, roles,
  * version, then the usage bars, the disk, the shards the node holds and the uptime. Nothing
  * stacked, and the whole table fits the page without a sideways scroll (app.css .ns-nodes:
- * tight cells, narrow bars; the disk cell is "91% · 8.38 GB free", its sizes in the tooltip).
+ * tight cells, narrow bars; the disk is its bar and share, then Used, Free and Total as columns of
+ * their own — the owner, 0.3.101; it was "91% · 8.38 GB free" with the rest in the tooltip).
  */
 function nodesBody(c, d) {
   const nodes = d.nodes || [];
@@ -506,12 +507,17 @@ function nodesBody(c, d) {
       h('td.num', usageBar(pctOf(n.cpu), 'disk', `CPU ${n.cpu}% (the process, over the last sample)`)),
       h('td.num', loadCell(n, coreMap ? coreMap.get(n.name) : undefined)),
       h('td', diskBar(used, total, p)),
+      ...diskSizes(used, total).map((v) => h('td.num', v)),
       h('td.num', a.shards === undefined || a.shards === '' ? h('span.muted', { title: 'Not in _cat/allocation' }, '–') : num(Number(a.shards))),
       h('td.muted', n.uptime || ''));
   });
 
   return h('div.ns-nodes', table(['Node', 'Node ID', 'IP', 'Roles', 'Version', { label: 'Heap', num: true }, { label: 'RAM', num: true },
-                { label: 'CPU', num: true }, { label: 'Load 1m/5m', num: true }, 'Disk', { label: 'Shards', num: true, title: 'Shards on the node (_cat/allocation)' }, 'Uptime'],
+                { label: 'CPU', num: true }, { label: 'Load 1m/5m', num: true }, 'Disk',
+                { label: 'Used', num: true, title: 'Disk used on the node: the whole data-path filesystem, Elasticsearch and anything else on it (_cat/nodes disk.used)' },
+                { label: 'Free', num: true, title: 'Disk free on the node: total minus used' },
+                { label: 'Total', num: true, title: 'Disk size of the node\'s data path (_cat/nodes disk.total)' },
+                { label: 'Shards', num: true, title: 'Shards on the node (_cat/allocation)' }, 'Uptime'],
     trs, {
       // A cluster with no nodes is not a thing. An empty list here means the call did
       // not come back with one, so it says that rather than implying an empty cluster.
@@ -556,11 +562,15 @@ function loadCell(n, coreCount) {
   return usageBar(p, 'disk', `load 1 m over ${num(coreCount)} cores: ${p.toFixed(0)} % · 5 m ${n.load_5m || '–'}`, { text });
 }
 
-/** Disk as the same bar and the free space beside the number — one short line; the sizes in its tooltip. */
+/** Disk as the same bar and its share; the sizes are the Used, Free and Total columns (diskSizes). */
 function diskBar(used, total, p) {
-  if (!total) return h('span.muted', '–');
-  return usageBar(p, 'disk', `disk ${pct(p, 1, ' ')} — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`,
-    { suffix: `· ${bytes(total - used)} free`, digits: 0 });
+  if (!total) return h('span.muted', { title: 'The node did not report its disk' }, '–');
+  return usageBar(p, 'disk', `disk ${pct(p, 1, ' ')} — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`, { digits: 0 });
+}
+/** Used, free and total for the node's own columns: free is total minus used, the figure the bar's tooltip names too. A node that did not report its disk shows "–" in all three, never 0. */
+function diskSizes(used, total) {
+  if (!total) return ['–', '–', '–'].map((t) => h('span.muted', t));
+  return [bytes(used), bytes(total - used), bytes(total)];
 }
 
 /**
