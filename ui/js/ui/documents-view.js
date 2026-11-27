@@ -253,11 +253,11 @@ export function documentsView(cluster, target, { onBack } = {}) {
         onclick: () => openDoc(hit),
         onmouseenter: (e) => peekSoon(hit, e.currentTarget), onmouseleave: peekLeave },
         tf ? h('td.mono', { style: { fontSize: '11.5px' } }, timeCell(hit._source ? hit._source[tf] : null)) : null,
-        h('td.mono', { title: hit._index }, hit._index),
-        h('td.mono', { title: hit._id }, hit._id),
-        // No title: resting on the row shows the whole document after two seconds (peekSoon).
+        // No titles: resting on the row shows the whole document after two seconds (peekSoon).
+        h('td.mono', hit._index),
+        h('td.mono', hit._id),
         h('td.docs-sum', D.summaryOf(hit._source, { skip: tf ? [tf] : [] })),
-        h('td', { onclick: (e) => e.stopPropagation() }, rowMenu(() => menuFor(hit), { title: `Actions for ${hit._id}` })));
+        h('td', { onclick: (e) => { e.stopPropagation(); peekHide(); } }, rowMenu(() => menuFor(hit), { title: `Actions for ${hit._id}` })));
     });
     const table = h('div.tbl-wrap', h('table#docs-table.tbl',
       h('thead', h('tr', tf ? h('th', tf) : null, h('th', '_index'), h('th', '_id'), h('th', 'Document'), h('th', ''))),
@@ -315,7 +315,8 @@ export function documentsView(cluster, target, { onBack } = {}) {
     }
     fullBtn.onclick = () => { full = !full; drawFull(); };
     drawView(); drawFull();
-    p.then(() => { if (st.selected === hit) { st.selected = null; if (el.isConnected) drawMain(); } });
+    // By index and id: a search that lands while the dialog is open re-reads the same document as a new object.
+    p.then(() => { if (st.selected && st.selected._index === hit._index && st.selected._id === hit._id) { st.selected = null; if (el.isConnected) drawMain(); } });
   }
 
   /** The Fields view: one row per field (dotted names), each with its own copy button. */
@@ -341,14 +342,16 @@ export function documentsView(cluster, target, { onBack } = {}) {
   function peekSoon(hit, row) {
     clearTimeout(peekTimer); clearTimeout(leaveTimer);
     if (peekEl && peekEl.dataset.id === `${hit._index}/${hit._id}`) return;
-    peekHide();
-    peekTimer = setTimeout(() => peekShow(hit, row), PEEK_MS);
+    // Another row's preview is showing: the pointer may be passing over this row on its way to it,
+    // so it gets the same grace as leaving; it goes only if the pointer does not arrive.
+    if (peekEl) leaveTimer = setTimeout(peekHide, 200);
+    peekTimer = setTimeout(() => { peekHide(); peekShow(hit, row); }, PEEK_MS);
   }
   function peekLeave() { clearTimeout(peekTimer); clearTimeout(leaveTimer); leaveTimer = setTimeout(peekHide, 200); }
   function peekShow(hit, row) {
-    if (!el.isConnected || !row.isConnected || document.querySelector('.modal-overlay')) return;
+    if (!el.isConnected || !row.isConnected || document.querySelector('.modal-overlay, .menu-pop')) return;
     peekEl = h('div.docs-peek', { role: 'tooltip', dataset: { id: `${hit._index}/${hit._id}` },
-      onmouseenter: () => clearTimeout(leaveTimer), onmouseleave: peekLeave },
+      onmouseenter: () => { clearTimeout(leaveTimer); clearTimeout(peekTimer); }, onmouseleave: peekLeave },
       h('div.docs-peek-h', h('span.mono', `${hit._index} / `, h('b.mono', hit._id)), h('span.muted', 'click the row to open')),
       jsonView(hit._source || {}));
     document.body.append(peekEl);
@@ -359,17 +362,19 @@ export function documentsView(cluster, target, { onBack } = {}) {
     const below = vh - r.bottom, above = r.top;
     peekEl.style.width = `${w}px`;
     peekEl.style.left = `${left}px`;
-    if (below >= 220 || below >= above) { peekEl.style.top = `${r.bottom + 4}px`; peekEl.style.maxHeight = `${Math.max(120, below - 16)}px`; }
-    else { peekEl.style.bottom = `${vh - r.top + 4}px`; peekEl.style.maxHeight = `${Math.max(120, above - 16)}px`; }
+    if (below >= 220 || below >= above) { peekEl.style.top = `${r.bottom}px`; peekEl.style.maxHeight = `${Math.max(120, below - 16)}px`; }
+    else { peekEl.style.bottom = `${vh - r.top}px`; peekEl.style.maxHeight = `${Math.max(120, above - 16)}px`; }
     window.addEventListener('keydown', peekKey, true);
-    window.addEventListener('scroll', peekHide, true);
+    window.addEventListener('scroll', peekScroll, true);
     window.addEventListener('hashchange', peekHide);
   }
   function peekKey(e) { if (e.key === 'Escape') peekHide(); }
+  // The page scrolling moves the row away; the preview's own scrolling is someone reading it.
+  function peekScroll(e) { const t = e.target; if (peekEl && t && t.nodeType === 1 && peekEl.contains(t)) return; peekHide(); }
   function peekHide() {
     clearTimeout(peekTimer); clearTimeout(leaveTimer);
     window.removeEventListener('keydown', peekKey, true);
-    window.removeEventListener('scroll', peekHide, true);
+    window.removeEventListener('scroll', peekScroll, true);
     window.removeEventListener('hashchange', peekHide);
     if (peekEl) { peekEl.remove(); peekEl = null; }
   }

@@ -3723,13 +3723,17 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
 .docs-doc-bar { flex: none; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .docs-doc-seg { flex: none; }
 .docs-doc-view { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
-.docs-doc-view pre.json { margin: 0; padding: 12px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.docs-doc-view pre.json { margin: 0; padding: 12px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: none; overflow: visible; border-radius: 0; }
 .docs-doc-fields { width: 100%; }
-.docs-doc-fields th { text-align: left; font-weight: 600; white-space: nowrap; width: 1%; padding: 4px 10px; vertical-align: top; position: static; background: none; }
-.docs-doc-fields td { padding: 4px 10px; font-size: 12px; overflow-wrap: anywhere; vertical-align: top; }
-.docs-doc-fields td:last-child { width: 1%; padding: 2px 6px; }
-.modal-overlay.docs-doc-full { padding: 0; }
-.modal.docs-doc.full { max-width: none !important; width: 100vw !important; height: 100vh; max-height: 100vh; border-radius: 0; border: 0; }
+/* table.tbl th is upper-case, sticky and muted: field names are case-sensitive and every row has one. */
+table.tbl.docs-doc-fields th { text-align: left; font-weight: 600; white-space: nowrap; width: 1%; padding: 4px 10px; vertical-align: top;
+  position: static; z-index: auto; background: none; text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-primary); }
+table.tbl.docs-doc-fields td { padding: 4px 10px; font-size: 12px; overflow-wrap: anywhere; vertical-align: top; }
+table.tbl.docs-doc-fields td:last-child { width: 1%; padding: 2px 6px; }
+@media (max-width: 700px) { table.tbl.docs-doc-fields th { white-space: normal; overflow-wrap: anywhere; width: 38%; } }
+/* Full screen fills the overlay (not 100vw: with a classic scrollbar's gutter that ran past it). */
+.modal-overlay.docs-doc-full { padding: 0; place-items: stretch; }
+.modal.docs-doc.full { max-width: none !important; width: auto !important; height: auto; max-height: none; border-radius: 0; border: 0; }
 /* The two-second preview beside a row (0.3.101). */
 .docs-peek { position: fixed; z-index: 90; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-1);
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
