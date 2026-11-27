@@ -2949,6 +2949,12 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
    bars' gap and width), a short period's few bars stay bar-wide and centred, the rings a size smaller. */
 .ld[data-ld="summary"] .ld-sum-days .ld-days, .ld[data-ld="summary"] .ld-sum-days .ld-ticks { justify-content: center; gap: 3px; }
 .ld[data-ld="summary"] .ld-sum-days .ld-day, .ld[data-ld="summary"] .ld-sum-days .ld-ticks span { flex: 1 1 0; min-width: 0; max-width: 72px; }
+/* The figures on each Day by day bar (0.3.101): dark ink at the foot of the bar, on the green. A bar
+   narrower than the words (a long range) drops them; the tooltip still has every figure. */
+.ld-sum-days .ld-day { position: relative; container-type: inline-size; }
+.ld-sum-days .ld-day-lab { position: absolute; left: 0; right: 0; bottom: 4px; display: grid; gap: 1px; justify-items: center;
+  font-size: 10.5px; line-height: 1.2; font-weight: 600; color: #0b0b0b; pointer-events: none; white-space: nowrap; }
+@container (max-width: 62px) { .ld-sum-days .ld-day-lab { display: none; } }
 .ld[data-ld="summary"] .ld-sum-days .ld-ticks span { text-align: center; white-space: nowrap; overflow: visible; font-variant-numeric: tabular-nums; }
 .ld[data-ld="summary"] .ld-rings { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 6px; }
 .ld[data-ld="summary"] .ld-ring { padding: 6px 4px; gap: 2px; }

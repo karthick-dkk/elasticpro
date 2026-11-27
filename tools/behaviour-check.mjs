@@ -8588,6 +8588,15 @@ await settleFor(300);
         ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.to === to7 && m.from !== from7 && m.maxDevices === 2000), 'log delay: the tiles no longer read the page’s 1 h range');
         const head = g('ld-sum-days').closest('section').querySelector('header').textContent;
         ok(/Last 7 days · \d+ \w{3} – \d+ \w{3}/.test(head), `log delay: Day by day's header reads "${head}"`);
+        // The figures on each measured bar (0.3.101) are the tooltip's: Delay = 30–60 min + above 60 min, No delay its count.
+        for (const bar of g('ld-sum-days').querySelectorAll('.ld-day')) {
+          const lab = bar.querySelector('.ld-day-lab');
+          if (bar.classList.contains('ld-gap')) { ok(!lab, `log delay: the gap day ${bar.dataset.day} has figures written on it`); continue; }
+          const m = /No delay (\d+) .*?, (\d+) at [^,]+, (\d+) /.exec(bar.title);
+          const want = m ? [`Delay ${Number(m[2]) + Number(m[3])}`, `No delay ${m[1]}`].join(' | ') : '?';
+          const got = lab ? [...lab.children].map((x) => x.textContent).join(' | ') : 'none';
+          ok(got === want, `log delay: ${bar.dataset.day}'s bar reads "${got}", its tooltip says "${want}" (${bar.title})`);
+        }
       }
       // A 30-day custom range: 30 bars, a day without totals a gap, the ticks every one its own date.
       g('ld-range').querySelector('[data-range="custom"]').click(); await settleFor(150);

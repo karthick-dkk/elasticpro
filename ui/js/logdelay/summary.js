@@ -63,6 +63,19 @@ function tiles(res, b, lv) {
 }
 
 /**
+ * The figures written on a day's bar (the owner, 0.3.101): devices delayed (the 30–60 min band and
+ * above 60 min, the yellow and red) and No delay (the green: on time, silent and can't measure — the
+ * same count as the tooltip and the legend). Part delayed and another time zone stay in the tooltip.
+ * A bar too narrow for the words (a long range) hides them (app.css container query).
+ */
+function dayLabel(d) {
+  const late = (finite(d.delayed) ? d.delayed : 0) + (finite(d.critical) ? d.critical : 0);
+  return h('span.ld-day-lab', { 'aria-hidden': 'true' },
+    h('span', { dataset: { lab: 'delay' } }, `Delay ${countText(late)}`),
+    h('span', { dataset: { lab: 'nodelay' } }, `No delay ${countText(noDelayOf(d).count)}`));
+}
+
+/**
  * Day by day over `win` (dayChartDays: at least the last 7 days) from `daysRes`, its own answer;
  * `pending` is drawn instead while that answer is read or could not be. Nothing measured says so,
  * never an empty chart read as 0.
@@ -86,7 +99,8 @@ function dayCard(daysRes, win, b, pending) {
   const chart = h('div.ld-chart.ld-sum-days',
     h('div.ld-days#ld-sum-days', { role: 'img', 'aria-label': `Devices per day, ${covered}: between ${Math.min(...late)} and ${Math.max(...late)} delayed`, style: { height: `${H}px` } },
       ...bars.map((x, i) => h(`span.ld-day${x.gap ? '.ld-gap' : ''}`, { title: dayTitle(list[i], b), dataset: { day: x.day || '' } },
-        seg(x.ok, C.ok, 'ok'), seg(x.tz, C.tz, 'tz'), seg(x.part, C.part, 'part'), seg(x.delay, C.delay, 'delay'), seg(x.critical, C.crit, 'critical')))),
+        seg(x.ok, C.ok, 'ok'), seg(x.tz, C.tz, 'tz'), seg(x.part, C.part, 'part'), seg(x.delay, C.delay, 'delay'), seg(x.critical, C.crit, 'critical'),
+        x.gap ? null : dayLabel(list[i])))),
     h('div.ld-ticks#ld-sum-ticks', ...ticks.map((t) => h('span', t))));
   return card('Day by day', sub, chart,
     [legend(key(C.ok, 'No delay (silent and can’t measure included)'), key(C.delay, b.mid), key(C.crit, b.high), anyPart ? h('span.ld-key', partFill('i'), 'Part delayed') : null, anyTz ? key(C.tz, 'Other time zone') : null)]);
