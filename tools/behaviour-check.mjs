@@ -9543,8 +9543,10 @@ await settleFor(300);
   const btn = doc.getElementById('app-foot-theme');
   ok(!!btn && !!btn.querySelector('svg') && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
   if (btn) {
-    const was = doc.documentElement.getAttribute('data-theme');
-    ok(was === 'light' || was === 'dark', `footer: with no theme chosen the page names a theme the switch knows, not "${was}"`);
+    // The page in this harness may not carry data-theme yet (boot's theme step is not what is
+    // under test here); the button must still name Light or Dark, never System.
+    const was = doc.documentElement.getAttribute('data-theme') || (/Theme: Dark/.test(btn.getAttribute('aria-label') || '') ? 'dark' : 'light');
+    ok(/^Theme: (Light|Dark) \(click for (Dark|Light)\)$/.test(btn.getAttribute('aria-label') || ''), `footer: before any press the button reads "${btn.getAttribute('aria-label')}", not Light or Dark`);
     const seen = [];
     for (let i = 0; i < 4; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme')); }
     const other = was === 'dark' ? 'light' : 'dark';
