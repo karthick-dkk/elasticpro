@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.101
+
+- **The theme switch is Light and Dark only.** The footer button switches between Light (sun) and Dark (moon); System, its third step, is gone, and Your settings no longer lists it (Light, Dark, Dark blue and Warm remain). Someone who never chose a theme, or chose System before, sees the computer's light or dark as it is when the page loads, shown on the button as that theme; nothing is saved for them until they press one. Inside Zabbix the theme still follows the Zabbix user's.
+
 ## 0.3.100
 
 - **Indices › Documents opens on Custom, with no dates: every document in the indices, newest first.** It opened on the last 24 hours (or the range last picked, kept in the browser), so a daily index from an earlier day showed "No documents match". 15m, 1h, 24h and 7d are still there; one picked holds for that view only and is not carried to the next index.

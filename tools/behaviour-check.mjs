@@ -9523,21 +9523,21 @@ await settleFor(300);
     ok(!/Karthick|licence|MIT|admin|operator/i.test(words), `footer (${id}): carries an author, a licence or a role: "${f.textContent}"`);
     ok(!f.style.position && (f.getAttribute('style') || '') === '', `footer (${id}): positioned inline (${f.getAttribute('style')})`);
   }
-  // The theme button: one icon, cycling Light → Dark → System through the app's own theme setting.
+  // The theme button (the owner, 0.3.101): one icon, switching Light ↔ Dark; no System step.
   await go('overview');
   const btn = doc.getElementById('app-foot-theme');
   ok(!!btn && !!btn.querySelector('svg') && /^Theme: /.test(btn.getAttribute('aria-label') || ''), `footer: the theme button reads "${btn && btn.textContent}" / ${btn && btn.getAttribute('aria-label')}`);
   if (btn) {
-    const was = doc.documentElement.getAttribute('data-theme') || 'system';
+    const was = doc.documentElement.getAttribute('data-theme');
+    ok(was === 'light' || was === 'dark', `footer: with no theme chosen the page names a theme the switch knows, not "${was}"`);
     const seen = [];
-    for (let i = 0; i < 3; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme') || 'system'); }
-    const start = ['light', 'dark', 'system'].indexOf(was) >= 0 ? ['light', 'dark', 'system'].indexOf(was) : -1;
-    const want = [0, 1, 2].map((k) => ['light', 'dark', 'system'][(start + 1 + k) % 3]);
-    ok(seen.join(',') === want.join(','), `footer: the theme cycle went ${seen.join(' → ')} from ${was}, expected ${want.join(' → ')}`);
-    ok(doc.getElementById('app-foot-theme') === btn, 'footer: cycling the theme rebuilt the button under the pointer');
-    ok(/Theme: System/.test(btn.getAttribute('aria-label')) && btn.dataset.theme === 'system', `footer: after the cycle the button says ${btn.getAttribute('aria-label')}`);
-    // Back where it was (System), as the app keeps it.
-    while ((doc.documentElement.getAttribute('data-theme') || 'system') !== was) { btn.click(); await settleFor(50); }
+    for (let i = 0; i < 4; i++) { btn.click(); await settleFor(80); seen.push(doc.documentElement.getAttribute('data-theme')); }
+    const other = was === 'dark' ? 'light' : 'dark';
+    const want = [other, was, other, was];
+    ok(seen.join(',') === want.join(','), `footer: the theme switch went ${seen.join(' → ')} from ${was}, expected ${want.join(' → ')}`);
+    ok(doc.getElementById('app-foot-theme') === btn, 'footer: switching the theme rebuilt the button under the pointer');
+    const lbl = btn.getAttribute('aria-label') || '';
+    ok(!/System|then/.test(lbl) && lbl === `Theme: ${was === 'dark' ? 'Dark' : 'Light'} (click for ${was === 'dark' ? 'Light' : 'Dark'})`, `footer: after the switch the button says ${lbl}`);
   }
   ok(!!doc.querySelector('#view .ov-board') || true, '');
 }

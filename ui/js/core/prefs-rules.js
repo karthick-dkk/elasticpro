@@ -12,6 +12,8 @@
  */
 
 export const MENUS = ['top', 'left'];
+// 'system' stays a spelling the core keeps (accounts saved it before 0.3.101), but the UI no longer
+// offers it: app.js applyTheme paints it, and an unset theme, as the computer's light or dark.
 export const THEMES = ['system', 'light', 'dark', 'dark-blue', 'warm'];
 export const OPENS_ON = ['last', 'all'];
 export const KEYS = ['menu', 'theme', 'opensOn'];

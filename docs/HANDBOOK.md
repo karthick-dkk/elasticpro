@@ -706,8 +706,11 @@ than being overwritten by the next save.
 
 The UI side (`ui/js/core/prefs.js`, rules in `core/prefs-rules.js`): on start `loadPrefs()` sends
 `PREFS_GET`; each `null` falls back to the browser's IndexedDB copy (`theme` is the key that
-existed before 0.3.55; `menu` and `opensOn` are new), then to the default (`top`, `system`,
-`last`). When the account has no value and the browser has one, the browser's goes to the
+existed before 0.3.55; `menu` and `opensOn` are new), then to the default (`left`, `system`,
+`last`). Since 0.3.101 the UI no longer offers System (the footer button switches Light ↔ Dark;
+Your settings lists Light, Dark, Dark blue and Warm): an unset theme, or a `system` an account
+saved earlier, is painted as the computer's light or dark at page load, and nothing is saved until
+the person presses a theme. When the account has no value and the browser has one, the browser's goes to the
 account once, as the first `PREFS_SET` (`migrationPatch`) — never over a choice the account
 already made. `savePref(key, value)` sends `PREFS_SET` and also writes the browser copy, which
 is what an older core (no `userPrefs` flag), a snapshot file or a `file://` render reads.

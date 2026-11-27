@@ -68,10 +68,10 @@ test('every theme the button offers has a stylesheet block', () => {
   const app = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
   const block = app.slice(app.indexOf('const THEMES = ['), app.indexOf('];', app.indexOf('const THEMES = [')));
   const ids = [...block.matchAll(/id:\s*'([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(ids.length >= 4, `only found ${ids.length} themes in the cycle`);
-  assert.ok(ids.includes('system'), 'system must stay in the cycle');
+  assert.ok(ids.length >= 2 && ids.includes('light') && ids.includes('dark'), `the themes offered are ${ids.join(', ')}`);
+  // The owner, 0.3.101: System is no longer offered; the switch is Light and Dark.
+  assert.ok(!ids.includes('system'), 'System is offered again');
   for (const id of ids) {
-    if (id === 'system') continue;   // system stamps no attribute; it is the OS default
     if (id === 'light') { assert.ok(css.includes(':root {'), 'light lives on bare :root'); continue; }
     assert.ok(css.includes(`:root[data-theme="${id}"]`),
       `the button offers "${id}" but app.css has no block for it`);
