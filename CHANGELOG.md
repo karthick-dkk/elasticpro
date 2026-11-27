@@ -3,6 +3,8 @@
 ## 0.3.101
 
 - **The theme switch is Light and Dark only.** The footer button switches between Light (sun) and Dark (moon); System, its third step, is gone, and Your settings no longer lists it (Light, Dark, Dark blue and Warm remain). Someone who never chose a theme, or chose System before, sees the computer's light or dark as it is when the page loads, shown on the button as that theme; nothing is saved for them until they press one. Inside Zabbix the theme still follows the Zabbix user's.
+- **Indices › Documents: a document opens in a large dialog**, not the narrow pane on the right. Up to 1100 px wide and most of the window tall, with **⤢ Full screen** for the whole window; **Escape** closes it, also from full screen. Two views: **JSON** (as before) and **Fields**, one row per field with dotted names (`host.name`), each with its own copy button. **Copy JSON** / **Copy fields** copies what the view shows (fields as `name<TAB>value`, one per line); **REST** opens the GET in the REST console.
+- **Resting the pointer on a document row for two seconds shows a preview** of that document beside the row. It stays while the pointer is on the row or the preview and goes when the pointer leaves both, on a click, on Escape or on scroll. The row's own text tooltip is gone (the preview replaces it).
 
 ## 0.3.100
 

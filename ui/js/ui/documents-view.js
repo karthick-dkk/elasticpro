@@ -4,7 +4,8 @@
  * Drawn by the Indices page in place of its list when the address is `#/indices/docs/<target>`:
  * a query-string box, the time range (when the indices have a date field), a fields panel
  * read from `_mapping` whose aggregatable fields show their top values, a page of hits with
- * server paging, and the document picked on the right. Read-only: the view never changes a
+ * server paging, and the document picked in a large dialog (full screen on demand; Escape closes
+ * it), with a preview after the pointer rests on a row for two seconds. Read-only: the view never changes a
  * document (Edit and Delete were removed in 0.3.72 at the owner's request); the row's ⋯ menu
  * copies the JSON or opens it in REST. The arithmetic and the request shapes are
  * core/documents.js; nothing here computes a second copy.
@@ -19,6 +20,7 @@ import { empty } from '../pages/common.js';
 import { rowMenu, ICON, toast } from './menu.js';
 import { navigateTo } from '../core/intent.js';
 import { pagerBar } from '../lib/pager.js';
+import { modal } from './modal.js';
 import * as D from '../core/documents.js';
 
 /**
@@ -67,7 +69,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
     page: 0, perPage: DOC_SIZE.get(),
     fields: null, fieldsError: null, timeField: null,
     hits: [], hitsFrom: 0, total: null, loading: false, error: null, searched: false,   // hitsFrom: the `from` the hits on screen were read at
-    selected: null,                     // the hit on the right
+    selected: null,                     // the hit open in the dialog
     values: null,                       // { field, list, other, loading, error } under the clicked field
     gen: 0,                             // the search in flight; an older answer is dropped
   };
@@ -77,8 +79,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
   const top = h('div.docs-top');
   const fieldsBox = h('aside.docs-fields', { 'aria-label': 'Fields' });
   const main = h('section.docs-main');
-  const detail = h('aside.docs-detail', { hidden: true, 'aria-label': 'Document' });
-  const body = h('div.docs-body', fieldsBox, main, detail);
+  const body = h('div.docs-body', fieldsBox, main);
   el.append(top, body);
 
   /* ------------------------------------ data ------------------------------------ */
@@ -122,7 +123,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
       st.hits = []; st.total = null;
     }
     st.loading = false;
-    drawTop(); drawMain(); drawDetail();
+    drawTop(); drawMain();
   }
 
   async function loadValues(f) {
@@ -235,6 +236,8 @@ export function documentsView(cluster, target, { onBack } = {}) {
   }
 
   function drawMain() {
+    // The rows are rebuilt: a preview or a pending one belongs to a row that is going away.
+    peekHide();
     const tl = D.totalLabel(st.total);
     // The position of the hits on screen — while a page is loading, still the one being shown.
     const from = st.hitsFrom;
@@ -247,11 +250,13 @@ export function documentsView(cluster, target, { onBack } = {}) {
     const rows = st.hits.map((hit) => {
       const sel = st.selected && st.selected._index === hit._index && st.selected._id === hit._id;
       return h('tr', { 'aria-selected': sel ? 'true' : 'false', dataset: { id: hit._id, index: hit._index },
-        onclick: () => { st.selected = hit; drawMain(); drawDetail(); } },
+        onclick: () => openDoc(hit),
+        onmouseenter: (e) => peekSoon(hit, e.currentTarget), onmouseleave: peekLeave },
         tf ? h('td.mono', { style: { fontSize: '11.5px' } }, timeCell(hit._source ? hit._source[tf] : null)) : null,
         h('td.mono', { title: hit._index }, hit._index),
         h('td.mono', { title: hit._id }, hit._id),
-        h('td.docs-sum', { title: D.summaryOf(hit._source, { skip: tf ? [tf] : [], max: 600 }) }, D.summaryOf(hit._source, { skip: tf ? [tf] : [] })),
+        // No title: resting on the row shows the whole document after two seconds (peekSoon).
+        h('td.docs-sum', D.summaryOf(hit._source, { skip: tf ? [tf] : [] })),
         h('td', { onclick: (e) => e.stopPropagation() }, rowMenu(() => menuFor(hit), { title: `Actions for ${hit._id}` })));
     });
     const table = h('div.tbl-wrap', h('table#docs-table.tbl',
@@ -271,20 +276,102 @@ export function documentsView(cluster, target, { onBack } = {}) {
       }) : null);
   }
 
-  /* ------------------------------------ detail ------------------------------------ */
+  /* ------------------------------------ document ------------------------------------ */
 
-  function drawDetail() {
-    const hit = st.selected;
-    detail.hidden = !hit;
-    body.classList.toggle('with-detail', !!hit);
-    if (!hit) { mount(detail); return; }
-    const head = h('div.docs-detail-h',
-      h('span.docs-id', { title: `${hit._index} / ${hit._id}` }, `${hit._index} / `, h('b', hit._id)),
-      h('button.btn.sm', { type: 'button', title: 'Copy the document as JSON', onclick: () => copyText(D.pretty(hit._source)) }, 'Copy'),
-      h('button.btn.sm', { type: 'button', title: `Open GET ${D.docGetPath(hit)} in the REST console`,
-        onclick: () => navigateTo('console', { method: 'GET', path: D.docGetPath(hit), body: '' }) }, 'REST'),
-      h('button.btn.sm.ghost', { type: 'button', title: 'Close', 'aria-label': 'Close the document', onclick: () => { st.selected = null; drawMain(); drawDetail(); } }, '×'));
-    mount(detail, head, jsonView(hit._source || {}));
+  // The document opens in a large dialog (the owner, 0.3.101; it was a narrow pane on the right):
+  // JSON or Fields, Copy (what the view shows), REST, and full screen. Escape closes it (modal.js).
+  let view = 'json';
+  function openDoc(hit) {
+    peekHide();
+    st.selected = hit; drawMain();
+    const src = hit._source || {};
+    const content = h('div.docs-doc-view');
+    const seg = h('div.seg.docs-doc-seg', { role: 'group', 'aria-label': 'View' });
+    const copyBtn = h('button.btn.sm#docs-doc-copy', { type: 'button', onclick: () => copyText(view === 'json' ? D.pretty(src) : D.fieldsText(src)) });
+    let full = false;
+    const fullBtn = h('button.btn.sm#docs-doc-full', { type: 'button' });
+    // Both set by modal() while it builds the dialog (the actions callback runs before it returns).
+    let ctxDone = () => {}, dialog = null;
+    function drawView() {
+      mount(seg, ...[['json', 'JSON'], ['fields', 'Fields']].map(([id, label]) =>
+        h(`button.btn.sm${view === id ? '.primary' : ''}`, { type: 'button', 'aria-pressed': String(view === id), dataset: { view: id },
+          onclick: () => { view = id; drawView(); } }, label)));
+      copyBtn.textContent = view === 'json' ? 'Copy JSON' : 'Copy fields';
+      copyBtn.title = view === 'json' ? 'Copy the document as JSON' : 'Copy every field as name and value, one per line';
+      mount(content, view === 'json' ? jsonView(src) : fieldTable(src));
+    }
+    const p = modal(`${hit._index} / ${hit._id}`, null, [
+      h('div.docs-doc-bar', seg, h('span', { style: { flex: '1' } }), copyBtn,
+        h('button.btn.sm', { type: 'button', title: `Open GET ${D.docGetPath(hit)} in the REST console`,
+          onclick: () => { ctxDone(); navigateTo('console', { method: 'GET', path: D.docGetPath(hit), body: '' }); } }, 'REST'),
+        fullBtn),
+      content,
+    ], (ctx) => { ctxDone = ctx.done; dialog = ctx.dialog; return []; }, { width: '1100px', cls: 'docs-doc' });
+    function drawFull() {
+      if (dialog) { dialog.classList.toggle('full', full); if (dialog.parentElement) dialog.parentElement.classList.toggle('docs-doc-full', full); }
+      fullBtn.textContent = full ? '⤡ Exit full screen' : '⤢ Full screen';
+      fullBtn.title = full ? 'Back to the dialog size' : 'Use the whole window';
+      fullBtn.setAttribute('aria-pressed', String(full));
+    }
+    fullBtn.onclick = () => { full = !full; drawFull(); };
+    drawView(); drawFull();
+    p.then(() => { if (st.selected === hit) { st.selected = null; if (el.isConnected) drawMain(); } });
+  }
+
+  /** The Fields view: one row per field (dotted names), each with its own copy button. */
+  function fieldTable(src) {
+    const rows = D.flatFields(src);
+    if (!rows.length) return h('div.muted', { style: { padding: '8px' } }, 'This document has no fields');
+    return h('table.tbl.docs-doc-fields', h('tbody', ...rows.map(([k, v]) => {
+      const text = D.fieldText(v);
+      return h('tr', { dataset: { field: k } },
+        h('th.mono', { scope: 'row' }, k),
+        h('td.mono', text),
+        h('td', h('button.btn.sm.ghost.icon', { type: 'button', title: `Copy the value of ${k}`, 'aria-label': `Copy the value of ${k}`, onclick: () => copyText(text) }, '⧉')));
+    })));
+  }
+
+  /* ------------------------------------ preview ------------------------------------ */
+
+  // Resting the pointer on a row for two seconds shows the document beside it (the owner,
+  // 0.3.101). It stays while the pointer is on the row or on the preview, and goes when the
+  // pointer leaves both, on a click, on Escape, on scroll, or when the view is left.
+  const PEEK_MS = 2000;
+  let peekTimer = 0, leaveTimer = 0, peekEl = null;
+  function peekSoon(hit, row) {
+    clearTimeout(peekTimer); clearTimeout(leaveTimer);
+    if (peekEl && peekEl.dataset.id === `${hit._index}/${hit._id}`) return;
+    peekHide();
+    peekTimer = setTimeout(() => peekShow(hit, row), PEEK_MS);
+  }
+  function peekLeave() { clearTimeout(peekTimer); clearTimeout(leaveTimer); leaveTimer = setTimeout(peekHide, 200); }
+  function peekShow(hit, row) {
+    if (!el.isConnected || !row.isConnected || document.querySelector('.modal-overlay')) return;
+    peekEl = h('div.docs-peek', { role: 'tooltip', dataset: { id: `${hit._index}/${hit._id}` },
+      onmouseenter: () => clearTimeout(leaveTimer), onmouseleave: peekLeave },
+      h('div.docs-peek-h', h('span.mono', `${hit._index} / `, h('b.mono', hit._id)), h('span.muted', 'click the row to open')),
+      jsonView(hit._source || {}));
+    document.body.append(peekEl);
+    const r = row.getBoundingClientRect();
+    const vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
+    const w = Math.min(560, vw - 32);
+    const left = Math.max(16, Math.min(r.left + Math.min(240, r.width / 3), vw - w - 16));
+    const below = vh - r.bottom, above = r.top;
+    peekEl.style.width = `${w}px`;
+    peekEl.style.left = `${left}px`;
+    if (below >= 220 || below >= above) { peekEl.style.top = `${r.bottom + 4}px`; peekEl.style.maxHeight = `${Math.max(120, below - 16)}px`; }
+    else { peekEl.style.bottom = `${vh - r.top + 4}px`; peekEl.style.maxHeight = `${Math.max(120, above - 16)}px`; }
+    window.addEventListener('keydown', peekKey, true);
+    window.addEventListener('scroll', peekHide, true);
+    window.addEventListener('hashchange', peekHide);
+  }
+  function peekKey(e) { if (e.key === 'Escape') peekHide(); }
+  function peekHide() {
+    clearTimeout(peekTimer); clearTimeout(leaveTimer);
+    window.removeEventListener('keydown', peekKey, true);
+    window.removeEventListener('scroll', peekHide, true);
+    window.removeEventListener('hashchange', peekHide);
+    if (peekEl) { peekEl.remove(); peekEl = null; }
   }
 
   async function copyText(text) {
@@ -294,7 +381,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
 
   /* ------------------------------------ start ------------------------------------ */
 
-  drawTop(); drawFields(); drawMain(); drawDetail();
+  drawTop(); drawFields(); drawMain();
   (async () => { await loadMapping(); drawTop(); drawFields(); await search(); })();
 
   el.refresh = run;

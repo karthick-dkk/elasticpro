@@ -3682,7 +3682,6 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
 .docs-top .seg { flex: none; }
 .docs-top input[type="datetime-local"] { height: 30px; font-size: 12px; }
 .docs-body { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 10px; align-items: start; }
-.docs-body.with-detail { grid-template-columns: 220px minmax(0, 1fr) minmax(300px, 420px); }
 .docs-fields { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-1); max-height: 72vh; overflow: auto; font-size: 12px; min-width: 0; }
 .docs-fields-h { padding: 7px 10px; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--text-muted);
   border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface-1); }
@@ -3705,12 +3704,31 @@ a.pill.ov-alerts:hover { filter: brightness(.95); }
 .docs-main table.tbl td.docs-sum { max-width: 0; width: 60%; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); font-size: 11.5px; }
 .docs-main tbody tr[data-id] { cursor: pointer; }
 .docs-main tbody tr[aria-selected="true"] td { background: var(--accent-soft); }
-.docs-detail { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-1); min-width: 0; }
-.docs-detail-h { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 12px; min-height: 32px; }
-.docs-detail-h .docs-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
-.docs-detail pre.json { margin: 0; padding: 10px; max-height: 62vh; overflow: auto; font-size: 11.5px; }
+/* The document dialog (0.3.101): large by default, the whole window on demand; the JSON or the
+   field table scrolls inside it, the bar stays put. */
+.modal.docs-doc { height: min(86vh, 960px); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal.docs-doc .modal-head { flex: none; }
+.modal.docs-doc .modal-head h2 { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.modal.docs-doc .modal-foot { display: none; }
+.modal.docs-doc .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.docs-doc-bar { flex: none; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.docs-doc-seg { flex: none; }
+.docs-doc-view { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.docs-doc-view pre.json { margin: 0; padding: 12px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.docs-doc-fields { width: 100%; }
+.docs-doc-fields th { text-align: left; font-weight: 600; white-space: nowrap; width: 1%; padding: 4px 10px; vertical-align: top; position: static; background: none; }
+.docs-doc-fields td { padding: 4px 10px; font-size: 12px; overflow-wrap: anywhere; vertical-align: top; }
+.docs-doc-fields td:last-child { width: 1%; padding: 2px 6px; }
+.modal-overlay.docs-doc-full { padding: 0; }
+.modal.docs-doc.full { max-width: none !important; width: 100vw !important; height: 100vh; max-height: 100vh; border-radius: 0; border: 0; }
+/* The two-second preview beside a row (0.3.101). */
+.docs-peek { position: fixed; z-index: 90; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-1);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.docs-peek-h { flex: none; display: flex; gap: 8px; justify-content: space-between; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11.5px; }
+.docs-peek-h .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.docs-peek pre.json { margin: 0; padding: 8px 10px; font-size: 11.5px; overflow: auto; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 1100px) {
-  .docs-body, .docs-body.with-detail { grid-template-columns: 1fr; }
+  .docs-body { grid-template-columns: 1fr; }
   .docs-fields { max-height: 32vh; }
 }
 

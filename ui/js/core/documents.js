@@ -229,6 +229,34 @@ export function summaryOf(source, { skip = [], max = 160 } = {}) {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/**
+ * A `_source` as field rows, `[name, value]`, for the document dialog's Fields view: nested
+ * objects become dotted names (`host.name`), as Elasticsearch and ECS name them; arrays, empty
+ * objects and null are one row each, the value as JSON. In source order, nothing dropped.
+ */
+export function flatFields(source) {
+  const out = [];
+  const walk = (obj, prefix) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const name = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length) walk(v, name);
+      else out.push([name, v]);
+    }
+  };
+  if (source && typeof source === 'object') walk(source, '');
+  return out;
+}
+
+/** A field's value as text for its row and its copy: strings as they are, everything else as JSON. */
+export function fieldText(v) {
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+/** The Fields view copied as text: one `name<TAB>value` line per field. */
+export function fieldsText(source) {
+  return flatFields(source).map(([k, v]) => `${k}\t${fieldText(v)}`).join('\n');
+}
+
 /** The query with `field:"value"` added (AND), or that term alone when the query was empty. */
 export function addTerm(query, field, value) {
   const term = `${field}:"${String(value).replace(/(["\\])/g, '\\$1')}"`;

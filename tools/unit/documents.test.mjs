@@ -158,3 +158,16 @@ test('addTerm: field:"value", AND-ed, quotes escaped, not twice', () => {
 test('doc path: the GET the REST console opens, encoded', () => {
   assert.equal(D.docGetPath({ _index: 'logstash-a', _id: 'id/1' }), '/logstash-a/_doc/id%2F1');
 });
+
+test('fields view: dotted names in source order, leaves as JSON, nothing dropped', () => {
+  const src = { '@timestamp': '2026-10-13T23:57:45.272Z', host: { name: 'win-hyd-02', ip: ['10.20.2.16'] }, event: { size: 1233, ok: true }, empty: {}, gone: null, tags: [] };
+  assert.deepEqual(D.flatFields(src), [
+    ['@timestamp', '2026-10-13T23:57:45.272Z'], ['host.name', 'win-hyd-02'], ['host.ip', ['10.20.2.16']],
+    ['event.size', 1233], ['event.ok', true], ['empty', {}], ['gone', null], ['tags', []],
+  ]);
+  assert.deepEqual(D.flatFields(null), []);
+  assert.equal(D.fieldText('a "b"'), 'a "b"', 'a string is copied as it is, not quoted');
+  assert.equal(D.fieldText(['10.20.2.16']), '["10.20.2.16"]');
+  assert.equal(D.fieldText(null), 'null');
+  assert.equal(D.fieldsText({ a: 1, b: { c: 'x' } }), 'a\t1\nb.c\tx');
+});

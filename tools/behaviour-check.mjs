@@ -9981,15 +9981,52 @@ async function backToList() {
     }
   }
 
-  // 5. A row opens the document on the right; the ⋯ menu is read-only for every role (Edit and Delete
-  //    were removed in 0.3.72 at the owner's request): Copy JSON and Open in REST, nothing that writes.
+  // 5. Resting the pointer on a row for two seconds previews the document (0.3.101); not sooner,
+  //    and it goes when the pointer leaves.
   const row = docRows()[0];
+  if (row) {
+    row.dispatchEvent(new window.MouseEvent('mouseenter'));
+    await settleFor(900);
+    ok(!doc.querySelector('.docs-peek'), 'documents: the row preview showed before two seconds');
+    await settleFor(1400);
+    const peek = doc.querySelector('.docs-peek');
+    ok(!!peek && !!peek.querySelector('pre.json') && peek.textContent.includes(row.dataset.id), 'documents: two seconds on a row did not preview that document');
+    row.dispatchEvent(new window.MouseEvent('mouseleave'));
+    await settleFor(400);
+    ok(!doc.querySelector('.docs-peek'), 'documents: the preview stayed after the pointer left the row');
+  }
+  // 6. A row opens the document in a large dialog: JSON or Fields (each field with its copy), Copy,
+  //    REST, full screen; Escape closes it. The ⋯ menu is read-only for every role (Edit and Delete
+  //    were removed in 0.3.72 at the owner's request): Copy JSON and Open in REST, nothing that writes.
   if (row) { row.click(); await settleFor(150); }
-  ok(!!view().querySelector('.docs-detail:not([hidden]) pre.json'), 'documents: a row click did not open the document on the right');
-  ok(!!row && view().querySelector('.docs-detail .docs-id') && view().querySelector('.docs-detail .docs-id').textContent.includes(row.dataset.id), 'documents: the detail does not name the _id');
+  const dlg = doc.querySelector('.modal.docs-doc');
+  ok(!!dlg && !!dlg.querySelector('pre.json'), 'documents: a row click did not open the document dialog');
+  ok(!!row && !!dlg && dlg.querySelector('.modal-head h2').textContent.includes(row.dataset.id), 'documents: the dialog does not name the _id');
+  ok(!view().querySelector('.docs-detail'), 'documents: the narrow pane on the right is still drawn');
+  if (dlg) {
+    ok(/1100px/.test(dlg.style.maxWidth), `documents: the dialog is ${dlg.style.maxWidth} wide at most, not the large 1100px`);
+    ok(dlg.querySelector('#docs-doc-copy').textContent === 'Copy JSON', `documents: the JSON view's copy reads ${dlg.querySelector('#docs-doc-copy').textContent}`);
+    dlg.querySelector('.docs-doc-seg button[data-view="fields"]').click(); await settleFor(50);
+    const frows = [...dlg.querySelectorAll('.docs-doc-fields tr')];
+    ok(frows.length > 0 && frows.every((r) => r.querySelector('button[aria-label^="Copy the value of"]')), `documents: the Fields view has ${frows.length} rows, not every one with its copy`);
+    ok(dlg.querySelector('#docs-doc-copy').textContent === 'Copy fields', `documents: the Fields view's copy reads ${dlg.querySelector('#docs-doc-copy').textContent}`);
+    const fullBtn = dlg.querySelector('#docs-doc-full');
+    fullBtn.click(); await settleFor(50);
+    ok(dlg.classList.contains('full') && dlg.parentElement.classList.contains('docs-doc-full') && fullBtn.getAttribute('aria-pressed') === 'true', 'documents: Full screen did not take the whole window');
+    fullBtn.click(); await settleFor(50);
+    ok(!dlg.classList.contains('full'), 'documents: Exit full screen left it full');
+    dlg.querySelector('.docs-doc-seg button[data-view="json"]').click(); await settleFor(50);
+    fullBtn.click(); await settleFor(50);
+    window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settleFor(100);
+    ok(!doc.querySelector('.modal.docs-doc'), 'documents: Escape did not close the document (full screen)');
+    ok(!view().querySelector('#docs-table tr[aria-selected="true"]'), 'documents: the row stays selected after the dialog closed');
+  }
   for (const role of ['operator', 'admin']) {
     st.state.caller = { name: role, role };
-    if (row) { row.querySelector('.menu-trigger').click(); await settleFor(100); }
+    // The rows were rebuilt when the dialog opened and closed: the first row as it is now.
+    const now = docRows()[0];
+    if (now) { now.querySelector('.menu-trigger').click(); await settleFor(100); }
     const items = menuItems();
     ok(items.includes('Copy JSON') && items.includes('Open in REST'), `documents: an ${role}'s ⋯ menu lacks Copy JSON / Open in REST (${items.join(', ')})`);
     ok(!items.some((t) => /Edit|Delete/.test(t)), `documents: an ${role}'s ⋯ menu offers ${items.filter((t) => /Edit|Delete/.test(t)).join(', ')}`);
