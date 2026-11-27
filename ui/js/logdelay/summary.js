@@ -63,16 +63,17 @@ function tiles(res, b, lv) {
 }
 
 /**
- * The figures written on a day's bar (the owner, 0.3.101): devices delayed (the 30–60 min band and
+ * The figures written at the foot of a day's column, on a chip of their own so they read over any
+ * colour and over a short bar (the owner, 0.3.101): devices delayed (the 30–60 min band and
  * above 60 min, the yellow and red) and No delay (the green: on time, silent and can't measure — the
  * same count as the tooltip and the legend). Part delayed and another time zone stay in the tooltip.
  * A bar too narrow for the words (a long range) hides them (app.css container query).
  */
 function dayLabel(d) {
-  const late = (finite(d.delayed) ? d.delayed : 0) + (finite(d.critical) ? d.critical : 0);
+  const late = finite(d.delayed) || finite(d.critical) ? (finite(d.delayed) ? d.delayed : 0) + (finite(d.critical) ? d.critical : 0) : null;
   return h('span.ld-day-lab', { 'aria-hidden': 'true' },
-    h('span', { dataset: { lab: 'delay' } }, `Delay ${countText(late)}`),
-    h('span', { dataset: { lab: 'nodelay' } }, `No delay ${countText(noDelayOf(d).count)}`));
+    h('span', { dataset: { lab: 'delay' } }, 'Delay ', h('b', countText(late))),
+    h('span', { dataset: { lab: 'nodelay' } }, 'No delay ', h('b', countText(noDelayOf(d).count))));
 }
 
 /**

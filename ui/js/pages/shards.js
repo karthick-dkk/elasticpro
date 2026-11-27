@@ -31,6 +31,7 @@ import { shardSplit, visibleShards, loadPercent, coresByNode, queueSizes, shortN
 import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
 import { explainInWords, explainBody } from '../core/shard-fixes.js';
 import { withFreshReads } from '../core/es.js';
+import { nodeFreeBytes } from '../core/cluster-boxes.js';
 
 let host = null;
 /**
@@ -341,7 +342,8 @@ function block(c) {
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
     nodesCard(c, d),
     // One row of three (the owner, 0.3.101): Shard allocation, Query pressure, Disk & dangling indices.
-    h('div.ns-row', allocationCard(c, all, d), pressureCard(c), diskCard(c, d)),
+    // Kept, so an open "i" in one card outlives a redraw of another.
+    keptBox(`row:${c.id}`, 'div.ns-row', {}, [allocationCard(c, all, d), pressureCard(c), diskCard(c, d)]),
     shardsCard(c, d, all, raw)]);
 }
 
@@ -489,6 +491,8 @@ function nodesBody(c, d) {
     const a = alloc.find((x) => x.node === n.name) || {};
     const used = Number(n['disk.used']) || Number(a['disk.used']) || 0;
     const total = Number(n['disk.total']) || Number(a['disk.total']) || 0;
+    // Free is core/cluster-boxes.js nodeFreeBytes, the figure the Overview shows too.
+    const free = nodeFreeBytes({ 'disk.total': total || null, 'disk.used': n['disk.used'] || a['disk.used'] || null, 'disk.avail': n['disk.avail'] || a['disk.avail'] });
     const p = total ? (used / total) * 100 : NaN;
     const heap = pctOf(n['heap.percent']);
     const heapCur = Number(n['heap.current']), heapMax = Number(n['heap.max']);
@@ -507,7 +511,7 @@ function nodesBody(c, d) {
       h('td.num', usageBar(pctOf(n.cpu), 'disk', `CPU ${n.cpu}% (the process, over the last sample)`)),
       h('td.num', loadCell(n, coreMap ? coreMap.get(n.name) : undefined)),
       h('td', diskBar(used, total, p)),
-      ...diskSizes(used, total).map((v) => h('td.num', v)),
+      ...diskSizes(used, total, free).map((v) => h('td.num', v)),
       h('td.num', a.shards === undefined || a.shards === '' ? h('span.muted', { title: 'Not in _cat/allocation' }, '–') : num(Number(a.shards))),
       h('td.muted', n.uptime || ''));
   });
@@ -567,10 +571,14 @@ function diskBar(used, total, p) {
   if (!total) return h('span.muted', { title: 'The node did not report its disk' }, '–');
   return usageBar(p, 'disk', `disk ${pct(p, 1, ' ')} — ${bytes(used)} of ${bytes(total)} used · ${bytes(total - used)} free`, { digits: 0 });
 }
-/** Used, free and total for the node's own columns: free is total minus used, the figure the bar's tooltip names too. A node that did not report its disk shows "–" in all three, never 0. */
-function diskSizes(used, total) {
-  if (!total) return ['–', '–', '–'].map((t) => h('span.muted', t));
-  return [bytes(used), bytes(total - used), bytes(total)];
+/**
+ * Used, free and total for the node's own columns. Free is nodeFreeBytes (total minus used, else
+ * disk.avail), the Overview's figure; a figure the node did not report is "–", never 0.
+ */
+function diskSizes(used, total, free) {
+  const dash = () => h('span.muted', '–');
+  if (!total) return [dash(), free === null ? dash() : bytes(free), dash()];
+  return [bytes(used), free === null ? dash() : bytes(free), bytes(total)];
 }
 
 /**
@@ -796,7 +804,7 @@ function danglingBody(c, io) {
   return h('div',
     line(h('b', { style: { color: 'var(--critical-ink)' } }, `${num(dang.indices.length)} found`), missing, h('span.muted', ` · ${asked} · Elasticsearch does not report their size`)),
     h('div.ns-nodes', table(['Index', 'UUID', 'Created', 'On node', ''], dang.indices.map((x) => h('tr',
-      h('td', h('span.ns-name', { title: x.index_name }, x.index_name)),
+      h('td', h('span.ns-name', { title: `${x.index_name} · UUID ${x.index_uuid}` }, x.index_name)),
       h('td.mono.muted.id', x.index_uuid),
       h('td.muted', x.creation_date_millis ? new Date(Number(x.creation_date_millis)).toISOString().slice(0, 10) : '–'),
       h('td', (x.node_ids || []).map(nameOf).join(', ') || '–'),

@@ -257,7 +257,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
         h('td.mono', hit._index),
         h('td.mono', hit._id),
         h('td.docs-sum', D.summaryOf(hit._source, { skip: tf ? [tf] : [] })),
-        h('td', { onclick: (e) => { e.stopPropagation(); peekHide(); } }, rowMenu(() => menuFor(hit), { title: `Actions for ${hit._id}` })));
+        h('td', { onclick: (e) => { e.stopPropagation(); peekHide(); } }, rowMenu(() => { peekHide(); return menuFor(hit); }, { title: `Actions for ${hit._id}` })));
     });
     const table = h('div.tbl-wrap', h('table#docs-table.tbl',
       h('thead', h('tr', tf ? h('th', tf) : null, h('th', '_index'), h('th', '_id'), h('th', 'Document'), h('th', ''))),
@@ -344,7 +344,7 @@ export function documentsView(cluster, target, { onBack } = {}) {
     if (peekEl && peekEl.dataset.id === `${hit._index}/${hit._id}`) return;
     // Another row's preview is showing: the pointer may be passing over this row on its way to it,
     // so it gets the same grace as leaving; it goes only if the pointer does not arrive.
-    if (peekEl) leaveTimer = setTimeout(peekHide, 200);
+    if (peekEl) leaveTimer = setTimeout(peekRemove, 200);
     peekTimer = setTimeout(() => { peekHide(); peekShow(hit, row); }, PEEK_MS);
   }
   function peekLeave() { clearTimeout(peekTimer); clearTimeout(leaveTimer); leaveTimer = setTimeout(peekHide, 200); }
@@ -373,6 +373,10 @@ export function documentsView(cluster, target, { onBack } = {}) {
   function peekScroll(e) { const t = e.target; if (peekEl && t && t.nodeType === 1 && peekEl.contains(t)) return; peekHide(); }
   function peekHide() {
     clearTimeout(peekTimer); clearTimeout(leaveTimer);
+    peekRemove();
+  }
+  /** The preview and its listeners only: the grace after passing over another row must not cancel that row's own timer. */
+  function peekRemove() {
     window.removeEventListener('keydown', peekKey, true);
     window.removeEventListener('scroll', peekScroll, true);
     window.removeEventListener('hashchange', peekHide);

@@ -8592,8 +8592,9 @@ await settleFor(300);
         for (const bar of g('ld-sum-days').querySelectorAll('.ld-day')) {
           const lab = bar.querySelector('.ld-day-lab');
           if (bar.classList.contains('ld-gap')) { ok(!lab, `log delay: the gap day ${bar.dataset.day} has figures written on it`); continue; }
-          const m = /No delay (\d+) .*?, (\d+) at [^,]+, (\d+) /.exec(bar.title);
-          const want = m ? [`Delay ${Number(m[2]) + Number(m[3])}`, `No delay ${m[1]}`].join(' | ') : '?';
+          const n = (t) => Number(t.replace(/,/g, ''));
+          const m = /No delay ([\d,]+) .*?, ([\d,]+) at [^,]+, ([\d,]+) /.exec(bar.title);
+          const want = m ? [`Delay ${(n(m[2]) + n(m[3])).toLocaleString('en-US')}`, `No delay ${m[1]}`].join(' | ') : '?';
           const got = lab ? [...lab.children].map((x) => x.textContent).join(' | ') : 'none';
           ok(got === want, `log delay: ${bar.dataset.day}'s bar reads "${got}", its tooltip says "${want}" (${bar.title})`);
         }
