@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.102
+
+- **Log Delay › Summary › Day by day: the green figure on each bar reads "On time N"** (was "No delay N"). N is the devices measured on time that day, the tooltip's "on time N". The green part of the bar also holds the silent and can't-measure devices; those, and the No delay total that includes them, stay in the tooltip and the legend, so the bar's word never counts a device that was not measured on time. "Delay N" is unchanged.
+
 ## 0.3.101
 
 - **The theme switch is Light and Dark only.** The footer button switches between Light (sun) and Dark (moon); System, its third step, is gone, and Your settings no longer lists it (Light, Dark, Dark blue and Warm remain). Someone who never chose a theme, or chose System before, sees the computer's light or dark as it is when the page loads, shown on the button as that theme; nothing is saved for them until they press one. Inside Zabbix the theme still follows the Zabbix user's.
