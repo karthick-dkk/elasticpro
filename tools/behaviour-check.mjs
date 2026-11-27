@@ -8588,13 +8588,13 @@ await settleFor(300);
         ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.to === to7 && m.from !== from7 && m.maxDevices === 2000), 'log delay: the tiles no longer read the page’s 1 h range');
         const head = g('ld-sum-days').closest('section').querySelector('header').textContent;
         ok(/Last 7 days · \d+ \w{3} – \d+ \w{3}/.test(head), `log delay: Day by day's header reads "${head}"`);
-        // The figures on each measured bar (0.3.101) are the tooltip's: Delay = 30–60 min + above 60 min, No delay its count.
+        // The figures on each measured bar are the tooltip's: Delay = 30–60 min + above 60 min (0.3.101), On time its "on time N" (0.3.102), never the No delay total.
         for (const bar of g('ld-sum-days').querySelectorAll('.ld-day')) {
           const lab = bar.querySelector('.ld-day-lab');
           if (bar.classList.contains('ld-gap')) { ok(!lab, `log delay: the gap day ${bar.dataset.day} has figures written on it`); continue; }
           const n = (t) => Number(t.replace(/,/g, ''));
-          const m = /No delay ([\d,]+) .*?, ([\d,]+) at [^,]+, ([\d,]+) /.exec(bar.title);
-          const want = m ? [`Delay ${(n(m[2]) + n(m[3])).toLocaleString('en-US')}`, `No delay ${m[1]}`].join(' | ') : '?';
+          const m = /No delay [\d,]+ \(on time ([\d,]+) .*?, ([\d,]+) at [^,]+, ([\d,]+) /.exec(bar.title);
+          const want = m ? [`Delay ${(n(m[2]) + n(m[3])).toLocaleString('en-US')}`, `On time ${m[1]}`].join(' | ') : '?';
           const got = lab ? [...lab.children].map((x) => x.textContent).join(' | ') : 'none';
           ok(got === want, `log delay: ${bar.dataset.day}'s bar reads "${got}", its tooltip says "${want}" (${bar.title})`);
         }
